@@ -411,7 +411,8 @@ class DiscordCodexClient(discord.Client):
             return
 
         key = ThreadStore.key(interaction.guild_id, interaction.channel_id, interaction.user.id)
-        resume = "" if new else self.threads.current(key)
+        plain = bool(self.memory.get_style(interaction.guild_id, interaction.user.id))
+        resume = "" if new else self.threads.current(key, plain=plain)
         await interaction.response.defer(thinking=True)
         result = await self._answer(
             prompt, attachments, interaction.guild_id, interaction.user.id, effort_value, resume
@@ -433,7 +434,7 @@ class DiscordCodexClient(discord.Client):
                 await interaction.followup.send(chunk)
         finally:
             remove_dir(result.generated_dir)
-        self.threads.remember(key, result.thread_id, sent.id)
+        self.threads.remember(key, result.thread_id, sent.id, plain=plain)
         LOGGER.info("Completed slash guild=%s user=%s", interaction.guild_id, interaction.user.id)
 
     # ----- @mention entry point --------------------------------------------------------------
@@ -455,8 +456,11 @@ class DiscordCodexClient(discord.Client):
         # Replying to one of the Bot's answers continues that exact thread; otherwise the member's
         # most recent thread in this channel (within the TTL) is continued.
         key = ThreadStore.key(guild_id, message.channel.id, message.author.id)
+        plain = bool(self.memory.get_style(guild_id, message.author.id))
         replied_to = message.reference.message_id if message.reference else None
-        resume = self.threads.by_message(replied_to) or self.threads.current(key)
+        resume = self.threads.by_message(replied_to, plain=plain) or self.threads.current(
+            key, plain=plain
+        )
         async with message.channel.typing():
             result = await self._answer(
                 prompt, message.attachments, guild_id, message.author.id, resume=resume
@@ -468,7 +472,7 @@ class DiscordCodexClient(discord.Client):
                 await message.channel.send(chunk)
         finally:
             remove_dir(result.generated_dir)
-        self.threads.remember(key, result.thread_id, sent.id)
+        self.threads.remember(key, result.thread_id, sent.id, plain=plain)
         LOGGER.info("Completed @mention guild=%s user=%s", message.guild.id, message.author.id)
 
 

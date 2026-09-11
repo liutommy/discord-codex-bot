@@ -40,27 +40,45 @@ class ThreadStore:
     def _live(self, entry: dict, now: float) -> bool:
         return entry.get("version", "") == self._version and now - float(entry["at"]) <= self._ttl
 
-    def current(self, key: str, now: float | None = None) -> str:
+    def current(self, key: str, now: float | None = None, plain: bool = False) -> str:
+        """The member's resumable thread, if it was started under the same workspace (persona
+        vs. persona-free) the next request will use; a style set or cleared in between starts
+        a new thread instead of continuing under the wrong AGENTS.md."""
         entry = self._by_key.get(key)
         if entry is None or not self._live(entry, time.time() if now is None else now):
             return ""
+        if bool(entry.get("plain", False)) != plain:
+            return ""
         return str(entry["thread_id"])
 
-    def by_message(self, message_id: int | None) -> str:
+    def by_message(self, message_id: int | None, plain: bool = False) -> str:
         entry = self._by_message.get(str(message_id)) if message_id is not None else None
         if entry is None or entry.get("version", "") != self._version:
             return ""
+        if bool(entry.get("plain", False)) != plain:
+            return ""
         return entry["thread_id"]
 
-    def remember(self, key: str, thread_id: str, message_id: int | None = None) -> None:
+    def remember(
+        self, key: str, thread_id: str, message_id: int | None = None, plain: bool = False
+    ) -> None:
         if not thread_id:
             return
         previous = self._by_key.get(key)
         if previous and previous["thread_id"] != thread_id and not previous.get("harvested"):
             self._pending.append({"key": key, "thread_id": str(previous["thread_id"])})
-        self._by_key[key] = {"thread_id": thread_id, "at": time.time(), "version": self._version}
+        self._by_key[key] = {
+            "thread_id": thread_id,
+            "at": time.time(),
+            "version": self._version,
+            "plain": plain,
+        }
         if message_id is not None:
-            self._by_message[str(message_id)] = {"thread_id": thread_id, "version": self._version}
+            self._by_message[str(message_id)] = {
+                "thread_id": thread_id,
+                "version": self._version,
+                "plain": plain,
+            }
             while len(self._by_message) > MAX_MESSAGE_LINKS:
                 del self._by_message[next(iter(self._by_message))]
         self._save()

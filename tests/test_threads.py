@@ -62,3 +62,17 @@ def test_personal_style_switches_to_the_persona_free_workspace(config: Config) -
     assert "/workspace" in _arguments(config)
     assert "/workspace-plain" in _arguments(config, plain=True)
     assert "--cd" not in _arguments(config, resume="t", plain=True)  # resumed threads keep cwd
+
+
+def test_style_change_switches_workspace_and_starts_a_new_thread(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path / "threads.json", ttl_seconds=600, version="v1")
+    key = ThreadStore.key(1, 2, 3)
+    store.remember(key, "plain-thread", message_id=7, plain=True)
+    assert store.current(key, plain=True) == "plain-thread"
+    assert store.by_message(7, plain=True) == "plain-thread"
+    # member clears their personal style -> persona workspace -> the plain thread must not resume
+    assert store.current(key, plain=False) == ""
+    assert store.by_message(7, plain=False) == ""
+    store.remember(key, "persona-thread", message_id=8, plain=False)
+    assert store.current(key, plain=False) == "persona-thread"
+    assert store.harvest_candidates() == [(key, "plain-thread")]
