@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+from collections.abc import Sequence
 from pathlib import Path
 
 from .config import Config
@@ -54,9 +55,11 @@ def _prompt(user_prompt: str) -> str:
     )
 
 
-def _arguments(config: Config) -> tuple[str, ...]:
+def _arguments(config: Config, images: Sequence[Path] = ()) -> tuple[str, ...]:
     # Sandbox, tool feature flags and web search live in CODEX_HOME/config.toml (refreshed from
     # config/codex-config.toml at container start); only per-deployment values are passed here.
+    # `-i` is variadic, so images go last and `--` keeps the stdin marker from being read as a file.
+    image_flags = tuple(flag for image in images for flag in ("-i", str(image)))
     return (
         "exec",
         "--model",
@@ -70,6 +73,8 @@ def _arguments(config: Config) -> tuple[str, ...]:
         "never",
         "--cd",
         str(config.codex_workspace),
+        *image_flags,
+        "--",
         "-",
     )
 
@@ -99,10 +104,10 @@ async def _communicate(
         raise RuntimeError("Codex request timed out") from None
 
 
-async def run_codex(user_prompt: str, config: Config) -> str:
+async def run_codex(user_prompt: str, config: Config, images: Sequence[Path] = ()) -> str:
     process = await asyncio.create_subprocess_exec(
         "codex",
-        *_arguments(config),
+        *_arguments(config, images),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

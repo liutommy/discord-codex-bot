@@ -20,4 +20,7 @@ def config() -> Config:
         max_prompt_chars=6000,
         max_response_chars=12000,
         max_queued_jobs=10,
+        attachment_dir=Path("/tmp/discord-codex"),
+        max_attachment_bytes=8_000_000,
+        attachment_sweep_minutes=10,
     )

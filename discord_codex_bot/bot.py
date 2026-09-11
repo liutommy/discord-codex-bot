@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import discord
 from discord import app_commands
 
 from .access import check_access
+from .attachments import download_image, remove_request_dir, sweep_forever, validate_image
 from .codex import codex_login_status, run_codex
 from .config import Config, load_config
 from .output import split_discord_message, truncate
@@ -38,6 +40,7 @@ class DiscordCodexClient(discord.Client):
         )
 
     async def setup_hook(self) -> None:
+        self._sweeper = self.loop.create_task(sweep_forever(self.config))
         # A guild that has not invited the bot yet (e.g. production before rollout) must not take
         # the whole client down; the runtime access check still rejects it until it is synced.
         for guild_id in self.config.allowed_guild_ids:
@@ -76,8 +79,13 @@ class DiscordCodexClient(discord.Client):
             ephemeral=True,
         )
 
-    @app_commands.describe(prompt="要交給 Codex 的問題")
-    async def codex_command(self, interaction: discord.Interaction, prompt: str) -> None:
+    @app_commands.describe(prompt="要交給 Codex 的問題", image="選填：一張要讓 Codex 看的圖片")
+    async def codex_command(
+        self,
+        interaction: discord.Interaction,
+        prompt: str,
+        image: discord.Attachment | None = None,
+    ) -> None:
         allowed, reason = self._access(interaction)
         if not allowed:
             await interaction.response.send_message(reason, ephemeral=True)
@@ -89,10 +97,19 @@ class DiscordCodexClient(discord.Client):
                 ephemeral=True,
             )
             return
+        suffix = ""
+        if image is not None:
+            suffix = validate_image(image.content_type, image.size, self.config)
+            if not suffix.startswith("."):
+                await interaction.response.send_message(suffix, ephemeral=True)
+                return
 
         await interaction.response.defer(thinking=True)
+        images: list[Path] = []
         try:
-            answer = await self.queue.run(lambda: run_codex(prompt, self.config))
+            if image is not None:
+                images.append(await download_image(image, suffix, self.config))
+            answer = await self.queue.run(lambda: run_codex(prompt, self.config, images))
             chunks = split_discord_message(truncate(answer, self.config.max_response_chars))
             await interaction.edit_original_response(content=chunks[0])
             for chunk in chunks[1:]:
@@ -112,6 +129,9 @@ class DiscordCodexClient(discord.Client):
                     "並通知 Bot 管理者查看 container log。"
                 )
             )
+        finally:
+            for path in images:
+                remove_request_dir(path)
 
 
 def main() -> None:

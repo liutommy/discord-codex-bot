@@ -132,6 +132,12 @@ Guild-scoped slash commands normally appear quickly. Run:
 The Bot serializes Codex work to one request at a time and caps the queue, prompt, response, and
 runtime. Discord users cannot select the model or reasoning effort.
 
+`/codex` accepts an optional `image` attachment (PNG/JPEG/WebP/GIF, `MAX_ATTACHMENT_BYTES`). The
+file is saved into a per-request directory under `/tmp/discord-codex` (container tmpfs), passed to
+`codex exec -i`, and deleted when the request finishes; a sweeper removes any leftover request
+directory older than one request timeout every `ATTACHMENT_SWEEP_MINUTES`. Restarting the container
+also clears the tmpfs.
+
 ## 6. Add the production server
 
 Invite the same application to the production server. Then update `.env`:

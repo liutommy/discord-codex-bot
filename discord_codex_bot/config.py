@@ -52,6 +52,9 @@ class Config:
     max_prompt_chars: int
     max_response_chars: int
     max_queued_jobs: int
+    attachment_dir: Path
+    max_attachment_bytes: int
+    attachment_sweep_minutes: int
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -78,4 +81,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         max_prompt_chars=_positive_int(values, "MAX_PROMPT_CHARS", 6_000),
         max_response_chars=_positive_int(values, "MAX_RESPONSE_CHARS", 12_000),
         max_queued_jobs=_positive_int(values, "MAX_QUEUED_JOBS", 10),
+        attachment_dir=Path(values.get("ATTACHMENT_DIR", "/tmp/discord-codex")),
+        max_attachment_bytes=_positive_int(values, "MAX_ATTACHMENT_BYTES", 8_000_000),
+        attachment_sweep_minutes=_positive_int(values, "ATTACHMENT_SWEEP_MINUTES", 10),
     )
