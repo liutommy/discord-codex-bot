@@ -157,7 +157,10 @@ age). `/codex new:True` or `/codex-reset` starts fresh. The mapping lives in
 falls back to a fresh one. Codex bakes the instruction files (`AGENTS.md`, output style) into a
 thread when it starts and does not re-read them on resume, so every stored thread carries a
 fingerprint of those files; after a rebuild that changes them, old threads are not resumed and
-the next message starts fresh with the new persona/style. This is conversation memory, not
+the next message starts fresh with the new persona/style. The same applies to the workspace a
+thread was started in: setting or clearing a personal style switches between the persona and
+persona-free workspaces, so the member's next message starts a new thread rather than
+continuing under the old `AGENTS.md`. This is conversation memory, not
 Codex's background "memories" feature,
 which consolidates asynchronously and is not tied to Discord members.
 
