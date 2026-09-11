@@ -1,0 +1,26 @@
+# Operator-controlled Codex runtime policy. The entrypoint copies this file into CODEX_HOME on
+# every container start, so edits here take effect after `docker compose up -d --build`.
+# Model and reasoning effort come from the environment (CODEX_MODEL / CODEX_REASONING_EFFORT).
+sandbox_mode = "read-only"
+approval_policy = "never"
+web_search = "disabled"
+
+[features]
+memories = true
+shell_tool = false
+unified_exec = false
+apps = false
+browser_use = false
+computer_use = false
+image_generation = false
+plugins = false
+view_image = false
+goals = false
+multi_agent = false
+
+[memories]
+use_memories = true
+generate_memories = true
+
+[history]
+persistence = "none"
