@@ -184,6 +184,13 @@ oldest notes.
 Codex's own background "memories" are not used for this: they consolidate only after 6 h idle in
 a long-lived process and have no notion of Discord members.
 
+A third, operator-only tier lives outside the Bot's control: `permanent/` in the repo directory
+(gitignored except its README) is baked into the image at `PERMANENT_MEMORY_DIR`. Its `MEMORY.md`
+is injected into every prompt verbatim as `[永久記憶索引]` — no line/byte window, never evicted,
+never consolidated — and `permanent/topics/*.md` are searchable/recallable with
+`scope="permanent"`. The Bot never writes there and has no command for it; edit the files and
+rebuild.
+
 Notes are consolidated once a day. At `CONSOLIDATE_HOUR` (`CONSOLIDATE_TIMEZONE`, default 02:00
 Asia/Taipei) the Bot runs one minimal Codex turn so the session rollout carries fresh
 `rate_limits`, reads the 5-hour window's `used_percent`, and proceeds only if at least

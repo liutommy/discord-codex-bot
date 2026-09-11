@@ -94,3 +94,21 @@ def test_personal_style_set_get_clear(tmp_path: Path) -> None:
     assert store.clear_style(1, 2)
     assert not store.clear_style(1, 2)
     assert store.get_style(1, 2) == ""
+
+
+def test_permanent_memory_is_read_only_whole_index_and_searchable(tmp_path: Path) -> None:
+    from discord_codex_bot.memory import PermanentMemory
+
+    perm = PermanentMemory(tmp_path, LIMITS)
+    assert perm.index_text() == "" and perm.search("x").startswith("（「x」沒有命中")
+    (tmp_path / "MEMORY.md").write_text("\n".join(f"- line {i}" for i in range(500)), "utf-8")
+    (tmp_path / "topics").mkdir()
+    (tmp_path / "topics" / "house-rules.md").write_text("# 規則\n\n第三條：不可以洗頻\n", "utf-8")
+    assert perm.index_text().count("\n") == 499  # no window: index_max_lines=3 does not apply
+    assert "## house-rules (house-rules.md) line 3" in perm.search("洗頻")
+    assert perm.recall("house-rules").startswith("[house-rules.md 第 1–2 行，共 3 行]")
+    assert perm.recall("list") == "- house-rules"
+    assert perm.recall("nope").startswith("（找不到永久記憶")
+    assert extract_read_requests('<recall scope="permanent" name="house-rules"/>') == [
+        ("recall", "permanent", "house-rules", 1, None)
+    ]

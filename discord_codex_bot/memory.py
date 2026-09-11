@@ -23,10 +23,10 @@ MEMORY_TAG = re.compile(
 # snippet-first search, then a paged read of one note.
 # Models sometimes drop the "/" or add a closing tag; accept `/>`, `>` and `></search>` alike.
 SEARCH_TAG = re.compile(
-    r'<search\s+scope="(user|guild)"\s+query="([^"]{1,200})"\s*/?>(?:\s*</search>)?'
+    r'<search\s+scope="(user|guild|permanent)"\s+query="([^"]{1,200})"\s*/?>(?:\s*</search>)?'
 )
 RECALL_TAG = re.compile(
-    r'<recall\s+scope="(user|guild)"\s+name="([^"]{1,80})"'
+    r'<recall\s+scope="(user|guild|permanent)"\s+name="([^"]{1,80})"'
     r'(?:\s+offset="(\d+)")?(?:\s+lines="(\d+)")?\s*/?>(?:\s*</recall>)?'
 )
 
@@ -329,11 +329,7 @@ class MemoryStore:
     # ----- internals -------------------------------------------------------------------------
 
     def _truncate(self, text: str) -> str:
-        data = text.encode("utf-8")
-        if len(data) <= self._limits.read_max_bytes:
-            return text
-        cut = data[: self._limits.read_max_bytes].decode("utf-8", errors="ignore")
-        return f"{cut}\n[已截斷至 {self._limits.read_max_bytes} bytes，用 offset 繼續讀]"
+        return _truncate(text, self._limits.read_max_bytes)
 
     def _evict_oldest(self, directory: Path) -> bool:
         for index_name in (ARCHIVE_FILE, INDEX_FILE):
@@ -377,6 +373,80 @@ class MemoryStore:
     def _write_file(path: Path, lines: list[str]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + ("\n" if lines else ""), "utf-8")
+
+
+class PermanentMemory:
+    """Operator-managed tier: a directory of hand-written files baked into the image.
+
+    <root>/MEMORY.md      injected into every prompt verbatim — no line/byte window, never evicted
+    <root>/topics/*.md    read on demand by file stem via <search/> and <recall/>
+    Nothing in the Bot writes here; there is no slash command for it.
+    """
+
+    def __init__(self, root: Path, limits: MemoryLimits) -> None:
+        self._root = root
+        self._limits = limits
+
+    def index_text(self) -> str:
+        try:
+            return (self._root / INDEX_FILE).read_text("utf-8").strip()
+        except OSError:
+            return ""
+
+    def _topics(self) -> list[Path]:
+        topics = self._root / TOPIC_DIR
+        return sorted(p for p in topics.glob("*.md") if p.is_file()) if topics.is_dir() else []
+
+    def search(self, query: str) -> str:
+        try:
+            pattern = re.compile(query, re.I)
+        except re.error:
+            pattern = re.compile(re.escape(query), re.I)
+        context = self._limits.search_context_lines
+        snippets: list[str] = []
+        total = 0
+        for path in self._topics():
+            lines = path.read_text("utf-8", errors="ignore").splitlines()
+            for number, line in enumerate(lines, 1):
+                if not pattern.search(line):
+                    continue
+                total += 1
+                if total > self._limits.search_max_matches:
+                    continue
+                start, end = max(0, number - 1 - context), min(len(lines), number + context)
+                block = "\n".join(
+                    f"{'>' if i == number else ' '} {i:>4}: {lines[i - 1]}"
+                    for i in range(start + 1, end + 1)
+                )
+                snippets.append(f"## {path.stem} ({path.name}) line {number}\n{block}")
+        if not snippets:
+            return f"（「{query}」沒有命中任何永久記憶）"
+        text = "\n\n".join(snippets)
+        if total > self._limits.search_max_matches:
+            text += f"\n\n[顯示 {self._limits.search_max_matches} / {total} 個命中；請縮小查詢]"
+        return _truncate(text, self._limits.read_max_bytes)
+
+    def recall(self, name: str, offset: int = 1, lines: int | None = None) -> str:
+        if name == LIST_NAME:
+            return "\n".join(f"- {p.stem}" for p in self._topics()) or "（沒有永久記憶檔）"
+        match = next((p for p in self._topics() if name in (p.stem, p.name)), None)
+        if match is None:
+            return f"（找不到永久記憶「{name}」）"
+        all_lines = match.read_text("utf-8", errors="ignore").splitlines()
+        page = min(lines or self._limits.read_max_lines, self._limits.read_max_lines)
+        start = max(1, offset)
+        chunk = all_lines[start - 1 : start - 1 + page]
+        body = "\n".join(f"{i:>4}: {line}" for i, line in enumerate(chunk, start))
+        header = f"[{match.name} 第 {start}–{start + len(chunk) - 1} 行，共 {len(all_lines)} 行]"
+        return _truncate(f"{header}\n{body}", self._limits.read_max_bytes)
+
+
+def _truncate(text: str, max_bytes: int) -> str:
+    data = text.encode("utf-8")
+    if len(data) <= max_bytes:
+        return text
+    cut = data[:max_bytes].decode("utf-8", errors="ignore")
+    return f"{cut}\n[已截斷至 {max_bytes} bytes，用 offset 繼續讀]"
 
 
 def extract_memory_tags(answer: str) -> tuple[str, list[tuple[str, str, str]]]:

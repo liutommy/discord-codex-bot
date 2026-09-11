@@ -23,6 +23,7 @@ from .memory import (
     SCOPES,
     MemoryLimits,
     MemoryStore,
+    PermanentMemory,
     extract_memory_tags,
     extract_read_requests,
 )
@@ -60,19 +61,18 @@ class DiscordCodexClient(discord.Client):
         self.threads = ThreadStore(
             config.codex_home / "discord_threads.json", config.thread_ttl_minutes * 60
         )
-        self.memory = MemoryStore(
-            config.codex_home / "memory",
-            MemoryLimits(
-                config.memory_index_max_lines,
-                config.memory_index_max_bytes,
-                config.memory_user_max_bytes,
-                config.memory_guild_max_bytes,
-                config.memory_read_max_lines,
-                config.memory_read_max_bytes,
-                config.memory_search_max_matches,
-                config.memory_search_context_lines,
-            ),
+        limits = MemoryLimits(
+            config.memory_index_max_lines,
+            config.memory_index_max_bytes,
+            config.memory_user_max_bytes,
+            config.memory_guild_max_bytes,
+            config.memory_read_max_lines,
+            config.memory_read_max_bytes,
+            config.memory_search_max_matches,
+            config.memory_search_context_lines,
         )
+        self.memory = MemoryStore(config.codex_home / "memory", limits)
+        self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-remember",
@@ -183,7 +183,15 @@ class DiscordCodexClient(discord.Client):
             for attachment in attachments:
                 suffix = validate_image(attachment.content_type, attachment.size, self.config)
                 images.append(await download_image(attachment, suffix, self.config))
-            memory = self.memory.render(guild_id, user_id)
+            permanent = self.permanent.index_text()
+            memory = "\n\n".join(
+                section
+                for section in (
+                    f"[永久記憶索引]\n{permanent}" if permanent else "",
+                    self.memory.render(guild_id, user_id),
+                )
+                if section
+            )
             style = self.memory.get_style(guild_id, user_id)
             result = await self.queue.run(
                 lambda: run_codex(
@@ -198,11 +206,7 @@ class DiscordCodexClient(discord.Client):
                     break
                 recalled = "\n\n".join(
                     f'<RESULT kind="{kind}" scope="{scope}" target="{target}">\n'
-                    + (
-                        self.memory.search(scope, guild_id, user_id, target)
-                        if kind == "search"
-                        else self.memory.recall(scope, guild_id, user_id, target, offset, lines)
-                    )
+                    + self._read(kind, scope, guild_id, user_id, target, offset, lines)
                     + "\n</RESULT>"
                     for kind, scope, target, offset, lines in wanted
                 )
@@ -233,6 +237,24 @@ class DiscordCodexClient(discord.Client):
         finally:
             for path in images:
                 remove_request_dir(path)
+
+    def _read(
+        self,
+        kind: str,
+        scope: str,
+        guild_id: int | None,
+        user_id: int,
+        target: str,
+        offset: int,
+        lines: int | None,
+    ) -> str:
+        if scope == "permanent":
+            if kind == "search":
+                return self.permanent.search(target)
+            return self.permanent.recall(target, offset, lines)
+        if kind == "search":
+            return self.memory.search(scope, guild_id, user_id, target)
+        return self.memory.recall(scope, guild_id, user_id, target, offset, lines)
 
     @staticmethod
     def _files(result: CodexResult) -> list[discord.File]:

@@ -108,6 +108,7 @@ class Config:
     memory_search_context_lines: int
     memory_recall_rounds: int
     output_style_path: Path
+    permanent_memory_dir: Path
     consolidate_hour: int
     consolidate_timezone: str
     consolidate_min_remaining_percent: int
@@ -157,6 +158,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Operator-written default output style, injected into every prompt when non-empty.
         output_style_path=Path(
             values.get("OUTPUT_STYLE_FILE", "/opt/discord-codex/output-style.md")
+        ),
+        # Operator-managed permanent memory (baked into the image, read-only for the Bot).
+        permanent_memory_dir=Path(
+            values.get("PERMANENT_MEMORY_DIR", "/opt/discord-codex/permanent")
         ),
         # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.
         consolidate_hour=_bounded_int(values, "CONSOLIDATE_HOUR", 2, 0, 23),
