@@ -7,6 +7,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DISCORD_ID = re.compile(r"^\d{17,20}$")
+# Codex CLI value -> Codex UI label. Verified against `codex debug models` for gpt-5.6-luna
+# (supported_reasoning_levels) and the request payload each value produces; re-verify on upgrade.
+REASONING_EFFORTS = {
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "Extra high",
+    "max": "Max",
+}
 
 
 def _required(env: Mapping[str, str], name: str) -> str:
@@ -35,6 +44,15 @@ def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
         raise ValueError(f"{name} must be a positive integer") from error
     if value <= 0:
         raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _effort(env: Mapping[str, str]) -> str:
+    value = env.get("CODEX_REASONING_EFFORT", "").strip() or "medium"
+    if value not in REASONING_EFFORTS:
+        raise ValueError(
+            f"CODEX_REASONING_EFFORT must be one of {', '.join(REASONING_EFFORTS)}"
+        )
     return value
 
 
@@ -73,9 +91,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             values.get("ALLOWED_CHANNEL_IDS"), "ALLOWED_CHANNEL_IDS"
         ),
         codex_model=values.get("CODEX_MODEL", "").strip() or "gpt-5.6-luna",
-        codex_reasoning_effort=(
-            values.get("CODEX_REASONING_EFFORT", "").strip() or "high"
-        ),
+        codex_reasoning_effort=_effort(values),
         codex_home=Path(values.get("CODEX_HOME", "/var/lib/codex")),
         codex_workspace=Path(values.get("CODEX_WORKSPACE", "/workspace")),
         codex_timeout_seconds=_positive_int(values, "CODEX_TIMEOUT_SECONDS", 600),

@@ -11,7 +11,7 @@ from discord import app_commands
 from .access import check_access
 from .attachments import download_image, remove_request_dir, sweep_forever, validate_image
 from .codex import codex_login_status, run_codex
-from .config import Config, load_config
+from .config import REASONING_EFFORTS, Config, load_config
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
 
@@ -96,7 +96,11 @@ class DiscordCodexClient(discord.Client):
         return ""
 
     async def _answer(
-        self, prompt: str, attachments: Sequence[discord.Attachment], guild_id: int | None
+        self,
+        prompt: str,
+        attachments: Sequence[discord.Attachment],
+        guild_id: int | None,
+        effort: str = "",
     ) -> str:
         """Run one validated request through Codex; always returns text to post."""
         images: list[Path] = []
@@ -104,7 +108,9 @@ class DiscordCodexClient(discord.Client):
             for attachment in attachments:
                 suffix = validate_image(attachment.content_type, attachment.size, self.config)
                 images.append(await download_image(attachment, suffix, self.config))
-            answer = await self.queue.run(lambda: run_codex(prompt, self.config, images))
+            answer = await self.queue.run(
+                lambda: run_codex(prompt, self.config, images, effort)
+            )
             return truncate(answer, self.config.max_response_chars)
         except QueueFullError:
             return QUEUE_FULL_MESSAGE
@@ -123,21 +129,34 @@ class DiscordCodexClient(discord.Client):
             await interaction.response.send_message(reason, ephemeral=True)
             return
         status = await codex_login_status(self.config)
+        default_label = REASONING_EFFORTS[self.config.codex_reasoning_effort]
         await interaction.response.send_message(
             f"{status}\n模型：{self.config.codex_model}\n"
-            f"推理強度：{self.config.codex_reasoning_effort}",
+            f"預設推理強度：{default_label}（/codex 可選 {'、'.join(REASONING_EFFORTS.values())}）",
             ephemeral=True,
         )
 
-    @app_commands.describe(prompt="要交給 Codex 的問題", image="選填：一張要讓 Codex 看的圖片")
+    @app_commands.describe(
+        prompt="要交給 Codex 的問題",
+        effort="選填：推理強度（預設 Medium）",
+        image="選填：一張要讓 Codex 看的圖片",
+    )
+    @app_commands.choices(
+        effort=[
+            app_commands.Choice(name=label, value=value)
+            for value, label in REASONING_EFFORTS.items()
+        ]
+    )
     async def codex_command(
         self,
         interaction: discord.Interaction,
         prompt: str,
+        effort: app_commands.Choice[str] | None = None,
         image: discord.Attachment | None = None,
     ) -> None:
         attachments = [image] if image is not None else []
         prompt = prompt.strip()
+        effort_value = effort.value if effort is not None else self.config.codex_reasoning_effort
         reason = self._access(
             interaction.guild_id, interaction.channel, interaction.channel_id
         ) or self._validate(prompt, attachments)
@@ -146,9 +165,12 @@ class DiscordCodexClient(discord.Client):
             return
 
         await interaction.response.defer(thinking=True)
-        answer = await self._answer(prompt, attachments, interaction.guild_id)
+        answer = await self._answer(prompt, attachments, interaction.guild_id, effort_value)
         # Discord does not echo slash command inputs, so quote the question above the answer.
-        chunks = split_discord_message(format_reply(prompt, answer, has_image=bool(attachments)))
+        reply = format_reply(
+            prompt, answer, has_image=bool(attachments), effort=REASONING_EFFORTS[effort_value]
+        )
+        chunks = split_discord_message(reply)
         await interaction.edit_original_response(content=chunks[0])
         for chunk in chunks[1:]:
             await interaction.followup.send(chunk)

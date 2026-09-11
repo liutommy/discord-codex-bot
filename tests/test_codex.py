@@ -51,3 +51,10 @@ def test_extracts_last_completed_agent_message() -> None:
         )
     )
     assert parse_codex_jsonl(stdout) == "final answer"
+
+
+def test_per_request_effort_overrides_default(config: Config) -> None:
+    from discord_codex_bot.codex import _arguments
+
+    assert 'model_reasoning_effort="high"' in _arguments(config)
+    assert 'model_reasoning_effort="max"' in _arguments(config, effort="max")

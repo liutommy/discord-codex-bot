@@ -29,5 +29,17 @@ def test_loads_safe_operational_defaults() -> None:
         }
     )
     assert config.codex_model == "gpt-5.6-luna"
-    assert config.codex_reasoning_effort == "high"
+    assert config.codex_reasoning_effort == "medium"
     assert config.max_queued_jobs == 10
+
+
+def test_effort_accepts_verified_values_and_rejects_unknown_ones() -> None:
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    override = {**base, "CODEX_REASONING_EFFORT": "xhigh"}
+    assert load_config(override).codex_reasoning_effort == "xhigh"
+    with pytest.raises(ValueError, match="CODEX_REASONING_EFFORT"):
+        load_config({**base, "CODEX_REASONING_EFFORT": "extra_high"})

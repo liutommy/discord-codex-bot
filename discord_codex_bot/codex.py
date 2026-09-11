@@ -55,9 +55,9 @@ def _prompt(user_prompt: str) -> str:
     )
 
 
-def _arguments(config: Config, images: Sequence[Path] = ()) -> tuple[str, ...]:
+def _arguments(config: Config, images: Sequence[Path] = (), effort: str = "") -> tuple[str, ...]:
     # Sandbox, tool feature flags and web search live in CODEX_HOME/config.toml (refreshed from
-    # config/codex-config.toml at container start); only per-deployment values are passed here.
+    # config/codex-config.toml at container start); only per-request values are passed here.
     # `-i` is variadic, so images go last and `--` keeps the stdin marker from being read as a file.
     image_flags = tuple(flag for image in images for flag in ("-i", str(image)))
     return (
@@ -65,7 +65,7 @@ def _arguments(config: Config, images: Sequence[Path] = ()) -> tuple[str, ...]:
         "--model",
         config.codex_model,
         "-c",
-        f'model_reasoning_effort="{config.codex_reasoning_effort}"',
+        f'model_reasoning_effort="{effort or config.codex_reasoning_effort}"',
         "--ignore-rules",
         "--skip-git-repo-check",
         "--json",
@@ -104,10 +104,12 @@ async def _communicate(
         raise RuntimeError("Codex request timed out") from None
 
 
-async def run_codex(user_prompt: str, config: Config, images: Sequence[Path] = ()) -> str:
+async def run_codex(
+    user_prompt: str, config: Config, images: Sequence[Path] = (), effort: str = ""
+) -> str:
     process = await asyncio.create_subprocess_exec(
         "codex",
-        *_arguments(config, images),
+        *_arguments(config, images, effort),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

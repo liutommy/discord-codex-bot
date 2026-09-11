@@ -133,11 +133,14 @@ The `@mention` form keeps the question visible as the member's own message, supp
 `MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Messages that do not
 mention the Bot are discarded without processing.
 
-`/codex-status` must report `ChatGPT 訂閱登入有效`, model `gpt-5.6-luna`, and reasoning effort
-`high`. A command in another server or outside the configured test channel must not execute.
+`/codex-status` must report `ChatGPT 訂閱登入有效`, model `gpt-5.6-luna`, and the default reasoning
+effort (`Medium`). A command in another server or outside the configured test channel must not execute.
 
 The Bot serializes Codex work to one request at a time and caps the queue, prompt, response, and
-runtime. Discord users cannot select the model or reasoning effort.
+runtime. Discord users cannot select the model. `/codex` has an optional `effort` choice — Low,
+Medium (default), High, Extra high, Max — mapped to the CLI values `low/medium/high/xhigh/max`
+verified against `codex debug models` for `gpt-5.6-luna`; the CLI forwards any string verbatim, so
+the Bot only offers this allowlist. `@mention` requests use the default `CODEX_REASONING_EFFORT`.
 
 `/codex` accepts an optional `image` attachment (PNG/JPEG/WebP/GIF, `MAX_ATTACHMENT_BYTES`). The
 file is saved into a per-request directory under `/tmp/discord-codex` (container tmpfs), passed to
