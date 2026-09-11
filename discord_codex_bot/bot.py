@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections.abc import Sequence
@@ -41,6 +42,22 @@ FAILURE_MESSAGE = (
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
 
 
+def instructions_version(config: Config) -> str:
+    """Fingerprint of the instruction files Codex bakes into a thread at its start."""
+    digest = hashlib.sha256()
+    for path in (
+        config.codex_workspace / "AGENTS.md",
+        config.codex_workspace_plain / "AGENTS.md",
+        config.output_style_path,
+    ):
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            pass
+        digest.update(b"\0")
+    return digest.hexdigest()[:12]
+
+
 def strip_mention(content: str, bot_id: int) -> str:
     """Remove every <@id> / <@!id> mention of the bot so only the question remains."""
     return re.sub(rf"<@!?{bot_id}>", "", content).strip()
@@ -59,7 +76,9 @@ class DiscordCodexClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.queue = SerialQueue(config.max_queued_jobs)
         self.threads = ThreadStore(
-            config.codex_home / "discord_threads.json", config.thread_ttl_minutes * 60
+            config.codex_home / "discord_threads.json",
+            config.thread_ttl_minutes * 60,
+            instructions_version(config),
         )
         limits = MemoryLimits(
             config.memory_index_max_lines,

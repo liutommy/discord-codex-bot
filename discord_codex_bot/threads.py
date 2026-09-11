@@ -13,13 +13,19 @@ class ThreadStore:
     Two indexes: (guild, channel, user) -> most recent thread within the TTL, and bot message id ->
     thread, so replying to an old bot answer continues that exact conversation. Persisted as JSON
     next to the Codex sessions so a container restart keeps the mapping.
+
+    Every entry records the `version` of the instruction files it was started with (AGENTS.md,
+    output style). Codex loads those at thread start and keeps them for the thread's life, so a
+    thread from an older version is never resumed — a persona or style change takes effect on the
+    next message instead of lingering until the TTL expires.
     """
 
-    def __init__(self, path: Path, ttl_seconds: float) -> None:
+    def __init__(self, path: Path, ttl_seconds: float, version: str = "") -> None:
         self._path = path
         self._ttl = ttl_seconds
+        self._version = version
         self._by_key: dict[str, dict[str, float | str]] = {}
-        self._by_message: dict[str, str] = {}
+        self._by_message: dict[str, dict[str, str]] = {}
         self._load()
 
     @staticmethod
@@ -28,25 +34,26 @@ class ThreadStore:
 
     def current(self, key: str, now: float | None = None) -> str:
         entry = self._by_key.get(key)
-        if entry is None:
+        if entry is None or entry.get("version", "") != self._version:
             return ""
         if (time.time() if now is None else now) - float(entry["at"]) > self._ttl:
             return ""
         return str(entry["thread_id"])
 
     def by_message(self, message_id: int | None) -> str:
-        return self._by_message.get(str(message_id), "") if message_id is not None else ""
+        entry = self._by_message.get(str(message_id)) if message_id is not None else None
+        if entry is None or entry.get("version", "") != self._version:
+            return ""
+        return entry["thread_id"]
 
     def remember(self, key: str, thread_id: str, message_id: int | None = None) -> None:
         if not thread_id:
             return
-        self._by_key[key] = {"thread_id": thread_id, "at": time.time()}
+        self._by_key[key] = {"thread_id": thread_id, "at": time.time(), "version": self._version}
         if message_id is not None:
-            self._by_message[str(message_id)] = thread_id
-            for stale in list(self._by_message)[: -MAX_MESSAGE_LINKS or None]:
-                if len(self._by_message) <= MAX_MESSAGE_LINKS:
-                    break
-                del self._by_message[stale]
+            self._by_message[str(message_id)] = {"thread_id": thread_id, "version": self._version}
+            while len(self._by_message) > MAX_MESSAGE_LINKS:
+                del self._by_message[next(iter(self._by_message))]
         self._save()
 
     def forget(self, key: str) -> bool:
@@ -61,7 +68,12 @@ class ThreadStore:
         except (OSError, ValueError):
             return
         self._by_key = dict(data.get("by_key", {}))
-        self._by_message = dict(data.get("by_message", {}))
+        # Entries written before versioning were plain thread ids; they carry no version and
+        # therefore never match, which is the intended outcome.
+        self._by_message = {
+            k: v if isinstance(v, dict) else {"thread_id": str(v), "version": ""}
+            for k, v in data.get("by_message", {}).items()
+        }
 
     def _save(self) -> None:
         cutoff = time.time() - self._ttl
