@@ -15,6 +15,7 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
     assert {command.name for command in client.tree.get_commands()} == {
         "codex",
         "codex-status",
+        "codex-reset",
     }
     assert client.intents.guilds
     assert client.intents.message_content

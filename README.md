@@ -145,6 +145,14 @@ Medium (default), High, Extra high, Max — mapped to the CLI values `low/medium
 verified against `codex debug models` for `gpt-5.6-luna`; the CLI forwards any string verbatim, so
 the Bot only offers this allowlist. `@mention` requests use the default `CODEX_REASONING_EFFORT`.
 
+Follow-up questions keep their context: each answer is a Codex thread, and the Bot resumes it with
+`codex exec resume <thread_id>` when the same member asks again in the same channel within
+`THREAD_TTL_MINUTES`, or when anyone replies to one of the Bot's answers (that exact thread, any
+age). `/codex new:True` or `/codex-reset` starts fresh. The mapping lives in
+`CODEX_HOME/discord_threads.json` and survives restarts; a thread that can no longer be resumed
+falls back to a fresh one. This is conversation memory, not Codex's background "memories" feature,
+which consolidates asynchronously and is not tied to Discord members.
+
 Codex can also generate images (`image_generation = true`). The built-in tool writes them to
 `CODEX_HOME/generated_images/<thread_id>/`; the Bot attaches them to the reply (up to 10) and
 deletes that directory afterwards. Leftovers from crashed requests are swept with the attachments.

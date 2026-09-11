@@ -74,6 +74,7 @@ class Config:
     max_attachment_bytes: int
     max_attachments: int
     attachment_sweep_minutes: int
+    thread_ttl_minutes: int
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -102,4 +103,5 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         max_attachment_bytes=_positive_int(values, "MAX_ATTACHMENT_BYTES", 8_000_000),
         max_attachments=_positive_int(values, "MAX_ATTACHMENTS", 4),
         attachment_sweep_minutes=_positive_int(values, "ATTACHMENT_SWEEP_MINUTES", 10),
+        thread_ttl_minutes=_positive_int(values, "THREAD_TTL_MINUTES", 60),
     )

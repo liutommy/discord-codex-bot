@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 from collections.abc import Sequence
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from .config import Config
 
+LOGGER = logging.getLogger(__name__)
 MAX_PROCESS_OUTPUT_BYTES = 5 * 1024 * 1024
 # `codex` on PATH is a Node wrapper that forwards SIGTERM/SIGINT/SIGHUP to the native binary but
 # cannot forward SIGKILL, so a timed-out request is killed as a whole process group instead.
@@ -33,6 +35,8 @@ class CodexResult:
     # The caller sends them and then removes `generated_dir`.
     images: tuple[Path, ...] = ()
     generated_dir: Path | None = None
+    thread_id: str = ""
+    resumed: bool = False
 
 
 def _events(stdout: str):
@@ -85,13 +89,18 @@ def _prompt(user_prompt: str) -> str:
     )
 
 
-def _arguments(config: Config, images: Sequence[Path] = (), effort: str = "") -> tuple[str, ...]:
+def _arguments(
+    config: Config, images: Sequence[Path] = (), effort: str = "", resume: str = ""
+) -> tuple[str, ...]:
     # Sandbox, tool feature flags and web search live in CODEX_HOME/config.toml (refreshed from
     # config/codex-config.toml at container start); only per-request values are passed here.
     # `-i` is variadic, so images go last and `--` keeps the stdin marker from being read as a file.
+    # `exec resume <id>` continues a stored thread; it keeps that thread's cwd and has no --color.
     image_flags = tuple(flag for image in images for flag in ("-i", str(image)))
+    head = ("exec", "resume", resume) if resume else ("exec",)
+    tail = () if resume else ("--color", "never", "--cd", str(config.codex_workspace))
     return (
-        "exec",
+        *head,
         "--model",
         config.codex_model,
         "-c",
@@ -99,10 +108,7 @@ def _arguments(config: Config, images: Sequence[Path] = (), effort: str = "") ->
         "--ignore-rules",
         "--skip-git-repo-check",
         "--json",
-        "--color",
-        "never",
-        "--cd",
-        str(config.codex_workspace),
+        *tail,
         *image_flags,
         "--",
         "-",
@@ -134,12 +140,12 @@ async def _communicate(
         raise RuntimeError("Codex request timed out") from None
 
 
-async def run_codex(
-    user_prompt: str, config: Config, images: Sequence[Path] = (), effort: str = ""
-) -> CodexResult:
+async def _exec(
+    user_prompt: str, config: Config, images: Sequence[Path], effort: str, resume: str
+) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         "codex",
-        *_arguments(config, images, effort),
+        *_arguments(config, images, effort, resume),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -149,15 +155,35 @@ async def run_codex(
     stdout, stderr = await _communicate(process, _prompt(user_prompt), config.codex_timeout_seconds)
     if len(stdout) + len(stderr) > MAX_PROCESS_OUTPUT_BYTES:
         raise RuntimeError("Codex output exceeded the process limit")
-    if process.returncode != 0:
-        summary = " | ".join(stderr.decode("utf-8", errors="replace").splitlines()[-3:])
-        raise RuntimeError(f"Codex exited with code {process.returncode}: {summary}")
-    output = stdout.decode("utf-8", errors="replace")
+    return (
+        process.returncode or 0,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
+    )
+
+
+async def run_codex(
+    user_prompt: str,
+    config: Config,
+    images: Sequence[Path] = (),
+    effort: str = "",
+    resume: str = "",
+) -> CodexResult:
+    code, output, stderr = await _exec(user_prompt, config, images, effort, resume)
+    if code != 0 and resume:
+        # The stored thread may have been rotated away or be unreadable; answer fresh instead.
+        LOGGER.warning("Resume of thread %s failed (%s); starting a new thread", resume, code)
+        resume = ""
+        code, output, stderr = await _exec(user_prompt, config, images, effort, resume)
+    if code != 0:
+        summary = " | ".join(stderr.splitlines()[-3:])
+        raise RuntimeError(f"Codex exited with code {code}: {summary}")
     message = parse_codex_jsonl(output)
     if not message:
         raise RuntimeError("Codex returned no agent message")
-    generated_dir, generated = collect_generated_images(config, parse_thread_id(output))
-    return CodexResult(message, generated, generated_dir)
+    thread_id = parse_thread_id(output) or resume
+    generated_dir, generated = collect_generated_images(config, thread_id)
+    return CodexResult(message, generated, generated_dir, thread_id, bool(resume))
 
 
 async def codex_login_status(config: Config) -> str:

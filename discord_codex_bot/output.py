@@ -4,11 +4,22 @@ DISCORD_MESSAGE_LIMIT = 2_000
 PROMPT_ECHO_CHARS = 300
 
 
-def format_reply(prompt: str, answer: str, *, has_image: bool = False, effort: str = "") -> str:
+def format_reply(
+    prompt: str,
+    answer: str,
+    *,
+    has_image: bool = False,
+    effort: str = "",
+    resumed: bool = False,
+) -> str:
     """Quote the question above the answer; Discord does not echo slash command inputs."""
     echoed = prompt if len(prompt) <= PROMPT_ECHO_CHARS else f"{prompt[:PROMPT_ECHO_CHARS]}…"
     quoted = "\n".join(f"> {line}" for line in echoed.splitlines() or [""])
-    tags = [tag for tag in (effort, "附圖" if has_image else "") if tag]
+    tags = [
+        tag
+        for tag in (effort, "附圖" if has_image else "", "續接" if resumed else "")
+        if tag
+    ]
     suffix = f"（{'、'.join(tags)}）" if tags else ""
     return f"**問**{suffix}：\n{quoted}\n\n{answer}"
 

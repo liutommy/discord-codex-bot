@@ -24,4 +24,5 @@ def config() -> Config:
         max_attachment_bytes=8_000_000,
         max_attachments=4,
         attachment_sweep_minutes=10,
+        thread_ttl_minutes=60,
     )
