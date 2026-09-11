@@ -10,7 +10,7 @@ from .access import check_access
 from .attachments import download_image, remove_request_dir, sweep_forever, validate_image
 from .codex import codex_login_status, run_codex
 from .config import Config, load_config
-from .output import split_discord_message, truncate
+from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
 
 LOGGER = logging.getLogger(__name__)
@@ -110,7 +110,8 @@ class DiscordCodexClient(discord.Client):
             if image is not None:
                 images.append(await download_image(image, suffix, self.config))
             answer = await self.queue.run(lambda: run_codex(prompt, self.config, images))
-            chunks = split_discord_message(truncate(answer, self.config.max_response_chars))
+            reply = format_reply(prompt, answer, has_image=bool(images))
+            chunks = split_discord_message(truncate(reply, self.config.max_response_chars))
             await interaction.edit_original_response(content=chunks[0])
             for chunk in chunks[1:]:
                 await interaction.followup.send(chunk)

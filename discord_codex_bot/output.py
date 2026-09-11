@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 DISCORD_MESSAGE_LIMIT = 2_000
+PROMPT_ECHO_CHARS = 300
+
+
+def format_reply(prompt: str, answer: str, *, has_image: bool = False) -> str:
+    """Quote the question above the answer; Discord does not echo slash command inputs."""
+    echoed = prompt if len(prompt) <= PROMPT_ECHO_CHARS else f"{prompt[:PROMPT_ECHO_CHARS]}…"
+    quoted = "\n".join(f"> {line}" for line in echoed.splitlines() or [""])
+    suffix = "（附圖）" if has_image else ""
+    return f"**問**{suffix}：\n{quoted}\n\n{answer}"
 
 
 def truncate(text: str, max_chars: int) -> str:
