@@ -17,9 +17,16 @@ _INDEX_LINE = re.compile(r"^- \[(?P<name>[^\]]+)\]\((?P<file>[^)]+)\) — (?P<ho
 MEMORY_TAG = re.compile(
     r'<memory\s+scope="(user|guild)"\s+name="([^"]{1,60})">\s*(.*?)\s*</memory>', re.S
 )
-# Claude-style on-demand read: the model asks for a topic file (or the archive list) and the Bot
-# feeds it back into the same thread.
-RECALL_TAG = re.compile(r'<recall\s+scope="(user|guild)"\s+name="([^"]{1,80})"\s*/>')
+# On-demand reads, executed by the Bot (Codex has no file tools here). Modelled on pi-context:
+# snippet-first search, then a paged read of one note.
+# Models sometimes drop the "/" or add a closing tag; accept `/>`, `>` and `></search>` alike.
+SEARCH_TAG = re.compile(
+    r'<search\s+scope="(user|guild)"\s+query="([^"]{1,200})"\s*/?>(?:\s*</search>)?'
+)
+RECALL_TAG = re.compile(
+    r'<recall\s+scope="(user|guild)"\s+name="([^"]{1,80})"'
+    r'(?:\s+offset="(\d+)")?(?:\s+lines="(\d+)")?\s*/?>(?:\s*</recall>)?'
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +35,10 @@ class MemoryLimits:
     index_max_bytes: int
     user_max_bytes: int
     guild_max_bytes: int
-    recall_max_bytes: int
+    read_max_lines: int
+    read_max_bytes: int
+    search_max_matches: int
+    search_context_lines: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,9 +61,9 @@ class MemoryStore:
 
     <root>/<guild>/guild/            server-wide scope
     <root>/<guild>/users/<user>/     one directory per member
-        MEMORY.md                    index: one line per memory, injected into every prompt
+        MEMORY.md                    index, one line per memory, injected into every prompt
         MEMORY-archive.md            index lines that fell off the injected window
-        topics/<slug>.md             the memory itself, read on demand via <recall/>
+        topics/<slug>.md             the memory itself, searched / read on demand
     """
 
     def __init__(self, root: Path, limits: MemoryLimits) -> None:
@@ -77,6 +87,12 @@ class MemoryStore:
 
     def entries(self, scope: str, guild_id: int | None, user_id: int | None) -> list[Entry]:
         return self._read_index(self.scope_dir(scope, guild_id, user_id) / INDEX_FILE)
+
+    def all_entries(self, scope: str, guild_id: int | None, user_id: int | None) -> list[Entry]:
+        directory = self.scope_dir(scope, guild_id, user_id)
+        return self._read_index(directory / INDEX_FILE) + self._read_index(
+            directory / ARCHIVE_FILE
+        )
 
     def index_text(self, scope: str, guild_id: int | None, user_id: int | None) -> str:
         """The injected window: the first index_max_lines / index_max_bytes of MEMORY.md."""
@@ -103,21 +119,21 @@ class MemoryStore:
     def add(
         self, scope: str, guild_id: int | None, user_id: int | None, name: str, text: str
     ) -> str:
-        """Store one memory; returns the index line, or a user-facing reason when refused."""
+        """Store one memory and return its index line. A full scope evicts its oldest notes."""
         text = text.strip()
         if not text:
             return "記憶內容不能是空的。"
         directory = self.scope_dir(scope, guild_id, user_id)
         body = f"# {name.strip()}\n\n{date.today().isoformat()}\n\n{text}\n"
-        if self.usage_bytes(scope, guild_id, user_id) + len(body.encode("utf-8")) > self.capacity(
-            scope
+        needed = len(body.encode("utf-8")) + 120
+        while (
+            self.usage_bytes(scope, guild_id, user_id) + needed > self.capacity(scope)
+            and self._evict_oldest(directory)
         ):
-            return f"{SCOPES[scope]}記憶已達容量上限，請先用 /forget 清理。"
+            pass
         entries = self._read_index(directory / INDEX_FILE)
         slug = slugify(name)
-        existing = {entry.file for entry in entries} | {
-            entry.file for entry in self._read_index(directory / ARCHIVE_FILE)
-        }
+        existing = {e.file for e in self.all_entries(scope, guild_id, user_id)}
         file = f"{slug}.md"
         counter = 2
         while file in existing:
@@ -147,21 +163,89 @@ class MemoryStore:
 
     # ----- read on demand --------------------------------------------------------------------
 
-    def recall(self, scope: str, guild_id: int | None, user_id: int | None, name: str) -> str:
+    def search(self, scope: str, guild_id: int | None, user_id: int | None, query: str) -> str:
+        """Snippet-first search over every note: matching lines with a few lines of context."""
+        directory = self.scope_dir(scope, guild_id, user_id)
+        try:
+            pattern = re.compile(query, re.I)
+        except re.error:
+            pattern = re.compile(re.escape(query), re.I)
+        context = self._limits.search_context_lines
+        snippets: list[str] = []
+        total = 0
+        for entry in self.all_entries(scope, guild_id, user_id):
+            try:
+                lines = (directory / TOPIC_DIR / entry.file).read_text("utf-8").splitlines()
+            except OSError:
+                continue
+            for number, line in enumerate(lines, 1):
+                if not pattern.search(line):
+                    continue
+                total += 1
+                if total > self._limits.search_max_matches:
+                    continue
+                start, end = max(0, number - 1 - context), min(len(lines), number + context)
+                block = "\n".join(
+                    f"{'>' if i == number else ' '} {i:>4}: {lines[i - 1]}"
+                    for i in range(start + 1, end + 1)
+                )
+                snippets.append(f"## {entry.name} ({entry.file}) line {number}\n{block}")
+        if not snippets:
+            return f"（「{query}」沒有命中任何記憶）"
+        text = "\n\n".join(snippets)
+        if total > self._limits.search_max_matches:
+            text += f"\n\n[顯示 {self._limits.search_max_matches} / {total} 個命中；請縮小查詢]"
+        return self._truncate(text)
+
+    def recall(
+        self,
+        scope: str,
+        guild_id: int | None,
+        user_id: int | None,
+        name: str,
+        offset: int = 1,
+        lines: int | None = None,
+    ) -> str:
+        """Paged read of one note; the header tells the model how much is left."""
         directory = self.scope_dir(scope, guild_id, user_id)
         if name == LIST_NAME:
-            lines = [e.line() for e in self._read_index(directory / ARCHIVE_FILE)]
-            return "\n".join(lines) or "（沒有索引以外的記憶）"
-        entries = self._read_index(directory / INDEX_FILE) + self._read_index(
-            directory / ARCHIVE_FILE
+            listed = [e.line() for e in self._read_index(directory / ARCHIVE_FILE)]
+            return self._truncate("\n".join(listed) or "（沒有索引以外的記憶）")
+        match = next(
+            (e for e in self.all_entries(scope, guild_id, user_id) if name in (e.name, e.file)),
+            None,
         )
-        match = next((e for e in entries if e.name == name or e.file == name), None)
         if match is None:
             return f"（找不到記憶「{name}」）"
-        raw = (directory / TOPIC_DIR / match.file).read_bytes()[: self._limits.recall_max_bytes]
-        return raw.decode("utf-8", errors="ignore")
+        try:
+            all_lines = (directory / TOPIC_DIR / match.file).read_text("utf-8").splitlines()
+        except OSError:
+            return f"（記憶「{name}」的檔案遺失）"
+        page = min(lines or self._limits.read_max_lines, self._limits.read_max_lines)
+        start = max(1, offset)
+        chunk = all_lines[start - 1 : start - 1 + page]
+        body = "\n".join(f"{i:>4}: {line}" for i, line in enumerate(chunk, start))
+        header = f"[{match.file} 第 {start}–{start + len(chunk) - 1} 行，共 {len(all_lines)} 行]"
+        return self._truncate(f"{header}\n{body}")
 
     # ----- internals -------------------------------------------------------------------------
+
+    def _truncate(self, text: str) -> str:
+        data = text.encode("utf-8")
+        if len(data) <= self._limits.read_max_bytes:
+            return text
+        cut = data[: self._limits.read_max_bytes].decode("utf-8", errors="ignore")
+        return f"{cut}\n[已截斷至 {self._limits.read_max_bytes} bytes，用 offset 繼續讀]"
+
+    def _evict_oldest(self, directory: Path) -> bool:
+        for index_name in (ARCHIVE_FILE, INDEX_FILE):
+            entries = self._read_index(directory / index_name)
+            if entries:
+                oldest = entries.pop(0)
+                (directory / TOPIC_DIR / oldest.file).unlink(missing_ok=True)
+                self._write_file(directory / index_name, [e.line() for e in entries])
+                return True
+        return False
 
     def _read_index(self, path: Path) -> list[Entry]:
         try:
@@ -177,7 +261,7 @@ class MemoryStore:
 
     def _write_index(self, directory: Path, entries: list[Entry]) -> None:
         # Keep the injected window honest: once MEMORY.md would exceed its limits, the oldest
-        # lines move to the archive, where <recall name="list"/> still finds them.
+        # lines move to the archive, where <recall name="list"/> and <search/> still find them.
         overflow: list[Entry] = []
         while entries:
             lines = [e.line() for e in entries]
@@ -203,5 +287,11 @@ def extract_memory_tags(answer: str) -> tuple[str, list[tuple[str, str, str]]]:
     return MEMORY_TAG.sub("", answer).strip(), found
 
 
-def extract_recall_tags(answer: str) -> list[tuple[str, str]]:
-    return RECALL_TAG.findall(answer)
+def extract_read_requests(answer: str) -> list[tuple[str, str, str, int, int | None]]:
+    """[(kind, scope, target, offset, lines)] for every <search/> and <recall/> in an answer."""
+    requests: list[tuple[str, str, str, int, int | None]] = [
+        ("search", scope, query, 1, None) for scope, query in SEARCH_TAG.findall(answer)
+    ]
+    for scope, name, offset, lines in RECALL_TAG.findall(answer):
+        requests.append(("recall", scope, name, int(offset or 1), int(lines) if lines else None))
+    return requests

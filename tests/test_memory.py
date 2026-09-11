@@ -6,7 +6,7 @@ from discord_codex_bot.memory import (
     MemoryLimits,
     MemoryStore,
     extract_memory_tags,
-    extract_recall_tags,
+    extract_read_requests,
     slugify,
 )
 
@@ -15,7 +15,10 @@ LIMITS = MemoryLimits(
     index_max_bytes=25_000,
     user_max_bytes=600,
     guild_max_bytes=200_000_000,
-    recall_max_bytes=20,
+    read_max_lines=2,
+    read_max_bytes=50_000,
+    search_max_matches=50,
+    search_context_lines=1,
 )
 
 
@@ -39,18 +42,24 @@ def test_index_overflow_moves_oldest_to_archive_and_stays_recallable(tmp_path: P
     assert [e.name for e in store.entries("guild", 1, None)] == ["n2", "n3", "n4"]
     assert "n0" in archive and "n1" in archive and "n0" not in index
     assert "n0" in store.recall("guild", 1, None, "list")
-    assert store.recall("guild", 1, None, "n0").startswith("# n0")
-    assert len(store.recall("guild", 1, None, "n4").encode("utf-8")) <= LIMITS.recall_max_bytes
+    page = store.recall("guild", 1, None, "n0")
+    assert page.startswith("[n0.md 第 1–2 行，共 5 行]") and "   1: # n0" in page
+    assert "   3: 2026" in store.recall("guild", 1, None, "n0", offset=3, lines=1)
+    hits = store.search("guild", 1, None, "fact [13]")
+    assert "## n1 (n1.md) line 5" in hits and "## n3 (n3.md) line 5" in hits and "n2" not in hits
+    assert store.search("guild", 1, None, "zzz").startswith("（「zzz」沒有命中")
 
 
-def test_capacity_refuses_and_forget_frees(tmp_path: Path) -> None:
+def test_capacity_evicts_oldest_and_forget_deletes(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path, LIMITS)
     assert store.add("user", 1, 2, "a", "x" * 150).startswith("- [a]")
     assert store.add("user", 1, 2, "b", "y" * 150).startswith("- [b]")
-    assert "容量上限" in store.add("user", 1, 2, "c", "z" * 150)
-    assert store.forget("user", 1, 2, "a")
-    assert not store.forget("user", 1, 2, "a")
     assert store.add("user", 1, 2, "c", "z" * 150).startswith("- [c]")
+    names = [e.name for e in store.all_entries("user", 1, 2)]
+    assert "a" not in names and "c" in names  # oldest evicted to make room
+    assert not (tmp_path / "1" / "users" / "2" / "topics" / "a.md").exists()
+    assert store.forget("user", 1, 2, "b")
+    assert not store.forget("user", 1, 2, "b")
     assert store.recall("user", 1, 2, "nope").startswith("（找不到")
 
 
@@ -63,5 +72,14 @@ def test_slug_and_tag_parsing() -> None:
     )
     assert text == "好的。"
     assert facts == [("user", "綠茶", "喜歡綠茶"), ("guild", "開團", "週五開團")]
-    assert extract_recall_tags('<recall scope="user" name="綠茶"/>') == [("user", "綠茶")]
-    assert extract_recall_tags("plain answer") == []
+    assert extract_read_requests(
+        '<search scope="guild" query="開團"/>'
+        '<recall scope="user" name="綠茶" offset="3" lines="10"/>'
+    ) == [("search", "guild", "開團", 1, None), ("recall", "user", "綠茶", 3, 10)]
+    assert extract_read_requests('<recall scope="user" name="綠茶"/>') == [
+        ("recall", "user", "綠茶", 1, None)
+    ]
+    assert extract_read_requests("plain answer") == []
+    assert extract_read_requests('<search scope="guild" query="吉祥物|名字">') == [
+        ("search", "guild", "吉祥物|名字", 1, None)
+    ]

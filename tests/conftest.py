@@ -29,7 +29,10 @@ def config() -> Config:
         memory_index_max_bytes=25_000,
         memory_user_max_bytes=50_000_000,
         memory_guild_max_bytes=200_000_000,
-        memory_recall_max_bytes=25_000,
-        memory_recall_rounds=2,
+        memory_read_max_lines=2000,
+        memory_read_max_bytes=50_000,
+        memory_search_max_matches=50,
+        memory_search_context_lines=3,
+        memory_recall_rounds=10,
         output_style_path=Path("/opt/discord-codex/output-style.md"),
     )

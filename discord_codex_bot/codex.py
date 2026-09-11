@@ -93,10 +93,12 @@ def _prompt(user_prompt: str, memory: str = "", style: str = "") -> str:
             "MEMORY holds two indexes of notes saved earlier, one line per note:"
             " 個人記憶 is about this member, 伺服器記憶 is shared by the whole server."
             " Use them silently; do not list or restate them.",
-            "If a note's full text is needed to answer, reply with ONLY"
-            ' <recall scope="user|guild" name="<name from the index>"/> and nothing else;'
-            ' its content will be sent to you. <recall scope="…" name="list"/> lists notes'
-            " that are not in the index.",
+            "Notes are files; you only see their index lines. To look inside, reply with ONLY"
+            " one or more of these tags and nothing else, and the results will be sent to you:"
+            ' <search scope="user|guild" query="regex or words"/> returns matching lines with'
+            ' context (search first — it is cheaper than reading); <recall scope="user|guild"'
+            ' name="<name from the index>" offset="1" lines="200"/> reads a page of one note;'
+            ' <recall scope="…" name="list"/> lists notes that are not in the index.',
             "If the member states a durable fact or preference about themselves, or the server"
             " agrees on something everyone should remember, append"
             ' <memory scope="user" name="short title">one sentence</memory> or'

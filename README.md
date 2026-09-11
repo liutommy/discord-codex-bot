@@ -167,12 +167,16 @@ CODEX_HOME/memory/<guild>/users/<member>/     seen only in that member's request
 
 Notes get in two ways: `/remember scope name text` (explicit) and automatically, when the model
 ends an answer with `<memory scope="user|guild" name="…">…</memory>` because the member stated a
-durable fact (the tag is stored and stripped). Reading works like Claude's index-then-open: the
-model sees only the index; if it needs a note it replies with `<recall scope="…" name="…"/>` and
-the Bot feeds that file (up to `MEMORY_RECALL_MAX_BYTES`) back into the same thread, at most
-`MEMORY_RECALL_ROUNDS` times per request. `<recall name="list"/>` lists archived notes. `/memory`
-shows what is stored, `/forget` deletes a note. Capacity is capped per scope
-(`MEMORY_USER_MAX_BYTES` 50 MB, `MEMORY_GUILD_MAX_BYTES` 200 MB); a full scope refuses new notes.
+durable fact (the tag is stored and stripped). Reading is snippet-first, like pi-context: the
+model sees only the index; it can reply with `<search scope="…" query="regex"/>` to get matching
+lines with `MEMORY_SEARCH_CONTEXT_LINES` of context (up to `MEMORY_SEARCH_MAX_MATCHES` hits), or
+`<recall scope="…" name="…" offset="1" lines="200"/>` to read one page of a note. Every result is
+fed back into the same thread and bounded like pi's tool output (`MEMORY_READ_MAX_LINES` 2000 /
+`MEMORY_READ_MAX_BYTES` 50 KB per page, with the total line count in the header so the model can
+page on); at most `MEMORY_RECALL_ROUNDS` (10) rounds per request. `<recall name="list"/>` lists
+archived notes. `/memory` shows what is stored, `/forget` deletes a note. Capacity is capped per
+scope (`MEMORY_USER_MAX_BYTES` 50 MB, `MEMORY_GUILD_MAX_BYTES` 200 MB); a full scope evicts its
+oldest notes.
 Codex's own background "memories" are not used for this: they consolidate only after 6 h idle in
 a long-lived process and have no notion of Discord members.
 

@@ -23,7 +23,7 @@ from .memory import (
     MemoryLimits,
     MemoryStore,
     extract_memory_tags,
-    extract_recall_tags,
+    extract_read_requests,
 )
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
@@ -65,7 +65,10 @@ class DiscordCodexClient(discord.Client):
                 config.memory_index_max_bytes,
                 config.memory_user_max_bytes,
                 config.memory_guild_max_bytes,
-                config.memory_recall_max_bytes,
+                config.memory_read_max_lines,
+                config.memory_read_max_bytes,
+                config.memory_search_max_matches,
+                config.memory_search_context_lines,
             ),
         )
         self.tree.add_command(
@@ -172,16 +175,21 @@ class DiscordCodexClient(discord.Client):
             result = await self.queue.run(
                 lambda: run_codex(prompt, self.config, images, effort, resume, memory)
             )
-            # Claude-style on-demand read: the model names a note, the Bot feeds it back into
-            # the same thread. Bounded by MEMORY_RECALL_ROUNDS.
+            # On-demand reads (search snippets / paged recall): the Bot executes the request and
+            # feeds the result back into the same thread. Bounded by MEMORY_RECALL_ROUNDS.
             for _ in range(self.config.memory_recall_rounds):
-                wanted = extract_recall_tags(result.text)
+                wanted = extract_read_requests(result.text)
                 if not wanted:
                     break
                 recalled = "\n\n".join(
-                    f"<RECALLED scope=\"{scope}\" name=\"{name}\">\n"
-                    f"{self.memory.recall(scope, guild_id, user_id, name)}\n</RECALLED>"
-                    for scope, name in wanted
+                    f'<RESULT kind="{kind}" scope="{scope}" target="{target}">\n'
+                    + (
+                        self.memory.search(scope, guild_id, user_id, target)
+                        if kind == "search"
+                        else self.memory.recall(scope, guild_id, user_id, target, offset, lines)
+                    )
+                    + "\n</RESULT>"
+                    for kind, scope, target, offset, lines in wanted
                 )
                 result = await self.queue.run(
                     lambda text=recalled, thread=result.thread_id: run_codex(

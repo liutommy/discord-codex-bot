@@ -79,7 +79,10 @@ class Config:
     memory_index_max_bytes: int
     memory_user_max_bytes: int
     memory_guild_max_bytes: int
-    memory_recall_max_bytes: int
+    memory_read_max_lines: int
+    memory_read_max_bytes: int
+    memory_search_max_matches: int
+    memory_search_context_lines: int
     memory_recall_rounds: int
     output_style_path: Path
 
@@ -116,8 +119,12 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         memory_index_max_bytes=_positive_int(values, "MEMORY_INDEX_MAX_BYTES", 25_000),
         memory_user_max_bytes=_positive_int(values, "MEMORY_USER_MAX_BYTES", 50_000_000),
         memory_guild_max_bytes=_positive_int(values, "MEMORY_GUILD_MAX_BYTES", 200_000_000),
-        memory_recall_max_bytes=_positive_int(values, "MEMORY_RECALL_MAX_BYTES", 25_000),
-        memory_recall_rounds=_positive_int(values, "MEMORY_RECALL_ROUNDS", 2),
+        # Read/search pages sized like pi's tool-output defaults (2000 lines / 50 KB).
+        memory_read_max_lines=_positive_int(values, "MEMORY_READ_MAX_LINES", 2000),
+        memory_read_max_bytes=_positive_int(values, "MEMORY_READ_MAX_BYTES", 50_000),
+        memory_search_max_matches=_positive_int(values, "MEMORY_SEARCH_MAX_MATCHES", 50),
+        memory_search_context_lines=_positive_int(values, "MEMORY_SEARCH_CONTEXT_LINES", 3),
+        memory_recall_rounds=_positive_int(values, "MEMORY_RECALL_ROUNDS", 10),
         # Operator-written default output style, injected into every prompt when non-empty.
         output_style_path=Path(
             values.get("OUTPUT_STYLE_FILE", "/opt/discord-codex/output-style.md")
