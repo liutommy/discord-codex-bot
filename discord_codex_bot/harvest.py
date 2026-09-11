@@ -102,13 +102,23 @@ def codex_runner(config: Config) -> Runner:
 
 
 async def harvest_forever(
-    threads: ThreadStore, store: MemoryStore, config: Config, queue_run
+    threads: ThreadStore,
+    store: MemoryStore,
+    config: Config,
+    queue_run,
+    wakeup: asyncio.Event | None = None,
 ) -> None:
-    """Every HARVEST_INTERVAL_MINUTES: distil each no-longer-resumable thread once, when the last
+    """Distil each no-longer-resumable thread once: every HARVEST_INTERVAL_MINUTES, or as soon as
+    `wakeup` is set (the Bot sets it when a thread switch retires an old thread), when the last
     known 5h reading leaves at least CONSOLIDATE_MIN_REMAINING_PERCENT."""
     runner = codex_runner(config)
+    wakeup = wakeup or asyncio.Event()
     while True:
-        await asyncio.sleep(config.harvest_interval_minutes * 60)
+        try:
+            await asyncio.wait_for(wakeup.wait(), timeout=config.harvest_interval_minutes * 60)
+        except TimeoutError:
+            pass
+        wakeup.clear()
         candidates = threads.harvest_candidates()
         if not candidates:
             continue

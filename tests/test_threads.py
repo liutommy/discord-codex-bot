@@ -76,3 +76,18 @@ def test_style_change_switches_workspace_and_starts_a_new_thread(tmp_path: Path)
     store.remember(key, "persona-thread", message_id=8, plain=False)
     assert store.current(key, plain=False) == "persona-thread"
     assert store.harvest_candidates() == [(key, "plain-thread")]
+
+
+def test_continued_thread_is_harvested_again_and_switch_is_detected(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path / "threads.json", ttl_seconds=60, version="v1")
+    key = ThreadStore.key(1, 2, 3)
+    store.remember(key, "a")
+    store.mark_harvested("a")
+    assert not store.switched(key, "a")
+    store.remember(key, "a")  # continued after harvest -> eligible again when it expires
+    import time
+
+    assert store.harvest_candidates(now=time.time() + 61) == [(key, "a")]
+    assert store.switched(key, "b")
+    store.remember(key, "b")
+    assert store.harvest_candidates() == [(key, "a")]

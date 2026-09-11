@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -148,8 +149,11 @@ class DiscordCodexClient(discord.Client):
         self._consolidator = self.loop.create_task(
             consolidate_forever(self.memory, self.config, self.queue.run)
         )
+        self._harvest_wakeup = asyncio.Event()
         self._harvester = self.loop.create_task(
-            harvest_forever(self.threads, self.memory, self.config, self.queue.run)
+            harvest_forever(
+                self.threads, self.memory, self.config, self.queue.run, self._harvest_wakeup
+            )
         )
         # A guild that has not invited the bot yet (e.g. production before rollout) must not take
         # the whole client down; the runtime access check still rejects it until it is synced.
@@ -278,6 +282,13 @@ class DiscordCodexClient(discord.Client):
         if kind == "search":
             return self.memory.search(scope, guild_id, user_id, target)
         return self.memory.recall(scope, guild_id, user_id, target, offset, lines)
+
+    def _remember(self, key: str, thread_id: str, message_id: int, plain: bool) -> None:
+        """Record the thread; a switch retires the old one, so harvest it without waiting."""
+        switched = self.threads.switched(key, thread_id)
+        self.threads.remember(key, thread_id, message_id, plain=plain)
+        if switched and hasattr(self, "_harvest_wakeup"):
+            self._harvest_wakeup.set()
 
     @staticmethod
     def _files(result: CodexResult) -> list[discord.File]:
@@ -434,7 +445,7 @@ class DiscordCodexClient(discord.Client):
                 await interaction.followup.send(chunk)
         finally:
             remove_dir(result.generated_dir)
-        self.threads.remember(key, result.thread_id, sent.id, plain=plain)
+        self._remember(key, result.thread_id, sent.id, plain)
         LOGGER.info("Completed slash guild=%s user=%s", interaction.guild_id, interaction.user.id)
 
     # ----- @mention entry point --------------------------------------------------------------
@@ -472,7 +483,7 @@ class DiscordCodexClient(discord.Client):
                 await message.channel.send(chunk)
         finally:
             remove_dir(result.generated_dir)
-        self.threads.remember(key, result.thread_id, sent.id, plain=plain)
+        self._remember(key, result.thread_id, sent.id, plain)
         LOGGER.info("Completed @mention guild=%s user=%s", message.guild.id, message.author.id)
 
 

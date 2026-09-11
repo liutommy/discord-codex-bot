@@ -67,6 +67,8 @@ class ThreadStore:
         previous = self._by_key.get(key)
         if previous and previous["thread_id"] != thread_id and not previous.get("harvested"):
             self._pending.append({"key": key, "thread_id": str(previous["thread_id"])})
+        # A thread continued after it was harvested (reply to an old answer) has new content;
+        # it will be harvested again once it stops being resumable. Consolidation merges dupes.
         self._by_key[key] = {
             "thread_id": thread_id,
             "at": time.time(),
@@ -93,6 +95,12 @@ class ThreadStore:
         return True
 
     # ----- harvest ---------------------------------------------------------------------------
+
+    def switched(self, key: str, thread_id: str) -> bool:
+        """True when `thread_id` is not the thread currently recorded for `key`, i.e. the next
+        `remember()` will retire the old one; callers use it to wake the harvester early."""
+        previous = self._by_key.get(key)
+        return previous is not None and previous["thread_id"] != thread_id
 
     def harvest_candidates(self, now: float | None = None) -> list[tuple[str, str]]:
         """(key, thread_id) for every thread that can no longer be resumed and was not harvested."""
