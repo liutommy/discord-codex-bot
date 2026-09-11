@@ -89,6 +89,7 @@ class Config:
     codex_reasoning_effort: str
     codex_home: Path
     codex_workspace: Path
+    codex_workspace_plain: Path
     codex_timeout_seconds: int
     max_prompt_chars: int
     max_response_chars: int
@@ -135,6 +136,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         codex_reasoning_effort=_effort(values),
         codex_home=Path(values.get("CODEX_HOME", "/var/lib/codex")),
         codex_workspace=Path(values.get("CODEX_WORKSPACE", "/workspace")),
+        # Same rules without the operator persona; used when a member set a personal style.
+        codex_workspace_plain=Path(values.get("CODEX_WORKSPACE_PLAIN", "/workspace-plain")),
         codex_timeout_seconds=_positive_int(values, "CODEX_TIMEOUT_SECONDS", 600),
         max_prompt_chars=_positive_int(values, "MAX_PROMPT_CHARS", 6_000),
         max_response_chars=_positive_int(values, "MAX_RESPONSE_CHARS", 12_000),

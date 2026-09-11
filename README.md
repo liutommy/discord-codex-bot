@@ -201,6 +201,12 @@ merged, contradictions resolved newest-wins, nothing invented. Input is fed in b
 run, and a failed scope is left untouched. Codex's own background memory consolidation is not used
 (it needs 6 h of idle time in a long-lived process and has no member dimension).
 
+The persona is a fourth operator-only layer: `persona/*.md` (gitignored except its README) is
+appended to `/workspace/AGENTS.md` at build time, so Codex loads it as project instructions on
+every request — the place with the most weight this deployment can give it. A member who sets a
+personal style is served from `/workspace-plain` (rules only), so the personal style replaces the
+persona instead of competing with it; a thread keeps the workspace it started in.
+
 Output style has two layers. `config/output-style.md` is the operator's default; when it has
 content it is injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
 Each member can set their own with `/style text:…` (stored as

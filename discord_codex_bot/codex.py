@@ -130,6 +130,7 @@ def _arguments(
     effort: str = "",
     resume: str = "",
     schema: Path | None = None,
+    plain: bool = False,
 ) -> tuple[str, ...]:
     # Sandbox, tool feature flags and web search live in CODEX_HOME/config.toml (refreshed from
     # config/codex-config.toml at container start); only per-request values are passed here.
@@ -138,7 +139,10 @@ def _arguments(
     image_flags = tuple(flag for image in images for flag in ("-i", str(image)))
     schema_flags = ("--output-schema", str(schema)) if schema else ()
     head = ("exec", "resume", resume) if resume else ("exec",)
-    tail = () if resume else ("--color", "never", "--cd", str(config.codex_workspace))
+    # The persona lives in /workspace/AGENTS.md (loaded by Codex from cwd); a member with a
+    # personal style gets the persona-free workspace instead. A resumed thread keeps its cwd.
+    workspace = config.codex_workspace_plain if plain else config.codex_workspace
+    tail = () if resume else ("--color", "never", "--cd", str(workspace))
     tail += schema_flags
     return (
         *head,
@@ -188,10 +192,11 @@ async def _exec(
     effort: str,
     resume: str,
     schema: Path | None = None,
+    plain: bool = False,
 ) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         "codex",
-        *_arguments(config, images, effort, resume, schema),
+        *_arguments(config, images, effort, resume, schema, plain),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -225,12 +230,13 @@ async def run_codex(
         if raw
         else _prompt(user_prompt, memory, output_style(config), personal_style)
     )
-    code, output, stderr = await _exec(prompt, config, images, effort, resume, schema)
+    plain = bool(personal_style)
+    code, output, stderr = await _exec(prompt, config, images, effort, resume, schema, plain)
     if code != 0 and resume:
         # The stored thread may have been rotated away or be unreadable; answer fresh instead.
         LOGGER.warning("Resume of thread %s failed (%s); starting a new thread", resume, code)
         resume = ""
-        code, output, stderr = await _exec(prompt, config, images, effort, resume, schema)
+        code, output, stderr = await _exec(prompt, config, images, effort, resume, schema, plain)
     if code != 0:
         summary = " | ".join(stderr.splitlines()[-3:])
         raise RuntimeError(f"Codex exited with code {code}: {summary}")

@@ -27,14 +27,23 @@ COPY --chown=1000:1000 config/codex-config.toml /opt/discord-codex/config.toml
 COPY --chown=1000:1000 config/output-style.md /opt/discord-codex/output-style.md
 COPY --chown=1000:1000 config/consolidate-schema.json /opt/discord-codex/consolidate-schema.json
 COPY --chown=1000:1000 permanent /opt/discord-codex/permanent
+COPY --chown=1000:1000 persona /opt/discord-codex/persona
 
-RUN mkdir -p /var/lib/codex \
-    && chown -R 1000:1000 /var/lib/codex /workspace /app \
+# Two Codex working directories: /workspace = runtime rules + operator persona (persona/*.md,
+# gitignored, appended at build time); /workspace-plain = runtime rules only, used when a member
+# has set a personal output style.
+RUN mkdir -p /var/lib/codex /workspace-plain \
+    && cp /workspace/AGENTS.md /workspace-plain/AGENTS.md \
+    && for f in /opt/discord-codex/persona/*.md; do \
+         case "$f" in */README.md) ;; *) printf '\n\n' >> /workspace/AGENTS.md; cat "$f" >> /workspace/AGENTS.md ;; esac; \
+       done \
+    && chown -R 1000:1000 /var/lib/codex /workspace /workspace-plain /app \
     && chmod 0555 /app/scripts/entrypoint.sh
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     CODEX_HOME=/var/lib/codex \
     CODEX_WORKSPACE=/workspace \
+    CODEX_WORKSPACE_PLAIN=/workspace-plain \
     PYTHONUNBUFFERED=1
 
 USER 1000:1000

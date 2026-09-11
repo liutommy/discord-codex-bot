@@ -8,3 +8,5 @@ __pycache__/
 
 permanent/*
 !permanent/README.md
+persona/*
+!persona/README.md

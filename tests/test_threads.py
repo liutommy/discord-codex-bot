@@ -36,3 +36,9 @@ def test_resume_arguments_target_the_stored_thread(config: Config) -> None:
     fresh = _arguments(config)
     assert fresh[:2] == ("exec", "--model")
     assert "--cd" in fresh
+
+
+def test_personal_style_switches_to_the_persona_free_workspace(config: Config) -> None:
+    assert "/workspace" in _arguments(config)
+    assert "/workspace-plain" in _arguments(config, plain=True)
+    assert "--cd" not in _arguments(config, resume="t", plain=True)  # resumed threads keep cwd

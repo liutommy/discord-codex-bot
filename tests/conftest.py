@@ -17,6 +17,7 @@ def config() -> Config:
         codex_reasoning_effort="high",
         codex_home=Path("/var/lib/codex"),
         codex_workspace=Path("/workspace"),
+        codex_workspace_plain=Path("/workspace-plain"),
         codex_timeout_seconds=600,
         max_prompt_chars=6000,
         max_response_chars=12000,
