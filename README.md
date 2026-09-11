@@ -9,16 +9,19 @@ runtime is one always-restarting Docker container named `tommy_test`.
 Discord guild allowlist
         |
         v
-/codex slash command -> discord.py -> serial queue -> codex exec
-                                                |
-                                                v
-                              Docker volume: CODEX_HOME
-                              (ChatGPT login + local memories)
+/codex slash command ─┐
+                      ├─> discord.py -> validate -> serial queue -> codex exec (Luna, effort allowlist)
+@mention + images ────┘                                       |
+                                                              v
+                                            Docker volume: CODEX_HOME
+                                            (ChatGPT login + local memories)
 ```
 
 There is no inbound HTTP port. The bot opens outbound connections to the Discord Gateway and
 OpenAI. `ALLOWED_GUILD_IDS` is enforced when commands are registered and again for every
-interaction. `ALLOWED_CHANNEL_IDS` is optional and intended for the initial test channel.
+interaction. `ALLOWED_CHANNEL_IDS` is optional and intended for the initial test channel; it is one
+global list across all allowed guilds, so leave it empty once every channel in both servers may use
+the Bot (the current deployment).
 
 The two allowed guilds share one Codex identity and one local memory store because this deployment
 represents one agent. Use separate containers and separate `CODEX_HOME` volumes if guild memories
@@ -150,7 +153,17 @@ also clears the tmpfs.
 
 ## 6. Add the production server
 
-Invite the same application to the production server. Then update `.env`:
+Invite the same application to the production server. If that server is administered by someone
+else, the owner temporarily enables **Public Bot** in the Developer Portal, hands them the invite
+URL below, and turns Public Bot off again once they have added it. A server that is not listed in
+`ALLOWED_GUILD_IDS` gets no commands and every request is rejected, so the allowlist — not the
+Public Bot switch — is the real gate.
+
+```text
+https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot%20applications.commands&permissions=2147486720&integration_type=0
+```
+
+Then update `.env`:
 
 ```dotenv
 ALLOWED_GUILD_IDS=<test guild id>,<production guild id>
