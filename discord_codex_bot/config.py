@@ -75,6 +75,13 @@ class Config:
     max_attachments: int
     attachment_sweep_minutes: int
     thread_ttl_minutes: int
+    memory_index_max_lines: int
+    memory_index_max_bytes: int
+    memory_user_max_bytes: int
+    memory_guild_max_bytes: int
+    memory_recall_max_bytes: int
+    memory_recall_rounds: int
+    output_style_path: Path
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -104,4 +111,15 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         max_attachments=_positive_int(values, "MAX_ATTACHMENTS", 4),
         attachment_sweep_minutes=_positive_int(values, "ATTACHMENT_SWEEP_MINUTES", 10),
         thread_ttl_minutes=_positive_int(values, "THREAD_TTL_MINUTES", 60),
+        # Two-tier memory sized like Claude Code auto memory (index 200 lines / 25 KB).
+        memory_index_max_lines=_positive_int(values, "MEMORY_INDEX_MAX_LINES", 200),
+        memory_index_max_bytes=_positive_int(values, "MEMORY_INDEX_MAX_BYTES", 25_000),
+        memory_user_max_bytes=_positive_int(values, "MEMORY_USER_MAX_BYTES", 50_000_000),
+        memory_guild_max_bytes=_positive_int(values, "MEMORY_GUILD_MAX_BYTES", 200_000_000),
+        memory_recall_max_bytes=_positive_int(values, "MEMORY_RECALL_MAX_BYTES", 25_000),
+        memory_recall_rounds=_positive_int(values, "MEMORY_RECALL_ROUNDS", 2),
+        # Operator-written default output style, injected into every prompt when non-empty.
+        output_style_path=Path(
+            values.get("OUTPUT_STYLE_FILE", "/opt/discord-codex/output-style.md")
+        ),
     )

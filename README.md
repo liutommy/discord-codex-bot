@@ -153,6 +153,32 @@ age). `/codex new:True` or `/codex-reset` starts fresh. The mapping lives in
 falls back to a fresh one. This is conversation memory, not Codex's background "memories" feature,
 which consolidates asynchronously and is not tied to Discord members.
 
+Long-term memory is Bot-owned and two-tier, shaped like Claude Code auto memory, with a personal
+scope per member and a shared scope per server:
+
+```text
+CODEX_HOME/memory/<guild>/guild/              shared by everyone in that server
+CODEX_HOME/memory/<guild>/users/<member>/     seen only in that member's requests
+    MEMORY.md            index, one line per note; the first MEMORY_INDEX_MAX_LINES / MEMORY_INDEX_MAX_BYTES
+                         (200 lines / 25 KB) are injected into every prompt
+    MEMORY-archive.md    index lines that fell off the injected window (still recallable)
+    topics/<slug>.md     the note itself, read on demand
+```
+
+Notes get in two ways: `/remember scope name text` (explicit) and automatically, when the model
+ends an answer with `<memory scope="user|guild" name="…">…</memory>` because the member stated a
+durable fact (the tag is stored and stripped). Reading works like Claude's index-then-open: the
+model sees only the index; if it needs a note it replies with `<recall scope="…" name="…"/>` and
+the Bot feeds that file (up to `MEMORY_RECALL_MAX_BYTES`) back into the same thread, at most
+`MEMORY_RECALL_ROUNDS` times per request. `<recall name="list"/>` lists archived notes. `/memory`
+shows what is stored, `/forget` deletes a note. Capacity is capped per scope
+(`MEMORY_USER_MAX_BYTES` 50 MB, `MEMORY_GUILD_MAX_BYTES` 200 MB); a full scope refuses new notes.
+Codex's own background "memories" are not used for this: they consolidate only after 6 h idle in
+a long-lived process and have no notion of Discord members.
+
+`config/output-style.md` is the operator's default output style; when it has content it is
+injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
+
 Codex can also generate images (`image_generation = true`). The built-in tool writes them to
 `CODEX_HOME/generated_images/<thread_id>/`; the Bot attaches them to the reply (up to 10) and
 deletes that directory afterwards. Leftovers from crashed requests are swept with the attachments.

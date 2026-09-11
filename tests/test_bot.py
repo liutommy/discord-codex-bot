@@ -16,6 +16,9 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
         "codex",
         "codex-status",
         "codex-reset",
+        "remember",
+        "forget",
+        "memory",
     }
     assert client.intents.guilds
     assert client.intents.message_content

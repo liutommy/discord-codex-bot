@@ -25,4 +25,11 @@ def config() -> Config:
         max_attachments=4,
         attachment_sweep_minutes=10,
         thread_ttl_minutes=60,
+        memory_index_max_lines=200,
+        memory_index_max_bytes=25_000,
+        memory_user_max_bytes=50_000_000,
+        memory_guild_max_bytes=200_000_000,
+        memory_recall_max_bytes=25_000,
+        memory_recall_rounds=2,
+        output_style_path=Path("/opt/discord-codex/output-style.md"),
     )

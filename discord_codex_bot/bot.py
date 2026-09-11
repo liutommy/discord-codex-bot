@@ -18,6 +18,13 @@ from .attachments import (
 )
 from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
+from .memory import (
+    SCOPES,
+    MemoryLimits,
+    MemoryStore,
+    extract_memory_tags,
+    extract_recall_tags,
+)
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
 from .threads import ThreadStore
@@ -27,6 +34,9 @@ QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
 FAILURE_MESSAGE = (
     "Codex 執行失敗。請用 /codex-status 檢查登入狀態，並通知 Bot 管理者查看 container log。"
 )
+
+
+SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
 
 
 def strip_mention(content: str, bot_id: int) -> str:
@@ -47,6 +57,37 @@ class DiscordCodexClient(discord.Client):
         self.queue = SerialQueue(config.max_queued_jobs)
         self.threads = ThreadStore(
             config.codex_home / "discord_threads.json", config.thread_ttl_minutes * 60
+        )
+        self.memory = MemoryStore(
+            config.codex_home / "memory",
+            MemoryLimits(
+                config.memory_index_max_lines,
+                config.memory_index_max_bytes,
+                config.memory_user_max_bytes,
+                config.memory_guild_max_bytes,
+                config.memory_recall_max_bytes,
+            ),
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name="remember",
+                description="記住一件事（個人或整個伺服器）",
+                callback=self.remember_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name="forget",
+                description="刪除一則記憶（用 /memory 看名稱）",
+                callback=self.forget_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name="memory",
+                description="查看 Bot 記得的事（只有你看得到）",
+                callback=self.memory_command,
+            )
         )
         self.tree.add_command(
             app_commands.Command(
@@ -117,6 +158,7 @@ class DiscordCodexClient(discord.Client):
         prompt: str,
         attachments: Sequence[discord.Attachment],
         guild_id: int | None,
+        user_id: int,
         effort: str = "",
         resume: str = "",
     ) -> CodexResult:
@@ -126,11 +168,35 @@ class DiscordCodexClient(discord.Client):
             for attachment in attachments:
                 suffix = validate_image(attachment.content_type, attachment.size, self.config)
                 images.append(await download_image(attachment, suffix, self.config))
+            memory = self.memory.render(guild_id, user_id)
             result = await self.queue.run(
-                lambda: run_codex(prompt, self.config, images, effort, resume)
+                lambda: run_codex(prompt, self.config, images, effort, resume, memory)
             )
+            # Claude-style on-demand read: the model names a note, the Bot feeds it back into
+            # the same thread. Bounded by MEMORY_RECALL_ROUNDS.
+            for _ in range(self.config.memory_recall_rounds):
+                wanted = extract_recall_tags(result.text)
+                if not wanted:
+                    break
+                recalled = "\n\n".join(
+                    f"<RECALLED scope=\"{scope}\" name=\"{name}\">\n"
+                    f"{self.memory.recall(scope, guild_id, user_id, name)}\n</RECALLED>"
+                    for scope, name in wanted
+                )
+                result = await self.queue.run(
+                    lambda text=recalled, thread=result.thread_id: run_codex(
+                        text + "\n\nNow answer the member's question.",
+                        self.config,
+                        effort=effort,
+                        resume=thread,
+                        raw=True,
+                    )
+                )
+            text, facts = extract_memory_tags(result.text)
+            for scope, name, fact in facts:
+                self.memory.add(scope, guild_id, user_id, name, fact)
             return CodexResult(
-                truncate(result.text, self.config.max_response_chars),
+                truncate(text, self.config.max_response_chars),
                 result.images,
                 result.generated_dir,
                 result.thread_id,
@@ -163,6 +229,48 @@ class DiscordCodexClient(discord.Client):
             f"{status}\n模型：{self.config.codex_model}\n"
             f"預設推理強度：{default_label}（/codex 可選 {'、'.join(REASONING_EFFORTS.values())}）",
             ephemeral=True,
+        )
+
+    @app_commands.describe(
+        scope="個人＝只對你；伺服器＝這裡所有人", name="短標題", text="要記住的內容"
+    )
+    @app_commands.choices(scope=SCOPE_CHOICES)
+    async def remember_command(
+        self,
+        interaction: discord.Interaction,
+        scope: app_commands.Choice[str],
+        name: str,
+        text: str,
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        line = self.memory.add(scope.value, interaction.guild_id, interaction.user.id, name, text)
+        await interaction.response.send_message(f"已記住：{line}", ephemeral=True)
+
+    @app_commands.describe(scope="個人或伺服器", name="/memory 顯示的名稱")
+    @app_commands.choices(scope=SCOPE_CHOICES)
+    async def forget_command(
+        self, interaction: discord.Interaction, scope: app_commands.Choice[str], name: str
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        forgot = self.memory.forget(scope.value, interaction.guild_id, interaction.user.id, name)
+        await interaction.response.send_message(
+            f"已刪除「{name}」。" if forgot else f"找不到「{name}」。", ephemeral=True
+        )
+
+    async def memory_command(self, interaction: discord.Interaction) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        text = self.memory.render(interaction.guild_id, interaction.user.id) or "目前沒有記憶。"
+        await interaction.response.send_message(
+            split_discord_message(text)[0], ephemeral=True
         )
 
     async def reset_command(self, interaction: discord.Interaction) -> None:
@@ -211,7 +319,7 @@ class DiscordCodexClient(discord.Client):
         resume = "" if new else self.threads.current(key)
         await interaction.response.defer(thinking=True)
         result = await self._answer(
-            prompt, attachments, interaction.guild_id, effort_value, resume
+            prompt, attachments, interaction.guild_id, interaction.user.id, effort_value, resume
         )
         # Discord does not echo slash command inputs, so quote the question above the answer.
         reply = format_reply(
@@ -255,7 +363,9 @@ class DiscordCodexClient(discord.Client):
         replied_to = message.reference.message_id if message.reference else None
         resume = self.threads.by_message(replied_to) or self.threads.current(key)
         async with message.channel.typing():
-            result = await self._answer(prompt, message.attachments, guild_id, resume=resume)
+            result = await self._answer(
+                prompt, message.attachments, guild_id, message.author.id, resume=resume
+            )
         chunks = split_discord_message(result.text)
         try:
             sent = await message.reply(chunks[0], files=self._files(result), mention_author=False)
