@@ -91,3 +91,15 @@ def test_continued_thread_is_harvested_again_and_switch_is_detected(tmp_path: Pa
     assert store.switched(key, "b")
     store.remember(key, "b")
     assert store.harvest_candidates() == [(key, "a")]
+
+
+def test_entries_without_workspace_flag_are_never_resumed(tmp_path: Path) -> None:
+    path = tmp_path / "threads.json"
+    path.write_text(
+        '{"by_key": {"1:2:3": {"thread_id": "old", "at": 9999999999, "version": "v1"}},'
+        ' "by_message": {"5": {"thread_id": "old", "version": "v1"}}, "pending": []}',
+        "utf-8",
+    )
+    store = ThreadStore(path, ttl_seconds=600, version="v1")
+    assert store.current("1:2:3", plain=False) == "" and store.current("1:2:3", plain=True) == ""
+    assert store.by_message(5, plain=False) == "" and store.by_message(5, plain=True) == ""

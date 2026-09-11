@@ -47,16 +47,16 @@ class ThreadStore:
         entry = self._by_key.get(key)
         if entry is None or not self._live(entry, time.time() if now is None else now):
             return ""
-        if bool(entry.get("plain", False)) != plain:
-            return ""
+        if entry.get("plain") is None or bool(entry["plain"]) != plain:
+            return ""  # unknown workspace (pre-flag entry) is never resumed
         return str(entry["thread_id"])
 
     def by_message(self, message_id: int | None, plain: bool = False) -> str:
         entry = self._by_message.get(str(message_id)) if message_id is not None else None
         if entry is None or entry.get("version", "") != self._version:
             return ""
-        if bool(entry.get("plain", False)) != plain:
-            return ""
+        if entry.get("plain") is None or bool(entry["plain"]) != plain:
+            return ""  # unknown workspace (pre-flag entry) is never resumed
         return entry["thread_id"]
 
     def remember(
