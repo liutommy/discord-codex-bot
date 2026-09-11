@@ -83,3 +83,14 @@ def test_slug_and_tag_parsing() -> None:
     assert extract_read_requests('<search scope="guild" query="吉祥物|名字">') == [
         ("search", "guild", "吉祥物|名字", 1, None)
     ]
+
+
+def test_personal_style_set_get_clear(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path, LIMITS)
+    assert store.get_style(1, 2) == ""
+    store.set_style(1, 2, "  條列、少於 100 字  ")
+    assert store.get_style(1, 2) == "條列、少於 100 字"
+    assert store.get_style(1, 3) == ""
+    assert store.clear_style(1, 2)
+    assert not store.clear_style(1, 2)
+    assert store.get_style(1, 2) == ""

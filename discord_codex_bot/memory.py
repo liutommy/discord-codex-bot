@@ -9,6 +9,7 @@ SCOPES = {"user": "個人", "guild": "伺服器"}
 INDEX_FILE = "MEMORY.md"
 ARCHIVE_FILE = "MEMORY-archive.md"
 TOPIC_DIR = "topics"
+STYLE_FILE = "style.md"
 LIST_NAME = "list"
 _SLUG = re.compile(r"[^\w-]+", re.UNICODE)
 _INDEX_LINE = re.compile(r"^- \[(?P<name>[^\]]+)\]\((?P<file>[^)]+)\) — (?P<hook>.*)$")
@@ -227,6 +228,28 @@ class MemoryStore:
         body = "\n".join(f"{i:>4}: {line}" for i, line in enumerate(chunk, start))
         header = f"[{match.file} 第 {start}–{start + len(chunk) - 1} 行，共 {len(all_lines)} 行]"
         return self._truncate(f"{header}\n{body}")
+
+    # ----- personal output style -------------------------------------------------------------
+
+    def style_path(self, guild_id: int | None, user_id: int) -> Path:
+        return self.scope_dir("user", guild_id, user_id) / STYLE_FILE
+
+    def get_style(self, guild_id: int | None, user_id: int) -> str:
+        try:
+            return self.style_path(guild_id, user_id).read_text("utf-8").strip()
+        except OSError:
+            return ""
+
+    def set_style(self, guild_id: int | None, user_id: int, text: str) -> None:
+        path = self.style_path(guild_id, user_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text.strip() + "\n", "utf-8")
+
+    def clear_style(self, guild_id: int | None, user_id: int) -> bool:
+        path = self.style_path(guild_id, user_id)
+        existed = path.exists()
+        path.unlink(missing_ok=True)
+        return existed
 
     # ----- internals -------------------------------------------------------------------------
 

@@ -19,6 +19,7 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
         "remember",
         "forget",
         "memory",
+        "style",
     }
     assert client.intents.guilds
     assert client.intents.message_content

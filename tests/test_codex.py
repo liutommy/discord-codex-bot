@@ -84,3 +84,12 @@ def test_generated_images_are_collected_by_thread_id(config: Config, tmp_path) -
     assert [p.name for p in images] == ["a.png", "b.png"]
     assert collect_generated_images(config, "missing") == (None, ())
     assert collect_generated_images(config, "") == (None, ())
+
+
+def test_prompt_layers_default_and_personal_style() -> None:
+    from discord_codex_bot.codex import _prompt
+
+    text = _prompt("q", memory="", style="預設風格", personal_style="個人風格")
+    assert text.index("<OUTPUT_STYLE>\n預設風格") < text.index("<PERSONAL_STYLE>\n個人風格")
+    assert "<PERSONAL_STYLE>" not in _prompt("q", style="預設風格")
+    assert "<OUTPUT_STYLE>" not in _prompt("q")

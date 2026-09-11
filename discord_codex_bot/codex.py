@@ -81,9 +81,14 @@ def output_style(config: Config) -> str:
         return ""
 
 
-def _prompt(user_prompt: str, memory: str = "", style: str = "") -> str:
+def _prompt(
+    user_prompt: str, memory: str = "", style: str = "", personal_style: str = ""
+) -> str:
     memory_block = ("<MEMORY>", memory, "</MEMORY>") if memory else ()
     style_block = ("<OUTPUT_STYLE>", style, "</OUTPUT_STYLE>") if style else ()
+    personal_block = (
+        ("<PERSONAL_STYLE>", personal_style, "</PERSONAL_STYLE>") if personal_style else ()
+    )
     return "\n".join(
         (
             "You are answering inside a private Discord server.",
@@ -105,9 +110,11 @@ def _prompt(user_prompt: str, memory: str = "", style: str = "") -> str:
             ' <memory scope="guild" name="short title">one sentence</memory> after your answer.'
             " Never emit the tag for questions, opinions, or one-off requests.",
             "OUTPUT_STYLE, when present, is the operator's default formatting and voice for every"
-            " answer; follow it unless the member asks otherwise.",
+            " answer. PERSONAL_STYLE, when present, is this member's own preference and wins over"
+            " OUTPUT_STYLE wherever they conflict. Follow them unless the member asks otherwise.",
             "Return only the answer intended for Discord.",
             *style_block,
+            *personal_block,
             *memory_block,
             "<USER_MESSAGE>",
             user_prompt,
@@ -197,9 +204,14 @@ async def run_codex(
     resume: str = "",
     memory: str = "",
     raw: bool = False,
+    personal_style: str = "",
 ) -> CodexResult:
     """Run one turn. `raw` sends `user_prompt` verbatim (used to feed recalled notes back)."""
-    prompt = user_prompt if raw else _prompt(user_prompt, memory, output_style(config))
+    prompt = (
+        user_prompt
+        if raw
+        else _prompt(user_prompt, memory, output_style(config), personal_style)
+    )
     code, output, stderr = await _exec(prompt, config, images, effort, resume)
     if code != 0 and resume:
         # The stored thread may have been rotated away or be unreadable; answer fresh instead.

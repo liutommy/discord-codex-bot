@@ -94,6 +94,13 @@ class DiscordCodexClient(discord.Client):
         )
         self.tree.add_command(
             app_commands.Command(
+                name="style",
+                description="查看／設定／清除你的個人回覆風格（覆蓋預設）",
+                callback=self.style_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
                 name="codex",
                 description="詢問此伺服器的 Codex agent",
                 callback=self.codex_command,
@@ -172,8 +179,11 @@ class DiscordCodexClient(discord.Client):
                 suffix = validate_image(attachment.content_type, attachment.size, self.config)
                 images.append(await download_image(attachment, suffix, self.config))
             memory = self.memory.render(guild_id, user_id)
+            style = self.memory.get_style(guild_id, user_id)
             result = await self.queue.run(
-                lambda: run_codex(prompt, self.config, images, effort, resume, memory)
+                lambda: run_codex(
+                    prompt, self.config, images, effort, resume, memory, personal_style=style
+                )
             )
             # On-demand reads (search snippets / paged recall): the Bot executes the request and
             # feeds the result back into the same thread. Bounded by MEMORY_RECALL_ROUNDS.
@@ -280,6 +290,32 @@ class DiscordCodexClient(discord.Client):
         await interaction.response.send_message(
             split_discord_message(text)[0], ephemeral=True
         )
+
+    @app_commands.describe(
+        text="你的回覆風格（例如：條列、少於 100 字、用英文）；留空＝查看目前設定",
+        clear="設為 True 清除個人風格，回到預設",
+    )
+    async def style_command(
+        self,
+        interaction: discord.Interaction,
+        text: str | None = None,
+        clear: bool = False,
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        guild_id, user_id = interaction.guild_id, interaction.user.id
+        if clear:
+            cleared = self.memory.clear_style(guild_id, user_id)
+            message = "已清除個人風格，回到預設。" if cleared else "你沒有設定個人風格。"
+        elif text and text.strip():
+            self.memory.set_style(guild_id, user_id, text)
+            message = f"已設定個人風格：\n{text.strip()}"
+        else:
+            current = self.memory.get_style(guild_id, user_id)
+            message = f"目前個人風格：\n{current}" if current else "目前使用預設風格。"
+        await interaction.response.send_message(split_discord_message(message)[0], ephemeral=True)
 
     async def reset_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)

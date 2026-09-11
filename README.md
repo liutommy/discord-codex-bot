@@ -180,8 +180,12 @@ oldest notes.
 Codex's own background "memories" are not used for this: they consolidate only after 6 h idle in
 a long-lived process and have no notion of Discord members.
 
-`config/output-style.md` is the operator's default output style; when it has content it is
-injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
+Output style has two layers. `config/output-style.md` is the operator's default; when it has
+content it is injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
+Each member can set their own with `/style text:…` (stored as
+`memory/<guild>/users/<member>/style.md` and injected as `<PERSONAL_STYLE>`, which wins over the
+default where they conflict), inspect it with `/style`, and return to the default with
+`/style clear:True`.
 
 Codex can also generate images (`image_generation = true`). The built-in tool writes them to
 `CODEX_HOME/generated_images/<thread_id>/`; the Bot attaches them to the reply (up to 10) and
