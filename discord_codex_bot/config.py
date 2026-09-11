@@ -99,6 +99,7 @@ class Config:
     max_attachments: int
     attachment_sweep_minutes: int
     thread_ttl_minutes: int
+    harvest_interval_minutes: int
     memory_index_max_lines: int
     memory_index_max_bytes: int
     memory_user_max_bytes: int
@@ -147,6 +148,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         max_attachments=_positive_int(values, "MAX_ATTACHMENTS", 4),
         attachment_sweep_minutes=_positive_int(values, "ATTACHMENT_SWEEP_MINUTES", 10),
         thread_ttl_minutes=_positive_int(values, "THREAD_TTL_MINUTES", 60),
+        # Finished threads are distilled into the member's memory on this cadence.
+        harvest_interval_minutes=_positive_int(values, "HARVEST_INTERVAL_MINUTES", 10),
         # Two-tier memory sized like Claude Code auto memory (index 200 lines / 25 KB).
         memory_index_max_lines=_positive_int(values, "MEMORY_INDEX_MAX_LINES", 200),
         memory_index_max_bytes=_positive_int(values, "MEMORY_INDEX_MAX_BYTES", 25_000),

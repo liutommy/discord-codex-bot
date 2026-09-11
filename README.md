@@ -195,6 +195,16 @@ never consolidated — and `permanent/topics/*.md` are searchable/recallable wit
 `scope="permanent"`. The Bot never writes there and has no command for it; edit the files and
 rebuild.
 
+Finished conversations feed memory too. When a thread can no longer be resumed — its TTL passed,
+the persona/style was rebuilt, or the member used `new:True` / `-reset` — a background pass (every
+`HARVEST_INTERVAL_MINUTES`) reads its transcript from the Codex session rollout and asks Codex
+(`--output-schema`) for the few things worth remembering about that member next month; each
+becomes a personal note. One-off questions, looked-up facts and the persona itself are skipped.
+Each thread is harvested once; the pass waits while the last known 5-hour reading is under
+`CONSOLIDATE_MIN_REMAINING_PERCENT`. Operators can run it on demand inside the container with
+`python -m discord_codex_bot.harvest` (`--force` ignores the quota gate); the nightly
+consolidation has the same entry point, `python -m discord_codex_bot.consolidate [--force]`.
+
 Notes are consolidated once a day. At `CONSOLIDATE_HOUR` (`CONSOLIDATE_TIMEZONE`, default 02:00
 Asia/Taipei) the Bot runs one minimal Codex turn so the session rollout carries fresh
 `rate_limits`, reads the 5-hour window's `used_percent`, and proceeds only if at least

@@ -27,6 +27,7 @@ def config() -> Config:
         max_attachments=4,
         attachment_sweep_minutes=10,
         thread_ttl_minutes=60,
+        harvest_interval_minutes=10,
         memory_index_max_lines=200,
         memory_index_max_bytes=25_000,
         memory_user_max_bytes=50_000_000,

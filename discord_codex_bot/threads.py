@@ -18,25 +18,31 @@ class ThreadStore:
     output style). Codex loads those at thread start and keeps them for the thread's life, so a
     thread from an older version is never resumed — a persona or style change takes effect on the
     next message instead of lingering until the TTL expires.
+
+    A thread that stops being resumable (TTL passed, version changed, replaced by `new`/reset)
+    becomes a harvest candidate: its transcript is distilled once into the member's long-term
+    memory. `harvest_candidates()` lists them, `mark_harvested()` retires them.
     """
 
     def __init__(self, path: Path, ttl_seconds: float, version: str = "") -> None:
         self._path = path
         self._ttl = ttl_seconds
         self._version = version
-        self._by_key: dict[str, dict[str, float | str]] = {}
+        self._by_key: dict[str, dict[str, float | str | bool]] = {}
         self._by_message: dict[str, dict[str, str]] = {}
+        self._pending: list[dict[str, str]] = []
         self._load()
 
     @staticmethod
     def key(guild_id: int | None, channel_id: int | None, user_id: int) -> str:
         return f"{guild_id}:{channel_id}:{user_id}"
 
+    def _live(self, entry: dict, now: float) -> bool:
+        return entry.get("version", "") == self._version and now - float(entry["at"]) <= self._ttl
+
     def current(self, key: str, now: float | None = None) -> str:
         entry = self._by_key.get(key)
-        if entry is None or entry.get("version", "") != self._version:
-            return ""
-        if (time.time() if now is None else now) - float(entry["at"]) > self._ttl:
+        if entry is None or not self._live(entry, time.time() if now is None else now):
             return ""
         return str(entry["thread_id"])
 
@@ -49,6 +55,9 @@ class ThreadStore:
     def remember(self, key: str, thread_id: str, message_id: int | None = None) -> None:
         if not thread_id:
             return
+        previous = self._by_key.get(key)
+        if previous and previous["thread_id"] != thread_id and not previous.get("harvested"):
+            self._pending.append({"key": key, "thread_id": str(previous["thread_id"])})
         self._by_key[key] = {"thread_id": thread_id, "at": time.time(), "version": self._version}
         if message_id is not None:
             self._by_message[str(message_id)] = {"thread_id": thread_id, "version": self._version}
@@ -57,10 +66,34 @@ class ThreadStore:
         self._save()
 
     def forget(self, key: str) -> bool:
-        removed = self._by_key.pop(key, None) is not None
-        if removed:
-            self._save()
-        return removed
+        entry = self._by_key.pop(key, None)
+        if entry is None:
+            return False
+        if not entry.get("harvested"):
+            self._pending.append({"key": key, "thread_id": str(entry["thread_id"])})
+        self._save()
+        return True
+
+    # ----- harvest ---------------------------------------------------------------------------
+
+    def harvest_candidates(self, now: float | None = None) -> list[tuple[str, str]]:
+        """(key, thread_id) for every thread that can no longer be resumed and was not harvested."""
+        current = time.time() if now is None else now
+        found = [(p["key"], p["thread_id"]) for p in self._pending]
+        for key, entry in self._by_key.items():
+            if not entry.get("harvested") and not self._live(entry, current):
+                found.append((key, str(entry["thread_id"])))
+        seen: set[str] = set()
+        return [c for c in found if not (c[1] in seen or seen.add(c[1]))]
+
+    def mark_harvested(self, thread_id: str) -> None:
+        self._pending = [p for p in self._pending if p["thread_id"] != thread_id]
+        for entry in self._by_key.values():
+            if entry["thread_id"] == thread_id:
+                entry["harvested"] = True
+        self._save()
+
+    # ----- persistence -----------------------------------------------------------------------
 
     def _load(self) -> None:
         try:
@@ -74,11 +107,11 @@ class ThreadStore:
             k: v if isinstance(v, dict) else {"thread_id": str(v), "version": ""}
             for k, v in data.get("by_message", {}).items()
         }
+        self._pending = list(data.get("pending", []))
 
     def _save(self) -> None:
-        cutoff = time.time() - self._ttl
-        self._by_key = {k: v for k, v in self._by_key.items() if float(v["at"]) >= cutoff}
-        payload = {"by_key": self._by_key, "by_message": self._by_message}
+        # Expired entries stay until harvested so their transcript can still be distilled.
+        payload = {"by_key": self._by_key, "by_message": self._by_message, "pending": self._pending}
         try:
             self._path.write_text(json.dumps(payload), "utf-8")
         except OSError:

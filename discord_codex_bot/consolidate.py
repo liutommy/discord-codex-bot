@@ -112,6 +112,33 @@ def codex_runner(config: Config) -> Runner:
     return run
 
 
+async def run_once(config: Config, force: bool = False) -> str:
+    """Operator entry point: `python -m discord_codex_bot.consolidate [--force]` inside the
+    container. Without --force the same 5h-quota gate as the nightly job applies."""
+    from .memory import MemoryLimits
+
+    store = MemoryStore(
+        config.codex_home / "memory",
+        MemoryLimits(
+            config.memory_index_max_lines,
+            config.memory_index_max_bytes,
+            config.memory_user_max_bytes,
+            config.memory_guild_max_bytes,
+            config.memory_read_max_lines,
+            config.memory_read_max_bytes,
+            config.memory_search_max_matches,
+            config.memory_search_context_lines,
+        ),
+    )
+    if not force:
+        limits = await probe_rate_limits(config)
+        remaining = 100.0 - limits.primary_used_percent if limits else -1.0
+        if remaining < config.consolidate_min_remaining_percent:
+            gate = config.consolidate_min_remaining_percent
+            return f"skipped: 5h remaining {remaining:.0f}% < {gate}%"
+    return await consolidate_all(store, codex_runner(config), config.consolidate_max_input_bytes)
+
+
 async def consolidate_forever(store: MemoryStore, config: Config, queue_run) -> None:
     """Daily at CONSOLIDATE_HOUR local time: if enough 5h quota remains, rewrite every scope."""
     runner = codex_runner(config)
@@ -136,3 +163,12 @@ async def consolidate_forever(store: MemoryStore, config: Config, queue_run) -> 
             LOGGER.info("Consolidation done (5h remaining %.0f%%):\n%s", remaining, summary)
         except Exception:
             LOGGER.exception("Consolidation run failed")
+
+
+if __name__ == "__main__":
+    import sys
+
+    from .config import load_config
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    print(asyncio.run(run_once(load_config(), force="--force" in sys.argv[1:])))
