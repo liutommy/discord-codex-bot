@@ -3,7 +3,8 @@
 # Model and reasoning effort come from the environment (CODEX_MODEL / CODEX_REASONING_EFFORT).
 sandbox_mode = "read-only"
 approval_policy = "never"
-web_search = "disabled"
+# Web search runs on OpenAI's side (no container egress); "live" = real-time results.
+web_search = "live"
 
 [features]
 memories = true

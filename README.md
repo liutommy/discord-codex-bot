@@ -178,9 +178,11 @@ filter exists; every member who can see and invoke the command in those guilds m
 - Session files remain enabled because automatic memory generation needs durable session input.
 - The container mounts no host home or source workspace.
 - Codex command tools, apps, browser, computer use, image generation, plugins, `view_image`
-  (reads local files), goals, multi-agent and web search are disabled. The model-visible tool list
-  then contains only `apply_patch`, which the read-only sandbox plus `approval_policy = "never"`
-  rejects; verify after login by asking `/codex` to create a file and expecting a refusal.
+  (reads local files), goals and multi-agent are disabled. Web search is enabled (`web_search =
+  "live"`); it runs on OpenAI's side, so the container itself never makes outbound requests for
+  it. The model-visible tool list is then `web__run` plus `apply_patch`, which the read-only
+  sandbox plus `approval_policy = "never"` rejects (verified: asking `/codex` to create a file is
+  refused and nothing is written).
 - The Codex child process receives a minimal environment without `DISCORD_TOKEN` and runs in its
   own process group so a timed-out request cannot leave the native binary running.
 - The root filesystem is read-only, Linux capabilities are dropped, and no host port is published.
