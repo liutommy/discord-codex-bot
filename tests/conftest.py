@@ -12,6 +12,7 @@ def config() -> Config:
         application_id=123456789012345678,
         allowed_guild_ids=frozenset({111111111111111111}),
         allowed_channel_ids=frozenset({222222222222222222}),
+        command_prefix="codex",
         codex_model="gpt-5.6-luna",
         codex_reasoning_effort="high",
         codex_home=Path("/var/lib/codex"),

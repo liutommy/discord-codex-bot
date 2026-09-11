@@ -11,15 +11,17 @@ class FakeAttachment:
 
 
 def test_registers_only_expected_slash_commands(config: Config) -> None:
-    client = DiscordCodexClient(config)
+    from dataclasses import replace
+
+    client = DiscordCodexClient(replace(config, command_prefix="inmu-king"))
     assert {command.name for command in client.tree.get_commands()} == {
-        "codex",
-        "codex-status",
-        "codex-reset",
-        "remember",
-        "forget",
-        "memory",
-        "style",
+        "inmu-king",
+        "inmu-king-status",
+        "inmu-king-reset",
+        "inmu-king-remember",
+        "inmu-king-forget",
+        "inmu-king-memory",
+        "inmu-king-style",
     }
     assert client.intents.guilds
     assert client.intents.message_content

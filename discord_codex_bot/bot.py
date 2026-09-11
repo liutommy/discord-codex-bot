@@ -33,7 +33,7 @@ from .threads import ThreadStore
 LOGGER = logging.getLogger(__name__)
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
 FAILURE_MESSAGE = (
-    "Codex 執行失敗。請用 /codex-status 檢查登入狀態，並通知 Bot 管理者查看 container log。"
+    "Codex 執行失敗。請用 /{prefix}-status 檢查登入狀態，並通知 Bot 管理者查看 container log。"
 )
 
 
@@ -54,6 +54,7 @@ class DiscordCodexClient(discord.Client):
         intents.message_content = True
         super().__init__(intents=intents)
         self.config = config
+        prefix = config.command_prefix
         self.tree = app_commands.CommandTree(self)
         self.queue = SerialQueue(config.max_queued_jobs)
         self.threads = ThreadStore(
@@ -74,49 +75,49 @@ class DiscordCodexClient(discord.Client):
         )
         self.tree.add_command(
             app_commands.Command(
-                name="remember",
+                name=f"{prefix}-remember",
                 description="記住一件事（個人或整個伺服器）",
                 callback=self.remember_command,
             )
         )
         self.tree.add_command(
             app_commands.Command(
-                name="forget",
-                description="刪除一則記憶（用 /memory 看名稱）",
+                name=f"{prefix}-forget",
+                description=f"刪除一則記憶（用 /{prefix}-memory 看名稱）",
                 callback=self.forget_command,
             )
         )
         self.tree.add_command(
             app_commands.Command(
-                name="memory",
+                name=f"{prefix}-memory",
                 description="查看 Bot 記得的事（只有你看得到）",
                 callback=self.memory_command,
             )
         )
         self.tree.add_command(
             app_commands.Command(
-                name="style",
+                name=f"{prefix}-style",
                 description="查看／設定／清除你的個人回覆風格（覆蓋預設）",
                 callback=self.style_command,
             )
         )
         self.tree.add_command(
             app_commands.Command(
-                name="codex",
+                name=prefix,
                 description="詢問此伺服器的 Codex agent",
                 callback=self.codex_command,
             )
         )
         self.tree.add_command(
             app_commands.Command(
-                name="codex-status",
+                name=f"{prefix}-status",
                 description="檢查 Bot 的 Codex 模型與訂閱登入狀態",
                 callback=self.status_command,
             )
         )
         self.tree.add_command(
             app_commands.Command(
-                name="codex-reset",
+                name=f"{prefix}-reset",
                 description="忘掉你在此頻道的對話脈絡，下一題從頭開始",
                 callback=self.reset_command,
             )
@@ -228,7 +229,7 @@ class DiscordCodexClient(discord.Client):
             return CodexResult(QUEUE_FULL_MESSAGE)
         except Exception:
             LOGGER.exception("Codex request failed guild=%s", guild_id)
-            return CodexResult(FAILURE_MESSAGE)
+            return CodexResult(FAILURE_MESSAGE.format(prefix=self.config.command_prefix))
         finally:
             for path in images:
                 remove_request_dir(path)
@@ -249,7 +250,8 @@ class DiscordCodexClient(discord.Client):
         default_label = REASONING_EFFORTS[self.config.codex_reasoning_effort]
         await interaction.response.send_message(
             f"{status}\n模型：{self.config.codex_model}\n"
-            f"預設推理強度：{default_label}（/codex 可選 {'、'.join(REASONING_EFFORTS.values())}）",
+            f"預設推理強度：{default_label}"
+            f"（/{self.config.command_prefix} 可選 {'、'.join(REASONING_EFFORTS.values())}）",
             ephemeral=True,
         )
 
@@ -271,7 +273,7 @@ class DiscordCodexClient(discord.Client):
         line = self.memory.add(scope.value, interaction.guild_id, interaction.user.id, name, text)
         await interaction.response.send_message(f"已記住：{line}", ephemeral=True)
 
-    @app_commands.describe(scope="個人或伺服器", name="/memory 顯示的名稱")
+    @app_commands.describe(scope="個人或伺服器", name="記憶名稱（用 -memory 指令查看）")
     @app_commands.choices(scope=SCOPE_CHOICES)
     async def forget_command(
         self, interaction: discord.Interaction, scope: app_commands.Choice[str], name: str
@@ -387,7 +389,7 @@ class DiscordCodexClient(discord.Client):
         finally:
             remove_dir(result.generated_dir)
         self.threads.remember(key, result.thread_id, sent.id)
-        LOGGER.info("Completed /codex guild=%s user=%s", interaction.guild_id, interaction.user.id)
+        LOGGER.info("Completed slash guild=%s user=%s", interaction.guild_id, interaction.user.id)
 
     # ----- @mention entry point --------------------------------------------------------------
 

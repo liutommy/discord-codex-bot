@@ -131,6 +131,10 @@ Guild-scoped slash commands normally appear quickly. Run:
 @<your bot> 這張圖裡有什麼？   (with images attached to the message)
 ```
 
+Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>`,
+`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`. This README uses the
+default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
+
 Both entry points share one pipeline: guild allowlist → validation → serial queue → `codex exec`.
 The `@mention` form keeps the question visible as the member's own message, supports up to
 `MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Messages that do not

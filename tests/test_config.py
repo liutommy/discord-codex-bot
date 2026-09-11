@@ -43,3 +43,15 @@ def test_effort_accepts_verified_values_and_rejects_unknown_ones() -> None:
     assert load_config(override).codex_reasoning_effort == "xhigh"
     with pytest.raises(ValueError, match="CODEX_REASONING_EFFORT"):
         load_config({**base, "CODEX_REASONING_EFFORT": "extra_high"})
+
+
+def test_command_prefix_defaults_and_validates() -> None:
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    assert load_config(base).command_prefix == "codex"
+    assert load_config({**base, "COMMAND_PREFIX": "inmu-king"}).command_prefix == "inmu-king"
+    with pytest.raises(ValueError, match="COMMAND_PREFIX"):
+        load_config({**base, "COMMAND_PREFIX": "Inmu King"})
