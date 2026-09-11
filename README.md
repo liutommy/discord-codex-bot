@@ -154,7 +154,11 @@ Follow-up questions keep their context: each answer is a Codex thread, and the B
 `THREAD_TTL_MINUTES`, or when anyone replies to one of the Bot's answers (that exact thread, any
 age). `/codex new:True` or `/codex-reset` starts fresh. The mapping lives in
 `CODEX_HOME/discord_threads.json` and survives restarts; a thread that can no longer be resumed
-falls back to a fresh one. This is conversation memory, not Codex's background "memories" feature,
+falls back to a fresh one. Codex bakes the instruction files (`AGENTS.md`, output style) into a
+thread when it starts and does not re-read them on resume, so every stored thread carries a
+fingerprint of those files; after a rebuild that changes them, old threads are not resumed and
+the next message starts fresh with the new persona/style. This is conversation memory, not
+Codex's background "memories" feature,
 which consolidates asynchronously and is not tied to Discord members.
 
 Long-term memory is Bot-owned and two-tier, shaped like Claude Code auto memory, with a personal
