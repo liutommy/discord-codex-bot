@@ -39,7 +39,8 @@ UV_CACHE_DIR=.uv-cache uv run ruff check .
 
 1. Open the Discord Developer Portal and select **New Application**.
 2. Open **Bot**, select **Reset Token**, and copy the token once.
-3. Keep privileged gateway intents disabled; this bot only needs the `Guilds` intent.
+3. Under **Privileged Gateway Intents** enable only **Message Content Intent** (needed for the
+   `@mention` entry point). Leave Presence and Server Members off.
 4. Open **OAuth2 > URL Generator**.
 5. Select scopes `bot` and `applications.commands`.
 6. Grant the bot permission to view channels and send messages, then open the generated URL and
@@ -124,7 +125,13 @@ Guild-scoped slash commands normally appear quickly. Run:
 ```text
 /codex-status
 /codex prompt:請用一句話說明你目前能做什麼
+@Codex DC bot 這張圖裡有什麼？   (with images attached to the message)
 ```
+
+Both entry points share one pipeline: guild allowlist → validation → serial queue → `codex exec`.
+The `@mention` form keeps the question visible as the member's own message, supports up to
+`MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Messages that do not
+mention the Bot are discarded without processing.
 
 `/codex-status` must report `ChatGPT 訂閱登入有效`, model `gpt-5.6-luna`, and reasoning effort
 `high`. A command in another server or outside the configured test channel must not execute.

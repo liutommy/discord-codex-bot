@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import discord
@@ -14,12 +16,24 @@ from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
 
 LOGGER = logging.getLogger(__name__)
+QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
+FAILURE_MESSAGE = (
+    "Codex 執行失敗。請用 /codex-status 檢查登入狀態，並通知 Bot 管理者查看 container log。"
+)
+
+
+def strip_mention(content: str, bot_id: int) -> str:
+    """Remove every <@id> / <@!id> mention of the bot so only the question remains."""
+    return re.sub(rf"<@!?{bot_id}>", "", content).strip()
 
 
 class DiscordCodexClient(discord.Client):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.none()
         intents.guilds = True
+        # @mention entry point: message_content is needed to read the question and its images.
+        intents.guild_messages = True
+        intents.message_content = True
         super().__init__(intents=intents)
         self.config = config
         self.tree = app_commands.CommandTree(self)
@@ -57,19 +71,55 @@ class DiscordCodexClient(discord.Client):
         LOGGER.info("Discord bot ready as %s", self.user)
         LOGGER.info("%s", await codex_login_status(self.config))
 
-    def _access(self, interaction: discord.Interaction) -> tuple[bool, str]:
-        parent_id = getattr(interaction.channel, "parent_id", None)
+    # ----- shared pipeline -------------------------------------------------------------------
+
+    def _access(self, guild_id: int | None, channel: object, channel_id: int | None) -> str:
+        """Empty string when allowed, otherwise the user-facing rejection reason."""
         decision = check_access(
-            guild_id=interaction.guild_id,
-            channel_id=interaction.channel_id,
-            parent_channel_id=parent_id,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            parent_channel_id=getattr(channel, "parent_id", None),
             config=self.config,
         )
-        return decision.allowed, decision.reason
+        return "" if decision.allowed else decision.reason
+
+    def _validate(self, prompt: str, attachments: Sequence[discord.Attachment]) -> str:
+        """Empty string when the request is acceptable, otherwise the rejection reason."""
+        if not prompt or len(prompt) > self.config.max_prompt_chars:
+            return f"prompt 必須介於 1 到 {self.config.max_prompt_chars} 個字元。"
+        if len(attachments) > self.config.max_attachments:
+            return f"一次最多 {self.config.max_attachments} 張圖片。"
+        for attachment in attachments:
+            suffix = validate_image(attachment.content_type, attachment.size, self.config)
+            if not suffix.startswith("."):
+                return suffix
+        return ""
+
+    async def _answer(
+        self, prompt: str, attachments: Sequence[discord.Attachment], guild_id: int | None
+    ) -> str:
+        """Run one validated request through Codex; always returns text to post."""
+        images: list[Path] = []
+        try:
+            for attachment in attachments:
+                suffix = validate_image(attachment.content_type, attachment.size, self.config)
+                images.append(await download_image(attachment, suffix, self.config))
+            answer = await self.queue.run(lambda: run_codex(prompt, self.config, images))
+            return truncate(answer, self.config.max_response_chars)
+        except QueueFullError:
+            return QUEUE_FULL_MESSAGE
+        except Exception:
+            LOGGER.exception("Codex request failed guild=%s", guild_id)
+            return FAILURE_MESSAGE
+        finally:
+            for path in images:
+                remove_request_dir(path)
+
+    # ----- slash commands --------------------------------------------------------------------
 
     async def status_command(self, interaction: discord.Interaction) -> None:
-        allowed, reason = self._access(interaction)
-        if not allowed:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
         status = await codex_login_status(self.config)
@@ -86,53 +136,47 @@ class DiscordCodexClient(discord.Client):
         prompt: str,
         image: discord.Attachment | None = None,
     ) -> None:
-        allowed, reason = self._access(interaction)
-        if not allowed:
+        attachments = [image] if image is not None else []
+        prompt = prompt.strip()
+        reason = self._access(
+            interaction.guild_id, interaction.channel, interaction.channel_id
+        ) or self._validate(prompt, attachments)
+        if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
-        prompt = prompt.strip()
-        if not prompt or len(prompt) > self.config.max_prompt_chars:
-            await interaction.response.send_message(
-                f"prompt 必須介於 1 到 {self.config.max_prompt_chars} 個字元。",
-                ephemeral=True,
-            )
-            return
-        suffix = ""
-        if image is not None:
-            suffix = validate_image(image.content_type, image.size, self.config)
-            if not suffix.startswith("."):
-                await interaction.response.send_message(suffix, ephemeral=True)
-                return
 
         await interaction.response.defer(thinking=True)
-        images: list[Path] = []
-        try:
-            if image is not None:
-                images.append(await download_image(image, suffix, self.config))
-            answer = await self.queue.run(lambda: run_codex(prompt, self.config, images))
-            reply = format_reply(prompt, answer, has_image=bool(images))
-            chunks = split_discord_message(truncate(reply, self.config.max_response_chars))
-            await interaction.edit_original_response(content=chunks[0])
-            for chunk in chunks[1:]:
-                await interaction.followup.send(chunk)
-            LOGGER.info(
-                "Completed Codex request guild=%s user=%s",
-                interaction.guild_id,
-                interaction.user.id,
-            )
-        except QueueFullError:
-            await interaction.edit_original_response(content="目前排隊已滿，請稍後再試。")
-        except Exception:
-            LOGGER.exception("Codex request failed guild=%s", interaction.guild_id)
-            await interaction.edit_original_response(
-                content=(
-                    "Codex 執行失敗。請用 /codex-status 檢查登入狀態，"
-                    "並通知 Bot 管理者查看 container log。"
-                )
-            )
-        finally:
-            for path in images:
-                remove_request_dir(path)
+        answer = await self._answer(prompt, attachments, interaction.guild_id)
+        # Discord does not echo slash command inputs, so quote the question above the answer.
+        chunks = split_discord_message(format_reply(prompt, answer, has_image=bool(attachments)))
+        await interaction.edit_original_response(content=chunks[0])
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk)
+        LOGGER.info("Completed /codex guild=%s user=%s", interaction.guild_id, interaction.user.id)
+
+    # ----- @mention entry point --------------------------------------------------------------
+
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or self.user is None or self.user not in message.mentions:
+            return
+        guild_id = message.guild.id if message.guild else None
+        reason = self._access(guild_id, message.channel, message.channel.id)
+        if reason:
+            await message.reply(reason, mention_author=False)
+            return
+        prompt = strip_mention(message.content, self.user.id)
+        reason = self._validate(prompt, message.attachments)
+        if reason:
+            await message.reply(reason, mention_author=False)
+            return
+
+        async with message.channel.typing():
+            answer = await self._answer(prompt, message.attachments, message.guild.id)
+        chunks = split_discord_message(answer)
+        await message.reply(chunks[0], mention_author=False)
+        for chunk in chunks[1:]:
+            await message.channel.send(chunk)
+        LOGGER.info("Completed @mention guild=%s user=%s", message.guild.id, message.author.id)
 
 
 def main() -> None:

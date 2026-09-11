@@ -54,6 +54,7 @@ class Config:
     max_queued_jobs: int
     attachment_dir: Path
     max_attachment_bytes: int
+    max_attachments: int
     attachment_sweep_minutes: int
 
 
@@ -83,5 +84,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         max_queued_jobs=_positive_int(values, "MAX_QUEUED_JOBS", 10),
         attachment_dir=Path(values.get("ATTACHMENT_DIR", "/tmp/discord-codex")),
         max_attachment_bytes=_positive_int(values, "MAX_ATTACHMENT_BYTES", 8_000_000),
+        max_attachments=_positive_int(values, "MAX_ATTACHMENTS", 4),
         attachment_sweep_minutes=_positive_int(values, "ATTACHMENT_SWEEP_MINUTES", 10),
     )

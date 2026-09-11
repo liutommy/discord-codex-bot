@@ -22,5 +22,6 @@ def config() -> Config:
         max_queued_jobs=10,
         attachment_dir=Path("/tmp/discord-codex"),
         max_attachment_bytes=8_000_000,
+        max_attachments=4,
         attachment_sweep_minutes=10,
     )
