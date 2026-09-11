@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -52,6 +53,18 @@ class Entry:
         return f"- [{self.name}]({self.file}) — {self.hook}"
 
 
+@dataclass(frozen=True, slots=True)
+class Note:
+    name: str
+    date: str
+    text: str
+
+
+def _hook(text: str) -> str:
+    hook = " ".join(text.split())
+    return hook if len(hook) <= 80 else f"{hook[:80]}…"
+
+
 def slugify(name: str) -> str:
     slug = _SLUG.sub("-", name.strip()).strip("-").lower()[:40]
     return slug or "memory"
@@ -82,7 +95,11 @@ class MemoryStore:
 
     def usage_bytes(self, scope: str, guild_id: int | None, user_id: int | None) -> int:
         directory = self.scope_dir(scope, guild_id, user_id)
-        return sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
+        return sum(
+            p.stat().st_size
+            for p in directory.rglob("*")
+            if p.is_file() and ".backup" not in p.parts
+        )
 
     # ----- index -----------------------------------------------------------------------------
 
@@ -142,11 +159,69 @@ class MemoryStore:
             counter += 1
         (directory / TOPIC_DIR).mkdir(parents=True, exist_ok=True)
         (directory / TOPIC_DIR / file).write_text(body, "utf-8")
-        hook = " ".join(text.split())
-        hook = hook if len(hook) <= 80 else f"{hook[:80]}…"
-        entries.append(Entry(name.strip(), file, hook))
+        entries.append(Entry(name.strip(), file, _hook(text)))
         self._write_index(directory, entries)
         return entries[-1].line()
+
+    # ----- consolidation ---------------------------------------------------------------------
+
+    def guild_ids(self) -> list[int]:
+        if not self._root.is_dir():
+            return []
+        return sorted(int(p.name) for p in self._root.iterdir() if p.name.isdigit())
+
+    def user_ids(self, guild_id: int) -> list[int]:
+        users = self._root / str(guild_id) / "users"
+        if not users.is_dir():
+            return []
+        return sorted(int(p.name) for p in users.iterdir() if p.name.isdigit())
+
+    def notes(self, scope: str, guild_id: int | None, user_id: int | None) -> list[Note]:
+        """Every note of a scope, oldest first (archive before index), as (name, date, text)."""
+        directory = self.scope_dir(scope, guild_id, user_id)
+        notes = []
+        for entry in self._read_index(directory / ARCHIVE_FILE) + self._read_index(
+            directory / INDEX_FILE
+        ):
+            try:
+                raw = (directory / TOPIC_DIR / entry.file).read_text("utf-8")
+            except OSError:
+                continue
+            parts = raw.split("\n\n", 2)
+            note_date = parts[1].strip() if len(parts) > 1 else ""
+            text = parts[2].strip() if len(parts) > 2 else raw.strip()
+            notes.append(Note(entry.name, note_date, text))
+        return notes
+
+    def rewrite(
+        self, scope: str, guild_id: int | None, user_id: int | None, notes: list[Note]
+    ) -> None:
+        """Replace a scope's notes wholesale; the previous state is kept in `.backup/`."""
+        directory = self.scope_dir(scope, guild_id, user_id)
+        backup = directory / ".backup"
+        if backup.exists():
+            shutil.rmtree(backup)
+        backup.mkdir(parents=True)
+        for name in (INDEX_FILE, ARCHIVE_FILE):
+            if (directory / name).exists():
+                shutil.move(str(directory / name), str(backup / name))
+        if (directory / TOPIC_DIR).exists():
+            shutil.move(str(directory / TOPIC_DIR), str(backup / TOPIC_DIR))
+        (directory / TOPIC_DIR).mkdir(parents=True, exist_ok=True)
+        entries: list[Entry] = []
+        used: set[str] = set()
+        for note in notes:
+            slug = slugify(note.name)
+            file = f"{slug}.md"
+            counter = 2
+            while file in used:
+                file = f"{slug}-{counter}.md"
+                counter += 1
+            used.add(file)
+            body = f"# {note.name}\n\n{note.date}\n\n{note.text}\n"
+            (directory / TOPIC_DIR / file).write_text(body, "utf-8")
+            entries.append(Entry(note.name, file, _hook(note.text)))
+        self._write_index(directory, entries)
 
     def forget(self, scope: str, guild_id: int | None, user_id: int | None, name: str) -> bool:
         directory = self.scope_dir(scope, guild_id, user_id)

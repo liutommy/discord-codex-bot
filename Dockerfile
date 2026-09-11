@@ -25,6 +25,7 @@ COPY --chown=1000:1000 scripts ./scripts
 COPY --chown=1000:1000 workspace /workspace
 COPY --chown=1000:1000 config/codex-config.toml /opt/discord-codex/config.toml
 COPY --chown=1000:1000 config/output-style.md /opt/discord-codex/output-style.md
+COPY --chown=1000:1000 config/consolidate-schema.json /opt/discord-codex/consolidate-schema.json
 
 RUN mkdir -p /var/lib/codex \
     && chown -R 1000:1000 /var/lib/codex /workspace /app \

@@ -18,6 +18,7 @@ from .attachments import (
 )
 from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
+from .consolidate import consolidate_forever
 from .memory import (
     SCOPES,
     MemoryLimits,
@@ -123,6 +124,9 @@ class DiscordCodexClient(discord.Client):
 
     async def setup_hook(self) -> None:
         self._sweeper = self.loop.create_task(sweep_forever(self.config))
+        self._consolidator = self.loop.create_task(
+            consolidate_forever(self.memory, self.config, self.queue.run)
+        )
         # A guild that has not invited the bot yet (e.g. production before rollout) must not take
         # the whole client down; the runtime access check still rejects it until it is synced.
         for guild_id in self.config.allowed_guild_ids:

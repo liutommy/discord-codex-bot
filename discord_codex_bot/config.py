@@ -47,6 +47,19 @@ def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
     return value
 
 
+def _bounded_int(env: Mapping[str, str], name: str, default: int, low: int, high: int) -> int:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer between {low} and {high}") from error
+    if not low <= value <= high:
+        raise ValueError(f"{name} must be an integer between {low} and {high}")
+    return value
+
+
 def _effort(env: Mapping[str, str]) -> str:
     value = env.get("CODEX_REASONING_EFFORT", "").strip() or "medium"
     if value not in REASONING_EFFORTS:
@@ -85,6 +98,11 @@ class Config:
     memory_search_context_lines: int
     memory_recall_rounds: int
     output_style_path: Path
+    consolidate_hour: int
+    consolidate_timezone: str
+    consolidate_min_remaining_percent: int
+    consolidate_max_input_bytes: int
+    consolidate_schema_path: Path
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -128,5 +146,15 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Operator-written default output style, injected into every prompt when non-empty.
         output_style_path=Path(
             values.get("OUTPUT_STYLE_FILE", "/opt/discord-codex/output-style.md")
+        ),
+        # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.
+        consolidate_hour=_bounded_int(values, "CONSOLIDATE_HOUR", 2, 0, 23),
+        consolidate_timezone=values.get("CONSOLIDATE_TIMEZONE", "").strip() or "Asia/Taipei",
+        consolidate_min_remaining_percent=_bounded_int(
+            values, "CONSOLIDATE_MIN_REMAINING_PERCENT", 50, 0, 100
+        ),
+        consolidate_max_input_bytes=_positive_int(values, "CONSOLIDATE_MAX_INPUT_BYTES", 100_000),
+        consolidate_schema_path=Path(
+            values.get("CONSOLIDATE_SCHEMA_FILE", "/opt/discord-codex/consolidate-schema.json")
         ),
     )

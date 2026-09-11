@@ -124,15 +124,21 @@ def _prompt(
 
 
 def _arguments(
-    config: Config, images: Sequence[Path] = (), effort: str = "", resume: str = ""
+    config: Config,
+    images: Sequence[Path] = (),
+    effort: str = "",
+    resume: str = "",
+    schema: Path | None = None,
 ) -> tuple[str, ...]:
     # Sandbox, tool feature flags and web search live in CODEX_HOME/config.toml (refreshed from
     # config/codex-config.toml at container start); only per-request values are passed here.
     # `-i` is variadic, so images go last and `--` keeps the stdin marker from being read as a file.
     # `exec resume <id>` continues a stored thread; it keeps that thread's cwd and has no --color.
     image_flags = tuple(flag for image in images for flag in ("-i", str(image)))
+    schema_flags = ("--output-schema", str(schema)) if schema else ()
     head = ("exec", "resume", resume) if resume else ("exec",)
     tail = () if resume else ("--color", "never", "--cd", str(config.codex_workspace))
+    tail += schema_flags
     return (
         *head,
         "--model",
@@ -175,11 +181,16 @@ async def _communicate(
 
 
 async def _exec(
-    prompt: str, config: Config, images: Sequence[Path], effort: str, resume: str
+    prompt: str,
+    config: Config,
+    images: Sequence[Path],
+    effort: str,
+    resume: str,
+    schema: Path | None = None,
 ) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         "codex",
-        *_arguments(config, images, effort, resume),
+        *_arguments(config, images, effort, resume, schema),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -205,6 +216,7 @@ async def run_codex(
     memory: str = "",
     raw: bool = False,
     personal_style: str = "",
+    schema: Path | None = None,
 ) -> CodexResult:
     """Run one turn. `raw` sends `user_prompt` verbatim (used to feed recalled notes back)."""
     prompt = (
@@ -212,12 +224,12 @@ async def run_codex(
         if raw
         else _prompt(user_prompt, memory, output_style(config), personal_style)
     )
-    code, output, stderr = await _exec(prompt, config, images, effort, resume)
+    code, output, stderr = await _exec(prompt, config, images, effort, resume, schema)
     if code != 0 and resume:
         # The stored thread may have been rotated away or be unreadable; answer fresh instead.
         LOGGER.warning("Resume of thread %s failed (%s); starting a new thread", resume, code)
         resume = ""
-        code, output, stderr = await _exec(prompt, config, images, effort, resume)
+        code, output, stderr = await _exec(prompt, config, images, effort, resume, schema)
     if code != 0:
         summary = " | ".join(stderr.splitlines()[-3:])
         raise RuntimeError(f"Codex exited with code {code}: {summary}")

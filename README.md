@@ -180,6 +180,16 @@ oldest notes.
 Codex's own background "memories" are not used for this: they consolidate only after 6 h idle in
 a long-lived process and have no notion of Discord members.
 
+Notes are consolidated once a day. At `CONSOLIDATE_HOUR` (`CONSOLIDATE_TIMEZONE`, default 02:00
+Asia/Taipei) the Bot runs one minimal Codex turn so the session rollout carries fresh
+`rate_limits`, reads the 5-hour window's `used_percent`, and proceeds only if at least
+`CONSOLIDATE_MIN_REMAINING_PERCENT` (50) remains. It then rewrites every scope of every guild
+(server-wide and each member) through `codex exec --output-schema`: duplicates and fragments are
+merged, contradictions resolved newest-wins, nothing invented. Input is fed in batches of
+`CONSOLIDATE_MAX_INPUT_BYTES`; each scope's previous state is kept in `.backup/` until the next
+run, and a failed scope is left untouched. Codex's own background memory consolidation is not used
+(it needs 6 h of idle time in a long-lived process and has no member dimension).
+
 Output style has two layers. `config/output-style.md` is the operator's default; when it has
 content it is injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
 Each member can set their own with `/style text:…` (stored as

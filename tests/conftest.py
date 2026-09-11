@@ -35,4 +35,9 @@ def config() -> Config:
         memory_search_context_lines=3,
         memory_recall_rounds=10,
         output_style_path=Path("/opt/discord-codex/output-style.md"),
+        consolidate_hour=2,
+        consolidate_timezone="Asia/Taipei",
+        consolidate_min_remaining_percent=50,
+        consolidate_max_input_bytes=100_000,
+        consolidate_schema_path=Path("/opt/discord-codex/consolidate-schema.json"),
     )
