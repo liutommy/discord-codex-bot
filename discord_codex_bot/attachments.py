@@ -44,14 +44,25 @@ def remove_request_dir(path: Path) -> None:
     shutil.rmtree(path.parent, ignore_errors=True)
 
 
-def sweep_stale(root: Path, max_age_seconds: float, now: float | None = None) -> int:
-    """Delete request directories older than max_age_seconds (crash leftovers); return count."""
+def remove_dir(path: Path | None) -> None:
+    if path is not None:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def generated_images_root(config: Config) -> Path:
+    return config.codex_home / "generated_images"
+
+
+def sweep_stale(
+    root: Path, max_age_seconds: float, now: float | None = None, prefix: str = ""
+) -> int:
+    """Delete subdirectories older than max_age_seconds (crash leftovers); return count."""
     if not root.is_dir():
         return 0
     cutoff = (time.time() if now is None else now) - max_age_seconds
     removed = 0
     for entry in root.iterdir():
-        if entry.name.startswith(REQUEST_DIR_PREFIX) and entry.stat().st_mtime < cutoff:
+        if entry.is_dir() and entry.name.startswith(prefix) and entry.stat().st_mtime < cutoff:
             shutil.rmtree(entry, ignore_errors=True)
             removed += 1
     return removed
@@ -62,7 +73,8 @@ async def sweep_forever(config: Config) -> None:
     # Anything older than one request timeout plus one sweep interval cannot belong to a live job.
     max_age = config.codex_timeout_seconds + interval
     while True:
-        removed = sweep_stale(config.attachment_dir, max_age)
+        removed = sweep_stale(config.attachment_dir, max_age, prefix=REQUEST_DIR_PREFIX)
+        removed += sweep_stale(generated_images_root(config), max_age)
         if removed:
-            LOGGER.info("Swept %d stale attachment directories", removed)
+            LOGGER.info("Swept %d stale attachment/generated-image directories", removed)
         await asyncio.sleep(interval)

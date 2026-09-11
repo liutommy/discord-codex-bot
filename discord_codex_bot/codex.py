@@ -5,6 +5,7 @@ import json
 import os
 import signal
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config
@@ -25,19 +26,48 @@ def _safe_environment(config: Config) -> dict[str, str]:
     }
 
 
-def parse_codex_jsonl(stdout: str) -> str:
-    final_message = ""
+@dataclass(frozen=True, slots=True)
+class CodexResult:
+    text: str
+    # Files the built-in image_gen tool wrote under CODEX_HOME/generated_images/<thread_id>/.
+    # The caller sends them and then removes `generated_dir`.
+    images: tuple[Path, ...] = ()
+    generated_dir: Path | None = None
+
+
+def _events(stdout: str):
     for line in stdout.splitlines():
         try:
-            event = json.loads(line)
+            yield json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") != "item.completed":
-            continue
+
+
+def parse_codex_jsonl(stdout: str) -> str:
+    final_message = ""
+    for event in _events(stdout):
         item = event.get("item", {})
-        if item.get("type") == "agent_message":
+        if event.get("type") == "item.completed" and item.get("type") == "agent_message":
             final_message = item.get("text", "")
     return final_message
+
+
+def parse_thread_id(stdout: str) -> str:
+    for event in _events(stdout):
+        if event.get("type") == "thread.started":
+            return str(event.get("thread_id", ""))
+    return ""
+
+
+def collect_generated_images(
+    config: Config, thread_id: str
+) -> tuple[Path | None, tuple[Path, ...]]:
+    if not thread_id:
+        return None, ()
+    directory = config.codex_home / "generated_images" / thread_id
+    if not directory.is_dir():
+        return None, ()
+    return directory, tuple(sorted(p for p in directory.iterdir() if p.is_file()))
 
 
 def _prompt(user_prompt: str) -> str:
@@ -106,7 +136,7 @@ async def _communicate(
 
 async def run_codex(
     user_prompt: str, config: Config, images: Sequence[Path] = (), effort: str = ""
-) -> str:
+) -> CodexResult:
     process = await asyncio.create_subprocess_exec(
         "codex",
         *_arguments(config, images, effort),
@@ -122,10 +152,12 @@ async def run_codex(
     if process.returncode != 0:
         summary = " | ".join(stderr.decode("utf-8", errors="replace").splitlines()[-3:])
         raise RuntimeError(f"Codex exited with code {process.returncode}: {summary}")
-    message = parse_codex_jsonl(stdout.decode("utf-8", errors="replace"))
+    output = stdout.decode("utf-8", errors="replace")
+    message = parse_codex_jsonl(output)
     if not message:
         raise RuntimeError("Codex returned no agent message")
-    return message
+    generated_dir, generated = collect_generated_images(config, parse_thread_id(output))
+    return CodexResult(message, generated, generated_dir)
 
 
 async def codex_login_status(config: Config) -> str:

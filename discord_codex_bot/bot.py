@@ -9,8 +9,14 @@ import discord
 from discord import app_commands
 
 from .access import check_access
-from .attachments import download_image, remove_request_dir, sweep_forever, validate_image
-from .codex import codex_login_status, run_codex
+from .attachments import (
+    download_image,
+    remove_dir,
+    remove_request_dir,
+    sweep_forever,
+    validate_image,
+)
+from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
@@ -101,25 +107,34 @@ class DiscordCodexClient(discord.Client):
         attachments: Sequence[discord.Attachment],
         guild_id: int | None,
         effort: str = "",
-    ) -> str:
-        """Run one validated request through Codex; always returns text to post."""
+    ) -> CodexResult:
+        """Run one validated request through Codex; always returns something to post."""
         images: list[Path] = []
         try:
             for attachment in attachments:
                 suffix = validate_image(attachment.content_type, attachment.size, self.config)
                 images.append(await download_image(attachment, suffix, self.config))
-            answer = await self.queue.run(
+            result = await self.queue.run(
                 lambda: run_codex(prompt, self.config, images, effort)
             )
-            return truncate(answer, self.config.max_response_chars)
+            return CodexResult(
+                truncate(result.text, self.config.max_response_chars),
+                result.images,
+                result.generated_dir,
+            )
         except QueueFullError:
-            return QUEUE_FULL_MESSAGE
+            return CodexResult(QUEUE_FULL_MESSAGE)
         except Exception:
             LOGGER.exception("Codex request failed guild=%s", guild_id)
-            return FAILURE_MESSAGE
+            return CodexResult(FAILURE_MESSAGE)
         finally:
             for path in images:
                 remove_request_dir(path)
+
+    @staticmethod
+    def _files(result: CodexResult) -> list[discord.File]:
+        # Discord caps a message at 10 attachments; generated images are deleted after sending.
+        return [discord.File(path) for path in result.images[:10]]
 
     # ----- slash commands --------------------------------------------------------------------
 
@@ -165,15 +180,20 @@ class DiscordCodexClient(discord.Client):
             return
 
         await interaction.response.defer(thinking=True)
-        answer = await self._answer(prompt, attachments, interaction.guild_id, effort_value)
+        result = await self._answer(prompt, attachments, interaction.guild_id, effort_value)
         # Discord does not echo slash command inputs, so quote the question above the answer.
         reply = format_reply(
-            prompt, answer, has_image=bool(attachments), effort=REASONING_EFFORTS[effort_value]
+            prompt, result.text, has_image=bool(attachments), effort=REASONING_EFFORTS[effort_value]
         )
         chunks = split_discord_message(reply)
-        await interaction.edit_original_response(content=chunks[0])
-        for chunk in chunks[1:]:
-            await interaction.followup.send(chunk)
+        try:
+            await interaction.edit_original_response(
+                content=chunks[0], attachments=self._files(result)
+            )
+            for chunk in chunks[1:]:
+                await interaction.followup.send(chunk)
+        finally:
+            remove_dir(result.generated_dir)
         LOGGER.info("Completed /codex guild=%s user=%s", interaction.guild_id, interaction.user.id)
 
     # ----- @mention entry point --------------------------------------------------------------
@@ -193,11 +213,14 @@ class DiscordCodexClient(discord.Client):
             return
 
         async with message.channel.typing():
-            answer = await self._answer(prompt, message.attachments, message.guild.id)
-        chunks = split_discord_message(answer)
-        await message.reply(chunks[0], mention_author=False)
-        for chunk in chunks[1:]:
-            await message.channel.send(chunk)
+            result = await self._answer(prompt, message.attachments, message.guild.id)
+        chunks = split_discord_message(result.text)
+        try:
+            await message.reply(chunks[0], files=self._files(result), mention_author=False)
+            for chunk in chunks[1:]:
+                await message.channel.send(chunk)
+        finally:
+            remove_dir(result.generated_dir)
         LOGGER.info("Completed @mention guild=%s user=%s", message.guild.id, message.author.id)
 
 

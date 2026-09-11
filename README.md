@@ -145,6 +145,10 @@ Medium (default), High, Extra high, Max — mapped to the CLI values `low/medium
 verified against `codex debug models` for `gpt-5.6-luna`; the CLI forwards any string verbatim, so
 the Bot only offers this allowlist. `@mention` requests use the default `CODEX_REASONING_EFFORT`.
 
+Codex can also generate images (`image_generation = true`). The built-in tool writes them to
+`CODEX_HOME/generated_images/<thread_id>/`; the Bot attaches them to the reply (up to 10) and
+deletes that directory afterwards. Leftovers from crashed requests are swept with the attachments.
+
 `/codex` accepts an optional `image` attachment (PNG/JPEG/WebP/GIF, `MAX_ATTACHMENT_BYTES`). The
 file is saved into a per-request directory under `/tmp/discord-codex` (container tmpfs), passed to
 `codex exec -i`, and deleted when the request finishes; a sweeper removes any leftover request
@@ -193,8 +197,8 @@ filter exists; every member who can see and invoke the command in those guilds m
 - CLI prompt history is disabled with `history.persistence = "none"`.
 - Session files remain enabled because automatic memory generation needs durable session input.
 - The container mounts no host home or source workspace.
-- Codex command tools, apps, browser, computer use, image generation, plugins, `view_image`
-  (reads local files), goals and multi-agent are disabled. Web search is enabled (`web_search =
+- Codex command tools, apps, browser, computer use, plugins, `view_image` (reads local files),
+  goals and multi-agent are disabled; image generation is enabled. Web search is enabled (`web_search =
   "live"`); it runs on OpenAI's side, so the container itself never makes outbound requests for
   it. The model-visible tool list is then `web__run` plus `apply_patch`, which the read-only
   sandbox plus `approval_policy = "never"` rejects (verified: asking `/codex` to create a file is

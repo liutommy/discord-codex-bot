@@ -13,7 +13,9 @@ unified_exec = false
 apps = false
 browser_use = false
 computer_use = false
-image_generation = false
+# Built-in image_gen saves under CODEX_HOME/generated_images/<thread_id>/; the Bot attaches and
+# deletes them per request.
+image_generation = true
 plugins = false
 view_image = false
 goals = false

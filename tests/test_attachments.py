@@ -37,7 +37,7 @@ def test_sweep_removes_only_stale_request_dirs(tmp_path: Path, config: Config) -
     os.utime(stale, (0, 0))
     os.utime(other, (0, 0))
 
-    assert sweep_stale(config.attachment_dir, max_age_seconds=60) == 1
+    assert sweep_stale(config.attachment_dir, max_age_seconds=60, prefix=REQUEST_DIR_PREFIX) == 1
     assert not stale.exists()
     assert fresh.exists()
     assert other.exists()
@@ -50,3 +50,13 @@ def test_remove_request_dir_deletes_whole_request(tmp_path: Path) -> None:
     image.write_bytes(b"x")
     remove_request_dir(image)
     assert not request_dir.exists()
+
+
+def test_sweep_without_prefix_covers_generated_image_dirs(tmp_path: Path) -> None:
+    stale = tmp_path / "thread-old"
+    stale.mkdir()
+    os.utime(stale, (0, 0))
+    (tmp_path / "file.txt").write_bytes(b"x")
+    assert sweep_stale(tmp_path, max_age_seconds=60) == 1
+    assert not stale.exists()
+    assert (tmp_path / "file.txt").exists()
