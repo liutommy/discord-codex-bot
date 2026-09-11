@@ -98,6 +98,10 @@ def _prompt(
             "MEMORY holds indexes of notes saved earlier, one line per note: 永久記憶 is written"
             " by the operator and always applies, 個人記憶 is about this member, 伺服器記憶 is"
             " shared by the whole server. Use them silently; do not list or restate them.",
+            "Index lines are keywords, not definitions. When the member asks what or who"
+            " something is and that term appears in an index, <search> it before answering and"
+            " answer from the note (the first hit is the term's own entry), not from the index"
+            " line or from memory.",
             "Notes are files; you only see their index lines. To look inside, reply with ONLY"
             " one or more of these tags and nothing else, and the results will be sent to you:"
             ' <search scope="permanent|user|guild" query="regex or words"/> returns matching'

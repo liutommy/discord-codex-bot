@@ -112,3 +112,24 @@ def test_permanent_memory_is_read_only_whole_index_and_searchable(tmp_path: Path
     assert extract_read_requests('<recall scope="permanent" name="house-rules"/>') == [
         ("recall", "permanent", "house-rules", 1, None)
     ]
+
+
+def test_search_ranks_definition_lines_before_mentions() -> None:
+    from discord_codex_bot.memory import search_snippets
+
+    article = ["TDN 是元兇。", "很多人提到 TDN。", "", "TDN 又出現了。"]
+    glossary = [
+        "## 人物",
+        "TDN",
+        "    一切的元兇。本篇役名「三浦」。",
+        "    被要求學狗叫。",
+        "",
+        "DB",
+        "    追尾的人。",
+    ]
+    sources = [("文章", "a.md", article), ("角色", "b.md", glossary)]
+    out = search_snippets(sources, "TDN", LIMITS, "none")
+    first = out.split("\n\n")[0]
+    assert first.startswith("## 角色 (b.md) line 2") and "一切的元兇" in first and "學狗叫" in first
+    assert "DB" not in first
+    assert search_snippets([("x", "x.md", ["nothing"])], "TDN", LIMITS, "none") == "none"

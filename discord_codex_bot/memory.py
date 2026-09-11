@@ -240,38 +240,16 @@ class MemoryStore:
     # ----- read on demand --------------------------------------------------------------------
 
     def search(self, scope: str, guild_id: int | None, user_id: int | None, query: str) -> str:
-        """Snippet-first search over every note: matching lines with a few lines of context."""
+        """Snippet-first search over every note, definition lines first."""
         directory = self.scope_dir(scope, guild_id, user_id)
-        try:
-            pattern = re.compile(query, re.I)
-        except re.error:
-            pattern = re.compile(re.escape(query), re.I)
-        context = self._limits.search_context_lines
-        snippets: list[str] = []
-        total = 0
+        sources = []
         for entry in self.all_entries(scope, guild_id, user_id):
             try:
                 lines = (directory / TOPIC_DIR / entry.file).read_text("utf-8").splitlines()
             except OSError:
                 continue
-            for number, line in enumerate(lines, 1):
-                if not pattern.search(line):
-                    continue
-                total += 1
-                if total > self._limits.search_max_matches:
-                    continue
-                start, end = max(0, number - 1 - context), min(len(lines), number + context)
-                block = "\n".join(
-                    f"{'>' if i == number else ' '} {i:>4}: {lines[i - 1]}"
-                    for i in range(start + 1, end + 1)
-                )
-                snippets.append(f"## {entry.name} ({entry.file}) line {number}\n{block}")
-        if not snippets:
-            return f"（「{query}」沒有命中任何記憶）"
-        text = "\n\n".join(snippets)
-        if total > self._limits.search_max_matches:
-            text += f"\n\n[顯示 {self._limits.search_max_matches} / {total} 個命中；請縮小查詢]"
-        return self._truncate(text)
+            sources.append((entry.name, entry.file, lines))
+        return search_snippets(sources, query, self._limits, f"（「{query}」沒有命中任何記憶）")
 
     def recall(
         self,
@@ -398,33 +376,13 @@ class PermanentMemory:
         return sorted(p for p in topics.glob("*.md") if p.is_file()) if topics.is_dir() else []
 
     def search(self, query: str) -> str:
-        try:
-            pattern = re.compile(query, re.I)
-        except re.error:
-            pattern = re.compile(re.escape(query), re.I)
-        context = self._limits.search_context_lines
-        snippets: list[str] = []
-        total = 0
-        for path in self._topics():
-            lines = path.read_text("utf-8", errors="ignore").splitlines()
-            for number, line in enumerate(lines, 1):
-                if not pattern.search(line):
-                    continue
-                total += 1
-                if total > self._limits.search_max_matches:
-                    continue
-                start, end = max(0, number - 1 - context), min(len(lines), number + context)
-                block = "\n".join(
-                    f"{'>' if i == number else ' '} {i:>4}: {lines[i - 1]}"
-                    for i in range(start + 1, end + 1)
-                )
-                snippets.append(f"## {path.stem} ({path.name}) line {number}\n{block}")
-        if not snippets:
-            return f"（「{query}」沒有命中任何永久記憶）"
-        text = "\n\n".join(snippets)
-        if total > self._limits.search_max_matches:
-            text += f"\n\n[顯示 {self._limits.search_max_matches} / {total} 個命中；請縮小查詢]"
-        return _truncate(text, self._limits.read_max_bytes)
+        sources = [
+            (path.stem, path.name, path.read_text("utf-8", errors="ignore").splitlines())
+            for path in self._topics()
+        ]
+        return search_snippets(
+            sources, query, self._limits, f"（「{query}」沒有命中任何永久記憶）"
+        )
 
     def recall(self, name: str, offset: int = 1, lines: int | None = None) -> str:
         if name == LIST_NAME:
@@ -439,6 +397,58 @@ class PermanentMemory:
         body = "\n".join(f"{i:>4}: {line}" for i, line in enumerate(chunk, start))
         header = f"[{match.name} 第 {start}–{start + len(chunk) - 1} 行，共 {len(all_lines)} 行]"
         return _truncate(f"{header}\n{body}", self._limits.read_max_bytes)
+
+
+def _term_score(line: str, query: str, pattern: re.Pattern[str]) -> int:
+    """3 = the line is the term itself, 2 = the line starts with it, 1 = mentioned, 0 = no."""
+    bare = re.sub(r"^[\s#*>\-\d.:|]+|[\s*|]+$", "", line)
+    if not pattern.search(line):
+        return 0
+    if bare.casefold() == query.casefold():
+        return 3
+    if bare.casefold().startswith(query.casefold()) and len(bare) <= len(query) + 12:
+        return 2
+    return 1
+
+
+def search_snippets(
+    sources: list[tuple[str, str, list[str]]], query: str, limits: MemoryLimits, none: str
+) -> str:
+    """Rank hits so a line that *is* the term (a glossary/character entry) comes first with its
+    definition block, then lines that start with it, then mere mentions with ± context. Without
+    this a term mentioned dozens of times in a long article buries its own definition."""
+    try:
+        pattern = re.compile(query, re.I)
+    except re.error:
+        pattern = re.compile(re.escape(query), re.I)
+    context = limits.search_context_lines
+    hits: list[tuple[int, int, int, str]] = []
+    for order, (name, file, lines) in enumerate(sources):
+        for number, line in enumerate(lines, 1):
+            score = _term_score(line, query, pattern)
+            if not score:
+                continue
+            if score >= 2:
+                # definition block: the term line plus what follows until the next blank line
+                end = number
+                while end < len(lines) and lines[end].strip() and end - number < 8:
+                    end += 1
+                start = number - 1
+            else:
+                start, end = max(0, number - 1 - context), min(len(lines), number + context)
+            block = "\n".join(
+                f"{'>' if i == number else ' '} {i:>4}: {lines[i - 1]}"
+                for i in range(start + 1, end + 1)
+            )
+            hits.append((-score, order, number, f"## {name} ({file}) line {number}\n{block}"))
+    if not hits:
+        return none
+    hits.sort()
+    shown = hits[: limits.search_max_matches]
+    text = "\n\n".join(h[3] for h in shown)
+    if len(hits) > len(shown):
+        text += f"\n\n[顯示 {len(shown)} / {len(hits)} 個命中，已依相關度排序；請縮小查詢]"
+    return _truncate(text, limits.read_max_bytes)
 
 
 def _truncate(text: str, max_bytes: int) -> str:
