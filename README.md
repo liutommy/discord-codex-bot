@@ -1,7 +1,7 @@
 # Discord Codex Bot
 
 Private Discord slash commands backed by Codex CLI authenticated with a ChatGPT subscription. The
-runtime is one always-restarting Docker container named `tommy_test`.
+runtime is one always-restarting Docker container (`BOT_CONTAINER_NAME`, default `discord-codex-bot`).
 
 ## Architecture
 
@@ -32,7 +32,7 @@ must be isolated from each other.
 This repo owns its Python environment. Do not use another repo's uv environment.
 
 ```bash
-cd /home/tommy_liu/tommy/discord-codex-bot
+cd discord-codex-bot
 UV_CACHE_DIR=.uv-cache uv sync
 UV_CACHE_DIR=.uv-cache uv run pytest
 UV_CACHE_DIR=.uv-cache uv run ruff check .
@@ -56,7 +56,7 @@ Never paste the Discord token into chat, source files, or GitHub.
 ## 2. Configure the test server
 
 ```bash
-cd /home/tommy_liu/tommy/discord-codex-bot
+cd discord-codex-bot
 cp .env.example .env
 chmod 600 .env
 ```
@@ -76,7 +76,7 @@ The `.env` file is ignored by Git and excluded from the Docker build context.
 
 ```bash
 docker compose up -d --build
-docker inspect -f '{{.Name}} restart={{.HostConfig.RestartPolicy.Name}}' tommy_test
+docker inspect -f '{{.Name}} restart={{.HostConfig.RestartPolicy.Name}}' discord-codex-bot
 docker compose ps
 ```
 
@@ -92,17 +92,17 @@ docker compose up -d --force-recreate
 Run device authentication inside the container:
 
 ```bash
-docker exec -it tommy_test codex login --device-auth
+docker exec -it discord-codex-bot codex login --device-auth
 ```
 
 Open the displayed URL, enter the one-time code, and sign in with the ChatGPT account whose
 subscription quota should be used. The login is stored only in the named volume
-`tommy_test_codex_home`.
+`<BOT_CONTAINER_NAME>_codex_home`.
 
 Verify the authentication mode:
 
 ```bash
-docker exec tommy_test codex login status
+docker exec discord-codex-bot codex login status
 ```
 
 The required result is:
@@ -128,7 +128,7 @@ Guild-scoped slash commands normally appear quickly. Run:
 ```text
 /codex-status
 /codex prompt:請用一句話說明你目前能做什麼
-@Codex DC bot 這張圖裡有什麼？   (with images attached to the message)
+@<your bot> 這張圖裡有什麼？   (with images attached to the message)
 ```
 
 Both entry points share one pipeline: guild allowlist → validation → serial queue → `codex exec`.
@@ -214,7 +214,7 @@ subscription quota. The serial queue limits concurrency but does not create addi
 ```bash
 # Status
 docker compose ps
-docker exec tommy_test codex login status
+docker exec discord-codex-bot codex login status
 
 # Logs
 docker compose logs --tail=200 bot
@@ -241,6 +241,6 @@ UV_CACHE_DIR=.uv-cache uv sync
 UV_CACHE_DIR=.uv-cache uv run pytest
 docker compose build --pull
 docker compose up -d
-docker exec tommy_test codex --version
-docker exec tommy_test codex login status
+docker exec discord-codex-bot codex --version
+docker exec discord-codex-bot codex login status
 ```

@@ -14,7 +14,7 @@ for name in DISCORD_TOKEN DISCORD_APPLICATION_ID ALLOWED_GUILD_IDS; do
 done
 
 if [ -n "$missing" ]; then
-  echo "tommy_test is waiting for configuration; missing:$missing"
+  echo "discord-codex-bot is waiting for configuration; missing:$missing"
   exec python -c "import time; time.sleep(2147483647)"
 fi
 

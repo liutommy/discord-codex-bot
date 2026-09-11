@@ -1,12 +1,12 @@
 services:
   bot:
-    container_name: tommy_test
+    container_name: ${BOT_CONTAINER_NAME:-discord-codex-bot}
     build:
       context: .
       args:
         CODEX_VERSION: ${CODEX_VERSION:-0.153.4}
         UV_VERSION: ${UV_VERSION:-0.10.0}
-    image: tommy/discord-codex-bot:local
+    image: discord-codex-bot:local
     restart: always
     init: true
     env_file:
@@ -17,7 +17,7 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - type: volume
-        source: tommy-test-codex-home
+        source: codex-home
         target: /var/lib/codex
     read_only: true
     tmpfs:
@@ -36,5 +36,5 @@ services:
       start_period: 10s
 
 volumes:
-  tommy-test-codex-home:
-    name: tommy_test_codex_home
+  codex-home:
+    name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_codex_home
