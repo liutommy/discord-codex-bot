@@ -203,8 +203,12 @@ the persona/style was rebuilt, or the member used `new:True` / `-reset` — a ba
 `HARVEST_INTERVAL_MINUTES`) reads its transcript from the Codex session rollout and asks Codex
 (`--output-schema`) for the few things worth remembering about that member next month; each
 becomes a personal note. One-off questions, looked-up facts and the persona itself are skipped.
-Each thread is harvested once; the pass waits while the last known 5-hour reading is under
-`CONSOLIDATE_MIN_REMAINING_PERCENT`. Operators can run it on demand inside the container with
+The rule is a state, not an event: whatever makes a thread non-resumable (TTL, instruction
+fingerprint, workspace switch, `new:True`, `-reset`, being replaced) makes it a harvest
+candidate, and a switch wakes the pass immediately instead of waiting for the interval. Each
+thread is harvested once per retirement — a thread continued afterwards by replying to an old
+answer is harvested again when it retires next. The pass waits while the last known 5-hour
+reading is under `CONSOLIDATE_MIN_REMAINING_PERCENT`. Operators can run it on demand inside the container with
 `python -m discord_codex_bot.harvest` (`--force` ignores the quota gate); the nightly
 consolidation has the same entry point, `python -m discord_codex_bot.consolidate [--force]`.
 
