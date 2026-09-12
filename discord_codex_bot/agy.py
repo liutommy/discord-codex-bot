@@ -134,18 +134,21 @@ async def run_agy(
     personal_style: str = "",
     schema: Path | None = None,
     plain: bool = False,
+    links: str = "",
 ) -> CodexResult:
     """One turn on Antigravity CLI with the same contract as run_codex.
 
     Images are made visible by adding their directory to the workspace (--add-dir) and telling the
     model to open them with view_file; agy has no attach-image flag in print mode.
     """
+    # Same rule as run_codex: a member with a personal style gets the persona-free workspace.
+    plain = plain or bool(personal_style)
     workspace = config.codex_workspace_plain if plain else config.codex_workspace
     project = await ensure_project(config, workspace)
     prompt = (
         user_prompt
         if raw
-        else _prompt(user_prompt, memory, output_style(config), personal_style)
+        else _prompt(user_prompt, memory, output_style(config), personal_style, links)
     )
     args = ["--project", project, "--model", model, "--output-format", "stream-json"]
     args += ["--input-format", "stream-json", "--print-timeout", f"{config.codex_timeout_seconds}s"]
@@ -165,7 +168,8 @@ async def run_agy(
     code, out, err = await _run(args, stdin, workspace, config)
     if code != 0 and resume:
         LOGGER.warning("agy resume of %s failed (%s); starting a new conversation", resume, code)
-        args = [a for a in args if a not in ("--conversation", resume)]
+        index = args.index("--conversation")
+        args = args[:index] + args[index + 2 :]
         resume = ""
         code, out, err = await _run(args, stdin, workspace, config)
     conversation, response, error = parse_stream(out)

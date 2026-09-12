@@ -136,9 +136,11 @@ Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
 
 Two backends share that pipeline. Codex CLI is the default; Google's Antigravity CLI (`agy`) is
-the second, and each member picks with `/<prefix>-model` (Codex, or one of the 14 `agy models`
-slugs — the reasoning effort is part of the slug, so Gemini Flash comes as High/Medium/Low
-variants and the Claude models take no effort flag). `agy` runs headless
+the second, and each member picks a model *family* plus a default reasoning effort with
+`/<prefix>-model` (Codex Luna; Gemini 3.8/3.7/3.6 Flash; Gemini 3.1 Pro; Claude Sonnet 4.6;
+Claude Opus 4.6; GPT-OSS 120B). The shared `effort` option is mapped onto what each family can run
+— agy bakes the effort into the model slug (Flash: low/medium/high, Pro: low/high, Claude and
+gpt-oss fixed), verified against a full model × `--effort` matrix. `agy` runs headless
 (`--input-format stream-json`, `--conversation` to resume, `--json-schema` for structured output,
 `--add-dir` + `view_file` for images), inside a registered project so `AGENTS.md` (the persona)
 applies, with `config/agy-settings.json` denying commands, writes, URL access and MCP. Its Google
@@ -146,6 +148,18 @@ sign-in lives in the `<name>_agy_home` volume: run `agy` inside the container on
 + code loop). Threads never cross backends; switching models starts a new thread and harvests the
 old one. Google's content policy may reject prompts on the Gemini models that the Claude models
 accept. Release announcements (`announce/latest.md`) are posted only to `ANNOUNCE_CHANNEL_IDS`.
+
+Links are read by the Bot itself, so both backends see the same thing: every http(s) URL in a
+member's message (up to `LINK_MAX_URLS`) is fetched, converted to text (`LINK_MAX_CHARS` per page)
+and injected as untrusted `<LINK>` blocks; the model can also ask for a page with
+`<fetch url="…"/>` during its read loop. Only public addresses are fetched — LAN, loopback and
+reserved ranges are refused before any connection — with size, time and redirect bounds. When the
+plain fetch is blocked (bot challenge, 403/429/503, no readable text) or the model asks with
+`<fetch url="…" render="1"/>` because the member wants to know what a page *looks* like, the Bot
+falls back to headless Chromium (Playwright, installed in the image): it waits out the challenge,
+takes the rendered text and attaches a full-page screenshot (`LINK_RENDER_TIMEOUT_SECONDS`,
+`LINK_SCREENSHOT_MAX_HEIGHT`) so the model can see the pictures. Pages behind logins still come
+back as "打不開"; on the Codex backend OpenAI's own web tool remains available as a second path.
 
 Both entry points share one pipeline: guild allowlist → validation → serial queue → `codex exec`.
 The `@mention` form keeps the question visible as the member's own message, supports up to
@@ -158,10 +172,11 @@ Messages that do not mention the Bot are discarded without processing.
 effort (`Medium`). A command in another server or outside the configured test channel must not execute.
 
 The Bot serializes Codex work to one request at a time and caps the queue, prompt, response, and
-runtime. Discord users cannot select the model. `/codex` has an optional `effort` choice — Low,
-Medium (default), High, Extra high, Max — mapped to the CLI values `low/medium/high/xhigh/max`
-verified against `codex debug models` for `gpt-5.6-luna`; the CLI forwards any string verbatim, so
-the Bot only offers this allowlist. `@mention` requests use the default `CODEX_REASONING_EFFORT`.
+runtime. `/codex` has an optional `effort` choice — Low, Medium (default), High, Extra high, Max —
+that overrides the member's stored default for one request; on Codex these map to the CLI values
+`low/medium/high/xhigh/max` verified against `codex debug models` for `gpt-5.6-luna` (the CLI
+forwards any string verbatim, so the Bot only offers this allowlist). `@mention` requests use the
+member's stored effort, else `CODEX_REASONING_EFFORT`.
 
 Follow-up questions keep their context: each answer is a Codex thread, and the Bot resumes it with
 `codex exec resume <thread_id>` when the same member asks again in the same channel within

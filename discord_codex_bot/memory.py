@@ -117,7 +117,7 @@ class MemoryStore:
         """The injected window: the first index_max_lines / index_max_bytes of MEMORY.md."""
         lines = [entry.line() for entry in self.entries(scope, guild_id, user_id)]
         kept: list[str] = []
-        size = 0
+        size = -1  # "\n".join(): one separator fewer than lines, same measure as _write_index
         for line in lines[: self._limits.index_max_lines]:
             size += len(line.encode("utf-8")) + 1
             if size > self._limits.index_max_bytes:
@@ -280,6 +280,8 @@ class MemoryStore:
         start = max(1, offset)
         chunk = all_lines[start - 1 : start - 1 + page]
         body = "\n".join(f"{i:>4}: {line}" for i, line in enumerate(chunk, start))
+        if not chunk:
+            return f"[{match.file} 共 {len(all_lines)} 行；offset {start} 已超過檔尾]"
         header = f"[{match.file} 第 {start}–{start + len(chunk) - 1} 行，共 {len(all_lines)} 行]"
         return self._truncate(f"{header}\n{body}")
 
@@ -416,20 +418,34 @@ class PermanentMemory:
         start = max(1, offset)
         chunk = all_lines[start - 1 : start - 1 + page]
         body = "\n".join(f"{i:>4}: {line}" for i, line in enumerate(chunk, start))
+        if not chunk:
+            return f"[{match.name} 共 {len(all_lines)} 行；offset {start} 已超過檔尾]"
         header = f"[{match.name} 第 {start}–{start + len(chunk) - 1} 行，共 {len(all_lines)} 行]"
         return _truncate(f"{header}\n{body}", self._limits.read_max_bytes)
 
 
+def query_pattern(query: str) -> re.Pattern[str]:
+    """Words separated by "|", each matched literally (case-insensitive). The query comes from the
+    model (and therefore indirectly from members), so it is never compiled as a regex: a
+    catastrophic pattern against member-written notes would stall the whole event loop."""
+    words = [w.strip() for w in query.split("|") if w.strip()]
+    if not words:
+        return re.compile(r"(?!x)x")  # matches nothing
+    return re.compile("|".join(re.escape(w) for w in words), re.I)
+
+
 def _term_score(line: str, query: str, pattern: re.Pattern[str]) -> int:
     """3 = the line is the term itself, 2 = the line starts with it, 1 = mentioned, 0 = no."""
-    bare = re.sub(r"^[\s#*>\-\d.:|]+|[\s*|]+$", "", line)
+    bare = re.sub(r"^[\s#*>\-\d.:|]+|[\s*|]+$", "", line).casefold()
     if not pattern.search(line):
         return 0
-    if bare.casefold() == query.casefold():
-        return 3
-    if bare.casefold().startswith(query.casefold()) and len(bare) <= len(query) + 12:
-        return 2
-    return 1
+    best = 1
+    for word in (w.strip().casefold() for w in query.split("|") if w.strip()):
+        if bare == word:
+            return 3
+        if bare.startswith(word) and len(bare) <= len(word) + 12:
+            best = 2
+    return best
 
 
 def search_snippets(
@@ -438,10 +454,7 @@ def search_snippets(
     """Rank hits so a line that *is* the term (a glossary/character entry) comes first with its
     definition block, then lines that start with it, then mere mentions with ± context. Without
     this a term mentioned dozens of times in a long article buries its own definition."""
-    try:
-        pattern = re.compile(query, re.I)
-    except re.error:
-        pattern = re.compile(re.escape(query), re.I)
+    pattern = query_pattern(query)
     context = limits.search_context_lines
     hits: list[tuple[int, int, int, str]] = []
     for order, (name, file, lines) in enumerate(sources):

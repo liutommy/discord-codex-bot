@@ -117,6 +117,12 @@ class Config:
     announce_dir: Path
     announce_channel_ids: frozenset[int]
     announce_approved: str
+    link_max_urls: int
+    link_max_bytes: int
+    link_max_chars: int
+    link_timeout_seconds: int
+    link_render_timeout_seconds: int
+    link_screenshot_max_height: int
     consolidate_hour: int
     consolidate_timezone: str
     consolidate_min_remaining_percent: int
@@ -188,6 +194,15 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         ),
         # Hard gate: only the announcement whose content hash the owner approved is ever posted.
         announce_approved=values.get("ANNOUNCE_APPROVED", "").strip(),
+        # Bot-side link fetching (all backends): URLs in a message are fetched into the prompt and
+        # the model may ask for more with <fetch url/>. Public addresses only.
+        link_max_urls=_positive_int(values, "LINK_MAX_URLS", 3),
+        link_max_bytes=_positive_int(values, "LINK_MAX_BYTES", 2_000_000),
+        link_max_chars=_positive_int(values, "LINK_MAX_CHARS", 20_000),
+        link_timeout_seconds=_positive_int(values, "LINK_TIMEOUT_SECONDS", 15),
+        # Chromium fallback (bot-challenge / client-rendered pages) and on-demand page screenshots.
+        link_render_timeout_seconds=_positive_int(values, "LINK_RENDER_TIMEOUT_SECONDS", 40),
+        link_screenshot_max_height=_positive_int(values, "LINK_SCREENSHOT_MAX_HEIGHT", 4000),
         # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.
         consolidate_hour=_bounded_int(values, "CONSOLIDATE_HOUR", 2, 0, 23),
         consolidate_timezone=values.get("CONSOLIDATE_TIMEZONE", "").strip() or "Asia/Taipei",

@@ -103,7 +103,11 @@ async def harvest_thread(
     store: MemoryStore, config: Config, key: str, thread_id: str, runner: Runner
 ) -> int:
     """Distil one finished thread into the member's personal memory; returns notes added."""
-    guild_id, _channel_id, user_id = (int(part) for part in key.split(":"))
+    try:
+        guild_id, _channel_id, user_id = (int(part) for part in key.split(":"))
+    except ValueError:
+        LOGGER.warning("Harvest: malformed key %r for thread %s; dropping", key, thread_id[:8])
+        return 0
     text = transcript(config, thread_id)
     if not text:
         return 0

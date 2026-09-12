@@ -5,6 +5,7 @@ description = "Private Discord gateway for a subscription-authenticated Codex CL
 requires-python = ">=3.12"
 dependencies = [
     "discord.py>=2.6,<3",
+    "playwright>=1.47,<2",
 ]
 
 [dependency-groups]

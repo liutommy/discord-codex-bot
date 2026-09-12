@@ -103,3 +103,41 @@ def test_entries_without_workspace_flag_are_never_resumed(tmp_path: Path) -> Non
     store = ThreadStore(path, ttl_seconds=600, version="v1")
     assert store.current("1:2:3", plain=False) == "" and store.current("1:2:3", plain=True) == ""
     assert store.by_message(5, plain=False) == "" and store.by_message(5, plain=True) == ""
+
+
+def test_message_links_are_capped_and_empty_ids_ignored(tmp_path: Path, monkeypatch) -> None:
+    from discord_codex_bot import threads
+
+    monkeypatch.setattr(threads, "MAX_MESSAGE_LINKS", 2)
+    store = ThreadStore(tmp_path / "t.json", ttl_seconds=600, version="v1")
+    key = ThreadStore.key(1, 2, 3)
+    for message_id in (10, 11, 12):
+        store.remember(key, f"thread-{message_id}", message_id=message_id)
+    assert store.by_message(10) == ""  # oldest link evicted
+    assert store.by_message(11) == "thread-11" and store.by_message(12) == "thread-12"
+    store.remember(key, "", message_id=13)
+    assert store.current(key) == "thread-12" and store.by_message(13) == ""
+    assert store.harvest_candidates() == [(key, "thread-10"), (key, "thread-11")]
+
+
+def test_store_survives_corrupt_or_unwritable_file(tmp_path: Path) -> None:
+    path = tmp_path / "t.json"
+    path.write_text("{not json", "utf-8")
+    store = ThreadStore(path, ttl_seconds=600, version="v1")
+    assert store.current("1:2:3") == "" and store.harvest_candidates() == []
+    unwritable = ThreadStore(tmp_path / "missing" / "t.json", ttl_seconds=600, version="v1")
+    unwritable.remember("1:2:3", "a", message_id=1)  # OSError swallowed
+    assert unwritable.current("1:2:3") == "a"
+    assert not (tmp_path / "missing").exists()
+
+
+def test_reset_of_an_expired_thread_is_harvested_once(tmp_path: Path) -> None:
+    import time
+
+    store = ThreadStore(tmp_path / "t.json", ttl_seconds=60, version="v1")
+    key = ThreadStore.key(1, 2, 3)
+    store.remember(key, "a")
+    later = time.time() + 61
+    assert store.harvest_candidates(now=later) == [(key, "a")]
+    assert store.forget(key)  # pending and by_key both name "a": listed once
+    assert store.harvest_candidates(now=later) == [(key, "a")]

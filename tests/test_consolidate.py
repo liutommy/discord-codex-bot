@@ -87,3 +87,63 @@ def test_read_rate_limits_from_newest_rollout(tmp_path: Path, config: Config) ->
     limits = read_rate_limits(config)
     assert limits is not None
     assert limits.primary_used_percent == 17.0 and limits.secondary_used_percent == 50.0
+
+
+# ----- _parse and consolidate_scope ----------------------------------------------------------
+
+import pytest  # noqa: E402
+
+from discord_codex_bot.consolidate import _parse, consolidate_scope  # noqa: E402
+
+
+def test_parse_drops_items_without_text_and_strips() -> None:
+    answer = json.dumps(
+        {
+            "notes": [
+                {"name": " a ", "date": " 2026-09-11 ", "text": " keep "},
+                {"name": "b", "date": "2026-09-11", "text": "   "},
+                {"name": "c", "date": "2026-09-11"},
+            ]
+        }
+    )
+    assert _parse(answer) == [Note("a", "2026-09-11", "keep")]
+    assert _parse('{"notes": []}') == []
+    with pytest.raises(KeyError):
+        _parse("{}")
+    with pytest.raises(json.JSONDecodeError):
+        _parse("not json")
+
+
+async def test_consolidate_scope_refuses_an_empty_rewrite(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path, LIMITS)
+    store.add("user", 1, 7, "暱稱", "叫我阿明")
+    calls = 0
+
+    async def empty(prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return '{"notes": []}'
+
+    with pytest.raises(RuntimeError, match="returned no notes"):
+        await consolidate_scope(store, "user", 1, 7, empty, 100_000)
+    assert calls == 1
+    assert [n.text for n in store.notes("user", 1, 7)] == ["叫我阿明"]
+    assert not (tmp_path / "1" / "users" / "7" / ".backup").exists()
+    assert await consolidate_scope(store, "guild", 1, None, empty, 100_000) == (0, 0)
+    assert calls == 1  # an empty scope never calls the model
+
+
+async def test_consolidate_scope_batches_large_input(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path, LIMITS)
+    for i in range(4):
+        store.add("guild", 1, None, f"n{i}", "x" * 100)
+    prompts: list[str] = []
+
+    async def echo(prompt: str) -> str:
+        prompts.append(prompt)
+        incoming = json.loads(prompt.split("\n\n", 1)[1])["notes"]
+        return json.dumps({"notes": incoming})
+
+    assert await consolidate_scope(store, "guild", 1, None, echo, 320) == (4, 4)
+    assert len(prompts) == 2
+    assert [n.name for n in store.notes("guild", 1, None)] == ["n0", "n1", "n2", "n3"]

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
+from .links import extract_fetch_tags, fetch_or_render, find_urls, link_blocks
 from .memory import (
     SCOPES,
     MemoryLimits,
@@ -251,6 +253,8 @@ class DiscordCodexClient(discord.Client):
             return await run_codex(text, self.config, effort=target.effort, **kw)
 
         images: list[Path] = []
+        self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
+        link_dir = Path(tempfile.mkdtemp(prefix="req-", dir=self.config.attachment_dir))
         try:
             for attachment in attachments:
                 suffix = validate_image(attachment.content_type, attachment.size, self.config)
@@ -265,26 +269,46 @@ class DiscordCodexClient(discord.Client):
                 if section
             )
             style = self.memory.get_style(guild_id, user_id)
+            links, shots = await link_blocks(
+                find_urls(prompt, self.config.link_max_urls), self.config, link_dir
+            )
+            images.extend(shots)
             result = await self.queue.run(
                 lambda: turn(
-                    prompt, images=images, resume=resume, memory=memory, personal_style=style
+                    prompt,
+                    images=images,
+                    resume=resume,
+                    memory=memory,
+                    personal_style=style,
+                    links=links,
                 )
             )
             # On-demand reads (search snippets / paged recall): the Bot executes the request and
             # feeds the result back into the same thread. Bounded by MEMORY_RECALL_ROUNDS.
             for _ in range(self.config.memory_recall_rounds):
                 wanted = extract_read_requests(result.text)
-                if not wanted:
+                urls = extract_fetch_tags(result.text)[: self.config.link_max_urls]
+                if not wanted and not urls:
                     break
-                recalled = "\n\n".join(
+                blocks = [
                     f'<RESULT kind="{kind}" scope="{scope}" target="{target}">\n'
                     + self._read(kind, scope, guild_id, user_id, target, offset, lines)
                     + "\n</RESULT>"
                     for kind, scope, target, offset, lines in wanted
-                )
+                ]
+                extra: list[Path] = []
+                for i, (url, render) in enumerate(urls):
+                    fetched, shot = await fetch_or_render(
+                        url, self.config, link_dir / f"fetch{i}", render
+                    )
+                    blocks.append(f'<LINK url="{url}">\n{fetched}\n</LINK>')
+                    if shot is not None:
+                        extra.append(shot)
+                recalled = "\n\n".join(blocks)
                 result = await self.queue.run(
-                    lambda text=recalled, thread=result.thread_id: turn(
+                    lambda text=recalled, thread=result.thread_id, imgs=tuple(extra): turn(
                         text + "\n\nNow answer the member's question.",
+                        images=imgs,
                         resume=thread,
                         raw=True,
                         personal_style=style,
@@ -308,6 +332,7 @@ class DiscordCodexClient(discord.Client):
         finally:
             for path in images:
                 remove_request_dir(path)
+            remove_dir(link_dir)
 
     def _read(
         self,
@@ -350,7 +375,7 @@ class DiscordCodexClient(discord.Client):
         return parse_choice(self.memory.get_model(guild_id, user_id), self.config.codex_model).value
 
     def _remember(
-        self, key: str, thread_id: str, message_id: int, plain: bool, model: str
+        self, key: str, thread_id: str, message_id: int | None, plain: bool, model: str
     ) -> None:
         """Record the thread; a switch retires the old one, so harvest it without waiting."""
         switched = self.threads.switched(key, thread_id)
@@ -541,15 +566,27 @@ class DiscordCodexClient(discord.Client):
             resumed=result.resumed,
         )
         chunks = split_discord_message(reply)
+        sent_id = None
         try:
             sent = await interaction.edit_original_response(
                 content=chunks[0], attachments=self._files(result)
             )
+            sent_id = sent.id
             for chunk in chunks[1:]:
                 await interaction.followup.send(chunk)
+        except discord.HTTPException:
+            LOGGER.exception(
+                "Delivery failed for /%s guild=%s", self.config.command_prefix, interaction.guild_id
+            )
+            try:
+                await interaction.followup.send(
+                    "回覆送出失敗（Discord 錯誤），請再問一次。", ephemeral=True
+                )
+            except discord.HTTPException:
+                pass
         finally:
             remove_dir(result.generated_dir)
-        self._remember(key, result.thread_id, sent.id, plain, model)
+        self._remember(key, result.thread_id, sent_id, plain, model)
         LOGGER.info("Completed slash guild=%s user=%s", interaction.guild_id, interaction.user.id)
 
     # ----- @mention entry point --------------------------------------------------------------
@@ -592,13 +629,21 @@ class DiscordCodexClient(discord.Client):
                 prompt, attachments, guild_id, message.author.id, resume=resume
             )
         chunks = split_discord_message(result.text)
+        sent_id = None
         try:
             sent = await message.reply(chunks[0], files=self._files(result), mention_author=False)
+            sent_id = sent.id
             for chunk in chunks[1:]:
                 await message.channel.send(chunk)
+        except discord.HTTPException:
+            LOGGER.exception("Delivery failed for @mention guild=%s", guild_id)
+            try:
+                await message.channel.send("回覆送出失敗（Discord 錯誤），請再問一次。")
+            except discord.HTTPException:
+                pass
         finally:
             remove_dir(result.generated_dir)
-        self._remember(key, result.thread_id, sent.id, plain, model)
+        self._remember(key, result.thread_id, sent_id, plain, model)
         LOGGER.info("Completed @mention guild=%s user=%s", message.guild.id, message.author.id)
 
 

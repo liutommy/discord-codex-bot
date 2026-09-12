@@ -36,6 +36,9 @@ COPY --chown=1000:1000 announce /opt/discord-codex/announce
 # self-update is disabled at runtime (AGY_CLI_DISABLE_AUTO_UPDATE).
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
+    && PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright /app/.venv/bin/playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chown -R 1000:1000 /opt/ms-playwright \
     && mkdir -p /home/node \
     && HOME=/home/node bash -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash' \
     && /home/node/.local/bin/agy --version \
@@ -58,6 +61,7 @@ RUN mkdir -p /var/lib/codex /workspace-plain \
 ENV PATH="/app/.venv/bin:/home/node/.local/bin:${PATH}" \
     AGY_CLI_DISABLE_AUTO_UPDATE=true \
     AGY_HOME=/home/node \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
     CODEX_HOME=/var/lib/codex \
     CODEX_WORKSPACE=/workspace \
     CODEX_WORKSPACE_PLAIN=/workspace-plain \
