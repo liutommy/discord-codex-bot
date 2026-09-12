@@ -89,7 +89,8 @@ async def test_describe_video_bytes_inlines_and_enforces_the_size_cap(
 
 async def test_describe_clips_to_the_char_limit(monkeypatch, config) -> None:
     _install(monkeypatch, Response(_candidate("字" * 50)))
-    out = await gemini.describe_youtube_url("https://youtu.be/x", replace(config, gemini_video_max_chars=10))
+    small = replace(config, gemini_video_max_chars=10)
+    out = await gemini.describe_youtube_url("https://youtu.be/x", small)
     assert out == "字" * 10 + "…"
 
 
