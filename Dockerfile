@@ -28,6 +28,21 @@ COPY --chown=1000:1000 config/output-style.md /opt/discord-codex/output-style.md
 COPY --chown=1000:1000 config/consolidate-schema.json /opt/discord-codex/consolidate-schema.json
 COPY --chown=1000:1000 permanent /opt/discord-codex/permanent
 COPY --chown=1000:1000 persona /opt/discord-codex/persona
+COPY --chown=1000:1000 config/agy-settings.json /opt/discord-codex/agy-settings.json
+COPY --chown=1000:1000 announce /opt/discord-codex/announce
+
+# Antigravity CLI (second backend). Installed for the runtime user; the installer fetches the
+# current release, so the version actually baked is recorded in the image label below and
+# self-update is disabled at runtime (AGY_CLI_DISABLE_AUTO_UPDATE).
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /home/node \
+    && HOME=/home/node bash -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash' \
+    && /home/node/.local/bin/agy --version \
+    && mkdir -p /home/node/.gemini \
+    && chown -R 1000:1000 /home/node
+# /home/node/.gemini is a named volume; creating it here (owned by 1000) makes Docker seed a fresh
+# volume with that ownership instead of root's.
 
 # Two Codex working directories: /workspace = runtime rules + operator persona (persona/*.md,
 # gitignored, appended at build time); /workspace-plain = runtime rules only, used when a member
@@ -40,7 +55,9 @@ RUN mkdir -p /var/lib/codex /workspace-plain \
     && chown -R 1000:1000 /var/lib/codex /workspace /workspace-plain /app \
     && chmod 0555 /app/scripts/entrypoint.sh
 
-ENV PATH="/app/.venv/bin:${PATH}" \
+ENV PATH="/app/.venv/bin:/home/node/.local/bin:${PATH}" \
+    AGY_CLI_DISABLE_AUTO_UPDATE=true \
+    AGY_HOME=/home/node \
     CODEX_HOME=/var/lib/codex \
     CODEX_WORKSPACE=/workspace \
     CODEX_WORKSPACE_PLAIN=/workspace-plain \

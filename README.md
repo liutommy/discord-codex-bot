@@ -135,6 +135,18 @@ Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>
 `/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`. This README uses the
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
 
+Two backends share that pipeline. Codex CLI is the default; Google's Antigravity CLI (`agy`) is
+the second, and each member picks with `/<prefix>-model` (Codex, or one of the 14 `agy models`
+slugs — the reasoning effort is part of the slug, so Gemini Flash comes as High/Medium/Low
+variants and the Claude models take no effort flag). `agy` runs headless
+(`--input-format stream-json`, `--conversation` to resume, `--json-schema` for structured output,
+`--add-dir` + `view_file` for images), inside a registered project so `AGENTS.md` (the persona)
+applies, with `config/agy-settings.json` denying commands, writes, URL access and MCP. Its Google
+sign-in lives in the `<name>_agy_home` volume: run `agy` inside the container once (SSH-style URL
++ code loop). Threads never cross backends; switching models starts a new thread and harvests the
+old one. Google's content policy may reject prompts on the Gemini models that the Claude models
+accept. Release announcements (`announce/latest.md`) are posted only to `ANNOUNCE_CHANNEL_IDS`.
+
 Both entry points share one pipeline: guild allowlist → validation → serial queue → `codex exec`.
 The `@mention` form keeps the question visible as the member's own message, supports up to
 `MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Replying to another

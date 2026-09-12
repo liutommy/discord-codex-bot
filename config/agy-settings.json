@@ -1,0 +1,15 @@
+{
+  "toolPermission": "proceed-in-sandbox",
+  "allowNonWorkspaceAccess": false,
+  "artifactReviewPolicy": "always-proceed",
+  "permissions": {
+    "deny": [
+      "command(*)",
+      "unsandboxed(*)",
+      "write_file(*)",
+      "read_url(*)",
+      "execute_url(*)",
+      "mcp(*)"
+    ]
+  }
+}

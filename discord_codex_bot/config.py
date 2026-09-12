@@ -111,6 +111,11 @@ class Config:
     memory_recall_rounds: int
     output_style_path: Path
     permanent_memory_dir: Path
+    agy_home: Path
+    agy_probe_model: str
+    agy_settings_path: Path
+    announce_dir: Path
+    announce_channel_ids: frozenset[int]
     consolidate_hour: int
     consolidate_timezone: str
     consolidate_min_remaining_percent: int
@@ -168,6 +173,17 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Operator-managed permanent memory (baked into the image, read-only for the Bot).
         permanent_memory_dir=Path(
             values.get("PERMANENT_MEMORY_DIR", "/opt/discord-codex/permanent")
+        ),
+        # Antigravity CLI backend (second backend; members pick it per user with /<prefix>-model).
+        agy_home=Path(values.get("AGY_HOME", "/home/node")),
+        agy_probe_model=values.get("AGY_PROBE_MODEL", "").strip() or "gemini-3.8-flash-low",
+        agy_settings_path=Path(
+            values.get("AGY_SETTINGS_FILE", "/opt/discord-codex/agy-settings.json")
+        ),
+        # Release announcements: announce/latest.md is posted once per guild when it changes.
+        announce_dir=Path(values.get("ANNOUNCE_DIR", "/opt/discord-codex/announce")),
+        announce_channel_ids=parse_id_set(
+            values.get("ANNOUNCE_CHANNEL_IDS"), "ANNOUNCE_CHANNEL_IDS"
         ),
         # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.
         consolidate_hour=_bounded_int(values, "CONSOLIDATE_HOUR", 2, 0, 23),

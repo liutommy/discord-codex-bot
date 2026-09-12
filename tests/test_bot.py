@@ -22,6 +22,7 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
         "inmu-king-forget",
         "inmu-king-memory",
         "inmu-king-style",
+        "inmu-king-model",
     }
     assert client.intents.guilds
     assert client.intents.message_content

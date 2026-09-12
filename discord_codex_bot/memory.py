@@ -11,6 +11,7 @@ INDEX_FILE = "MEMORY.md"
 ARCHIVE_FILE = "MEMORY-archive.md"
 TOPIC_DIR = "topics"
 STYLE_FILE = "style.md"
+MODEL_FILE = "model.txt"
 LIST_NAME = "list"
 _SLUG = re.compile(r"[^\w-]+", re.UNICODE)
 _INDEX_LINE = re.compile(r"^- \[(?P<name>[^\]]+)\]\((?P<file>[^)]+)\) — (?P<hook>.*)$")
@@ -300,6 +301,26 @@ class MemoryStore:
 
     def clear_style(self, guild_id: int | None, user_id: int) -> bool:
         path = self.style_path(guild_id, user_id)
+        existed = path.exists()
+        path.unlink(missing_ok=True)
+        return existed
+
+    # ----- personal model choice -------------------------------------------------------------
+
+    def get_model(self, guild_id: int | None, user_id: int) -> str:
+        try:
+            path = self.scope_dir("user", guild_id, user_id) / MODEL_FILE
+            return path.read_text("utf-8").strip()
+        except OSError:
+            return ""
+
+    def set_model(self, guild_id: int | None, user_id: int, value: str) -> None:
+        path = self.scope_dir("user", guild_id, user_id) / MODEL_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value.strip() + "\n", "utf-8")
+
+    def clear_model(self, guild_id: int | None, user_id: int) -> bool:
+        path = self.scope_dir("user", guild_id, user_id) / MODEL_FILE
         existed = path.exists()
         path.unlink(missing_ok=True)
         return existed

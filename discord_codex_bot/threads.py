@@ -40,7 +40,9 @@ class ThreadStore:
     def _live(self, entry: dict, now: float) -> bool:
         return entry.get("version", "") == self._version and now - float(entry["at"]) <= self._ttl
 
-    def current(self, key: str, now: float | None = None, plain: bool = False) -> str:
+    def current(
+        self, key: str, now: float | None = None, plain: bool = False, model: str = ""
+    ) -> str:
         """The member's resumable thread, if it was started under the same workspace (persona
         vs. persona-free) the next request will use; a style set or cleared in between starts
         a new thread instead of continuing under the wrong AGENTS.md."""
@@ -49,18 +51,27 @@ class ThreadStore:
             return ""
         if entry.get("plain") is None or bool(entry["plain"]) != plain:
             return ""  # unknown workspace (pre-flag entry) is never resumed
+        if entry.get("model", "") != model:
+            return ""  # a Codex thread cannot continue on agy and vice versa
         return str(entry["thread_id"])
 
-    def by_message(self, message_id: int | None, plain: bool = False) -> str:
+    def by_message(self, message_id: int | None, plain: bool = False, model: str = "") -> str:
         entry = self._by_message.get(str(message_id)) if message_id is not None else None
         if entry is None or entry.get("version", "") != self._version:
             return ""
         if entry.get("plain") is None or bool(entry["plain"]) != plain:
             return ""  # unknown workspace (pre-flag entry) is never resumed
+        if entry.get("model", "") != model:
+            return ""
         return entry["thread_id"]
 
     def remember(
-        self, key: str, thread_id: str, message_id: int | None = None, plain: bool = False
+        self,
+        key: str,
+        thread_id: str,
+        message_id: int | None = None,
+        plain: bool = False,
+        model: str = "",
     ) -> None:
         if not thread_id:
             return
@@ -74,12 +85,14 @@ class ThreadStore:
             "at": time.time(),
             "version": self._version,
             "plain": plain,
+            "model": model,
         }
         if message_id is not None:
             self._by_message[str(message_id)] = {
                 "thread_id": thread_id,
                 "version": self._version,
                 "plain": plain,
+                "model": model,
             }
             while len(self._by_message) > MAX_MESSAGE_LINKS:
                 del self._by_message[next(iter(self._by_message))]

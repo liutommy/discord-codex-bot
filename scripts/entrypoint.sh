@@ -4,6 +4,9 @@ set -eu
 # The named volume keeps whatever config.toml it was created with; refresh it from the image so the
 # checked-in policy file stays the single source of truth.
 cp /opt/discord-codex/config.toml "${CODEX_HOME}/config.toml"
+# Same for the Antigravity CLI policy (deny rules); its home is the second named volume.
+mkdir -p "${AGY_HOME}/.gemini/antigravity-cli"
+cp /opt/discord-codex/agy-settings.json "${AGY_HOME}/.gemini/antigravity-cli/settings.json"
 
 missing=""
 for name in DISCORD_TOKEN DISCORD_APPLICATION_ID ALLOWED_GUILD_IDS; do

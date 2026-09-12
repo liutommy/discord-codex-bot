@@ -11,6 +11,8 @@ import discord
 from discord import app_commands
 
 from .access import check_access
+from .agy import run_agy
+from .announce import announce_once
 from .attachments import (
     download_image,
     remove_dir,
@@ -18,6 +20,7 @@ from .attachments import (
     sweep_forever,
     validate_image,
 )
+from .backends import AGY, choices, parse_choice
 from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
@@ -42,6 +45,11 @@ FAILURE_MESSAGE = (
 
 
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
+# Discord allows 25 choices per option; Codex + 14 agy slugs = 15. Built with the default
+# Codex model name, which is also what load_config() falls back to.
+MODEL_CHOICES = [
+    app_commands.Choice(name=c.label[:100], value=c.value) for c in choices("gpt-5.6-luna")
+]
 
 
 def instructions_version(config: Config) -> str:
@@ -130,6 +138,13 @@ class DiscordCodexClient(discord.Client):
         )
         self.tree.add_command(
             app_commands.Command(
+                name=f"{prefix}-model",
+                description="查看／選擇／清除你要用的模型（Codex 或 Antigravity 的模型）",
+                callback=self.model_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
                 name=f"{prefix}-style",
                 description="查看／設定／清除你的個人回覆風格（覆蓋預設）",
                 callback=self.style_command,
@@ -183,6 +198,10 @@ class DiscordCodexClient(discord.Client):
     async def on_ready(self) -> None:
         LOGGER.info("Discord bot ready as %s", self.user)
         LOGGER.info("%s", await codex_login_status(self.config))
+        try:
+            await announce_once(self, self.config)
+        except Exception:
+            LOGGER.exception("Announcement pass failed")
 
     # ----- shared pipeline -------------------------------------------------------------------
 
@@ -217,7 +236,15 @@ class DiscordCodexClient(discord.Client):
         effort: str = "",
         resume: str = "",
     ) -> CodexResult:
-        """Run one validated request through Codex; always returns something to post."""
+        """Run one validated request through the member's backend; always returns text."""
+        choice = parse_choice(self.memory.get_model(guild_id, user_id), self.config.codex_model)
+
+        async def turn(text: str, **kw) -> CodexResult:
+            if choice.backend == AGY:
+                kw.pop("effort", None)
+                return await run_agy(text, self.config, choice.model, **kw)
+            return await run_codex(text, self.config, effort=effort, **kw)
+
         images: list[Path] = []
         try:
             for attachment in attachments:
@@ -234,8 +261,8 @@ class DiscordCodexClient(discord.Client):
             )
             style = self.memory.get_style(guild_id, user_id)
             result = await self.queue.run(
-                lambda: run_codex(
-                    prompt, self.config, images, effort, resume, memory, personal_style=style
+                lambda: turn(
+                    prompt, images=images, resume=resume, memory=memory, personal_style=style
                 )
             )
             # On-demand reads (search snippets / paged recall): the Bot executes the request and
@@ -251,12 +278,11 @@ class DiscordCodexClient(discord.Client):
                     for kind, scope, target, offset, lines in wanted
                 )
                 result = await self.queue.run(
-                    lambda text=recalled, thread=result.thread_id: run_codex(
+                    lambda text=recalled, thread=result.thread_id: turn(
                         text + "\n\nNow answer the member's question.",
-                        self.config,
-                        effort=effort,
                         resume=thread,
                         raw=True,
+                        personal_style=style,
                     )
                 )
             text, facts = extract_memory_tags(result.text)
@@ -309,10 +335,15 @@ class DiscordCodexClient(discord.Client):
         except discord.HTTPException:
             return None
 
-    def _remember(self, key: str, thread_id: str, message_id: int, plain: bool) -> None:
+    def _model(self, guild_id: int | None, user_id: int) -> str:
+        return parse_choice(self.memory.get_model(guild_id, user_id), self.config.codex_model).value
+
+    def _remember(
+        self, key: str, thread_id: str, message_id: int, plain: bool, model: str
+    ) -> None:
         """Record the thread; a switch retires the old one, so harvest it without waiting."""
         switched = self.threads.switched(key, thread_id)
-        self.threads.remember(key, thread_id, message_id, plain=plain)
+        self.threads.remember(key, thread_id, message_id, plain=plain, model=model)
         if switched and hasattr(self, "_harvest_wakeup"):
             self._harvest_wakeup.set()
 
@@ -378,6 +409,34 @@ class DiscordCodexClient(discord.Client):
         await interaction.response.send_message(
             split_discord_message(text)[0], ephemeral=True
         )
+
+    @app_commands.describe(
+        model="要使用的模型；留空＝查看目前設定",
+        clear="設為 True 清除，回到預設（Codex）",
+    )
+    @app_commands.choices(model=MODEL_CHOICES)
+    async def model_command(
+        self,
+        interaction: discord.Interaction,
+        model: app_commands.Choice[str] | None = None,
+        clear: bool = False,
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        guild_id, user_id = interaction.guild_id, interaction.user.id
+        if clear:
+            cleared = self.memory.clear_model(guild_id, user_id)
+            message = "已清除，回到預設模型。" if cleared else "你沒有設定模型。"
+        elif model is not None:
+            chosen = parse_choice(model.value, self.config.codex_model)
+            self.memory.set_model(guild_id, user_id, chosen.value)
+            message = f"已設定模型：{chosen.label}"
+        else:
+            stored = self.memory.get_model(guild_id, user_id)
+            message = f"目前模型：{parse_choice(stored, self.config.codex_model).label}"
+        await interaction.response.send_message(message, ephemeral=True)
 
     @app_commands.describe(
         text="你的回覆風格（例如：條列、少於 100 字、用英文）；留空＝查看目前設定",
@@ -449,7 +508,8 @@ class DiscordCodexClient(discord.Client):
 
         key = ThreadStore.key(interaction.guild_id, interaction.channel_id, interaction.user.id)
         plain = bool(self.memory.get_style(interaction.guild_id, interaction.user.id))
-        resume = "" if new else self.threads.current(key, plain=plain)
+        model = self._model(interaction.guild_id, interaction.user.id)
+        resume = "" if new else self.threads.current(key, plain=plain, model=model)
         await interaction.response.defer(thinking=True)
         result = await self._answer(
             prompt, attachments, interaction.guild_id, interaction.user.id, effort_value, resume
@@ -471,7 +531,7 @@ class DiscordCodexClient(discord.Client):
                 await interaction.followup.send(chunk)
         finally:
             remove_dir(result.generated_dir)
-        self._remember(key, result.thread_id, sent.id, plain)
+        self._remember(key, result.thread_id, sent.id, plain, model)
         LOGGER.info("Completed slash guild=%s user=%s", interaction.guild_id, interaction.user.id)
 
     # ----- @mention entry point --------------------------------------------------------------
@@ -505,9 +565,10 @@ class DiscordCodexClient(discord.Client):
         key = ThreadStore.key(guild_id, message.channel.id, message.author.id)
         plain = bool(self.memory.get_style(guild_id, message.author.id))
         replied_to = message.reference.message_id if message.reference else None
-        resume = self.threads.by_message(replied_to, plain=plain) or self.threads.current(
-            key, plain=plain
-        )
+        model = self._model(guild_id, message.author.id)
+        resume = self.threads.by_message(
+            replied_to, plain=plain, model=model
+        ) or self.threads.current(key, plain=plain, model=model)
         async with message.channel.typing():
             result = await self._answer(
                 prompt, attachments, guild_id, message.author.id, resume=resume
@@ -519,7 +580,7 @@ class DiscordCodexClient(discord.Client):
                 await message.channel.send(chunk)
         finally:
             remove_dir(result.generated_dir)
-        self._remember(key, result.thread_id, sent.id, plain)
+        self._remember(key, result.thread_id, sent.id, plain, model)
         LOGGER.info("Completed @mention guild=%s user=%s", message.guild.id, message.author.id)
 
 

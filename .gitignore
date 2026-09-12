@@ -10,3 +10,5 @@ permanent/*
 !permanent/README.md
 persona/*
 !persona/README.md
+announce/*
+!announce/README.md

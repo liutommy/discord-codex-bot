@@ -34,11 +34,33 @@ def rollout_path(config: Config, thread_id: str):
     return matches[0] if matches else None
 
 
+def _agy_transcript(config: Config, thread_id: str) -> str:
+    brain = config.agy_home / ".gemini/antigravity-cli/brain" / thread_id
+    path = brain / ".system_generated/logs/transcript.jsonl"
+    if not path.is_file():
+        return ""
+    turns: list[str] = []
+    for line in path.read_text("utf-8", errors="ignore").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        content = str(event.get("content") or "")
+        if event.get("type") == "USER_INPUT":
+            match = _USER_MESSAGE.search(content)
+            if match:
+                turns.append(f"後輩：{match.group(1).strip()}")
+        elif event.get("type") == "PLANNER_RESPONSE" and content.strip():
+            turns.append(f"前輩：{content.strip()}")
+    return "\n\n".join(turns)
+
+
 def transcript(config: Config, thread_id: str) -> str:
     """User turns and assistant answers of one thread, as plain text; empty when unavailable."""
     path = rollout_path(config, thread_id)
     if path is None:
-        return ""
+        body = _agy_transcript(config, thread_id)
+        return body[-MAX_TRANSCRIPT_CHARS:] if len(body) > MAX_TRANSCRIPT_CHARS else body
     turns: list[str] = []
     for line in path.read_text("utf-8", errors="ignore").splitlines():
         try:
