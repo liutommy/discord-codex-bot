@@ -285,3 +285,56 @@ def test_request_only_accepts_tag_only_replies_and_rejects_prose() -> None:
     assert not request_only('先說明。<fetch url="https://a.example/p"/>')
     assert not request_only('<fetch url="https://a.example/p"/> 然後回答')
     assert not request_only("")
+
+
+async def test_answer_dispatches_to_openrouter_with_the_catalog(
+    client, backends, monkeypatch
+) -> None:
+    from discord_codex_bot.openrouter import Model
+
+    calls = []
+
+    async def fake_openrouter(text, config, model, **kw):
+        calls.append((text, model, kw))
+        return CodexResult("OR", (), None, "or-1", False)
+
+    async def no_refresh():
+        return client.openrouter.models
+
+    monkeypatch.setattr(bot_module, "run_openrouter", fake_openrouter)
+    monkeypatch.setattr(client.openrouter, "free_models", no_refresh)
+    client.openrouter.models = [Model("g/free", "G", True, False, 1000)]
+    client.memory.set_model(GUILD, USER, "openrouter:g/free|high")
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "OR" and backends[0].calls == [] and backends[1].calls == []
+    text, model, kw = calls[0]
+    assert text == "q" and model == "g/free" and kw["effort"] == "high"
+    assert kw["catalog"] is client.openrouter and kw["resume"] == ""
+
+
+async def test_model_command_autocomplete_and_openrouter_reminder(client, monkeypatch) -> None:
+    from discord_codex_bot.openrouter import Model
+
+    async def no_refresh():
+        return client.openrouter.models
+
+    monkeypatch.setattr(client.openrouter, "free_models", no_refresh)
+    client.openrouter.models = [Model("g/vision:free", "Vision", True, False, 1),
+                                Model("t/text:free", "Text", False, True, 1)]
+    names = [c.name for c in await client.model_options("openrouter", "")]
+    assert names == ["OpenRouter · Vision（看圖）", "OpenRouter · Text"]
+    assert [c.value for c in await client.model_options("openrouter", "TEXT")] == [
+        "openrouter:t/text:free"
+    ]
+    assert [c.value for c in await client.model_options("agy", "opus")] == ["agy:claude-opus-4-6"]
+    assert [c.value for c in await client.model_options("codex", "")] == ["codex:gpt-5.6-luna"]
+    assert client._chosen_model("openrouter", "g/vision:free").value == "openrouter:g/vision:free"
+    assert client._chosen_model("openrouter", "openrouter:t/text:free").family == "t/text:free"
+    assert client._chosen_model("openrouter", "gone/model") is None
+    assert client._chosen_model("agy", "gemini-3.8-flash").value == "agy:gemini-3.8-flash"
+    assert client._chosen_model("agy", "nope") is None
+    described = client._describe("openrouter:g/vision:free", "high")
+    assert "OpenRouter · g/vision:free · 無" in described and "看得到圖片" in described
+    assert "免費模型可能隨時不穩或下架" in described
+    assert "· High" in client._describe("openrouter:t/text:free", "high")
+    assert "看不到圖片" in client._describe("openrouter:t/text:free", "")

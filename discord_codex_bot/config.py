@@ -114,6 +114,10 @@ class Config:
     agy_home: Path
     agy_probe_model: str
     agy_settings_path: Path
+    openrouter_api_key: str
+    openrouter_dir: Path
+    openrouter_catalog_ttl_seconds: int
+    openrouter_history_chars: int
     announce_dir: Path
     announce_channel_ids: frozenset[int]
     announce_approved: str
@@ -187,6 +191,17 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         agy_settings_path=Path(
             values.get("AGY_SETTINGS_FILE", "/opt/discord-codex/agy-settings.json")
         ),
+        # OpenRouter backend (third backend, free models only): no key = provider not offered.
+        # Conversations are Bot-kept transcripts under OPENROUTER_DIR, replayed within a budget.
+        openrouter_api_key=values.get("OPENROUTER_API_KEY", "").strip(),
+        openrouter_dir=Path(
+            values.get("OPENROUTER_DIR", "").strip()
+            or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "openrouter")
+        ),
+        openrouter_catalog_ttl_seconds=_positive_int(
+            values, "OPENROUTER_CATALOG_TTL_SECONDS", 3600
+        ),
+        openrouter_history_chars=_positive_int(values, "OPENROUTER_HISTORY_CHARS", 60_000),
         # Release announcements: announce/latest.md is posted once per guild when it changes.
         announce_dir=Path(values.get("ANNOUNCE_DIR", "/opt/discord-codex/announce")),
         announce_channel_ids=parse_id_set(

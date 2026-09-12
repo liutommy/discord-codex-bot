@@ -135,10 +135,16 @@ Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>
 `/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`. This README uses the
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
 
-Two backends share that pipeline. Codex CLI is the default; Google's Antigravity CLI (`agy`) is
-the second, and each member picks a model *family* plus a default reasoning effort with
-`/<prefix>-model` (Codex Luna; Gemini 3.8/3.7/3.6 Flash; Gemini 3.1 Pro; Claude Sonnet 4.6;
-Claude Opus 4.6; GPT-OSS 120B). The shared `effort` option is mapped onto what each family can run
+Three backends share that pipeline. Codex CLI is the default; Google's Antigravity CLI (`agy`) is
+the second; OpenRouter (free models only) the third. Each member picks `provider` → `model`
+(autocomplete, typing filters; the OpenRouter list is the live free-model catalog, image-capable
+first) → default `effort` with `/<prefix>-model` (Codex Luna; Gemini 3.8/3.7/3.6 Flash; Gemini
+3.1 Pro; Claude Sonnet 4.6; Claude Opus 4.6; GPT-OSS 120B; whatever OpenRouter lists as free that
+hour). OpenRouter is stateless, so the Bot keeps those conversations itself (`OPENROUTER_DIR`,
+replayed within `OPENROUTER_HISTORY_CHARS`), sends the persona as the system message, inlines
+images for models the catalog marks image-capable and `reasoning.effort` for models that take it;
+picking one reminds the member that free models are unstable and may vanish. The shared `effort`
+option is mapped onto what each family can run
 — agy bakes the effort into the model slug (Flash: low/medium/high, Pro: low/high, Claude and
 gpt-oss fixed), verified against a full model × `--effort` matrix. `agy` runs headless
 (`--input-format stream-json`, `--conversation` to resume, `--json-schema` for structured output,

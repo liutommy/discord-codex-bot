@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from .codex import run_codex
 from .config import Config
 from .memory import MemoryStore
+from .openrouter import load_transcript, message_text
 from .threads import ThreadStore
 from .usage import read_rate_limits
 
@@ -55,11 +56,23 @@ def _agy_transcript(config: Config, thread_id: str) -> str:
     return "\n\n".join(turns)
 
 
+def _openrouter_transcript(config: Config, thread_id: str) -> str:
+    turns: list[str] = []
+    for message in load_transcript(config, thread_id):
+        text = message_text(message.get("content"))
+        if message.get("role") == "user":
+            match = _USER_MESSAGE.search(text)
+            turns.append(f"後輩：{(match.group(1) if match else text).strip()}")
+        elif message.get("role") == "assistant" and text.strip():
+            turns.append(f"前輩：{text.strip()}")
+    return "\n\n".join(turns)
+
+
 def transcript(config: Config, thread_id: str) -> str:
     """User turns and assistant answers of one thread, as plain text; empty when unavailable."""
     path = rollout_path(config, thread_id)
     if path is None:
-        body = _agy_transcript(config, thread_id)
+        body = _openrouter_transcript(config, thread_id) or _agy_transcript(config, thread_id)
         return body[-MAX_TRANSCRIPT_CHARS:] if len(body) > MAX_TRANSCRIPT_CHARS else body
     turns: list[str] = []
     for line in path.read_text("utf-8", errors="ignore").splitlines():

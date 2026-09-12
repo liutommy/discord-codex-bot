@@ -21,7 +21,15 @@ from .attachments import (
     sweep_forever,
     validate_image,
 )
-from .backends import AGY, choices, parse_choice, resolve, split_stored
+from .backends import (
+    AGY,
+    OPENROUTER,
+    choices,
+    openrouter_choice,
+    parse_choice,
+    resolve,
+    split_stored,
+)
 from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
@@ -37,6 +45,7 @@ from .memory import (
     extract_memory_tags,
     extract_read_requests,
 )
+from .openrouter import Catalog, run_openrouter
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
 from .threads import ThreadStore
@@ -51,10 +60,13 @@ FAILURE_MESSAGE = (
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
 # Discord allows 25 choices per option; Codex + 14 agy slugs = 15. Built with the default
 # Codex model name, which is also what load_config() falls back to.
-MODEL_CHOICES = [
-    app_commands.Choice(name=c.label[:100], value=c.value) for c in choices("gpt-5.6-luna")
-]
 EFFORT_CHOICES = [app_commands.Choice(name=v, value=k) for k, v in REASONING_EFFORTS.items()]
+PROVIDER_CHOICES = [
+    app_commands.Choice(name="Codex", value="codex"),
+    app_commands.Choice(name="Antigravity（Gemini／Claude）", value=AGY),
+    app_commands.Choice(name="OpenRouter（免費模型）", value=OPENROUTER),
+]
+FREE_MODEL_NOTE = "免費模型可能隨時不穩或下架，失敗時請換一個。"
 
 
 def instructions_version(config: Config) -> str:
@@ -100,6 +112,13 @@ def request_only(answer: str) -> bool:
     return bool(answer.strip()) and not rest.strip()
 
 
+async def _model_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    provider = getattr(interaction.namespace, "provider", None) or "codex"
+    return await interaction.client.model_options(provider, current)
+
+
 class DiscordCodexClient(discord.Client):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.none()
@@ -129,6 +148,7 @@ class DiscordCodexClient(discord.Client):
         )
         self.memory = MemoryStore(config.codex_home / "memory", limits)
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
+        self.openrouter = Catalog(config)
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-remember",
@@ -153,7 +173,7 @@ class DiscordCodexClient(discord.Client):
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-model",
-                description="查看／選擇／清除你要用的模型（Codex 或 Antigravity 的模型）",
+                description="查看／選擇／清除你要用的模型（Codex、Antigravity 或 OpenRouter）",
                 callback=self.model_command,
             )
         )
@@ -261,6 +281,12 @@ class DiscordCodexClient(discord.Client):
             if target.backend == AGY:
                 kw.pop("effort", None)
                 return await run_agy(text, self.config, target.model, **kw)
+            if target.backend == OPENROUTER:
+                await self.openrouter.free_models()  # image / effort capability lookup
+                return await run_openrouter(
+                    text, self.config, target.model, effort=target.effort,
+                    catalog=self.openrouter, **kw,
+                )
             return await run_codex(text, self.config, effort=target.effort, **kw)
 
         images: list[Path] = []
@@ -377,11 +403,23 @@ class DiscordCodexClient(discord.Client):
         except discord.HTTPException:
             return None
 
+    def _effort_label(self, target) -> str:
+        """What the member sees as the effort: the level applied, or why there is none."""
+        if target.backend == OPENROUTER:
+            info = self.openrouter.get(target.model)
+            if info is not None and not info.reasoning:
+                return "無"
+        return REASONING_EFFORTS.get(target.effort, target.effort) if target.effort else "固定"
+
     def _describe(self, value: str, level: str) -> str:
         chosen = parse_choice(value, self.config.codex_model)
         target = resolve(chosen, level or self.config.codex_reasoning_effort)
-        shown = REASONING_EFFORTS.get(target.effort, target.effort) if target.effort else "固定"
-        return f"{chosen.label} · {shown} → `{target.model}`"
+        text = f"{chosen.label} · {self._effort_label(target)} → `{target.model}`"
+        if chosen.backend == OPENROUTER:
+            info = self.openrouter.get(chosen.family)
+            sees = "看得到" if info is None or info.image else "看不到"
+            text += f"（免費，{sees}圖片）\n{FREE_MODEL_NOTE}"
+        return text
 
     def _model(self, guild_id: int | None, user_id: int) -> str:
         return parse_choice(self.memory.get_model(guild_id, user_id), self.config.codex_model).value
@@ -458,16 +496,49 @@ class DiscordCodexClient(discord.Client):
             split_discord_message(text)[0], ephemeral=True
         )
 
+    async def model_options(self, provider: str, current: str) -> list[app_commands.Choice[str]]:
+        """Autocomplete for the model option: the provider's models, filtered by what the member
+        typed. OpenRouter's list is the live free-model catalog (image-capable first)."""
+        if provider == OPENROUTER:
+            options = [
+                openrouter_choice(m.id, f"{m.name}{'（看圖）' if m.image else ''}")
+                for m in await self.openrouter.free_models()
+            ]
+        else:
+            options = [c for c in choices(self.config.codex_model) if c.backend == provider]
+        needle = current.strip().lower()
+        matched = [
+            c
+            for c in options
+            if not needle or needle in c.value.lower() or needle in c.label.lower()
+        ]
+        return [app_commands.Choice(name=c.label[:100], value=c.value) for c in matched[:25]]
+
+    def _chosen_model(self, provider: str, model: str):
+        """The ModelChoice for a typed or picked model value; None when it is not offered."""
+        value = model.strip()
+        if not value.startswith(("codex:", f"{AGY}:", f"{OPENROUTER}:")):
+            value = f"{provider}:{value}"  # typed bare id (OpenRouter ids themselves contain ":")
+        chosen = parse_choice(value, self.config.codex_model)
+        if chosen.value != value:
+            return None  # unknown Codex / Antigravity value fell back to the default
+        if chosen.backend == OPENROUTER and self.openrouter.get(chosen.family) is None:
+            return None
+        return chosen
+
     @app_commands.describe(
-        model="要使用的模型；留空＝查看目前設定",
+        provider="模型來源；留空＝查看目前設定",
+        model="模型（打字篩選；OpenRouter 只列免費模型）",
         effort="這個模型的預設推理強度（/inmu-king 的 effort 可臨時覆蓋）",
         clear="設為 True 清除，回到預設（Codex）",
     )
-    @app_commands.choices(model=MODEL_CHOICES, effort=EFFORT_CHOICES)
+    @app_commands.choices(provider=PROVIDER_CHOICES, effort=EFFORT_CHOICES)
+    @app_commands.autocomplete(model=_model_autocomplete)
     async def model_command(
         self,
         interaction: discord.Interaction,
-        model: app_commands.Choice[str] | None = None,
+        provider: app_commands.Choice[str] | None = None,
+        model: str | None = None,
         effort: app_commands.Choice[str] | None = None,
         clear: bool = False,
     ) -> None:
@@ -476,18 +547,27 @@ class DiscordCodexClient(discord.Client):
             await interaction.response.send_message(reason, ephemeral=True)
             return
         guild_id, user_id = interaction.guild_id, interaction.user.id
+        stored = self.memory.get_model(guild_id, user_id)
         if clear:
             cleared = self.memory.clear_model(guild_id, user_id)
             message = "已清除，回到預設模型。" if cleared else "你沒有設定模型。"
         elif model is not None or effort is not None:
-            stored = self.memory.get_model(guild_id, user_id)
-            chosen = parse_choice(model.value if model else stored, self.config.codex_model)
+            source = provider.value if provider else split_stored(stored)[0].split(":")[0]
+            if model is not None:
+                await self.openrouter.free_models()
+                chosen = self._chosen_model(source, model)
+                if chosen is None:
+                    await interaction.response.send_message(
+                        f"沒有這個模型：`{model}`。請從清單裡選（打字可篩選）。", ephemeral=True
+                    )
+                    return
+            else:
+                chosen = parse_choice(stored, self.config.codex_model)
             level = effort.value if effort else split_stored(stored)[1]
             value = f"{chosen.value}|{level}" if level else chosen.value
             self.memory.set_model(guild_id, user_id, value)
             message = f"已設定：{self._describe(chosen.value, level)}"
         else:
-            stored = self.memory.get_model(guild_id, user_id)
             message = f"目前：{self._describe(*split_stored(stored))}"
         await interaction.response.send_message(message, ephemeral=True)
 
@@ -569,12 +649,12 @@ class DiscordCodexClient(discord.Client):
         )
         # Discord does not echo slash command inputs, so quote the question above the answer.
         target = resolve(parse_choice(model, self.config.codex_model), effort_value)
-        shown = REASONING_EFFORTS.get(target.effort, target.effort) if target.effort else "固定"
+        shown = self._effort_label(target)
         reply = format_reply(
             prompt,
             result.text,
             has_image=bool(attachments),
-            effort=f"{target.model} · {shown}" if target.backend == AGY else shown,
+            effort=shown if target.backend == "codex" else f"{target.model} · {shown}",
             resumed=result.resumed,
         )
         chunks = split_discord_message(reply)

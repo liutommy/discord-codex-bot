@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 CODEX = "codex"
 AGY = "agy"
+OPENROUTER = "openrouter"
 
 # Verified 2026-09-12 against `agy models` and a full model × --effort matrix: agy bakes the
 # reasoning effort into the model slug (`-high/-medium/-low`), `--effort` is only accepted when
@@ -58,6 +59,13 @@ def choices(codex_model: str) -> list[ModelChoice]:
     return out
 
 
+def openrouter_choice(model_id: str, name: str = "") -> ModelChoice:
+    """OpenRouter models are not a fixed list (the free tier changes weekly), so any id is a
+    valid choice value; the catalog decides what the autocomplete offers."""
+    label = f"OpenRouter · {name or model_id}"
+    return ModelChoice(f"{OPENROUTER}:{model_id}", label, OPENROUTER, model_id)
+
+
 def split_stored(value: str) -> tuple[str, str]:
     """Stored per-member value "<backend>:<family>|<effort>" -> (choice value, effort or "")."""
     choice, _, effort = value.partition("|")
@@ -71,6 +79,8 @@ def parse_choice(value: str, codex_model: str) -> ModelChoice:
     for choice in choices(codex_model):
         if choice.value == value:
             return choice
+    if value.startswith(f"{OPENROUTER}:") and len(value) > len(OPENROUTER) + 1:
+        return openrouter_choice(value.split(":", 1)[1])
     if value.startswith(f"{AGY}:"):
         slug = value.split(":", 1)[1]
         for fam, (_, by_effort) in AGY_FAMILIES.items():
@@ -83,6 +93,8 @@ def resolve(choice: ModelChoice, effort: str) -> Resolved:
     """Map the shared effort option onto what this backend/family can actually run."""
     if choice.backend == CODEX:
         return Resolved(CODEX, choice.family, effort)
+    if choice.backend == OPENROUTER:
+        return Resolved(OPENROUTER, choice.family, effort)  # applied only if the model takes it
     _label, by_effort = AGY_FAMILIES[choice.family]
     if "" in by_effort:
         return Resolved(AGY, by_effort[""], "")
