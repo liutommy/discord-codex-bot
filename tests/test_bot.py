@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from discord_codex_bot.bot import DiscordCodexClient, strip_mention
+from discord_codex_bot.bot import DiscordCodexClient, strip_mention, with_quoted_message
 from discord_codex_bot.config import Config
 
 
@@ -49,3 +49,13 @@ def test_codex_command_offers_every_verified_effort(config: Config) -> None:
     effort = next(p for p in command.parameters if p.name == "effort")
     assert {choice.value: choice.name for choice in effort.choices} == REASONING_EFFORTS
     assert not effort.required
+
+
+def test_with_quoted_message_folds_reply_target_into_prompt() -> None:
+    folded = with_quoted_message("這是什麼", "ryanlo", "看看這張\n圖", 1)
+    assert folded == (
+        "（後輩回覆了 ryanlo 的訊息：「看看這張 圖」）\n"
+        "（那則訊息附了 1 張圖，已一併附上）\n這是什麼"
+    )
+    assert with_quoted_message("", "kimo", "", 2).endswith("請看這則訊息。")
+    assert with_quoted_message("q", "kimo", "", 0) == "q"

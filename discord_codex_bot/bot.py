@@ -65,6 +65,19 @@ def strip_mention(content: str, bot_id: int) -> str:
     return re.sub(rf"<@!?{bot_id}>", "", content).strip()
 
 
+def with_quoted_message(prompt: str, author: str, content: str, image_count: int) -> str:
+    """Fold a replied-to member message into the prompt so the model sees what was pointed at."""
+    quoted = " ".join(content.split())
+    parts = []
+    if quoted:
+        parts.append(f"（後輩回覆了 {author} 的訊息：「{quoted}」）")
+    if image_count:
+        parts.append(f"（那則訊息附了 {image_count} 張圖，已一併附上）")
+    if not parts:
+        return prompt
+    return "\n".join(parts + [prompt or "請看這則訊息。"])
+
+
 class DiscordCodexClient(discord.Client):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.none()
@@ -283,6 +296,19 @@ class DiscordCodexClient(discord.Client):
             return self.memory.search(scope, guild_id, user_id, target)
         return self.memory.recall(scope, guild_id, user_id, target, offset, lines)
 
+    @staticmethod
+    async def _referenced(message: discord.Message) -> discord.Message | None:
+        """The message this one replies to, fetched if Discord did not resolve it inline."""
+        if message.reference is None or message.reference.message_id is None:
+            return None
+        resolved = message.reference.resolved
+        if isinstance(resolved, discord.Message):
+            return resolved
+        try:
+            return await message.channel.fetch_message(message.reference.message_id)
+        except discord.HTTPException:
+            return None
+
     def _remember(self, key: str, thread_id: str, message_id: int, plain: bool) -> None:
         """Record the thread; a switch retires the old one, so harvest it without waiting."""
         switched = self.threads.switched(key, thread_id)
@@ -459,7 +485,17 @@ class DiscordCodexClient(discord.Client):
             await message.reply(reason, mention_author=False)
             return
         prompt = strip_mention(message.content, self.user.id)
-        reason = self._validate(prompt, message.attachments)
+        attachments = list(message.attachments)
+        # Replying to another member's message (e.g. one that carries a picture) points the Bot
+        # at it: its text and images are folded into this request.
+        quoted = await self._referenced(message)
+        if quoted is not None and quoted.author != self.user:
+            images = [a for a in quoted.attachments if (a.content_type or "").startswith("image/")]
+            attachments.extend(images)
+            prompt = with_quoted_message(
+                prompt, quoted.author.display_name, quoted.content, len(images)
+            )
+        reason = self._validate(prompt, attachments)
         if reason:
             await message.reply(reason, mention_author=False)
             return
@@ -474,7 +510,7 @@ class DiscordCodexClient(discord.Client):
         )
         async with message.channel.typing():
             result = await self._answer(
-                prompt, message.attachments, guild_id, message.author.id, resume=resume
+                prompt, attachments, guild_id, message.author.id, resume=resume
             )
         chunks = split_discord_message(result.text)
         try:
