@@ -60,8 +60,25 @@ async def test_timeout_kills_whole_process_group() -> None:
     with pytest.raises(RuntimeError, match="timed out"):
         await _communicate(process, "", timeout_seconds=1)
     assert process.returncode is not None
-    with pytest.raises(ProcessLookupError):
-        os.kill(grandchild_pid, 0)
+    assert await _gone(grandchild_pid), "the grandchild outlived the timeout"
+
+
+async def _gone(pid: int) -> bool:
+    """True once `pid` is dead: reaped (kill 0 fails) or a zombie waiting for init to reap it —
+    on a busy runner that reap can lag a little behind the kill."""
+    for _ in range(60):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            stat = await asyncio.to_thread(Path(f"/proc/{pid}/stat").read_text)
+        except OSError:
+            return True
+        if stat.rsplit(")", 1)[1].split()[0] == "Z":
+            return True
+        await asyncio.sleep(0.05)
+    return False
 
 
 def test_extracts_last_completed_agent_message() -> None:
