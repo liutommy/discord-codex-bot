@@ -60,11 +60,15 @@ class FakePage:
 
 
 class FakeBrowser:
+    version = "151.0.7500.0"
+
     def __init__(self, page: FakePage) -> None:
         self.page = page
         self.closed = False
+        self.context_kwargs: dict = {}
 
     async def new_context(self, **kwargs):
+        self.context_kwargs = kwargs
         return self
 
     async def add_init_script(self, script: str) -> None:
@@ -377,3 +381,16 @@ async def test_render_link_is_bounded_by_the_render_timeout(monkeypatch, config:
     monkeypatch.setattr(links.asyncio, "wait_for", short_wait_for)
     text, shot = await render_link("https://slow.example/", config, None)
     assert text == "（https://slow.example/：渲染逾時，打不開）" and shot is None
+
+
+async def test_render_link_uses_the_browser_version_without_the_headless_token(
+    monkeypatch, config: Config
+) -> None:
+    async def resolve_ok(host: str) -> str:
+        return "93.184.216.34"
+
+    monkeypatch.setattr(links, "_resolve_public", resolve_ok)
+    browser = install_fake_playwright(monkeypatch, FakePage(["T"], text="body"))
+    await render_link("https://ok.example/", config, None)
+    agent = browser.context_kwargs["user_agent"]
+    assert "Chrome/151.0.0.0" in agent and "Headless" not in agent

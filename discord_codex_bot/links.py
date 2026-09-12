@@ -223,10 +223,16 @@ async def _render(url: str, config: Config, out_dir: Path | None) -> tuple[str, 
                   "--disable-gpu", "--headless=new"],
         )
         try:
-            # Keep the browser's own User-Agent: a spoofed one contradicts the TLS/JS
-            # fingerprint and is exactly what keeps the Cloudflare challenge page spinning.
+            # The browser's own User-Agent minus the "Headless" token: a foreign UA contradicts
+            # the TLS/JS fingerprint (Cloudflare never clears its challenge), while the literal
+            # "HeadlessChrome" is what X and Dcard refuse outright.
+            major = browser.version.split(".")[0]
+            user_agent = (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                f"Chrome/{major}.0.0.0 Safari/537.36"
+            )
             context = await browser.new_context(
-                locale="zh-TW", viewport={"width": 1280, "height": 900}
+                user_agent=user_agent, locale="zh-TW", viewport={"width": 1280, "height": 900}
             )
             hosts: dict[str, bool] = {}
             await context.route("**/*", lambda route, request: _guard_route(route, request, hosts))
