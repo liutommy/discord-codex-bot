@@ -34,7 +34,14 @@ from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
-from .links import FETCH_TAG, extract_fetch_tags, fetch_or_render, find_urls, link_blocks
+from .links import (
+    FETCH_TAG,
+    Preview,
+    extract_fetch_tags,
+    fetch_or_render,
+    find_urls,
+    link_blocks,
+)
 from .memory import (
     RECALL_TAG,
     SCOPES,
@@ -110,6 +117,24 @@ def request_only(answer: str) -> bool:
     for tag in (SEARCH_TAG, RECALL_TAG, FETCH_TAG):
         rest = tag.sub("", rest)
     return bool(answer.strip()) and not rest.strip()
+
+
+def previews_from(messages) -> dict[str, Preview]:
+    """Discord link embeds of `messages` as previews keyed by the embedded URL."""
+    out: dict[str, Preview] = {}
+    for message in messages:
+        for embed in message.embeds:
+            if not embed.url or embed.type not in ("article", "link", "rich", "video"):
+                continue
+            picture = embed.thumbnail if embed.thumbnail and embed.thumbnail.url else embed.image
+            image_url = ""
+            if picture and picture.url:
+                image_url = picture.proxy_url or picture.url
+            out.setdefault(
+                embed.url,
+                Preview(embed.url, embed.title or "", embed.description or "", image_url),
+            )
+    return out
 
 
 async def _model_autocomplete(
@@ -269,6 +294,7 @@ class DiscordCodexClient(discord.Client):
         user_id: int,
         effort: str = "",
         resume: str = "",
+        previews: dict[str, Preview] | None = None,
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text."""
         stored = self.memory.get_model(guild_id, user_id)
@@ -307,7 +333,7 @@ class DiscordCodexClient(discord.Client):
             )
             style = self.memory.get_style(guild_id, user_id)
             links, shots = await link_blocks(
-                find_urls(prompt, self.config.link_max_urls), self.config, link_dir
+                find_urls(prompt, self.config.link_max_urls), self.config, link_dir, previews
             )
             images.extend(shots)
             result = await self.queue.run(
@@ -389,6 +415,20 @@ class DiscordCodexClient(discord.Client):
         if kind == "search":
             return self.memory.search(scope, guild_id, user_id, target)
         return self.memory.recall(scope, guild_id, user_id, target, offset, lines)
+
+    async def _previews(
+        self, message: discord.Message, quoted: discord.Message | None
+    ) -> dict[str, Preview]:
+        """Link previews Discord attached to the request and the quoted message. Discord adds
+        embeds a moment after the message arrives, so a message with links but no embeds yet is
+        re-fetched once after a short wait."""
+        if not message.embeds and find_urls(message.content, 1):
+            await asyncio.sleep(self.config.link_preview_wait_seconds)
+            try:
+                message = await message.channel.fetch_message(message.id)
+            except discord.HTTPException:
+                pass
+        return previews_from([m for m in (message, quoted) if m is not None])
 
     @staticmethod
     async def _referenced(message: discord.Message) -> discord.Message | None:
@@ -706,6 +746,7 @@ class DiscordCodexClient(discord.Client):
         if reason:
             await message.reply(reason, mention_author=False)
             return
+        previews = await self._previews(message, quoted)
 
         # Replying to one of the Bot's answers continues that exact thread; otherwise the member's
         # most recent thread in this channel (within the TTL) is continued.
@@ -718,7 +759,8 @@ class DiscordCodexClient(discord.Client):
         ) or self.threads.current(key, plain=plain, model=model)
         async with message.channel.typing():
             result = await self._answer(
-                prompt, attachments, guild_id, message.author.id, resume=resume
+                prompt, attachments, guild_id, message.author.id, resume=resume,
+                previews=previews,
             )
         chunks = split_discord_message(result.text)
         sent_id = None

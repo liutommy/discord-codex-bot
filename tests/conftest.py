@@ -55,6 +55,7 @@ def config() -> Config:
         link_timeout_seconds=15,
         link_render_timeout_seconds=40,
         link_screenshot_max_height=4000,
+        link_preview_wait_seconds=2,
         consolidate_hour=2,
         consolidate_timezone="Asia/Taipei",
         consolidate_min_remaining_percent=50,

@@ -71,6 +71,7 @@ import pytest  # noqa: E402
 from discord_codex_bot import bot as bot_module  # noqa: E402
 from discord_codex_bot.bot import FAILURE_MESSAGE, QUEUE_FULL_MESSAGE  # noqa: E402
 from discord_codex_bot.codex import CodexResult  # noqa: E402
+from discord_codex_bot.links import Preview  # noqa: E402
 from discord_codex_bot.queue import SerialQueue  # noqa: E402
 
 GUILD, USER = 111111111111111111, 5
@@ -338,3 +339,37 @@ async def test_model_command_autocomplete_and_openrouter_reminder(client, monkey
     assert "免費模型可能隨時不穩或下架" in described
     assert "· High" in client._describe("openrouter:t/text:free", "high")
     assert "看不到圖片" in client._describe("openrouter:t/text:free", "")
+
+
+def test_previews_from_reads_discord_embeds_preferring_the_proxied_picture() -> None:
+    from types import SimpleNamespace as NS
+
+    from discord_codex_bot.bot import previews_from
+
+    thumb = NS(url="https://cdn.dcard/1.jpg", proxy_url="https://images.discordapp.net/1.jpg")
+    article = NS(type="article", url="https://www.dcard.tw/f/x/p/1", title="T", description="D",
+                 thumbnail=thumb, image=None)
+    bare = NS(type="link", url="https://a.example", title=None, description=None,
+              thumbnail=NS(url=None, proxy_url=None), image=NS(url="https://a.example/i.png",
+              proxy_url=None))
+    gif = NS(type="gifv", url="https://tenor.com/x", title="", description="", thumbnail=None,
+             image=None)
+    previews = previews_from([NS(embeds=[article, gif]), NS(embeds=[bare, article])])
+    assert list(previews) == ["https://www.dcard.tw/f/x/p/1", "https://a.example"]
+    assert previews["https://www.dcard.tw/f/x/p/1"] == Preview(
+        "https://www.dcard.tw/f/x/p/1", "T", "D", "https://images.discordapp.net/1.jpg"
+    )
+    assert previews["https://a.example"].image_url == "https://a.example/i.png"
+
+
+async def test_answer_hands_previews_to_link_blocks(client, backends, monkeypatch) -> None:
+    seen = {}
+
+    async def fake_link_blocks(urls, config, out_dir, previews=None):
+        seen["urls"], seen["previews"] = urls, previews
+        return "", []
+
+    monkeypatch.setattr(bot_module, "link_blocks", fake_link_blocks)
+    previews = {"https://x.example": Preview("https://x.example", "t")}
+    await client._answer("看 https://x.example", [], GUILD, USER, previews=previews)
+    assert seen == {"urls": ["https://x.example"], "previews": previews}

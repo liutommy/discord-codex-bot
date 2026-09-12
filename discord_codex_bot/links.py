@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import socket
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -37,6 +38,57 @@ USER_AGENT = (
 _SKIP = {"script", "style", "noscript", "template", "svg", "head"}
 _BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article",
           "pre", "blockquote", "td", "th", "dt", "dd", "hr", "table", "ul", "ol"}
+
+
+@dataclass(frozen=True, slots=True)
+class Preview:
+    """What Discord's own crawler got for a link (the message embed): sites that refuse the
+    Bot — Cloudflare-fronted Dcard, say — still let Discord's allowlisted crawler through."""
+
+    url: str
+    title: str = ""
+    description: str = ""
+    image_url: str = ""  # Discord's proxied copy when available (always fetchable)
+
+
+def _canonical(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{(parts.hostname or '').removeprefix('www.')}{parts.path.rstrip('/')}"
+
+
+def match_preview(url: str, previews: dict[str, Preview] | None) -> Preview | None:
+    """The preview for `url`: exact match first, then ignoring www., query and trailing slash."""
+    if not previews:
+        return None
+    if url in previews:
+        return previews[url]
+    wanted = _canonical(url)
+    return next((p for u, p in previews.items() if _canonical(u) == wanted), None)
+
+
+async def preview_blocks(
+    preview: Preview, config: Config, out_dir: Path | None
+) -> tuple[str, list[Path]]:
+    """The preview as a LINK body plus its picture, downloaded through the guarded session."""
+    lines = ["（Discord 預覽，不是全文；網站本身擋住了 Bot。）"]
+    if preview.title:
+        lines.append(f"標題：{preview.title}")
+    if preview.description:
+        lines.append(preview.description[: config.link_max_chars])
+    images: list[Path] = []
+    if preview.image_url and out_dir is not None:
+        try:
+            await asyncio.to_thread(out_dir.mkdir, parents=True, exist_ok=True)
+            async with _guarded_session(config) as session:
+                target = out_dir / "preview.jpg"
+                saved = await _download_image(session, preview.image_url, target, config)
+        except (aiohttp.ClientError, TimeoutError, OSError) as error:
+            LOGGER.warning("preview image %s failed: %s", preview.image_url, type(error).__name__)
+            saved = None
+        if saved:
+            images.append(saved)
+            lines.append("（預覽圖片已附上）")
+    return "\n".join(lines), images
 
 
 def find_urls(text: str, limit: int) -> list[str]:
@@ -260,14 +312,18 @@ async def fetch_x_status(
 
 
 async def link_blocks(
-    urls: list[str], config: Config, out_dir: Path | None = None
+    urls: list[str],
+    config: Config,
+    out_dir: Path | None = None,
+    previews: dict[str, Preview] | None = None,
 ) -> tuple[str, list[Path]]:
-    """Fetch `urls` (plain first, Chromium fallback) into untrusted <LINK> blocks plus any page
-    screenshots the fallback produced, to be attached as images."""
+    """Fetch `urls` (plain first, Discord preview or Chromium as fallback) into untrusted <LINK>
+    blocks plus any pictures the fallbacks produced, to be attached as images."""
     if not urls:
         return "", []
     results = await asyncio.gather(
-        *(fetch_or_render(url, config, out_dir / f"link{i}" if out_dir else None)
+        *(fetch_or_render(url, config, out_dir / f"link{i}" if out_dir else None,
+                          preview=match_preview(url, previews))
           for i, url in enumerate(urls))
     )
     pairs = zip(urls, results, strict=True)
@@ -278,6 +334,17 @@ async def link_blocks(
 
 def _challenge(title: str) -> bool:
     return "just a moment" in title.lower() or "請稍候" in title
+
+
+# An interactive Turnstile ("click the box") never clears on its own; give up at once.
+_INTERACTIVE = (
+    "點擊下方驗證", "驗證您是人類", "verify you are human", "complete the security check"
+)
+
+
+def _interactive(body: str) -> bool:
+    lowered = body.lower()
+    return any(marker.lower() in lowered for marker in _INTERACTIVE)
 
 
 async def _guard_route(route, request, hosts: dict[str, bool]) -> None:
@@ -340,6 +407,9 @@ async def _render(url: str, config: Config, out_dir: Path | None) -> tuple[str, 
             for _ in range(max(1, deadline // 3)):  # the caller's wait_for bounds the total
                 if not _challenge(await page.title()):
                     break
+                body = await page.evaluate("() => document.body ? document.body.innerText : ''")
+                if _interactive(body):
+                    return await page.title(), "", None  # a challenge title: reported as blocked
                 await asyncio.sleep(3)
             try:
                 await page.wait_for_load_state("networkidle", timeout=8000)
@@ -408,10 +478,15 @@ def blocked(result: str) -> bool:
 
 
 async def fetch_or_render(
-    url: str, config: Config, out_dir: Path | None, render: bool = False
+    url: str,
+    config: Config,
+    out_dir: Path | None,
+    render: bool = False,
+    preview: Preview | None = None,
 ) -> tuple[str, list[Path]]:
-    """(text, images): X posts through the API; otherwise plain fetch first and Chromium when
-    asked (render) or when the plain fetch cannot read the page."""
+    """(text, images): X posts through the API; otherwise plain fetch first, Chromium when that
+    cannot read the page (or when the model asked for the rendered page), and only when the site
+    itself cannot be read at all, the Discord preview the message carried."""
     user, post_id = x_status(url)
     if post_id:
         post = await fetch_x_status(url, config, out_dir)
@@ -423,4 +498,6 @@ async def fetch_or_render(
         if not blocked(text):
             return text, []
     text, shot = await render_link(url, config, out_dir)
+    if shot is None and preview is not None:
+        return await preview_blocks(preview, config, out_dir)
     return text, [shot] if shot else []

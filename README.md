@@ -168,9 +168,13 @@ falls back to headless Chromium (Playwright, installed in the image): it waits o
 takes the rendered text and attaches a full-page screenshot (`LINK_RENDER_TIMEOUT_SECONDS`,
 `LINK_SCREENSHOT_MAX_HEIGHT`) so the model can see the pictures. X posts (x.com and the
 fxtwitter/vxtwitter/fixupx/fixvx mirrors) are read through the fxtwitter API instead — text plus
-the photos or video poster frames, attached as images — with the page as fallback. Pages behind
-logins or an interactive Turnstile (e.g. Dcard) still come back as "打不開"; on the Codex backend
-OpenAI's own web tool remains available as a second path.
+the photos or video poster frames, attached as images — with the page as fallback. When neither
+the plain fetch nor Chromium can read a page (an interactive Turnstile, e.g. Dcard, is given up
+on at once), the Bot falls back to the link preview Discord attached to the message — Discord's
+crawler is a Cloudflare-verified bot and gets the title, description and picture — labelled as
+a preview, not the full page (`LINK_PREVIEW_WAIT_SECONDS` waits once for the embed to appear).
+Pages behind logins still come back as "打不開"; on the Codex backend OpenAI's own web tool
+remains available as a second path.
 
 Both entry points share one pipeline: guild allowlist → validation → serial queue → `codex exec`.
 The `@mention` form keeps the question visible as the member's own message, supports up to

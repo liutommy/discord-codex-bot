@@ -127,6 +127,7 @@ class Config:
     link_timeout_seconds: int
     link_render_timeout_seconds: int
     link_screenshot_max_height: int
+    link_preview_wait_seconds: float
     consolidate_hour: int
     consolidate_timezone: str
     consolidate_min_remaining_percent: int
@@ -218,6 +219,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Chromium fallback (bot-challenge / client-rendered pages) and on-demand page screenshots.
         link_render_timeout_seconds=_positive_int(values, "LINK_RENDER_TIMEOUT_SECONDS", 40),
         link_screenshot_max_height=_positive_int(values, "LINK_SCREENSHOT_MAX_HEIGHT", 4000),
+        # Discord attaches link embeds shortly after a message; wait this long once for them.
+        link_preview_wait_seconds=_positive_int(values, "LINK_PREVIEW_WAIT_SECONDS", 2),
         # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.
         consolidate_hour=_bounded_int(values, "CONSOLIDATE_HOUR", 2, 0, 23),
         consolidate_timezone=values.get("CONSOLIDATE_TIMEZONE", "").strip() or "Asia/Taipei",

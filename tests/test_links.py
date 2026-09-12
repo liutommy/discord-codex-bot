@@ -211,7 +211,7 @@ async def test_fetch_or_render_falls_back_only_when_blocked_or_asked(
 async def test_link_blocks_wraps_each_page_and_collects_screenshots(
     monkeypatch, config: Config, tmp_path: Path
 ) -> None:
-    async def fake(url: str, config: Config, out_dir, render: bool = False):
+    async def fake(url: str, config: Config, out_dir, render: bool = False, preview=None):
         return f"body of {url}", [out_dir / "page.jpg"] if "shot" in url else []
 
     monkeypatch.setattr(links, "fetch_or_render", fake)
@@ -525,3 +525,86 @@ async def test_fetch_or_render_falls_back_to_x_com_when_the_api_fails(
     got = await fetch_or_render("https://fixvx.com/u/status/1234567890", config, tmp_path)
     assert got == ("text", [])
     assert seen == ["https://x.com/u/status/1234567890"]
+
+
+def test_match_preview_ignores_www_query_and_trailing_slash() -> None:
+    previews = {"https://www.dcard.tw/f/x/p/1": links.Preview("https://www.dcard.tw/f/x/p/1", "T")}
+    assert links.match_preview("https://www.dcard.tw/f/x/p/1", previews).title == "T"
+    assert links.match_preview("https://dcard.tw/f/x/p/1/?ref=a", previews).title == "T"
+    assert links.match_preview("https://dcard.tw/f/x/p/2", previews) is None
+    assert links.match_preview("https://dcard.tw/f/x/p/1", None) is None
+
+
+async def test_fetch_or_render_uses_the_discord_preview_only_when_the_site_is_unreadable(
+    monkeypatch, config: Config, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    async def fake_fetch(url: str, cfg: Config) -> str:
+        calls.append("fetch")
+        return "（u：HTTP 403，打不開）" if "blocked" in url else "text"
+
+    async def fake_render(url, cfg, out_dir):
+        calls.append("render")
+        return "rendered", None
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def fake_download(session, url, path, cfg):
+        calls.append(f"image {url}")
+        path.write_bytes(b"jpg")
+        return path
+
+    monkeypatch.setattr(links, "fetch_link", fake_fetch)
+    monkeypatch.setattr(links, "render_link", fake_render)
+    monkeypatch.setattr(links, "_guarded_session", lambda cfg: Session())
+    monkeypatch.setattr(links, "_download_image", fake_download)
+    preview = links.Preview("https://blocked.example/p", "標題", "全文描述", "https://cdn/x.jpg")
+    text, images = await fetch_or_render(
+        "https://blocked.example/p", config, tmp_path, preview=preview
+    )
+    assert text == (
+        "（Discord 預覽，不是全文；網站本身擋住了 Bot。）\n標題：標題\n全文描述\n（預覽圖片已附上）"
+    )
+    assert images == [tmp_path / "preview.jpg"]
+    assert calls == ["fetch", "render", "image https://cdn/x.jpg"]  # the site first, preview last
+    calls.clear()  # a readable page ignores the preview; a rendered page wins over it too
+    readable = await fetch_or_render("https://ok.example", config, tmp_path, preview=preview)
+    assert readable[0] == "text"
+
+    async def render_ok(url, cfg, out_dir):
+        calls.append("render")
+        return "rendered", tmp_path / "page.jpg"
+
+    monkeypatch.setattr(links, "render_link", render_ok)
+    got = await fetch_or_render("https://blocked.example/p", config, tmp_path, preview=preview)
+    assert got == ("rendered", [tmp_path / "page.jpg"]) and calls == ["fetch", "fetch", "render"]
+    monkeypatch.setattr(links, "render_link", fake_render)
+    no_image = links.Preview("https://blocked.example/p", "", "只有描述")
+    assert await fetch_or_render("https://blocked.example/p", config, None, preview=no_image) == (
+        "（Discord 預覽，不是全文；網站本身擋住了 Bot。）\n只有描述", []
+    )
+
+
+async def test_render_link_gives_up_at_once_on_an_interactive_turnstile(
+    monkeypatch, config: Config
+) -> None:
+    async def resolve_ok(host: str) -> str:
+        return "93.184.216.34"
+
+    async def no_sleep(seconds):
+        raise AssertionError("must not wait out an interactive challenge")
+
+    monkeypatch.setattr(links, "_resolve_public", resolve_ok)
+    monkeypatch.setattr(links.asyncio, "sleep", no_sleep)
+    body = "Dcard 需要確認您的連線是安全的\n請稍候，並依據指示點擊下方驗證："
+    page = FakePage(["請稍候..."], text=body)
+    browser = install_fake_playwright(monkeypatch, page)
+    text, shot = await render_link("https://www.dcard.tw/f/x/p/1", config, None)
+    assert text == "（https://www.dcard.tw/f/x/p/1：機器人驗證沒過，打不開）" and shot is None
+    assert browser.closed
