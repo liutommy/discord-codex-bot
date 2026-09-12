@@ -35,7 +35,8 @@ def test_effort_maps_onto_legal_agy_slugs() -> None:
     assert resolve(pro, "xhigh").model == "gemini-3.1-pro-high"
     claude = parse_choice("agy:claude-opus-4-6", "gpt-5.6-luna")
     assert resolve(claude, "high") == resolve(claude, "low")
-    assert resolve(claude, "high").effort == "" and resolve(claude, "high").model.endswith("thinking")
+    fixed = resolve(claude, "high")
+    assert fixed.effort == "" and fixed.model.endswith("thinking")
     codex = parse_choice("codex:gpt-5.6-luna", "gpt-5.6-luna")
     assert resolve(codex, "xhigh").effort == "xhigh" and resolve(codex, "xhigh").backend == CODEX
 
