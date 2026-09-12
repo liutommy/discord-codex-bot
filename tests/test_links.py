@@ -17,6 +17,7 @@ from discord_codex_bot.links import (
     extract_fetch_tags,
     fetch_link,
     fetch_or_render,
+    fetch_x_status,
     find_urls,
     html_to_text,
     link_blocks,
@@ -193,12 +194,12 @@ async def test_fetch_or_render_falls_back_only_when_blocked_or_asked(
 
     monkeypatch.setattr(links, "fetch_link", fake_fetch)
     monkeypatch.setattr(links, "render_link", fake_render)
-    assert await fetch_or_render("https://ok.example", config, tmp_path) == ("text", None)
+    assert await fetch_or_render("https://ok.example", config, tmp_path) == ("text", [])
     assert await fetch_or_render("https://blocked.example", config, tmp_path) == (
-        "rendered", tmp_path / "page.jpg"
+        "rendered", [tmp_path / "page.jpg"]
     )
     assert await fetch_or_render("https://ok.example", config, tmp_path, render=True) == (
-        "rendered", tmp_path / "page.jpg"
+        "rendered", [tmp_path / "page.jpg"]
     )
     assert calls == [
         "fetch https://ok.example", "fetch https://blocked.example",
@@ -211,8 +212,7 @@ async def test_link_blocks_wraps_each_page_and_collects_screenshots(
     monkeypatch, config: Config, tmp_path: Path
 ) -> None:
     async def fake(url: str, config: Config, out_dir, render: bool = False):
-        shot = out_dir / "page.jpg" if "shot" in url else None
-        return f"body of {url}", shot
+        return f"body of {url}", [out_dir / "page.jpg"] if "shot" in url else []
 
     monkeypatch.setattr(links, "fetch_or_render", fake)
     assert await link_blocks([], config, tmp_path) == ("", [])
@@ -234,6 +234,8 @@ async def test_fetch_link_clips_text_and_reports_bot_challenge(monkeypatch, conf
 
         async def read(self, n: int) -> bytes:
             return self._body[:n]
+        async def iter_chunked(self, n: int):
+            yield await self.read(n)
 
         async def __aenter__(self):
             return self
@@ -394,3 +396,132 @@ async def test_render_link_uses_the_browser_version_without_the_headless_token(
     await render_link("https://ok.example/", config, None)
     agent = browser.context_kwargs["user_agent"]
     assert "Chrome/151.0.0.0" in agent and "Headless" not in agent
+
+
+def test_x_status_recognises_x_and_its_mirrors_only() -> None:
+    assert links.x_status("https://fixvx.com/aiban_imas/status/2098659648509559228") == (
+        "aiban_imas", "2098659648509559228"
+    )
+    assert links.x_status("https://www.x.com/a_b/status/12345?s=20")[1] == "12345"
+    assert links.x_status("https://mobile.twitter.com/a/status/12345/photo/1")[1] == "12345"
+    assert links.x_status("https://x.com/a_b/") == ("", "")
+    assert links.x_status("https://notx.com/a/status/12345") == ("", "")
+
+
+async def test_fetch_link_treats_a_redirect_shell_as_blocked(monkeypatch, config: Config) -> None:
+    class Response:
+        status, headers, charset = 200, {"Content-Type": "text/html"}, "utf-8"
+
+        def __init__(self) -> None:
+            self.content = self
+
+        async def read(self, n: int) -> bytes:
+            return b"<title>Redirecting...</title><p>Redirecting\u2026</p>"
+        async def iter_chunked(self, n: int):
+            yield await self.read(n)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Session:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def get(self, url: str, **kwargs):
+            return Response()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def resolve_ok(host: str) -> str:
+        return "93.184.216.34"
+
+    monkeypatch.setattr(links, "_resolve_public", resolve_ok)
+    monkeypatch.setattr(links, "_guarded_session", lambda config: Session())
+    out = await fetch_link("https://vxtwitter.com/a/status/1", config)
+    assert blocked(out) and "轉址殼" in out
+
+
+async def test_fetch_x_status_returns_text_and_downloads_media(
+    monkeypatch, config: Config, tmp_path: Path
+) -> None:
+    payload = {"tweet": {
+        "text": "…？", "created_at": "Sat Sep 12 06:27:00 +0000 2026",
+        "author": {"name": "あいばん", "screen_name": "aiban_imas"},
+        "media": {"all": [
+            {"type": "photo", "url": "https://pbs.twimg.com/media/a.jpg?name=orig"},
+            {"type": "video", "url": "https://video.twimg.com/v.mp4",
+             "thumbnail_url": "https://pbs.twimg.com/thumb.jpg"},
+        ]},
+        "quote": {"text": "原文", "author": {"screen_name": "someone"}},
+    }}
+    fetched: list[str] = []
+
+    class Response:
+        def __init__(self, url: str) -> None:
+            self.url, self.status = url, 200
+            self.content_type = "application/json" if "api." in url else "image/jpeg"
+            self.content = self
+
+        async def json(self, content_type=None):
+            return payload
+
+        async def read(self, n: int) -> bytes:
+            return b"jpegbytes"
+        async def iter_chunked(self, n: int):
+            yield await self.read(n)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Session:
+        def get(self, url: str, **kwargs):
+            fetched.append(url)
+            return Response(url)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(links, "_guarded_session", lambda config: Session())
+    text, images = await fetch_x_status(
+        "https://fixvx.com/aiban_imas/status/2098659648509559228", config, tmp_path / "x"
+    )
+    assert text.splitlines()[0].startswith("X 貼文 @aiban_imas（あいばん）")
+    assert "…？" in text and "引用 @someone：原文" in text and "影片只附封面幀" in text
+    assert images == [tmp_path / "x" / "x0.jpg", tmp_path / "x" / "x1.jpg"]
+    assert (tmp_path / "x" / "x1.jpg").read_bytes() == b"jpegbytes"
+    assert fetched == [
+        "https://api.fxtwitter.com/aiban_imas/status/2098659648509559228",
+        "https://pbs.twimg.com/media/a.jpg?name=large", "https://pbs.twimg.com/thumb.jpg",
+    ]
+
+
+async def test_fetch_or_render_falls_back_to_x_com_when_the_api_fails(
+    monkeypatch, config: Config, tmp_path: Path
+) -> None:
+    seen: list[str] = []
+
+    async def no_api(url, cfg, out_dir):
+        return None
+
+    async def fake_fetch(url: str, cfg: Config) -> str:
+        seen.append(url)
+        return "text"
+
+    monkeypatch.setattr(links, "fetch_x_status", no_api)
+    monkeypatch.setattr(links, "fetch_link", fake_fetch)
+    got = await fetch_or_render("https://fixvx.com/u/status/1234567890", config, tmp_path)
+    assert got == ("text", [])
+    assert seen == ["https://x.com/u/status/1234567890"]

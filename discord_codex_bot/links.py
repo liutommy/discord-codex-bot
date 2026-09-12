@@ -20,7 +20,16 @@ URL_RE = re.compile(r"https?://[^\s<>()\[\]\"'`]+")
 FETCH_TAG = re.compile(
     r'<fetch\s+url="(https?://[^"]{1,2000})"(?:\s+render="([^"]*)")?\s*/?>(?:\s*</fetch>)?'
 )
-BLOCKED_MARKERS = ("被網站的機器人驗證擋住", "HTTP 403", "HTTP 429", "頁面沒有可讀文字", "HTTP 503")
+BLOCKED_MARKERS = (
+    "被網站的機器人驗證擋住", "HTTP 403", "HTTP 429", "頁面沒有可讀文字", "HTTP 503", "只是轉址殼",
+)
+# X posts: x.com and the fx/vx embed mirrors members paste. Read through the fxtwitter API
+# (text + media) instead of the login-walled page; the generic path is the fallback.
+X_HOSTS = {"x.com", "twitter.com", "fxtwitter.com", "fixupx.com", "vxtwitter.com", "fixvx.com",
+           "twittpr.com"}
+X_STATUS = re.compile(r"^/([A-Za-z0-9_]{1,20})/status/(\d{5,25})")
+X_API = "https://api.fxtwitter.com"
+X_MAX_IMAGES = 4
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/128.0 Safari/537.36"
@@ -122,6 +131,18 @@ async def _resolve_public(host: str) -> str:
     return sorted(addresses)[0]
 
 
+async def _read_bounded(response, limit: int) -> bytes:
+    """Up to `limit` bytes of the body. (`content.read(n)` returns one chunk, not n bytes.)"""
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        chunks.append(chunk)
+        size += len(chunk)
+        if size >= limit:
+            break
+    return b"".join(chunks)[:limit]
+
+
 async def fetch_link(url: str, config: Config) -> str:
     """Fetch one http(s) URL into bounded plain text; returns a user-readable failure otherwise.
 
@@ -135,18 +156,13 @@ async def fetch_link(url: str, config: Config) -> str:
         await _resolve_public(parts.hostname)
     except (ValueError, socket.gaierror) as error:
         return f"（{url}：無法連線——{error}）"
-    timeout = aiohttp.ClientTimeout(total=config.link_timeout_seconds)
-    headers = {"User-Agent": USER_AGENT, "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"}
     try:
-        connector = aiohttp.TCPConnector(resolver=_PublicResolver(), use_dns_cache=False)
-        async with aiohttp.ClientSession(
-            timeout=timeout, headers=headers, connector=connector
-        ) as session:
+        async with _guarded_session(config) as session:
             async with session.get(url, max_redirects=5, allow_redirects=True) as response:
                 if response.status >= 400:
                     return f"（{url}：HTTP {response.status}，打不開）"
                 content_type = response.headers.get("Content-Type", "")
-                raw = await response.content.read(config.link_max_bytes)
+                raw = await _read_bounded(response, config.link_max_bytes)
     except (aiohttp.ClientError, TimeoutError) as error:
         return f"（{url}：抓取失敗——{type(error).__name__}）"
     body = raw.decode(response.charset or "utf-8", errors="replace")
@@ -160,10 +176,87 @@ async def fetch_link(url: str, config: Config) -> str:
         return f"（{url}：不是文字內容（{content_type.split(';')[0] or '未知'}），略過）"
     if not text:
         return f"（{url}：頁面沒有可讀文字）"
+    if len(text) < 120 and "redirect" in f"{title} {text}".lower():
+        return f"（{url}：只是轉址殼，內容要瀏覽器才載得到）"
     limit = config.link_max_chars
     clipped = text if len(text) <= limit else f"{text[:limit]}\n[已截斷至 {limit} 字]"
     head = f"標題：{title}\n" if title else ""
     return f"{head}{clipped}"
+
+
+def x_status(url: str) -> tuple[str, str]:
+    """(screen_name, post id) when `url` is an X post on x.com or one of its embed mirrors."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").removeprefix("www.").removeprefix("mobile.")
+    match = X_STATUS.match(parts.path) if host in X_HOSTS else None
+    return (match.group(1), match.group(2)) if match else ("", "")
+
+
+def _guarded_session(config: Config) -> aiohttp.ClientSession:
+    connector = aiohttp.TCPConnector(resolver=_PublicResolver(), use_dns_cache=False)
+    timeout = aiohttp.ClientTimeout(total=config.link_timeout_seconds)
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"}
+    return aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector)
+
+
+async def _download_image(session, url: str, path: Path, config: Config) -> Path | None:
+    async with session.get(url, max_redirects=3) as response:
+        if response.status >= 400 or not response.content_type.startswith("image/"):
+            return None
+        raw = await _read_bounded(response, config.link_max_bytes)
+    if len(raw) >= config.link_max_bytes:
+        return None  # truncated image data would only confuse the model
+    await asyncio.to_thread(path.write_bytes, raw)
+    return path
+
+
+async def fetch_x_status(
+    url: str, config: Config, out_dir: Path | None
+) -> tuple[str, list[Path]] | None:
+    """An X post as text plus its pictures (photos, or video/GIF poster frames) saved under
+    `out_dir`; None when the API cannot serve it, so the caller falls back to the page."""
+    user, post_id = x_status(url)
+    if not post_id:
+        return None
+    try:
+        async with _guarded_session(config) as session:
+            async with session.get(f"{X_API}/{user}/status/{post_id}") as response:
+                if response.status != 200:
+                    return None
+                tweet = (await response.json(content_type=None)).get("tweet") or {}
+            if not tweet:
+                return None
+            images: list[Path] = []
+            media = (tweet.get("media") or {}).get("all") or []
+            if out_dir is not None and media:
+                await asyncio.to_thread(out_dir.mkdir, parents=True, exist_ok=True)
+                for i, item in enumerate(media[:X_MAX_IMAGES]):
+                    photo = item.get("type") == "photo"
+                    source = item.get("url") if photo else item.get("thumbnail_url")
+                    source = (source or "").replace("name=orig", "name=large")  # bounded size
+                    if source:
+                        target = out_dir / f"x{i}.jpg"
+                        saved = await _download_image(session, source, target, config)
+                        if saved:
+                            images.append(saved)
+    except (aiohttp.ClientError, TimeoutError, ValueError, OSError) as error:
+        LOGGER.warning("fetch_x_status %s failed: %s", url, type(error).__name__)
+        return None
+    author = tweet.get("author") or {}
+    lines = [
+        f"X 貼文 @{author.get('screen_name', user)}（{author.get('name', '')}）"
+        f" {tweet.get('created_at', '')}",
+        tweet.get("text") or "（無文字）",
+    ]
+    if media:
+        kinds = "、".join(f"{m.get('type', '?')}" for m in media)
+        got = "圖片已附上" if images else "無法取得圖片"
+        frame = "（影片只附封面幀）" if any(m.get("type") != "photo" for m in media) else ""
+        lines.append(f"[媒體：{kinds}；{got}{frame}]")
+    quote = tweet.get("quote") or {}
+    if quote.get("text"):
+        lines.append(f"引用 @{(quote.get('author') or {}).get('screen_name', '')}：{quote['text']}")
+    return "\n".join(lines), images
 
 
 async def link_blocks(
@@ -179,7 +272,7 @@ async def link_blocks(
     )
     pairs = zip(urls, results, strict=True)
     blocks = [f'<LINK url="{url}">\n{text}\n</LINK>' for url, (text, _) in pairs]
-    shots = [shot for _, shot in results if shot is not None]
+    shots = [shot for _, shots in results for shot in shots]
     return "\n\n".join(blocks), shots
 
 
@@ -316,10 +409,18 @@ def blocked(result: str) -> bool:
 
 async def fetch_or_render(
     url: str, config: Config, out_dir: Path | None, render: bool = False
-) -> tuple[str, Path | None]:
-    """Plain fetch first; Chromium when asked (render) or when plain fetch cannot read the page."""
+) -> tuple[str, list[Path]]:
+    """(text, images): X posts through the API; otherwise plain fetch first and Chromium when
+    asked (render) or when the plain fetch cannot read the page."""
+    user, post_id = x_status(url)
+    if post_id:
+        post = await fetch_x_status(url, config, out_dir)
+        if post is not None:
+            return post
+        url = f"https://x.com/{user}/status/{post_id}"  # mirrors serve browsers a redirect shell
     if not render:
         text = await fetch_link(url, config)
         if not blocked(text):
-            return text, None
-    return await render_link(url, config, out_dir)
+            return text, []
+    text, shot = await render_link(url, config, out_dir)
+    return text, [shot] if shot else []

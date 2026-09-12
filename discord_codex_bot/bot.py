@@ -311,12 +311,11 @@ class DiscordCodexClient(discord.Client):
                 ]
                 extra: list[Path] = []
                 for i, (url, render) in enumerate(urls):
-                    fetched, shot = await fetch_or_render(
+                    fetched, shots = await fetch_or_render(
                         url, self.config, link_dir / f"fetch{i}", render
                     )
                     blocks.append(f'<LINK url="{url}">\n{fetched}\n</LINK>')
-                    if shot is not None:
-                        extra.append(shot)
+                    extra.extend(shots)
                 recalled = "\n\n".join(blocks)
                 result = await self.queue.run(
                     lambda text=recalled, thread=result.thread_id, imgs=tuple(extra): turn(

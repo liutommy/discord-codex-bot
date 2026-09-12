@@ -236,7 +236,7 @@ async def test_answer_feeds_a_standalone_fetch_tag_screenshot_back_as_an_image(
 
     async def fake_fetch_or_render(url, config, out_dir, render=False):
         calls.append((url, render))
-        return "整頁內容", shot
+        return "整頁內容", [shot]
 
     monkeypatch.setattr(bot_module, "fetch_or_render", fake_fetch_or_render)
     result = await client._answer("看這個網頁", [], GUILD, USER)
