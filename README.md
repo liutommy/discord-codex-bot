@@ -179,7 +179,9 @@ remains available as a second path.
 Videos in a link are understood through Gemini's free tier used as a tool (not a chat backend;
 `GEMINI_API_KEY`, no billing attached). A YouTube link is understood from its URL alone — Gemini
 watches the frames and listens — with the captions (`youtube-transcript-api`) as a fallback when
-Gemini cannot; an X clip is downloaded (up to `GEMINI_VIDEO_INLINE_MAX_BYTES`) and sent inline.
+Gemini cannot; an X clip is downloaded (up to `GEMINI_VIDEO_INLINE_MAX_BYTES`) and sent inline, and a link on one
+of the curated short-video hosts (TikTok, Instagram, Bilibili, Reddit, Streamable, …) is pulled by
+yt-dlp — a single progressive stream under the same cap, no ffmpeg — and sent inline too.
 The description is injected as an untrusted `<VIDEO>` block so whichever backend the member picked
 can answer about the clip. Understanding races a timer: a video that takes longer than
 `VIDEO_INTERIM_AFTER_SECONDS` shows a "still watching" reply that is edited into the final answer
