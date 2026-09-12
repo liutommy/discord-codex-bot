@@ -181,11 +181,52 @@ async def test_understand_video_x_downloads_the_clip_and_describes_it(
     monkeypatch.setattr(links, "_guarded_session", lambda cfg: FakeSession())
     monkeypatch.setattr(links, "_download_video", download)
     monkeypatch.setattr(links.gemini, "describe_video_bytes", describe)
-    out = await links.understand_video("https://x.com/a/status/1", config, tmp_path)
+    out = await links.understand_video("https://x.com/a/status/1234567890", config, tmp_path)
     assert out == f"{links.VIDEO_LABEL}影片裡有貓"
 
     async def no_url(url, cfg):
         return ""
 
     monkeypatch.setattr(links, "x_video_url", no_url)
-    assert await links.understand_video("https://x.com/a/status/1", config, tmp_path) is None
+    got = await links.understand_video("https://x.com/a/status/1234567890", config, tmp_path)
+    assert got is None
+
+
+def test_has_video_covers_curated_yt_dlp_hosts() -> None:
+    assert links.has_video("https://www.tiktok.com/@u/video/12345")
+    assert links.has_video("https://vt.tiktok.com/ZSabc/")
+    assert links.has_video("https://www.instagram.com/reel/abc/")
+    assert links._yt_dlp_host("https://b23.tv/xyz")
+    assert not links.has_video("https://example.com/v")
+
+
+async def test_understand_video_falls_through_to_yt_dlp_for_curated_hosts(
+    monkeypatch, config, tmp_path: Path
+) -> None:
+    calls = {}
+
+    def fake_download(url, out_dir, cap):
+        calls["url"], calls["cap"] = url, cap
+        clip = out_dir / "clip.mp4"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        clip.write_bytes(b"data")
+        return clip
+
+    async def describe(path, cfg):
+        return "抖音短片內容"
+
+    monkeypatch.setattr(links, "_yt_dlp_download", fake_download)
+    monkeypatch.setattr(links.gemini, "describe_video_bytes", describe)
+    out = await links.understand_video("https://www.tiktok.com/@u/video/9", config, tmp_path)
+    assert out == f"{links.VIDEO_LABEL}抖音短片內容"
+    assert calls["url"] == "https://www.tiktok.com/@u/video/9"
+    assert calls["cap"] == config.gemini_video_inline_max_bytes
+
+    def no_file(url, out_dir, cap):
+        return None
+
+    monkeypatch.setattr(links, "_yt_dlp_download", no_file)
+    blocked = await links.understand_video("https://www.tiktok.com/@u/video/9", config, tmp_path)
+    assert blocked is None
+    # a non-curated, non-youtube, non-x url is not a video target at all
+    assert await links.understand_video("https://example.com/v", config, tmp_path) is None

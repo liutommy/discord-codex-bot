@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -88,8 +89,11 @@ async def describe_video_bytes(path: Path, config: Config) -> str | None:
         LOGGER.info("clip %s over inline cap (%d bytes); skipped", path.name, len(raw))
         return None
     encoded = base64.b64encode(raw).decode("ascii")
+    mime = mimetypes.guess_type(path.name)[0] or "video/mp4"
+    if not mime.startswith("video/"):
+        mime = "video/mp4"
     parts = [
-        {"inline_data": {"mime_type": "video/mp4", "data": encoded}},
+        {"inline_data": {"mime_type": mime, "data": encoded}},
         {"text": _INSTRUCTION},
     ]
     text = await _generate(config, parts)
