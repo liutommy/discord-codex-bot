@@ -58,9 +58,16 @@ def choices(codex_model: str) -> list[ModelChoice]:
     return out
 
 
+def split_stored(value: str) -> tuple[str, str]:
+    """Stored per-member value "<backend>:<family>|<effort>" -> (choice value, effort or "")."""
+    choice, _, effort = value.partition("|")
+    return choice, effort.strip()
+
+
 def parse_choice(value: str, codex_model: str) -> ModelChoice:
     """Resolve a stored value; unknown or stale values fall back to the Codex default.
     Values stored by the earlier slug-based command ("agy:gemini-3.8-flash-high") still map."""
+    value = split_stored(value)[0]
     for choice in choices(codex_model):
         if choice.value == value:
             return choice

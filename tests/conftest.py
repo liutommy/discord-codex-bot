@@ -44,6 +44,7 @@ def config() -> Config:
         agy_settings_path=Path("/opt/discord-codex/agy-settings.json"),
         announce_dir=Path("/opt/discord-codex/announce"),
         announce_channel_ids=frozenset(),
+        announce_approved="",
         consolidate_hour=2,
         consolidate_timezone="Asia/Taipei",
         consolidate_min_remaining_percent=50,

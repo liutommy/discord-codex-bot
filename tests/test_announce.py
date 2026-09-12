@@ -32,8 +32,12 @@ async def test_announce_only_to_configured_channels_once(tmp_path: Path, config:
 
     assert await announce_once(client, base) == 0  # nothing configured -> nothing posted
     cfg = replace(base, announce_channel_ids=frozenset({10, 11}))
+    assert await announce_once(client, cfg) == 0  # configured but not approved -> nothing
+    cfg = replace(cfg, announce_approved=pending_announcement(cfg)[0])
     assert await announce_once(client, cfg) == 1
     assert good.sent == ["新功能上線！"] and foreign.sent == []
     assert await announce_once(client, cfg) == 0  # same version -> silent
     (tmp_path / "announce" / "latest.md").write_text("第二版", "utf-8")
+    assert await announce_once(client, cfg) == 0  # new content, old approval -> nothing
+    cfg = replace(cfg, announce_approved=pending_announcement(cfg)[0])
     assert await announce_once(client, cfg) == 1 and good.sent[-1] == "第二版"

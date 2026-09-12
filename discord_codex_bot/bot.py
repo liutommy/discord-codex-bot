@@ -20,7 +20,7 @@ from .attachments import (
     sweep_forever,
     validate_image,
 )
-from .backends import AGY, choices, parse_choice, resolve
+from .backends import AGY, choices, parse_choice, resolve, split_stored
 from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
@@ -50,6 +50,7 @@ SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label i
 MODEL_CHOICES = [
     app_commands.Choice(name=c.label[:100], value=c.value) for c in choices("gpt-5.6-luna")
 ]
+EFFORT_CHOICES = [app_commands.Choice(name=v, value=k) for k, v in REASONING_EFFORTS.items()]
 
 
 def instructions_version(config: Config) -> str:
@@ -237,8 +238,11 @@ class DiscordCodexClient(discord.Client):
         resume: str = "",
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text."""
-        choice = parse_choice(self.memory.get_model(guild_id, user_id), self.config.codex_model)
-        target = resolve(choice, effort or self.config.codex_reasoning_effort)
+        stored = self.memory.get_model(guild_id, user_id)
+        choice = parse_choice(stored, self.config.codex_model)
+        target = resolve(
+            choice, effort or split_stored(stored)[1] or self.config.codex_reasoning_effort
+        )
 
         async def turn(text: str, **kw) -> CodexResult:
             if target.backend == AGY:
@@ -336,6 +340,12 @@ class DiscordCodexClient(discord.Client):
         except discord.HTTPException:
             return None
 
+    def _describe(self, value: str, level: str) -> str:
+        chosen = parse_choice(value, self.config.codex_model)
+        target = resolve(chosen, level or self.config.codex_reasoning_effort)
+        shown = REASONING_EFFORTS.get(target.effort, target.effort) if target.effort else "固定"
+        return f"{chosen.label} · {shown} → `{target.model}`"
+
     def _model(self, guild_id: int | None, user_id: int) -> str:
         return parse_choice(self.memory.get_model(guild_id, user_id), self.config.codex_model).value
 
@@ -413,13 +423,15 @@ class DiscordCodexClient(discord.Client):
 
     @app_commands.describe(
         model="要使用的模型；留空＝查看目前設定",
+        effort="這個模型的預設推理強度（/inmu-king 的 effort 可臨時覆蓋）",
         clear="設為 True 清除，回到預設（Codex）",
     )
-    @app_commands.choices(model=MODEL_CHOICES)
+    @app_commands.choices(model=MODEL_CHOICES, effort=EFFORT_CHOICES)
     async def model_command(
         self,
         interaction: discord.Interaction,
         model: app_commands.Choice[str] | None = None,
+        effort: app_commands.Choice[str] | None = None,
         clear: bool = False,
     ) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
@@ -430,13 +442,16 @@ class DiscordCodexClient(discord.Client):
         if clear:
             cleared = self.memory.clear_model(guild_id, user_id)
             message = "已清除，回到預設模型。" if cleared else "你沒有設定模型。"
-        elif model is not None:
-            chosen = parse_choice(model.value, self.config.codex_model)
-            self.memory.set_model(guild_id, user_id, chosen.value)
-            message = f"已設定模型：{chosen.label}"
+        elif model is not None or effort is not None:
+            stored = self.memory.get_model(guild_id, user_id)
+            chosen = parse_choice(model.value if model else stored, self.config.codex_model)
+            level = effort.value if effort else split_stored(stored)[1]
+            value = f"{chosen.value}|{level}" if level else chosen.value
+            self.memory.set_model(guild_id, user_id, value)
+            message = f"已設定：{self._describe(chosen.value, level)}"
         else:
             stored = self.memory.get_model(guild_id, user_id)
-            message = f"目前模型：{parse_choice(stored, self.config.codex_model).label}"
+            message = f"目前：{self._describe(*split_stored(stored))}"
         await interaction.response.send_message(message, ephemeral=True)
 
     @app_commands.describe(

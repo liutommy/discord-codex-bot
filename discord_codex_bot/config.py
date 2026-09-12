@@ -116,6 +116,7 @@ class Config:
     agy_settings_path: Path
     announce_dir: Path
     announce_channel_ids: frozenset[int]
+    announce_approved: str
     consolidate_hour: int
     consolidate_timezone: str
     consolidate_min_remaining_percent: int
@@ -185,6 +186,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         announce_channel_ids=parse_id_set(
             values.get("ANNOUNCE_CHANNEL_IDS"), "ANNOUNCE_CHANNEL_IDS"
         ),
+        # Hard gate: only the announcement whose content hash the owner approved is ever posted.
+        announce_approved=values.get("ANNOUNCE_APPROVED", "").strip(),
         # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.
         consolidate_hour=_bounded_int(values, "CONSOLIDATE_HOUR", 2, 0, 23),
         consolidate_timezone=values.get("CONSOLIDATE_TIMEZONE", "").strip() or "Asia/Taipei",

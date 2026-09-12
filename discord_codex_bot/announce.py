@@ -41,6 +41,13 @@ async def announce_once(client: discord.Client, config: Config) -> int:
     digest, text = pending_announcement(config)
     if not digest or not config.announce_channel_ids:
         return 0
+    if digest != config.announce_approved:
+        LOGGER.info(
+            "Announcement %s not approved (ANNOUNCE_APPROVED=%r); not posting",
+            digest,
+            config.announce_approved,
+        )
+        return 0
     state = _load(config)
     posted = 0
     for channel_id in sorted(config.announce_channel_ids):
