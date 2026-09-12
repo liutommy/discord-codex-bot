@@ -20,7 +20,7 @@ from .attachments import (
     sweep_forever,
     validate_image,
 )
-from .backends import AGY, choices, parse_choice
+from .backends import AGY, choices, parse_choice, resolve
 from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
@@ -238,12 +238,13 @@ class DiscordCodexClient(discord.Client):
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text."""
         choice = parse_choice(self.memory.get_model(guild_id, user_id), self.config.codex_model)
+        target = resolve(choice, effort or self.config.codex_reasoning_effort)
 
         async def turn(text: str, **kw) -> CodexResult:
-            if choice.backend == AGY:
+            if target.backend == AGY:
                 kw.pop("effort", None)
-                return await run_agy(text, self.config, choice.model, **kw)
-            return await run_codex(text, self.config, effort=effort, **kw)
+                return await run_agy(text, self.config, target.model, **kw)
+            return await run_codex(text, self.config, effort=target.effort, **kw)
 
         images: list[Path] = []
         try:
@@ -515,11 +516,13 @@ class DiscordCodexClient(discord.Client):
             prompt, attachments, interaction.guild_id, interaction.user.id, effort_value, resume
         )
         # Discord does not echo slash command inputs, so quote the question above the answer.
+        target = resolve(parse_choice(model, self.config.codex_model), effort_value)
+        shown = REASONING_EFFORTS.get(target.effort, target.effort) if target.effort else "固定"
         reply = format_reply(
             prompt,
             result.text,
             has_image=bool(attachments),
-            effort=REASONING_EFFORTS[effort_value],
+            effort=f"{target.model} · {shown}" if target.backend == AGY else shown,
             resumed=result.resumed,
         )
         chunks = split_discord_message(reply)

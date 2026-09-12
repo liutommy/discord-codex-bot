@@ -1,7 +1,14 @@
 from pathlib import Path
 
 from discord_codex_bot.agy import parse_stream
-from discord_codex_bot.backends import AGY, AGY_MODELS, CODEX, choices, parse_choice
+from discord_codex_bot.backends import (
+    AGY,
+    AGY_FAMILIES,
+    CODEX,
+    choices,
+    parse_choice,
+    resolve,
+)
 from discord_codex_bot.memory import MemoryLimits, MemoryStore
 from discord_codex_bot.threads import ThreadStore
 
@@ -11,11 +18,26 @@ LIMITS = MemoryLimits(200, 25_000, 50_000_000, 200_000_000, 2000, 50_000, 50, 3)
 def test_choices_cover_codex_and_every_agy_slug() -> None:
     all_choices = choices("gpt-5.6-luna")
     assert all_choices[0].value == "codex:gpt-5.6-luna" and all_choices[0].backend == CODEX
-    assert {c.model for c in all_choices if c.backend == AGY} == set(AGY_MODELS)
+    assert {c.family for c in all_choices if c.backend == AGY} == set(AGY_FAMILIES)
     assert len(all_choices) <= 25  # Discord's per-option choice cap
-    assert parse_choice("agy:claude-opus-4-6-thinking", "gpt-5.6-luna").backend == AGY
+    assert parse_choice("agy:claude-opus-4-6", "gpt-5.6-luna").backend == AGY
+    assert parse_choice("agy:gemini-3.8-flash-high", "gpt-5.6-luna").family == "gemini-3.8-flash"
     assert parse_choice("agy:no-such-model", "gpt-5.6-luna").value == "codex:gpt-5.6-luna"
     assert parse_choice("", "gpt-5.6-luna").backend == CODEX
+
+
+def test_effort_maps_onto_legal_agy_slugs() -> None:
+    flash = parse_choice("agy:gemini-3.8-flash", "gpt-5.6-luna")
+    assert resolve(flash, "medium").model == "gemini-3.8-flash-medium"
+    assert resolve(flash, "max").model == "gemini-3.8-flash-high"  # capped at the family's top
+    pro = parse_choice("agy:gemini-3.1-pro", "gpt-5.6-luna")
+    assert resolve(pro, "medium").model == "gemini-3.1-pro-low"  # closest level at or below
+    assert resolve(pro, "xhigh").model == "gemini-3.1-pro-high"
+    claude = parse_choice("agy:claude-opus-4-6", "gpt-5.6-luna")
+    assert resolve(claude, "high") == resolve(claude, "low")
+    assert resolve(claude, "high").effort == "" and resolve(claude, "high").model.endswith("thinking")
+    codex = parse_choice("codex:gpt-5.6-luna", "gpt-5.6-luna")
+    assert resolve(codex, "xhigh").effort == "xhigh" and resolve(codex, "xhigh").backend == CODEX
 
 
 def test_member_model_choice_is_stored_per_guild(tmp_path: Path) -> None:
