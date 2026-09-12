@@ -40,7 +40,9 @@ class Model:
 
 def parse_catalog(payload: dict) -> list[Model]:
     """Free chat models from /models: zero prompt and completion price, text out, text in.
-    Image-capable models sort first, then by name — the order the autocomplete shows."""
+    Text-only output is a pricing guard too: media models (e.g. Lyria) also show token prices of
+    0 while charging per song in the description. Image-capable models sort first, then by name
+    — the order the autocomplete shows."""
     out: list[Model] = []
     for entry in payload.get("data") or []:
         pricing = entry.get("pricing") or {}
