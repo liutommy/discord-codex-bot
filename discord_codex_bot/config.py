@@ -128,6 +128,12 @@ class Config:
     link_render_timeout_seconds: int
     link_screenshot_max_height: int
     link_preview_wait_seconds: float
+    gemini_api_key: str
+    gemini_model: str
+    gemini_timeout_seconds: int
+    gemini_video_inline_max_bytes: int
+    gemini_video_max_chars: int
+    video_interim_after_seconds: float
     consolidate_hour: int
     consolidate_timezone: str
     consolidate_min_remaining_percent: int
@@ -221,6 +227,16 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         link_screenshot_max_height=_positive_int(values, "LINK_SCREENSHOT_MAX_HEIGHT", 4000),
         # Discord attaches link embeds shortly after a message; wait this long once for them.
         link_preview_wait_seconds=_positive_int(values, "LINK_PREVIEW_WAIT_SECONDS", 2),
+        # Gemini free tier as a video-understanding tool (no billing): empty key = disabled.
+        gemini_api_key=values.get("GEMINI_API_KEY", "").strip(),
+        gemini_model=values.get("GEMINI_MODEL", "").strip() or "gemini-flash-latest",
+        gemini_timeout_seconds=_positive_int(values, "GEMINI_TIMEOUT_SECONDS", 180),
+        gemini_video_inline_max_bytes=_positive_int(
+            values, "GEMINI_VIDEO_INLINE_MAX_BYTES", 12_000_000
+        ),
+        gemini_video_max_chars=_positive_int(values, "GEMINI_VIDEO_MAX_CHARS", 1500),
+        # A video whose understanding runs past this gets a "still working" interim reply.
+        video_interim_after_seconds=_positive_int(values, "VIDEO_INTERIM_AFTER_SECONDS", 8),
         # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.
         consolidate_hour=_bounded_int(values, "CONSOLIDATE_HOUR", 2, 0, 23),
         consolidate_timezone=values.get("CONSOLIDATE_TIMEZONE", "").strip() or "Asia/Taipei",

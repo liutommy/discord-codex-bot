@@ -176,6 +176,15 @@ a preview, not the full page (`LINK_PREVIEW_WAIT_SECONDS` waits once for the emb
 Pages behind logins still come back as "打不開"; on the Codex backend OpenAI's own web tool
 remains available as a second path.
 
+Videos in a link are understood through Gemini's free tier used as a tool (not a chat backend;
+`GEMINI_API_KEY`, no billing attached). A YouTube link is understood from its URL alone — Gemini
+watches the frames and listens — with the captions (`youtube-transcript-api`) as a fallback when
+Gemini cannot; an X clip is downloaded (up to `GEMINI_VIDEO_INLINE_MAX_BYTES`) and sent inline.
+The description is injected as an untrusted `<VIDEO>` block so whichever backend the member picked
+can answer about the clip. Understanding races a timer: a video that takes longer than
+`VIDEO_INTERIM_AFTER_SECONDS` shows a "still watching" reply that is edited into the final answer
+when it is done, so short clips answer in one shot and long ones do not look stalled.
+
 Both entry points share one pipeline: guild allowlist → validation → serial queue → `codex exec`.
 The `@mention` form keeps the question visible as the member's own message, supports up to
 `MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Replying to another

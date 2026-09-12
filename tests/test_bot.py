@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 from discord_codex_bot.bot import DiscordCodexClient, strip_mention, with_quoted_message
 from discord_codex_bot.config import Config
@@ -373,3 +374,53 @@ async def test_answer_hands_previews_to_link_blocks(client, backends, monkeypatc
     previews = {"https://x.example": Preview("https://x.example", "t")}
     await client._answer("看 https://x.example", [], GUILD, USER, previews=previews)
     assert seen == {"urls": ["https://x.example"], "previews": previews}
+
+
+async def test_understand_videos_races_the_timer_and_fires_the_interim(
+    client, monkeypatch
+) -> None:
+    import asyncio
+
+    from discord_codex_bot import bot as bm
+
+    monkeypatch.setattr(bm.gemini, "available", lambda config: True)
+    client.config = replace(client.config, video_interim_after_seconds=0.05)
+
+    async def slow_understand(url, config, out_dir):
+        await asyncio.sleep(0.2)
+        return "描述"
+
+    notices = []
+
+    async def on_slow():
+        notices.append(1)
+
+    monkeypatch.setattr(bm, "understand_video", slow_understand)
+    block = await client._understand_videos(
+        ["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow
+    )
+    assert block == '<VIDEO url="https://youtu.be/dQw4w9WgXcQ">\n描述\n</VIDEO>'
+    assert notices == [1]  # the slow clip fired the interim exactly once
+
+
+async def test_understand_videos_stays_silent_when_fast_or_disabled(client, monkeypatch) -> None:
+    from discord_codex_bot import bot as bm
+
+    async def fast_understand(url, config, out_dir):
+        return "快"
+
+    notices = []
+
+    async def on_slow():
+        notices.append(1)
+
+    monkeypatch.setattr(bm.gemini, "available", lambda config: True)
+    monkeypatch.setattr(bm, "understand_video", fast_understand)
+    block = await client._understand_videos(["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow)
+    assert block == '<VIDEO url="https://youtu.be/dQw4w9WgXcQ">\n快\n</VIDEO>' and notices == []
+    # no video urls, or Gemini disabled → no work, no notice
+    assert await client._understand_videos(["https://example.com"], Path("/tmp"), on_slow) == ""
+    monkeypatch.setattr(bm.gemini, "available", lambda config: False)
+    assert await client._understand_videos(
+        ["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow
+    ) == ""

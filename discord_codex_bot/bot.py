@@ -5,12 +5,13 @@ import hashlib
 import logging
 import re
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 import discord
 from discord import app_commands
 
+from . import gemini
 from .access import check_access
 from .agy import run_agy
 from .announce import announce_once
@@ -40,7 +41,9 @@ from .links import (
     extract_fetch_tags,
     fetch_or_render,
     find_urls,
+    has_video,
     link_blocks,
+    understand_video,
 )
 from .memory import (
     RECALL_TAG,
@@ -68,6 +71,7 @@ SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label i
 # Discord allows 25 choices per option; Codex + 14 agy slugs = 15. Built with the default
 # Codex model name, which is also what load_config() falls back to.
 EFFORT_CHOICES = [app_commands.Choice(name=v, value=k) for k, v in REASONING_EFFORTS.items()]
+VIDEO_INTERIM = "🎬 影片較長，前輩正在看，稍等…"
 PROVIDER_CHOICES = [
     app_commands.Choice(name="Codex", value="codex"),
     app_commands.Choice(name="Antigravity（Gemini／Claude）", value=AGY),
@@ -286,6 +290,38 @@ class DiscordCodexClient(discord.Client):
                 return suffix
         return ""
 
+    async def _understand_videos(
+        self,
+        urls: list[str],
+        out_dir: Path,
+        on_video_slow: Callable[[], Awaitable[None]] | None,
+    ) -> str:
+        """Describe the videos among `urls` (YouTube, X clips) as untrusted background blocks.
+        The work races a timer: a clip that takes longer than VIDEO_INTERIM_AFTER_SECONDS fires
+        on_video_slow once (the caller shows a "still watching" notice) and then finishes."""
+        targets = [u for u in urls if has_video(u)][: self.config.link_max_urls]
+        if not targets or not gemini.available(self.config):
+            return ""
+
+        async def describe() -> list[str]:
+            done = await asyncio.gather(
+                *(understand_video(u, self.config, out_dir / f"vid{i}")
+                  for i, u in enumerate(targets))
+            )
+            return [f'<VIDEO url="{u}">\n{d}\n</VIDEO>' for u, d in zip(targets, done, strict=True)
+                    if d]
+
+        task = asyncio.create_task(describe())
+        try:
+            blocks = await asyncio.wait_for(
+                asyncio.shield(task), self.config.video_interim_after_seconds
+            )
+        except TimeoutError:
+            if on_video_slow is not None:
+                await on_video_slow()
+            blocks = await task
+        return "\n\n".join(blocks)
+
     async def _answer(
         self,
         prompt: str,
@@ -295,6 +331,7 @@ class DiscordCodexClient(discord.Client):
         effort: str = "",
         resume: str = "",
         previews: dict[str, Preview] | None = None,
+        on_video_slow: Callable[[], Awaitable[None]] | None = None,
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text."""
         stored = self.memory.get_model(guild_id, user_id)
@@ -332,10 +369,11 @@ class DiscordCodexClient(discord.Client):
                 if section
             )
             style = self.memory.get_style(guild_id, user_id)
-            links, shots = await link_blocks(
-                find_urls(prompt, self.config.link_max_urls), self.config, link_dir, previews
-            )
+            found = find_urls(prompt, self.config.link_max_urls)
+            links, shots = await link_blocks(found, self.config, link_dir, previews)
             images.extend(shots)
+            video = await self._understand_videos(found, link_dir, on_video_slow)
+            links = "\n\n".join(block for block in (links, video) if block)
             result = await self.queue.run(
                 lambda: turn(
                     prompt,
@@ -684,8 +722,16 @@ class DiscordCodexClient(discord.Client):
         model = self._model(interaction.guild_id, interaction.user.id)
         resume = "" if new else self.threads.current(key, plain=plain, model=model)
         await interaction.response.defer(thinking=True)
+
+        async def on_video_slow() -> None:
+            try:
+                await interaction.edit_original_response(content=VIDEO_INTERIM)
+            except discord.HTTPException:
+                pass
+
         result = await self._answer(
-            prompt, attachments, interaction.guild_id, interaction.user.id, effort_value, resume
+            prompt, attachments, interaction.guild_id, interaction.user.id, effort_value, resume,
+            on_video_slow=on_video_slow,
         )
         # Discord does not echo slash command inputs, so quote the question above the answer.
         target = resolve(parse_choice(model, self.config.codex_model), effort_value)
@@ -757,15 +803,27 @@ class DiscordCodexClient(discord.Client):
         resume = self.threads.by_message(
             replied_to, plain=plain, model=model
         ) or self.threads.current(key, plain=plain, model=model)
+        interim: list[discord.Message] = []
+
+        async def on_video_slow() -> None:
+            try:
+                interim.append(await message.reply(VIDEO_INTERIM, mention_author=False))
+            except discord.HTTPException:
+                pass
+
         async with message.channel.typing():
             result = await self._answer(
                 prompt, attachments, guild_id, message.author.id, resume=resume,
-                previews=previews,
+                previews=previews, on_video_slow=on_video_slow,
             )
         chunks = split_discord_message(result.text)
         sent_id = None
         try:
-            sent = await message.reply(chunks[0], files=self._files(result), mention_author=False)
+            files = self._files(result)
+            if interim:
+                sent = await interim[0].edit(content=chunks[0], attachments=files)
+            else:
+                sent = await message.reply(chunks[0], files=files, mention_author=False)
             sent_id = sent.id
             for chunk in chunks[1:]:
                 await message.channel.send(chunk)
