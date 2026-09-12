@@ -152,8 +152,10 @@ accept. Release announcements (`announce/latest.md`) are posted only to `ANNOUNC
 Links are read by the Bot itself, so both backends see the same thing: every http(s) URL in a
 member's message (up to `LINK_MAX_URLS`) is fetched, converted to text (`LINK_MAX_CHARS` per page)
 and injected as untrusted `<LINK>` blocks; the model can also ask for a page with
-`<fetch url="…"/>` during its read loop. Only public addresses are fetched — LAN, loopback and
-reserved ranges are refused before any connection — with size, time and redirect bounds. When the
+`<fetch url="…"/>` during its read loop (a reply that is *only* tags; a tag quoted inside prose is
+just text). Only public addresses are fetched — LAN, loopback and reserved ranges are refused at
+connect time, on every redirect hop and on every request a rendered page makes — with size, time
+and redirect bounds. When the
 plain fetch is blocked (bot challenge, 403/429/503, no readable text) or the model asks with
 `<fetch url="…" render="1"/>` because the member wants to know what a page *looks* like, the Bot
 falls back to headless Chromium (Playwright, installed in the image): it waits out the challenge,

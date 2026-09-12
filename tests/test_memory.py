@@ -63,6 +63,16 @@ def test_capacity_evicts_oldest_and_forget_deletes(tmp_path: Path) -> None:
     assert store.recall("user", 1, 2, "nope").startswith("（找不到")
 
 
+def test_memory_store_recall_offset_past_end_reports_it(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path, LIMITS)
+    store.add("user", 1, 2, "note", "l1\nl2\nl3")
+    path = tmp_path / "1" / "users" / "2" / "topics" / "note.md"
+    total = len(path.read_text("utf-8").splitlines())
+    assert store.recall("user", 1, 2, "note", offset=total + 5) == (
+        f"[note.md 共 {total} 行；offset {total + 5} 已超過檔尾]"
+    )
+
+
 def test_slug_and_tag_parsing() -> None:
     assert slugify("Hello World!") == "hello-world"
     assert slugify("") == "memory"

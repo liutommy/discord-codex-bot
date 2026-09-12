@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import aiohttp
+from aiohttp.resolver import ThreadedResolver
 
 from .config import Config
 
@@ -100,6 +101,18 @@ def _public_address(ip: str) -> bool:
     )
 
 
+class _PublicResolver(ThreadedResolver):
+    """aiohttp resolver that refuses non-public answers at connect time. Every redirect hop and
+    every re-resolution goes through it, so a redirect to a LAN host or a DNS answer that changes
+    between check and connect (rebinding) is refused where it would otherwise be used."""
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        results = await super().resolve(host, port, family)
+        if not results or not all(_public_address(result["host"]) for result in results):
+            raise socket.gaierror(f"{host} resolves to a private or reserved address")
+        return results
+
+
 async def _resolve_public(host: str) -> str:
     """Resolve `host` and return one address only if every answer is a public IP."""
     infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
@@ -125,7 +138,10 @@ async def fetch_link(url: str, config: Config) -> str:
     timeout = aiohttp.ClientTimeout(total=config.link_timeout_seconds)
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"}
     try:
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        connector = aiohttp.TCPConnector(resolver=_PublicResolver(), use_dns_cache=False)
+        async with aiohttp.ClientSession(
+            timeout=timeout, headers=headers, connector=connector
+        ) as session:
             async with session.get(url, max_redirects=5, allow_redirects=True) as response:
                 if response.status >= 400:
                     return f"（{url}：HTTP {response.status}，打不開）"
@@ -136,7 +152,7 @@ async def fetch_link(url: str, config: Config) -> str:
     body = raw.decode(response.charset or "utf-8", errors="replace")
     if "html" in content_type:
         title, text = html_to_text(body)
-        if "just a moment" in title.lower() or "請稍候" in title:
+        if _challenge(title):
             return f"（{url}：被網站的機器人驗證擋住，打不開）"
     elif content_type.startswith("text/") or "json" in content_type or "xml" in content_type:
         title, text = "", body.strip()
@@ -167,10 +183,98 @@ async def link_blocks(
     return "\n\n".join(blocks), shots
 
 
+def _challenge(title: str) -> bool:
+    return "just a moment" in title.lower() or "請稍候" in title
+
+
+async def _guard_route(route, request, hosts: dict[str, bool]) -> None:
+    """Chromium request hook: every request the page makes — navigation, redirect hop, script,
+    image, fetch() from page JS — is allowed only towards a public address."""
+    parts = urlsplit(request.url)
+    host = parts.hostname
+    if parts.scheme not in ("http", "https") or not host:
+        await route.abort("blockedbyclient")
+        return
+    if host not in hosts:
+        try:
+            await _resolve_public(host)
+            hosts[host] = True
+        except (ValueError, socket.gaierror):
+            hosts[host] = False
+    await (route.continue_() if hosts[host] else route.abort("blockedbyclient"))
+
+
+async def _render(url: str, config: Config, out_dir: Path | None) -> tuple[str, str, Path | None]:
+    """(title, text, screenshot) of `url` rendered in headless Chromium; the caller bounds time."""
+    from playwright.async_api import async_playwright
+
+    deadline = config.link_render_timeout_seconds
+    async with async_playwright() as pw:
+        # Full Chromium (not the headless shell) passes bot challenges the shell fails; it needs
+        # a writable HOME and no zygote inside the read-only, cap-dropped container.
+        scratch = str(out_dir.parent if out_dir else Path("/tmp"))
+        browser = await pw.chromium.launch(
+            headless=True,
+            channel="chromium",
+            env={"HOME": scratch, "XDG_CONFIG_HOME": f"{scratch}/.config",
+                 "XDG_CACHE_HOME": f"{scratch}/.cache", "PATH": os.environ.get("PATH", "")},
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
+                  "--disable-setuid-sandbox", "--no-zygote", "--disable-dev-shm-usage",
+                  "--disable-gpu", "--headless=new"],
+        )
+        try:
+            # Keep the browser's own User-Agent: a spoofed one contradicts the TLS/JS
+            # fingerprint and is exactly what keeps the Cloudflare challenge page spinning.
+            context = await browser.new_context(
+                locale="zh-TW", viewport={"width": 1280, "height": 900}
+            )
+            hosts: dict[str, bool] = {}
+            await context.route("**/*", lambda route, request: _guard_route(route, request, hosts))
+            await context.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                "window.chrome={runtime:{}};"
+                "Object.defineProperty(navigator,'languages',{get:()=>['zh-TW','zh','en']});"
+                "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
+            )
+            page = await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=deadline * 1000)
+            for _ in range(max(1, deadline // 3)):  # the caller's wait_for bounds the total
+                if not _challenge(await page.title()):
+                    break
+                await asyncio.sleep(3)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            title = await page.title()
+            text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            shot = None
+            if out_dir is not None:
+                await asyncio.to_thread(out_dir.mkdir, parents=True, exist_ok=True)
+                shot = out_dir / "page.jpg"
+                height = min(
+                    await page.evaluate("() => document.documentElement.scrollHeight"),
+                    config.link_screenshot_max_height,
+                )
+                await page.screenshot(
+                    path=str(shot), type="jpeg", quality=80,
+                    clip={"x": 0, "y": 0, "width": 1280, "height": max(300, int(height))},
+                    full_page=True,
+                )
+            return title, text or "", shot
+        finally:
+            await browser.close()
+
+
+# One Chromium at a time: the container's pids_limit is sized for a single instance.
+_RENDER_SLOT = asyncio.Semaphore(1)
+
+
 async def render_link(url: str, config: Config, out_dir: Path | None) -> tuple[str, Path | None]:
     """Fetch through headless Chromium (anti-automation tweaks, waits out bot challenges) and
     return (text, screenshot path). Used as the fallback for pages plain HTTP cannot read and
-    whenever the model asks for the rendered page. Same public-address guard as fetch_link."""
+    whenever the model asks for the rendered page. Same public-address guard as fetch_link,
+    applied to every request the page makes."""
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return f"（{url}：只支援 http/https）", None
@@ -179,77 +283,26 @@ async def render_link(url: str, config: Config, out_dir: Path | None) -> tuple[s
     except (ValueError, socket.gaierror) as error:
         return f"（{url}：無法連線——{error}）", None
     try:
-        from playwright.async_api import async_playwright
+        async with _RENDER_SLOT:
+            title, text, shot = await asyncio.wait_for(
+                _render(url, config, out_dir), timeout=config.link_render_timeout_seconds
+            )
     except ImportError:
         return f"（{url}：此部署沒有 Chromium，無法渲染）", None
-    deadline = config.link_render_timeout_seconds
-    try:
-        async with async_playwright() as pw:
-            # Full Chromium (not the headless shell) passes bot challenges the shell fails; it
-            # needs a writable HOME and no zygote inside the read-only, cap-dropped container.
-            scratch = str(out_dir.parent if out_dir else Path("/tmp"))
-            browser = await pw.chromium.launch(
-                headless=True,
-                channel="chromium",
-                env={"HOME": scratch, "XDG_CONFIG_HOME": f"{scratch}/.config",
-                     "XDG_CACHE_HOME": f"{scratch}/.cache", "PATH": os.environ.get("PATH", "")},
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
-                      "--disable-setuid-sandbox", "--no-zygote", "--disable-dev-shm-usage",
-                      "--disable-gpu", "--headless=new"],
-            )
-            try:
-                # Keep the browser's own User-Agent: a spoofed one contradicts the TLS/JS
-                # fingerprint and is exactly what keeps the Cloudflare challenge page spinning.
-                context = await browser.new_context(
-                    locale="zh-TW", viewport={"width": 1280, "height": 900}
-                )
-                await context.add_init_script(
-                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-                    "window.chrome={runtime:{}};"
-                    "Object.defineProperty(navigator,'languages',{get:()=>['zh-TW','zh','en']});"
-                    "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
-                )
-                page = await context.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=deadline * 1000)
-                for _ in range(max(1, deadline // 3)):
-                    title = await page.title()
-                    if "just a moment" not in title.lower() and "請稍候" not in title:
-                        break
-                    await asyncio.sleep(3)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=8000)
-                except Exception:
-                    pass
-                title = await page.title()
-                if "just a moment" in title.lower() or "請稍候" in title:
-                    return f"（{url}：機器人驗證沒過，打不開）", None
-                text = await page.evaluate("() => document.body ? document.body.innerText : ''")
-                shot = None
-                if out_dir is not None:
-                    await asyncio.to_thread(out_dir.mkdir, parents=True, exist_ok=True)
-                    shot = out_dir / "page.jpg"
-                    height = min(
-                        await page.evaluate("() => document.documentElement.scrollHeight"),
-                        config.link_screenshot_max_height,
-                    )
-                    await page.screenshot(
-                        path=str(shot), type="jpeg", quality=80,
-                        clip={"x": 0, "y": 0, "width": 1280, "height": max(300, int(height))},
-                        full_page=True,
-                    )
-            finally:
-                await browser.close()
+    except TimeoutError:
+        return f"（{url}：渲染逾時，打不開）", None
     except Exception as error:  # playwright raises many distinct types; all mean "not readable"
         LOGGER.warning("render_link %s failed: %s", url, type(error).__name__)
         return f"（{url}：渲染失敗——{type(error).__name__}）", None
-    text = re.sub(r"[ \t\r\f\v]+", " ", text or "")
+    if _challenge(title):
+        return f"（{url}：機器人驗證沒過，打不開）", None
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text).strip()
     limit = config.link_max_chars
     clipped = text if len(text) <= limit else f"{text[:limit]}\n[已截斷至 {limit} 字]"
     head = f"標題：{title}\n" if title else ""
     note = "（整頁截圖已附上）\n" if shot else ""
     return f"{head}{note}{clipped or '（頁面沒有可讀文字，請看截圖）'}", shot
-
 
 def blocked(result: str) -> bool:
     return any(marker in result for marker in BLOCKED_MARKERS)

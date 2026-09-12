@@ -26,9 +26,11 @@ from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
-from .links import extract_fetch_tags, fetch_or_render, find_urls, link_blocks
+from .links import FETCH_TAG, extract_fetch_tags, fetch_or_render, find_urls, link_blocks
 from .memory import (
+    RECALL_TAG,
     SCOPES,
+    SEARCH_TAG,
     MemoryLimits,
     MemoryStore,
     PermanentMemory,
@@ -87,6 +89,15 @@ def with_quoted_message(prompt: str, author: str, content: str, image_count: int
     if not parts:
         return prompt
     return "\n".join(parts + [prompt or "請看這則訊息。"])
+
+
+def request_only(answer: str) -> bool:
+    """True when the reply is nothing but read/fetch tags — the protocol for asking the Bot to
+    read something. A tag embedded in prose (quoted from a fetched page, say) is just text."""
+    rest = answer
+    for tag in (SEARCH_TAG, RECALL_TAG, FETCH_TAG):
+        rest = tag.sub("", rest)
+    return bool(answer.strip()) and not rest.strip()
 
 
 class DiscordCodexClient(discord.Client):
@@ -286,6 +297,8 @@ class DiscordCodexClient(discord.Client):
             # On-demand reads (search snippets / paged recall): the Bot executes the request and
             # feeds the result back into the same thread. Bounded by MEMORY_RECALL_ROUNDS.
             for _ in range(self.config.memory_recall_rounds):
+                if not request_only(result.text):
+                    break  # an answer that merely quotes a tag (e.g. from a page) is an answer
                 wanted = extract_read_requests(result.text)
                 urls = extract_fetch_tags(result.text)[: self.config.link_max_urls]
                 if not wanted and not urls:

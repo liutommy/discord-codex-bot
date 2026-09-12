@@ -24,7 +24,7 @@ services:
         target: /home/node/.gemini
     read_only: true
     tmpfs:
-      - /tmp:rw,nosuid,size=256m
+      - /tmp:rw,noexec,nosuid,size=256m
     cap_drop:
       - ALL
     security_opt:

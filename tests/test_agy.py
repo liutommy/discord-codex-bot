@@ -133,6 +133,16 @@ async def test_run_agy_builds_stream_json_arguments(
     assert "<USER_MESSAGE>\n問題\n</USER_MESSAGE>" in content and "<MEMORY>\n- [a]" in content
 
 
+async def test_run_agy_personal_style_alone_uses_the_plain_workspace(
+    agy_config: Config, project, monkeypatch
+) -> None:
+    fake = FakeRun((0, _stream("c", "ok"), ""))
+    monkeypatch.setattr(agy, "_run", fake)
+    await run_agy("q", agy_config, "m", personal_style="條列、少於 100 字")
+    assert project == [agy_config.codex_workspace_plain]
+    assert fake.calls[0]["cwd"] == agy_config.codex_workspace_plain
+
+
 async def test_run_agy_raw_plain_and_schema(agy_config: Config, project, monkeypatch) -> None:
     fake = FakeRun((0, _stream("c", "ok"), ""))
     monkeypatch.setattr(agy, "_run", fake)

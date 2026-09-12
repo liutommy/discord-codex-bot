@@ -225,6 +225,44 @@ def test_read_routes_permanent_and_member_scopes(client, tmp_path) -> None:
     assert client._read("recall", "user", GUILD, USER, "開團", 1, None).startswith("（找不到記憶")
 
 
+async def test_answer_feeds_a_standalone_fetch_tag_screenshot_back_as_an_image(
+    client, backends, monkeypatch, tmp_path
+) -> None:
+    codex, _ = backends
+    codex.replies = ['<fetch url="https://x.example/p" render="1"/>', "看到了"]
+    shot = tmp_path / "shot.jpg"
+    shot.write_bytes(b"x")
+    calls: list[tuple[str, bool]] = []
+
+    async def fake_fetch_or_render(url, config, out_dir, render=False):
+        calls.append((url, render))
+        return "整頁內容", shot
+
+    monkeypatch.setattr(bot_module, "fetch_or_render", fake_fetch_or_render)
+    result = await client._answer("看這個網頁", [], GUILD, USER)
+    assert result.text == "看到了"
+    assert calls == [("https://x.example/p", True)]
+    prompt, _args, kw = codex.calls[1]
+    assert prompt.startswith('<LINK url="https://x.example/p">\n整頁內容\n</LINK>')
+    assert tuple(kw["images"]) == (shot,) and kw["resume"] == "t1" and kw["raw"] is True
+
+
+async def test_fetch_tag_embedded_in_prose_is_not_treated_as_a_standalone_request(
+    client, backends, monkeypatch
+) -> None:
+    codex, _ = backends
+    embedded = '先說明一下。<fetch url="https://x.example/p"/>後面還有內容。'
+    codex.replies = [embedded]
+
+    async def fail_if_called(url, config, out_dir, render=False):
+        raise AssertionError("fetch_or_render must not run for an embedded fetch tag")
+
+    monkeypatch.setattr(bot_module, "fetch_or_render", fail_if_called)
+    result = await client._answer("問題", [], GUILD, USER)
+    assert result.text == embedded
+    assert len(codex.calls) == 1
+
+
 def test_remember_wakes_the_harvester_only_on_a_thread_switch(client) -> None:
     import asyncio
 
@@ -237,3 +275,13 @@ def test_remember_wakes_the_harvester_only_on_a_thread_switch(client) -> None:
     client._remember(key, "b", 12, False, "codex:gpt-5.6-luna")
     assert client._harvest_wakeup.is_set()
     assert client.threads.harvest_candidates() == [(key, "a")]
+
+
+def test_request_only_accepts_tag_only_replies_and_rejects_prose() -> None:
+    from discord_codex_bot.bot import request_only
+
+    assert request_only('<fetch url="https://a.example/p" render="1"/>')
+    assert request_only('<search scope="user" query="a|b"/>\n<recall scope="guild" name="n"/>')
+    assert not request_only('先說明。<fetch url="https://a.example/p"/>')
+    assert not request_only('<fetch url="https://a.example/p"/> 然後回答')
+    assert not request_only("")

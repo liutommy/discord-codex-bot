@@ -45,6 +45,21 @@ def test_effort_accepts_verified_values_and_rejects_unknown_ones() -> None:
         load_config({**base, "CODEX_REASONING_EFFORT": "extra_high"})
 
 
+def test_link_render_settings_default_and_reject_non_positive_values() -> None:
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    config = load_config(base)
+    assert config.link_render_timeout_seconds == 40
+    assert config.link_screenshot_max_height == 4000
+    with pytest.raises(ValueError, match="LINK_RENDER_TIMEOUT_SECONDS"):
+        load_config({**base, "LINK_RENDER_TIMEOUT_SECONDS": "0"})
+    with pytest.raises(ValueError, match="LINK_SCREENSHOT_MAX_HEIGHT"):
+        load_config({**base, "LINK_SCREENSHOT_MAX_HEIGHT": "-1"})
+
+
 def test_command_prefix_defaults_and_validates() -> None:
     base = {
         "DISCORD_TOKEN": "t",
