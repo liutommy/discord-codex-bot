@@ -43,6 +43,7 @@ def config() -> Config:
         agy_probe_model="gemini-3.8-flash-low",
         agy_settings_path=Path("/opt/discord-codex/agy-settings.json"),
         openrouter_api_key="test-key",
+        orcarouter_api_key="test-orca",
         openrouter_dir=Path("/var/lib/codex/openrouter"),
         openrouter_catalog_ttl_seconds=3600,
         openrouter_history_chars=60_000,

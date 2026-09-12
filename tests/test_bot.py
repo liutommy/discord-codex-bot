@@ -296,14 +296,15 @@ async def test_answer_dispatches_to_openrouter_with_the_catalog(
 
     calls = []
 
-    async def fake_openrouter(text, config, model, **kw):
+    async def fake_openrouter(router, text, config, model, **kw):
         calls.append((text, model, kw))
+        assert router.key == "openrouter"
         return CodexResult("OR", (), None, "or-1", False)
 
     async def no_refresh():
         return client.openrouter.models
 
-    monkeypatch.setattr(bot_module, "run_openrouter", fake_openrouter)
+    monkeypatch.setattr(bot_module, "run_router", fake_openrouter)
     monkeypatch.setattr(client.openrouter, "free_models", no_refresh)
     client.openrouter.models = [Model("g/free", "G", True, False, 1000)]
     client.memory.set_model(GUILD, USER, "openrouter:g/free|high")
@@ -424,3 +425,47 @@ async def test_understand_videos_stays_silent_when_fast_or_disabled(client, monk
     assert await client._understand_videos(
         ["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow
     ) == ""
+
+
+async def test_answer_dispatches_to_orcarouter_with_its_own_catalog(
+    client, backends, monkeypatch
+) -> None:
+    from discord_codex_bot.openrouter import Model
+
+    calls = []
+
+    async def fake_router(router, text, config, model, **kw):
+        calls.append((router.key, model, kw["catalog"]))
+        return CodexResult("OC", (), None, "oc-1", False)
+
+    async def no_refresh():
+        return client.orcarouter.models
+
+    monkeypatch.setattr(bot_module, "run_router", fake_router)
+    monkeypatch.setattr(client.orcarouter, "free_models", no_refresh)
+    client.orcarouter.models = [Model("tencent/hy3-free", "hy3", False, False, 0)]
+    client.memory.set_model(GUILD, USER, "orcarouter:tencent/hy3-free")
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "OC" and result.thread_id == "oc-1"
+    assert calls == [("orcarouter", "tencent/hy3-free", client.orcarouter)]
+
+
+async def test_model_options_lists_orcarouter_free_models_only_with_a_key(
+    client, monkeypatch
+) -> None:
+    from discord_codex_bot.openrouter import Model
+
+    async def no_refresh():
+        return client.orcarouter.models
+
+    monkeypatch.setattr(client.orcarouter, "free_models", no_refresh)
+    client.orcarouter.models = [Model("tencent/hy3-free", "hy3", False, False, 0)]
+    assert [c.value for c in await client.model_options("orcarouter", "")] == [
+        "orcarouter:tencent/hy3-free"
+    ]
+    assert client._chosen_model("orcarouter", "tencent/hy3-free").backend == "orcarouter"
+    assert client._chosen_model("orcarouter", "nope-free") is None
+    described = client._describe("orcarouter:tencent/hy3-free", "high")
+    assert "OrcaRouter · tencent/hy3-free · 無" in described
+    client.config = replace(client.config, orcarouter_api_key="")
+    assert await client.model_options("orcarouter", "") == []  # no key → not offered

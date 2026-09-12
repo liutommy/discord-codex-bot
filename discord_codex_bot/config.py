@@ -115,6 +115,7 @@ class Config:
     agy_probe_model: str
     agy_settings_path: Path
     openrouter_api_key: str
+    orcarouter_api_key: str
     openrouter_dir: Path
     openrouter_catalog_ttl_seconds: int
     openrouter_history_chars: int
@@ -201,6 +202,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # OpenRouter backend (third backend, free models only): no key = provider not offered.
         # Conversations are Bot-kept transcripts under OPENROUTER_DIR, replayed within a budget.
         openrouter_api_key=values.get("OPENROUTER_API_KEY", "").strip(),
+        # OrcaRouter: same shape (OpenAI-compatible, free = -free ids); shares the transcript
+        # dir, catalog TTL and history budget above.
+        orcarouter_api_key=values.get("ORCAROUTER_API_KEY", "").strip(),
         openrouter_dir=Path(
             values.get("OPENROUTER_DIR", "").strip()
             or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "openrouter")

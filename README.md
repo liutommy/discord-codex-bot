@@ -135,8 +135,11 @@ Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>
 `/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`. This README uses the
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
 
-Three backends share that pipeline. Codex CLI is the default; Google's Antigravity CLI (`agy`) is
-the second; OpenRouter (free models only) the third. Each member picks `provider` → `model`
+Four backends share that pipeline. Codex CLI is the default; Google's Antigravity CLI (`agy`) is
+the second; OpenRouter and OrcaRouter (free models only, one shared OpenAI-compatible router core
+— they differ in host, key, free-model rule and thread prefix) the third and fourth. OrcaRouter's
+free tier is its `-free` ids (plus `orcarouter/free`); the account must have a GitHub login linked
+or the API answers `429 free_rate_limited`. Each member picks `provider` → `model`
 (autocomplete, typing filters; the OpenRouter list is the live free-model catalog, image-capable
 first) → default `effort` with `/<prefix>-model` (Codex Luna; Gemini 3.8/3.7/3.6 Flash; Gemini
 3.1 Pro; Claude Sonnet 4.6; Claude Opus 4.6; GPT-OSS 120B; whatever OpenRouter lists as free that
