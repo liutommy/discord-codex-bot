@@ -137,8 +137,10 @@ default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all a
 
 Both entry points share one pipeline: guild allowlist → validation → serial queue → `codex exec`.
 The `@mention` form keeps the question visible as the member's own message, supports up to
-`MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Messages that do not
-mention the Bot are discarded without processing.
+`MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Replying to another
+member's message while mentioning the Bot points it at that message: its text is quoted into the
+request and its images are attached, so "@Bot what is this?" as a reply to a picture works.
+Messages that do not mention the Bot are discarded without processing.
 
 `/codex-status` must report `ChatGPT 訂閱登入有效`, model `gpt-5.6-luna`, and the default reasoning
 effort (`Medium`). A command in another server or outside the configured test channel must not execute.
