@@ -172,6 +172,7 @@ class DiscordCodexClient(discord.Client):
         # @mention entry point: message_content is needed to read the question and its images.
         intents.guild_messages = True
         intents.message_content = True
+        intents.emojis_and_stickers = True  # keeps guild.emojis populated for the 記住 button
         super().__init__(intents=intents)
         self.config = config
         prefix = config.command_prefix
@@ -196,6 +197,7 @@ class DiscordCodexClient(discord.Client):
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.alerts = Alerter(self, config)
+        self._emoji_cache: dict[int, dict[str, discord.PartialEmoji]] = {}
         self.reminders = ReminderStore(config.codex_home / "reminders.json")
         self.openrouter = Catalog(config)
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
@@ -320,8 +322,24 @@ class DiscordCodexClient(discord.Client):
                 continue
             LOGGER.info("Registered %d commands for guild %d", len(commands), guild_id)
 
+    async def warm_emojis(self) -> None:
+        """Cache each guild's custom emojis by name (REST, so it works even without the intent
+        having delivered them yet)."""
+        for guild in self.guilds:
+            try:
+                emojis = await guild.fetch_emojis()
+            except discord.HTTPException as error:
+                LOGGER.warning("fetch_emojis failed for guild %s: %s", guild.id, error)
+                continue
+            self._emoji_cache[guild.id] = {
+                e.name: discord.PartialEmoji(name=e.name, id=e.id, animated=e.animated)
+                for e in emojis
+            }
+        LOGGER.info("Emoji cache: %s", {g: len(m) for g, m in self._emoji_cache.items()})
+
     async def on_ready(self) -> None:
         LOGGER.info("Discord bot ready as %s", self.user)
+        await self.warm_emojis()
         LOGGER.info("%s", await codex_login_status(self.config))
         LOGGER.info("Alerts go to user %s", await self.alerts.resolve_owner() or "(none)")
         if not getattr(self, "_login_watch", None):
@@ -671,8 +689,11 @@ class DiscordCodexClient(discord.Client):
 
     def _remember_emoji(self, guild_id: int | None):
         """The guild's custom emoji named REMEMBER_EMOJI_NAME, or None for the default 👍."""
-        guild = self.get_guild(guild_id) if guild_id else None
         wanted = self.config.remember_emoji_name
+        cached = self._emoji_cache.get(guild_id or 0, {}).get(wanted)
+        if cached is not None:
+            return cached
+        guild = self.get_guild(guild_id) if guild_id else None
         for emoji in getattr(guild, "emojis", ()) or ():
             if emoji.name == wanted:
                 return discord.PartialEmoji(name=emoji.name, id=emoji.id, animated=emoji.animated)

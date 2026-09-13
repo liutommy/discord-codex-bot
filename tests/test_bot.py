@@ -819,3 +819,18 @@ def test_remember_button_uses_the_guild_custom_emoji_when_present(client, monkey
     view = client._answer_view(GUILD, USER, "q", CodexResult("a"))
     remember = [b for b in view.children if b.custom_id.startswith("inmu:remember")][0]
     assert str(remember.item.emoji) == "👍"
+
+
+async def test_warm_emojis_fills_the_cache_used_by_the_remember_button(client, monkeypatch) -> None:
+    from types import SimpleNamespace as NS
+
+    async def fetch_emojis():
+        return [NS(name="114514", id=5, animated=False)]
+
+    guilds = [NS(id=GUILD, fetch_emojis=fetch_emojis)]
+    monkeypatch.setattr(type(client), "guilds", property(lambda self: guilds))
+    monkeypatch.setattr(client, "get_guild", lambda gid: NS(emojis=[]))  # gateway cache empty
+    await client.warm_emojis()
+    view = client._answer_view(GUILD, USER, "q", CodexResult("a"))
+    remember = [b for b in view.children if b.custom_id.startswith("inmu:remember")][0]
+    assert remember.item.emoji.id == 5
