@@ -24,6 +24,7 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
         "inmu-king-reset",
         "inmu-king-stop",
         "inmu-king-summary",
+        "inmu-king-remind",
         "inmu-king-remember",
         "inmu-king-forget",
         "inmu-king-memory",
@@ -677,3 +678,16 @@ async def test_answer_reads_attached_documents_into_a_files_block(
     assert '<FILE name="a.txt">\nhello file\n</FILE>' in kw["files"]
     assert '<FILE name="b.py">\nprint(1)\n</FILE>' in kw["files"]
     assert kw["images"] == []
+
+
+async def test_fire_reminder_mentions_only_the_member(client) -> None:
+
+    sent = []
+
+    class Channel:
+        async def send(self, text, allowed_mentions=None):
+            sent.append((text, allowed_mentions.users, allowed_mentions.everyone))
+
+    client.get_channel = lambda cid: Channel() if cid == 555 else None
+    await client._fire_reminder({"channel_id": 555, "user_id": USER, "text": "收衣服"})
+    assert sent == [(f"⏰ <@{USER}> 提醒：收衣服", True, False)]

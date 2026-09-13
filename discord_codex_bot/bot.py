@@ -7,6 +7,7 @@ import re
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import datetime as _dt
 from pathlib import Path
 
 import discord
@@ -64,6 +65,7 @@ from .memory import (
 from .openrouter import ROUTERS, Catalog, run_router
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
+from .reminders import ReminderStore, describe, parse_when, reminder_loop
 from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
 from .threads import ThreadStore
 from .ui import AnswerView, CancelView
@@ -190,6 +192,7 @@ class DiscordCodexClient(discord.Client):
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.alerts = Alerter(self, config)
+        self.reminders = ReminderStore(config.codex_home / "reminders.json")
         self.openrouter = Catalog(config)
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
@@ -265,6 +268,13 @@ class DiscordCodexClient(discord.Client):
         )
         self.tree.add_command(
             app_commands.Command(
+                name=f"{prefix}-remind",
+                description="設定提醒：到時在這個頻道 @你；留空＝列出你的提醒",
+                callback=self.remind_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
                 name=f"{prefix}-stop",
                 description="取消你在此頻道進行中的請求（回答上也有 ❌ 按鈕）",
                 callback=self.stop_command,
@@ -273,6 +283,9 @@ class DiscordCodexClient(discord.Client):
 
     async def setup_hook(self) -> None:
         self._sweeper = self.loop.create_task(sweep_forever(self.config))
+        self._reminder_loop = self.loop.create_task(
+            reminder_loop(self.reminders, self._fire_reminder, 30)
+        )
         self._consolidator = self.loop.create_task(
             consolidate_forever(self.memory, self.config, self.queue.run)
         )
@@ -699,6 +712,58 @@ class DiscordCodexClient(discord.Client):
             LOGGER.exception("Summary delivery failed guild=%s", interaction.guild_id)
         finally:
             remove_dir(result.generated_dir)
+
+    async def _fire_reminder(self, item: dict) -> None:
+        channel = self.get_channel(item["channel_id"]) or await self.fetch_channel(
+            item["channel_id"]
+        )
+        await channel.send(
+            f"⏰ <@{item['user_id']}> 提醒：{item['text']}",
+            allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False),
+        )
+
+    @app_commands.describe(
+        when="什麼時候：30分鐘後、2小時後、明天 9:30、後天下午3點、21:00、9/15 14:30",
+        text="到時要提醒的內容",
+        cancel="要取消的提醒編號（用留空的 /指令 查看）",
+    )
+    async def remind_command(
+        self,
+        interaction: discord.Interaction,
+        when: str | None = None,
+        text: str | None = None,
+        cancel: int | None = None,
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        user_id = interaction.user.id
+        if cancel is not None:
+            done = self.reminders.cancel(user_id, cancel)
+            message = f"已取消提醒 #{cancel}。" if done else f"找不到你的提醒 #{cancel}。"
+        elif when and text:
+            due = parse_when(when)
+            if due is None:
+                message = (
+                    f"看不懂時間「{when}」。可以寫：30分鐘後、明天 9:30、後天下午3點、9/15 14:30。"
+                )
+            else:
+                item = self.reminders.add(
+                    interaction.guild_id, interaction.channel_id, user_id, due, text
+                )
+                message = item if isinstance(item, str) else (
+                    f"好，{describe(due)} 在這個頻道提醒你：{item['text']}（#{item['id']}）"
+                )
+        elif when or text:
+            message = "要同時給 when（時間）和 text（內容）。"
+        else:
+            mine = self.reminders.for_user(user_id)
+            message = "你沒有提醒。" if not mine else "你的提醒：\n" + "\n".join(
+                f"#{i['id']} {describe(_dt.fromisoformat(i['due']))}"
+                f" — {i['text']}" for i in mine
+            )
+        await interaction.response.send_message(message, ephemeral=True)
 
     async def stop_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
