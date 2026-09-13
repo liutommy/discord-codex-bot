@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import logging.handlers
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -931,3 +933,42 @@ async def test_recall_loop_calls_registered_apis_and_help_lists_them(
     result = await client._answer("LCK 有幾隊", [], GUILD, USER)
     assert result.text == "LCK 有 10 隊"
     assert '<RESULT kind="api" name="lol" path="getLeagues?hl=zh-TW">\n{"leagues"' in prompts[1]
+
+
+def test_configure_logging_writes_to_the_host_dir_and_survives_an_unusable_one(
+    tmp_path: Path, config: Config
+) -> None:
+    from dataclasses import replace
+
+    from discord_codex_bot.bot import configure_logging
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    root.handlers.clear()
+    try:
+        configure_logging(replace(config, log_dir=tmp_path / "logs", log_keep_days=3))
+        logging.getLogger("probe").info("hello-log")
+        for handler in root.handlers:
+            handler.flush()
+        assert "hello-log" in (tmp_path / "logs" / "bot.log").read_text("utf-8")
+        rotating = [
+            h for h in root.handlers
+            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+        ]
+        assert len(rotating) == 1 and rotating[0].backupCount == 3
+        for handler in root.handlers:
+            handler.close()
+        root.handlers.clear()
+        # A LOG_DIR that cannot be created is a warning, never a reason not to start.
+        blocker = tmp_path / "blocker"
+        blocker.write_text("a file, not a directory", "utf-8")
+        configure_logging(replace(config, log_dir=blocker / "logs"))
+        assert root.handlers and not any(
+            isinstance(h, logging.FileHandler) for h in root.handlers
+        )
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.handlers.clear()
+        root.handlers.extend(saved_handlers)
+        root.setLevel(saved_level)

@@ -128,6 +128,8 @@ class Config:
     backup_dir: Path | None
     backup_hour: int
     backup_keep_days: int
+    log_dir: Path | None
+    log_keep_days: int
     sandbox_url: str
     sandbox_timeout_seconds: int
     apis_path: Path | None
@@ -239,6 +241,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         backup_dir=Path(values["BACKUP_DIR"]) if values.get("BACKUP_DIR", "").strip() else None,
         backup_hour=_bounded_int(values, "BACKUP_HOUR", 3, 0, 23),
         backup_keep_days=_positive_int(values, "BACKUP_KEEP_DAYS", 14),
+        # The Bot's own log into a bind-mounted host dir, rotated at local midnight and kept
+        # for LOG_KEEP_DAYS. `docker logs` only ever holds the *current* container, so without
+        # this a rebuild erases the evidence of any incident. Empty LOG_DIR = stderr only.
+        log_dir=Path(values["LOG_DIR"]) if values.get("LOG_DIR", "").strip() else None,
+        log_keep_days=_positive_int(values, "LOG_KEEP_DAYS", 14),
         # Sandbox sidecar for <run> snippets; empty SANDBOX_URL = the tool is not offered.
         sandbox_url=values.get("SANDBOX_URL", "http://sandbox:8070").strip(),
         sandbox_timeout_seconds=_bounded_int(values, "SANDBOX_TIMEOUT_SECONDS", 30, 1, 120),

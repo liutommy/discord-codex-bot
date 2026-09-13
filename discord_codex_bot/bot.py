@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import logging
+import logging.handlers
 import re
 import tempfile
 import time
@@ -1459,11 +1460,35 @@ class DiscordCodexClient(discord.Client):
         LOGGER.info("Completed @mention guild=%s user=%s", message.guild.id, message.author.id)
 
 
+def configure_logging(config: Config) -> None:
+    """stderr (so `docker logs` still works) plus, when LOG_DIR is set, a daily-rotating file in a
+    bind-mounted host directory. `docker logs` only holds the container that is running now, so a
+    rebuild takes the evidence with it; the host file is what an incident is read from afterwards.
+    A log dir that cannot be written is a warning, never a reason not to start."""
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    stream = logging.StreamHandler()
+    stream.setFormatter(formatter)
+    root.addHandler(stream)
+    if config.log_dir is None:
+        return
+    try:
+        config.log_dir.mkdir(parents=True, exist_ok=True)
+        rotating = logging.handlers.TimedRotatingFileHandler(
+            config.log_dir / "bot.log", when="midnight", backupCount=config.log_keep_days,
+            encoding="utf-8",
+        )
+    except OSError as error:
+        root.warning("LOG_DIR %s unusable (%s); logging to stderr only", config.log_dir, error)
+        return
+    rotating.suffix = "%Y-%m-%d"  # bot.log.2026-09-13 — find an incident by the date it happened
+    rotating.setFormatter(formatter)
+    root.addHandler(rotating)
+
+
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
     config = load_config()
+    configure_logging(config)
     client = DiscordCodexClient(config)
     client.run(config.discord_token, log_handler=None)

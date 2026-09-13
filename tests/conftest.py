@@ -56,6 +56,8 @@ def config() -> Config:
         backup_dir=None,
         backup_hour=3,
         backup_keep_days=14,
+        log_dir=None,
+        log_keep_days=14,
         sandbox_url="http://sandbox:8070",
         sandbox_timeout_seconds=30,
         apis_path=None,

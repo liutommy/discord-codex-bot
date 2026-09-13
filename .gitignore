@@ -13,3 +13,4 @@ persona/*
 announce/*
 !announce/README.md
 backups/
+logs/

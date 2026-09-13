@@ -26,6 +26,10 @@ services:
       - type: bind
         source: ./backups
         target: /backups
+      # The Bot's own log, kept on the host: `docker logs` is lost on every rebuild.
+      - type: bind
+        source: ./logs
+        target: /logs
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
@@ -41,6 +45,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       - searxng
       - sandbox
@@ -94,6 +103,11 @@ services:
     pids_limit: 128
     mem_limit: 768m
     cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
     networks:
       - sandbox_net
 
