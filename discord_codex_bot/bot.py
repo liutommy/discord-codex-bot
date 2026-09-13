@@ -67,7 +67,14 @@ from .memory import (
 from .openrouter import ROUTERS, Catalog, run_router
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
-from .reminders import ReminderStore, describe, parse_when, reminder_loop
+from .reminders import (
+    ReminderStore,
+    describe,
+    extract_reminder_tags,
+    parse_when,
+    reminder_loop,
+    render_pending,
+)
 from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
 from .threads import ThreadStore
 from .ui import AnswerButton, AnswerView, CancelView, recover_exchange
@@ -443,6 +450,7 @@ class DiscordCodexClient(discord.Client):
         previews: dict[str, Preview] | None = None,
         on_video_slow: Callable[[], Awaitable[None]] | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
+        channel_id: int | None = None,
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
         `on_delta` receives the accumulated answer while a backend streams it (agy, routers)."""
@@ -486,11 +494,13 @@ class DiscordCodexClient(discord.Client):
                     remove_request_dir(saved)
             files = "\n\n".join(documents)
             permanent = self.permanent.index_text()
+            pending = render_pending(self.reminders.for_user(user_id))
             memory = "\n\n".join(
                 section
                 for section in (
                     f"[永久記憶索引]\n{permanent}" if permanent else "",
                     self.memory.render(guild_id, user_id),
+                    f"[待辦提醒]\n{pending}" if pending else "",
                 )
                 if section
             )
@@ -551,6 +561,7 @@ class DiscordCodexClient(discord.Client):
             text, facts = extract_memory_tags(result.text)
             for scope, name, fact in facts:
                 self.memory.add(scope, guild_id, user_id, name, fact)
+            text = self._apply_reminder_tags(text, guild_id, channel_id, user_id)
             await self.alerts.record_success(target.backend)
             return CodexResult(
                 truncate(text, self.config.max_response_chars),
@@ -741,7 +752,10 @@ class DiscordCodexClient(discord.Client):
             )
             return
         await interaction.response.defer(thinking=True)
-        result = await self._answer(question, [], interaction.guild_id, user_id, resume="")
+        result = await self._answer(
+            question, [], interaction.guild_id, user_id, resume="",
+            channel_id=interaction.channel_id,
+        )
         await self.send_answer(
             interaction.followup, question, result, interaction.guild_id, user_id
         )
@@ -825,6 +839,35 @@ class DiscordCodexClient(discord.Client):
             LOGGER.exception("Summary delivery failed guild=%s", interaction.guild_id)
         finally:
             remove_dir(result.generated_dir)
+
+    def _apply_reminder_tags(
+        self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
+    ) -> str:
+        """Create / cancel the reminders the model asked for and append a confirmation."""
+        clean, creates, cancels = extract_reminder_tags(text)
+        if not creates and not cancels:
+            return text
+        notes: list[str] = []
+        for when_text, what, target in creates:
+            due = parse_when(when_text)
+            if due is None:
+                notes.append(f"（時間「{when_text}」看不懂，提醒沒有設）")
+                continue
+            if channel_id is None:
+                notes.append("（這裡沒辦法設提醒）")
+                continue
+            item = self.reminders.add(guild_id, channel_id, user_id, due, what, target)
+            if isinstance(item, str):
+                notes.append(f"（提醒沒有設：{item}）")
+            else:
+                whom = f"提醒 <@{target}>" if target and target != user_id else "提醒你"
+                notes.append(f"⏰ 已設定 #{item['id']}：{describe(due)} {whom}：{item['text']}")
+        for reminder_id in cancels:
+            done = self.reminders.cancel(user_id, reminder_id)
+            notes.append(
+                f"⛔ 已取消提醒 #{reminder_id}" if done else f"（找不到你的提醒 #{reminder_id}）"
+            )
+        return f"{clean}\n\n" + "\n".join(notes)
 
     async def _fire_reminder(self, item: dict) -> None:
         channel = self.get_channel(item["channel_id"]) or await self.fetch_channel(
@@ -1236,6 +1279,7 @@ class DiscordCodexClient(discord.Client):
             lambda on_video_slow, on_delta: self._answer(
                 prompt, attachments, interaction.guild_id, interaction.user.id, effort_value,
                 resume, on_video_slow=on_video_slow, on_delta=on_delta,
+                channel_id=interaction.channel_id,
             ),
         )
         if result is None:
@@ -1337,6 +1381,7 @@ class DiscordCodexClient(discord.Client):
                 lambda on_video_slow, on_delta: self._answer(
                     prompt, attachments, guild_id, message.author.id, resume=resume,
                     previews=previews, on_video_slow=on_video_slow, on_delta=on_delta,
+                    channel_id=message.channel.id,
                 ),
             )
         if result is None:

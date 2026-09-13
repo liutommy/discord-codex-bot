@@ -130,6 +130,13 @@ def _prompt(
             ' <recall scope="permanent|user|guild" name="<name from the index>" offset="1"'
             ' lines="200"/> reads a page of one note; <recall scope="…" name="list"/> lists'
             " notes that are not in the index.",
+            "MEMORY may end with a [待辦提醒] section: this member's pending reminders (#id,"
+            " Taipei time, text). When the member asks to be reminded of something, append"
+            ' <remind when="YYYY-MM-DD HH:MM" text="what" who="<@user id>"/> after your'
+            " answer (Taipei time; omit who to remind the member themself; relative forms like"
+            " 30分鐘後 or 明天 9:30 are also accepted); the Bot creates it and confirms. When"
+            ' they ask to cancel one, append <cancel_reminder id="N"/> using an id from that'
+            " section; never invent ids.",
             "If the member states a durable fact or preference about themselves, or the server"
             " agrees on something everyone should remember, append"
             ' <memory scope="user" name="short title">one sentence</memory> or'

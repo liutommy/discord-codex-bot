@@ -84,3 +84,30 @@ def test_add_records_the_target_defaulting_to_the_setter(tmp_path: Path) -> None
     soon = datetime.now(UTC) + timedelta(minutes=5)
     assert store.add(1, 2, 3, soon, "x")["target_id"] == 3
     assert store.add(1, 2, 3, soon, "y", target_id=9)["target_id"] == 9
+
+
+def test_parse_when_accepts_iso_taipei() -> None:
+    assert local(parse_when("2026-09-14 09:30", NOW)) == "2026-09-14 09:30"
+    assert local(parse_when("2026-09-14T21:05", NOW)) == "2026-09-14 21:05"
+    assert parse_when("2026-13-01 09:00", NOW) is None
+
+
+def test_extract_reminder_tags_and_render_pending() -> None:
+    from discord_codex_bot.reminders import extract_reminder_tags, render_pending
+
+    answer = (
+        '好，我記下了。<remind when="2026-09-14 09:30" text="倒垃圾"/>'
+        '<remind when="30分鐘後" text="開團" who="<@777>"/> 另外<cancel_reminder id="3"/>'
+    )
+    clean, creates, cancels = extract_reminder_tags(answer)
+    assert clean == "好，我記下了。 另外"
+    assert creates == [("2026-09-14 09:30", "倒垃圾", None), ("30分鐘後", "開團", 777)]
+    assert cancels == [3]
+    assert extract_reminder_tags("沒有標籤") == ("沒有標籤", [], [])
+    items = [
+        {"id": 1, "user_id": 3, "target_id": 3, "due": "2026-09-14T01:30:00+00:00",
+         "text": "倒垃圾"},
+        {"id": 2, "user_id": 3, "target_id": 9, "due": "2026-09-14T02:00:00+00:00",
+         "text": "開團"},
+    ]
+    assert render_pending(items) == "#1 09/14 09:30 倒垃圾\n#2 09/14 10:00 開團（提醒 <@9>）"

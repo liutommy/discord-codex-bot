@@ -770,7 +770,9 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
             sent.append(("followup", text, type(view).__name__ if view else None))
 
     message = NS(content="**問**：\n> 今天吃什麼\n\n吃咖哩", reference=None)
-    interaction = NS(message=message, guild_id=GUILD, response=Response(), followup=Followup())
+    interaction = NS(
+        message=message, guild_id=GUILD, channel_id=555, response=Response(), followup=Followup()
+    )
     await client.handle_answer_button(interaction, "remember", USER)
     assert sent[-1][0] == "msg" and sent[-1][1].startswith("已記進你的個人記憶：")
     assert [e.name for e in client.memory.entries("user", GUILD, USER)] == ["今天吃什麼"]
@@ -778,7 +780,7 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
     assert interaction.response.deferred
     assert sent[-1] == ("followup", "答案", "AnswerView")
     assert backends[0].calls[-1][0] == "今天吃什麼" and backends[0].calls[-1][2]["resume"] == ""
-    empty = NS(message=NS(content="沒有引用", reference=None), guild_id=GUILD,
+    empty = NS(message=NS(content="沒有引用", reference=None), guild_id=GUILD, channel_id=555,
                response=Response(), followup=Followup())
     await client.handle_answer_button(empty, "redo", USER)
     assert sent[-1][1].startswith("找不到原本的問題")
@@ -838,3 +840,31 @@ async def test_warm_emojis_fills_the_cache_used_by_the_remember_button(client, m
     view = client._answer_view(GUILD, USER, "q", CodexResult("a"))
     remember = [b for b in view.children if b.custom_id.startswith("inmu:remember")][0]
     assert remember.item.emoji.id == 5
+
+
+async def test_answer_creates_and_cancels_reminders_from_model_tags(
+    client, backends, monkeypatch
+) -> None:
+    codex, _ = backends
+    replies = iter([
+        CodexResult(
+            '好，明天叫你。<remind when="2026-12-01 09:30" text="倒垃圾"/>', (), None, "t", False
+        ),
+        CodexResult('取消了。<cancel_reminder id="1"/>', (), None, "t", False),
+        CodexResult('這個不行。<remind when="等一下" text="x"/>', (), None, "t", False),
+    ])
+
+    async def fake_codex(text, config, **kw):
+        fake_codex.prompts.append(kw)
+        return next(replies)
+
+    fake_codex.prompts = []
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    result = await client._answer("明天 9:30 提醒我倒垃圾", [], GUILD, USER, channel_id=555)
+    assert result.text.startswith("好，明天叫你。\n\n⏰ 已設定 #1：12/01 09:30 提醒你：倒垃圾")
+    assert [i["text"] for i in client.reminders.for_user(USER)] == ["倒垃圾"]
+    result = await client._answer("把那個提醒取消", [], GUILD, USER, channel_id=555)
+    assert "[待辦提醒]\n#1 12/01 09:30 倒垃圾" in fake_codex.prompts[-1]["memory"]
+    assert result.text.endswith("⛔ 已取消提醒 #1") and client.reminders.for_user(USER) == []
+    result = await client._answer("等一下提醒我", [], GUILD, USER, channel_id=555)
+    assert "看不懂，提醒沒有設" in result.text

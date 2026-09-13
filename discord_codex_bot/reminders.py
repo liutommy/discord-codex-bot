@@ -23,6 +23,13 @@ _CLOCK = re.compile(
     r"(?:(?P<ampm>早上|上午|中午|下午|晚上|凌晨)\s*)?"
     r"(?P<h>\d{1,2})\s*(?:[:：]\s*(?P<m>\d{2})|點\s*(?P<m2>\d{1,2})?\s*分?|點半)?\s*$"
 )
+# Tags the model appends to an answer: create / cancel reminders on the member's behalf.
+REMIND_TAG = re.compile(
+    r'<remind\s+when="([^"]{1,60})"\s+text="([^"]{1,300})"(?:\s+who="<?@?!?([0-9]{1,25})>?")?\s*/?>'
+    r"(?:\s*</remind>)?"
+)
+CANCEL_TAG = re.compile(r'<cancel_reminder\s+id="([0-9]{1,9})"\s*/?>(?:\s*</cancel_reminder>)?')
+_ISO = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})\s*$")
 _DATE = re.compile(
     r"^\s*(?:(?P<y>\d{4})[-/.])?(?P<mo>\d{1,2})[-/.](?P<d>\d{1,2})"
     r"(?:\s+(?P<h>\d{1,2})(?:[:：](?P<m>\d{2}))?)?\s*$"
@@ -35,6 +42,14 @@ def parse_when(text: str, now: datetime | None = None) -> datetime | None:
     tomorrow when already past), and "9/15 14:30" / "2026-10-01 08:00"."""
     now = (now or datetime.now(UTC)).astimezone(TAIPEI)
     text = text.strip()
+    if match := _ISO.match(text):  # what a model most reliably produces
+        y, mo, d, h, m = (int(g) for g in match.groups())
+        try:
+            return now.replace(
+                year=y, month=mo, day=d, hour=h, minute=m, second=0, microsecond=0
+            ).astimezone(UTC)
+        except ValueError:
+            return None
     if match := _RELATIVE.match(text):
         amount, unit = int(match.group(1)), match.group(2).lower()
         if unit in ("分鐘", "分", "min", "m"):
@@ -78,6 +93,30 @@ def parse_when(text: str, now: datetime | None = None) -> datetime | None:
             when += timedelta(days=1)  # a bare clock time already past today means tomorrow
         return when.astimezone(UTC)
     return None
+
+
+def extract_reminder_tags(
+    answer: str,
+) -> tuple[str, list[tuple[str, str, int | None]], list[int]]:
+    """(answer without the tags, [(when, text, target_id)], [ids to cancel])."""
+    creates = [
+        (when, text, int(who) if who else None) for when, text, who in REMIND_TAG.findall(answer)
+    ]
+    cancels = [int(i) for i in CANCEL_TAG.findall(answer)]
+    clean = CANCEL_TAG.sub("", REMIND_TAG.sub("", answer)).strip()
+    return clean, creates, cancels
+
+
+def render_pending(items: list[dict]) -> str:
+    """The member's pending reminders as prompt lines (id, Taipei time, text)."""
+    def note(item: dict) -> str:
+        target = item.get("target_id")
+        return f"（提醒 <@{target}>）" if target not in (None, item["user_id"]) else ""
+
+    return "\n".join(
+        f"#{i['id']} {describe(datetime.fromisoformat(i['due']))} {i['text']}{note(i)}"
+        for i in items
+    )
 
 
 def describe(when: datetime) -> str:
