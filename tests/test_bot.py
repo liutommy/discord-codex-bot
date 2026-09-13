@@ -770,18 +770,28 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
     class Followup:
         async def send(self, text, files=None, view=None):
             sent.append(("followup", text, type(view).__name__ if view else None))
+            return NS(id=9999)
 
-    message = NS(content="**問**：\n> 今天吃什麼\n\n吃咖哩", reference=None)
+    message = NS(content="**問**：\n> 今天吃什麼\n\n吃咖哩", reference=None, id=4242)
     interaction = NS(
         message=message, guild_id=GUILD, channel_id=555, response=Response(), followup=Followup()
     )
     await client.handle_answer_button(interaction, "remember", USER)
     assert sent[-1][0] == "msg" and sent[-1][1].startswith("已記進你的個人記憶：")
     assert [e.name for e in client.memory.entries("user", GUILD, USER)] == ["今天吃什麼"]
+    # 🔁 resumes the thread that answer came from: without it a redo of a follow-up question
+    # ("那他呢？") is answered as if the conversation before it had never happened.
+    from discord_codex_bot.threads import ThreadStore
+
+    plain, model = bool(client.memory.get_style(GUILD, USER)), client._model(GUILD, USER)
+    key = ThreadStore.key(GUILD, 555, USER)
+    client.threads.remember(key, "thread-abc", 4242, plain=plain, model=model)
     await client.handle_answer_button(interaction, "redo", USER)
     assert interaction.response.deferred
     assert sent[-1] == ("followup", "答案", "AnswerView")
-    assert backends[0].calls[-1][0] == "今天吃什麼" and backends[0].calls[-1][2]["resume"] == ""
+    assert backends[0].calls[-1][0] == "今天吃什麼"
+    assert backends[0].calls[-1][2]["resume"] == "thread-abc"
+    assert client.threads.by_message(9999, plain=plain, model=model) == "t1"  # redo answer linked
     empty = NS(message=NS(content="沒有引用", reference=None), guild_id=GUILD, channel_id=555,
                response=Response(), followup=Followup())
     await client.handle_answer_button(empty, "redo", USER)

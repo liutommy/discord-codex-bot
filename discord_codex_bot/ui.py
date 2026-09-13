@@ -42,9 +42,10 @@ class AnswerButton(
     discord.ui.DynamicItem[discord.ui.Button],
     template=r"inmu:(?P<action>redo|remember):(?P<user>[0-9]+)",
 ):
-    """🔁 asks the same question again as a fresh conversation; 👍 files the exchange into the
-    member's personal memory. The Bot does the work (`handle_answer_button`); this item only
-    identifies the action and the owner, from the custom_id, and gates on the owner."""
+    """🔁 asks the same question again, continuing the thread that answer came from; 👍 files
+    the exchange into the member's personal memory. The Bot does the work
+    (`handle_answer_button`); this item only identifies the action and the owner, from the
+    custom_id, and gates on the owner."""
 
     def __init__(self, action: str, user_id: int, emoji=None) -> None:
         label, default_emoji = _ACTIONS[action]

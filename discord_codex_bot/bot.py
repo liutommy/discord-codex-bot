@@ -790,25 +790,39 @@ class DiscordCodexClient(discord.Client):
             )
             return
         await interaction.response.defer(thinking=True)
+        # 🔁 continues the conversation the original answer came from: the member is asking for
+        # another attempt at that question, not a stranger's take on it with the context stripped.
+        # The answer's own message id is the link; if that thread is no longer resumable (TTL,
+        # style or model change) fall back to the member's current thread here, then to none.
+        key = ThreadStore.key(interaction.guild_id, interaction.channel_id, user_id)
+        plain = bool(self.memory.get_style(interaction.guild_id, user_id))
+        model = self._model(interaction.guild_id, user_id)
+        resume = self.threads.by_message(
+            getattr(interaction.message, "id", None), plain=plain, model=model
+        ) or self.threads.current(key, plain=plain, model=model)
         result = await self._answer(
-            question, [], interaction.guild_id, user_id, resume="",
+            question, [], interaction.guild_id, user_id, resume=resume,
             channel_id=interaction.channel_id,
         )
-        await self.send_answer(
+        sent = await self.send_answer(
             interaction.followup, question, result, interaction.guild_id, user_id
         )
+        # Link the redo answer too, so replying to *it* continues the same thread.
+        self._remember(key, result.thread_id, getattr(sent, "id", None), plain, model)
 
-    async def send_answer(self, destination, prompt: str, result, guild_id, user_id) -> None:
+    async def send_answer(self, destination, prompt: str, result, guild_id, user_id):
         """Post an answer (with its buttons) through any `.send`-able destination — used by the
-        🔁 button, which lands the new answer as a follow-up."""
+        🔁 button, which lands the new answer as a follow-up. Returns the message the destination
+        handed back (when it does), so the caller can link it to the thread."""
         chunks = split_discord_message(result.text)
         try:
-            await destination.send(
+            sent = await destination.send(
                 chunks[0], files=self._files(result),
                 view=self._answer_view(guild_id, user_id, prompt, result),
             )
             for chunk in chunks[1:]:
                 await destination.send(chunk)
+            return sent
         finally:
             remove_dir(result.generated_dir)
 
