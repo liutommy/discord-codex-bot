@@ -131,6 +131,9 @@ def _prompt(
             " limit and python3/ffmpeg/jq/pillow/pypdf/numpy available; print what you need to"
             " see, save files under ./out/ and they come back to you and to the member. Use it for"
             " arithmetic you cannot do reliably, data crunching, conversions and frame extraction.",
+            'HELP may list registered data APIs; call one with ONLY <api name="…" path="…"/> (path'
+            " is the endpoint plus query string relative to that API) and the Bot returns the"
+            " response. Prefer these over web search for the data they cover.",
             "Notes are files; you only see their index lines. To look inside, reply with ONLY"
             " one or more of these tags and nothing else, and the results will be sent to you:"
             ' <search scope="permanent|user|guild" query="word|word"/> returns lines containing'

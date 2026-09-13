@@ -15,7 +15,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from . import gemini, sandbox, search
+from . import apis, gemini, sandbox, search
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
@@ -143,7 +143,7 @@ def request_only(answer: str) -> bool:
     """True when the reply is nothing but read/fetch tags — the protocol for asking the Bot to
     read something. A tag embedded in prose (quoted from a fetched page, say) is just text."""
     rest = answer
-    for tag in (SEARCH_TAG, RECALL_TAG, FETCH_TAG, search.WEB_TAG, sandbox.RUN_TAG):
+    for tag in (SEARCH_TAG, RECALL_TAG, FETCH_TAG, search.WEB_TAG, sandbox.RUN_TAG, apis.API_TAG):
         rest = tag.sub("", rest)
     return bool(answer.strip()) and not rest.strip()
 
@@ -212,6 +212,7 @@ class DiscordCodexClient(discord.Client):
         self.alerts = Alerter(self, config)
         self._emoji_cache: dict[int, dict[str, discord.PartialEmoji]] = {}
         self.reminders = ReminderStore(config.codex_home / "reminders.json")
+        self.apis = apis.load_registry(config.apis_path)
         self.openrouter = Catalog(config)
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
@@ -400,7 +401,9 @@ class DiscordCodexClient(discord.Client):
     def help_sheet(self) -> str:
         """What this Bot can do, generated from the registered commands so it never drifts from
         the code; injected as HELP so the model can explain itself truthfully."""
-        return render_sheet(self.config.command_prefix, self._command_rows())
+        sheet = render_sheet(self.config.command_prefix, self._command_rows())
+        doc = apis.render_doc(self.apis)
+        return f"{sheet}\n{doc}" if doc else sheet
 
     def help_guide(self) -> str:
         """The detailed member guide behind /<prefix>-help (same source as the model's sheet)."""
@@ -534,7 +537,8 @@ class DiscordCodexClient(discord.Client):
                 urls = extract_fetch_tags(result.text)[: self.config.link_max_urls]
                 queries = search.extract_web_queries(result.text)[:2]
                 runs = sandbox.extract_runs(result.text) if sandbox.available(self.config) else []
-                if not wanted and not urls and not queries and not runs:
+                api_calls = apis.extract_api_calls(result.text) if self.apis else []
+                if not wanted and not urls and not queries and not runs and not api_calls:
                     break
                 blocks = [
                     f'<RESULT kind="{kind}" scope="{scope}" target="{target}">\n'
@@ -545,6 +549,9 @@ class DiscordCodexClient(discord.Client):
                 for query in queries:
                     provider, hits = await search.search_web(query, self.config)
                     blocks.append(search.render_results(query, provider, hits))
+                for name, path in api_calls:
+                    body = await apis.call_api(name, path, self.apis, self.config)
+                    blocks.append(apis.render_result(name, path, body))
                 extra: list[Path] = []
                 for i, (lang, code) in enumerate(runs):
                     try:
@@ -1089,7 +1096,8 @@ class DiscordCodexClient(discord.Client):
             " · ".join(routers) if routers else "OpenRouter／OrcaRouter：未設定",
             f"影片理解：{'開' if gemini.available(self.config) else '關'} · 讀連結：開"
             f" · 搜尋：{'／'.join(n for n, _ in search.providers(self.config)) or '關'}"
-            f" · 沙盒：{'開' if sandbox.available(self.config) else '關'}",
+            f" · 沙盒：{'開' if sandbox.available(self.config) else '關'}"
+            f" · 資料 API：{'／'.join(self.apis) or '無'}",
         ]
         return "\n".join((
             "【你的設定】", model_line, style_line, thread_line, memory_line,

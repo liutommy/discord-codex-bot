@@ -58,6 +58,7 @@ def config() -> Config:
         backup_keep_days=14,
         sandbox_url="http://sandbox:8070",
         sandbox_timeout_seconds=30,
+        apis_path=None,
         openrouter_dir=Path("/var/lib/codex/openrouter"),
         openrouter_catalog_ttl_seconds=3600,
         openrouter_history_chars=60_000,

@@ -902,3 +902,32 @@ async def test_recall_loop_runs_sandbox_snippets_and_delivers_files(
     assert [p.name for p in prompts[1][1]] == ["chart.png"]  # the model sees the picture
     assert [p.name for p in result.images] == ["chart.png"] and result.generated_dir is not None
     assert result.images[0].exists()  # survives _answer's cleanup for the caller to send
+
+
+async def test_recall_loop_calls_registered_apis_and_help_lists_them(
+    client, backends, monkeypatch
+) -> None:
+    from discord_codex_bot import apis as apis_module
+    from discord_codex_bot.bot import request_only
+
+    client.apis = {"lol": apis_module.Api("lol", "https://x/", {}, "先 getLeagues")}
+    assert "- lol：先 getLeagues" in client.help_sheet()
+    assert request_only('<api name="lol" path="getLeagues"/>')
+    replies = iter([
+        CodexResult('<api name="lol" path="getLeagues?hl=zh-TW"/>', (), None, "t1", False),
+        CodexResult("LCK 有 10 隊", (), None, "t1", True),
+    ])
+    prompts = []
+
+    async def fake_codex(text, config, **kw):
+        prompts.append(text)
+        return next(replies)
+
+    async def fake_call(name, path, registry, config):
+        return '{"leagues":[{"name":"LCK"}]}'
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(apis_module, "call_api", fake_call)
+    result = await client._answer("LCK 有幾隊", [], GUILD, USER)
+    assert result.text == "LCK 有 10 隊"
+    assert '<RESULT kind="api" name="lol" path="getLeagues?hl=zh-TW">\n{"leagues"' in prompts[1]
