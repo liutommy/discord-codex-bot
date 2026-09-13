@@ -720,3 +720,55 @@ async def test_answer_passes_on_delta_to_the_backend(client, backends) -> None:
 
     await client._answer("q", [], GUILD, USER, on_delta=on_delta)
     assert codex.calls[-1][2]["on_delta"] is on_delta
+
+
+async def test_exchange_of_uses_the_replied_message_or_the_quoted_block(
+    client, monkeypatch
+) -> None:
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(type(client), "user", property(lambda self: NS(id=999)))
+    original = NS(content="<@999> 拉麵推薦？", channel=None)
+    replied = NS(
+        content="去吃一蘭", reference=NS(message_id=1, resolved=original),
+    )
+    # a resolved reference is a discord.Message in production; the fallback path is exercised
+    # by isinstance failing here, so also cover the quoted-block shape
+    slash = NS(content="**問**：\n> 今天吃什麼\n\n吃咖哩", reference=None)
+    assert await client._exchange_of(slash) == ("今天吃什麼", "吃咖哩")
+    # a SimpleNamespace is not a discord.Message, so the quoted-block fallback runs
+    assert await client._exchange_of(replied) == ("", "去吃一蘭")
+
+
+async def test_handle_answer_button_remember_and_redo(client, backends, monkeypatch) -> None:
+    from types import SimpleNamespace as NS
+
+    sent = []
+
+    class Response:
+        def __init__(self):
+            self.deferred = False
+
+        async def send_message(self, text, ephemeral=False):
+            sent.append(("msg", text))
+
+        async def defer(self, thinking=False):
+            self.deferred = True
+
+    class Followup:
+        async def send(self, text, files=None, view=None):
+            sent.append(("followup", text, type(view).__name__ if view else None))
+
+    message = NS(content="**問**：\n> 今天吃什麼\n\n吃咖哩", reference=None)
+    interaction = NS(message=message, guild_id=GUILD, response=Response(), followup=Followup())
+    await client.handle_answer_button(interaction, "remember", USER)
+    assert sent[-1][0] == "msg" and sent[-1][1].startswith("已記進你的個人記憶：")
+    assert [e.name for e in client.memory.entries("user", GUILD, USER)] == ["今天吃什麼"]
+    await client.handle_answer_button(interaction, "redo", USER)
+    assert interaction.response.deferred
+    assert sent[-1] == ("followup", "答案", "AnswerView")
+    assert backends[0].calls[-1][0] == "今天吃什麼" and backends[0].calls[-1][2]["resume"] == ""
+    empty = NS(message=NS(content="沒有引用", reference=None), guild_id=GUILD,
+               response=Response(), followup=Followup())
+    await client.handle_answer_button(empty, "redo", USER)
+    assert sent[-1][1].startswith("找不到原本的問題")

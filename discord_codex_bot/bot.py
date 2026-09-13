@@ -68,7 +68,7 @@ from .queue import QueueFullError, SerialQueue
 from .reminders import ReminderStore, describe, parse_when, reminder_loop
 from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
 from .threads import ThreadStore
-from .ui import AnswerView, CancelView
+from .ui import AnswerButton, AnswerView, CancelView, recover_exchange
 
 LOGGER = logging.getLogger(__name__)
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
@@ -284,6 +284,7 @@ class DiscordCodexClient(discord.Client):
         )
 
     async def setup_hook(self) -> None:
+        self.add_dynamic_items(AnswerButton)  # answer buttons keep working across restarts
         self._sweeper = self.loop.create_task(sweep_forever(self.config))
         self._reminder_loop = self.loop.create_task(
             reminder_loop(self.reminders, self._fire_reminder, 30)
@@ -655,7 +656,46 @@ class DiscordCodexClient(discord.Client):
         return on_delta
 
     def _answer_view(self, guild_id: int | None, user_id: int, prompt: str, result) -> AnswerView:
-        return AnswerView(self, guild_id, user_id, prompt, result.text)
+        return AnswerView(user_id)
+
+    async def _exchange_of(self, message: discord.Message) -> tuple[str, str]:
+        """The question and answer behind one of the Bot's answer messages: an @mention answer
+        replies to the member's message (the question), a slash answer quotes it at the top."""
+        reference = message.reference
+        if reference is not None and reference.message_id is not None:
+            original = reference.resolved
+            if not isinstance(original, discord.Message):
+                try:
+                    original = await message.channel.fetch_message(reference.message_id)
+                except discord.HTTPException:
+                    original = None
+            if isinstance(original, discord.Message) and self.user is not None:
+                question = strip_mention(original.content, self.user.id)
+                if question:
+                    return question, message.content
+        return recover_exchange(message.content)
+
+    async def handle_answer_button(
+        self, interaction: discord.Interaction, action: str, user_id: int
+    ) -> None:
+        """🔁 / 👍 on an answer (owner already checked by the button)."""
+        question, answer = await self._exchange_of(interaction.message)
+        if action == "remember":
+            name = (question or answer).strip().splitlines()[0][:30] or "對話"
+            text = f"問：{question.strip()[:200]}\n答：{answer.strip()[:600]}"
+            line = self.memory.add("user", interaction.guild_id, user_id, name, text)
+            await interaction.response.send_message(f"已記進你的個人記憶：{line}", ephemeral=True)
+            return
+        if not question:
+            await interaction.response.send_message(
+                "找不到原本的問題（訊息太舊或格式不對），請直接再問一次。", ephemeral=True
+            )
+            return
+        await interaction.response.defer(thinking=True)
+        result = await self._answer(question, [], interaction.guild_id, user_id, resume="")
+        await self.send_answer(
+            interaction.followup, question, result, interaction.guild_id, user_id
+        )
 
     async def send_answer(self, destination, prompt: str, result, guild_id, user_id) -> None:
         """Post an answer (with its buttons) through any `.send`-able destination — used by the

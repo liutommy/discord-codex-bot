@@ -1,23 +1,28 @@
-"""Buttons on the Bot's messages. Every view is bound to the member who asked: anyone else
-pressing gets a private refusal, so a button never acts on someone else's request."""
+"""Buttons on the Bot's messages. Every button is bound to the member who asked (anyone else
+gets a private refusal). The answer buttons are persistent: their custom_id carries the action
+and the member, and the question/answer are recovered from the message itself, so they keep
+working after the Bot restarts — which it does on every deploy."""
 
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import discord
 
 NOT_YOURS = "這不是你的回答，按鈕只有發問的人能用。"
-BUTTON_TIMEOUT_SECONDS = 900
+CANCEL_TIMEOUT_SECONDS = 900
+_ACTIONS = {"redo": ("重答", "🔁"), "remember": ("記住", "👍")}
 
 
 class CancelView(discord.ui.View):
     """One ❌ on the "thinking" placeholder; cancels the in-flight request's task. The caller
-    edits the placeholder once the task reports cancellation, so the button only acknowledges."""
+    edits the placeholder once the task reports cancellation, so the button only acknowledges.
+    Not persistent on purpose: a restart kills the request anyway."""
 
     def __init__(self, owner_id: int) -> None:
-        super().__init__(timeout=BUTTON_TIMEOUT_SECONDS)
+        super().__init__(timeout=CANCEL_TIMEOUT_SECONDS)
         self.owner_id = owner_id
         self.task: asyncio.Task[Any] | None = None
 
@@ -33,38 +38,62 @@ class CancelView(discord.ui.View):
         await interaction.response.defer()
 
 
-class AnswerView(discord.ui.View):
-    """🔁 asks the same question again as a fresh conversation on the member's current model;
-    👍 files the exchange into the member's personal memory."""
+class AnswerButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"inmu:(?P<action>redo|remember):(?P<user>[0-9]+)",
+):
+    """🔁 asks the same question again as a fresh conversation; 👍 files the exchange into the
+    member's personal memory. The Bot does the work (`handle_answer_button`); this item only
+    identifies the action and the owner, from the custom_id, and gates on the owner."""
 
-    def __init__(self, bot: Any, guild_id: int | None, user_id: int, prompt: str, answer: str):
-        super().__init__(timeout=BUTTON_TIMEOUT_SECONDS)
-        self.bot, self.guild_id, self.user_id = bot, guild_id, user_id
-        self.prompt, self.answer = prompt, answer
+    def __init__(self, action: str, user_id: int) -> None:
+        label, emoji = _ACTIONS[action]
+        super().__init__(
+            discord.ui.Button(
+                label=label, emoji=emoji, style=discord.ButtonStyle.secondary,
+                custom_id=f"inmu:{action}:{user_id}",
+            )
+        )
+        self.action = action
+        self.user_id = user_id
 
-    async def _mine(self, interaction: discord.Interaction) -> bool:
+    @classmethod
+    async def from_custom_id(
+        cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match[str], /
+    ) -> AnswerButton:
+        return cls(match["action"], int(match["user"]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.user_id:
             return True
         await interaction.response.send_message(NOT_YOURS, ephemeral=True)
         return False
 
-    @discord.ui.button(label="重答", emoji="🔁", style=discord.ButtonStyle.secondary)
-    async def redo(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self._mine(interaction):
-            return
-        await interaction.response.defer(thinking=True)
-        result = await self.bot._answer(self.prompt, [], self.guild_id, self.user_id, resume="")
-        await self.bot.send_answer(
-            interaction.followup, self.prompt, result, self.guild_id, self.user_id
-        )
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.client.handle_answer_button(interaction, self.action, self.user_id)
 
-    @discord.ui.button(label="記住", emoji="👍", style=discord.ButtonStyle.secondary)
-    async def remember(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self._mine(interaction):
-            return
-        name = self.prompt.strip().splitlines()[0][:30] or "對話"
-        text = f"問：{self.prompt.strip()[:200]}\n答：{self.answer.strip()[:600]}"
-        line = self.bot.memory.add("user", self.guild_id, self.user_id, name, text)
-        button.disabled = True
-        await interaction.response.edit_message(view=self)
-        await interaction.followup.send(f"已記進你的個人記憶：{line}", ephemeral=True)
+
+class AnswerView(discord.ui.View):
+    """The two persistent answer buttons for one member (timeout=None: persistent views must
+    never expire)."""
+
+    def __init__(self, user_id: int) -> None:
+        super().__init__(timeout=None)
+        self.add_item(AnswerButton("redo", user_id))
+        self.add_item(AnswerButton("remember", user_id))
+
+
+def recover_exchange(content: str) -> tuple[str, str]:
+    """(question, answer) from a slash-command answer, whose first lines quote the question
+    ("**問**…：" then "> " lines, blank line, answer). Anything else is (\"\", content)."""
+    lines = content.splitlines()
+    if not lines or not lines[0].startswith("**問**"):
+        return "", content
+    quoted: list[str] = []
+    index = 1
+    while index < len(lines) and lines[index].startswith("> "):
+        quoted.append(lines[index][2:])
+        index += 1
+    if index < len(lines) and lines[index] == "":
+        index += 1
+    return "\n".join(quoted).strip(), "\n".join(lines[index:]).strip()
