@@ -296,6 +296,25 @@ class DiscordCodexClient(discord.Client):
                 return suffix
         return ""
 
+    def help_sheet(self) -> str:
+        """What this Bot can do, generated from the registered commands so it never drifts from
+        the code; injected as HELP so the model can explain itself truthfully."""
+        prefix = self.config.command_prefix
+        lines = [f"這個 Bot 的斜線指令（前綴 /{prefix}）："]
+        for command in sorted(self.tree.get_commands(), key=lambda c: c.name):
+            params = "、".join(p.name for p in command.parameters)
+            suffix = f"（參數：{params}）" if params else ""
+            lines.append(f"/{command.name} — {command.description}{suffix}")
+        lines.append(
+            "其他用法：@提及 Bot 直接問；回覆某則訊息可接續那段對話、或讓 Bot 看那則訊息的圖；"
+            "貼連結會自動讀（含 X 貼文、Discord 預覽）；"
+            "貼影片連結會看影片（YouTube／X／TikTok 等）；"
+            "模型來源：Codex（預設）、Antigravity（Gemini／Claude）、"
+            "OpenRouter 與 OrcaRouter 的免費模型；"
+            "記憶分個人與伺服器兩層，另有管理者維護的永久記憶。"
+        )
+        return "\n".join(lines)
+
     async def _understand_videos(
         self,
         urls: list[str],
@@ -389,6 +408,7 @@ class DiscordCodexClient(discord.Client):
                     memory=memory,
                     personal_style=style,
                     links=links,
+                    help=self.help_sheet(),
                 )
             )
             # On-demand reads (search snippets / paged recall): the Bot executes the request and
@@ -634,15 +654,32 @@ class DiscordCodexClient(discord.Client):
             f"已刪除「{name}」。" if forgot else f"找不到「{name}」。", ephemeral=True
         )
 
-    async def memory_command(self, interaction: discord.Interaction) -> None:
+    def _memory_text(self, guild_id: int | None, user_id: int, scope: str = "") -> str:
+        """Index listing for one scope, or both; the archive is not listed (search finds it)."""
+        if scope:
+            owner = user_id if scope == "user" else None
+            text = self.memory.index_text(scope, guild_id, owner)
+            label = SCOPES[scope]
+            return f"[{label}記憶索引]\n{text}" if text else f"目前沒有{label}記憶。"
+        return self.memory.render(guild_id, user_id) or "目前沒有記憶。"
+
+    @app_commands.describe(scope="只看個人或伺服器；留空＝兩者都列")
+    @app_commands.choices(scope=SCOPE_CHOICES)
+    async def memory_command(
+        self, interaction: discord.Interaction, scope: app_commands.Choice[str] | None = None
+    ) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
-        text = self.memory.render(interaction.guild_id, interaction.user.id) or "目前沒有記憶。"
-        await interaction.response.send_message(
-            split_discord_message(text)[0], ephemeral=True
+        text = self._memory_text(
+            interaction.guild_id, interaction.user.id, scope.value if scope else ""
         )
+        # Every chunk, so a long personal index no longer pushes the server section off the end.
+        chunks = split_discord_message(text)
+        await interaction.response.send_message(chunks[0], ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk, ephemeral=True)
 
     async def model_options(self, provider: str, current: str) -> list[app_commands.Choice[str]]:
         """Autocomplete for the model option: the provider's models, filtered by what the member

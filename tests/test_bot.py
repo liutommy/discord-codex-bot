@@ -522,3 +522,28 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     text = await client._status_text(GUILD, 555, USER)
     assert "OpenRouter 1 個免費模型" in text and "OrcaRouter" not in text.split("【系統】")[1]
     assert "影片理解：關" in text
+
+
+def test_help_sheet_is_generated_from_the_registered_commands(client) -> None:
+    sheet = client.help_sheet()
+    assert sheet.startswith("這個 Bot 的斜線指令（前綴 /codex）：")
+    assert "/codex-status — " in sheet and "/codex-model — " in sheet
+    assert "/codex-model — " in sheet and "（參數：" in sheet.split("/codex-model — ")[1]
+    assert "/codex-memory — " in sheet and "OrcaRouter" in sheet
+
+
+async def test_answer_hands_the_help_sheet_to_the_backend(client, backends) -> None:
+    codex, _ = backends
+    await client._answer("你會什麼", [], GUILD, USER)
+    assert codex.calls[0][2]["help"].startswith("這個 Bot 的斜線指令")
+
+
+def test_memory_text_lists_one_scope_or_both(client) -> None:
+    assert client._memory_text(GUILD, USER) == "目前沒有記憶。"
+    assert client._memory_text(GUILD, USER, "guild") == "目前沒有伺服器記憶。"
+    client.memory.add("user", GUILD, USER, "拉麵", "小明喜歡拉麵")
+    client.memory.add("guild", GUILD, None, "開團", "週五開團")
+    both = client._memory_text(GUILD, USER)
+    assert "[個人記憶索引]" in both and "[伺服器記憶索引]" in both and "開團" in both
+    only_guild = client._memory_text(GUILD, USER, "guild")
+    assert only_guild.startswith("[伺服器記憶索引]") and "拉麵" not in only_guild

@@ -87,8 +87,10 @@ def _prompt(
     style: str = "",
     personal_style: str = "",
     links: str = "",
+    help: str = "",
 ) -> str:
     memory_block = ("<MEMORY>", memory, "</MEMORY>") if memory else ()
+    help_block = ("<HELP>", help, "</HELP>") if help else ()
     links_block = ("<LINKS>", links, "</LINKS>") if links else ()
     style_block = ("<OUTPUT_STYLE>", style, "</OUTPUT_STYLE>") if style else ()
     personal_block = (
@@ -129,11 +131,15 @@ def _prompt(
             "OUTPUT_STYLE, when present, is the operator's default formatting and voice for every"
             " answer. PERSONAL_STYLE, when present, is this member's own preference and wins over"
             " OUTPUT_STYLE wherever they conflict. Follow them unless the member asks otherwise.",
+            "HELP, when present, lists this Bot's slash commands and abilities. When the member"
+            " asks what you can do or how a command works, answer from HELP in your own words;"
+            " never invent commands, options or abilities that are not listed there.",
             "Return only the answer intended for Discord.",
             *style_block,
             *personal_block,
             *memory_block,
             *links_block,
+            *help_block,
             "<USER_MESSAGE>",
             user_prompt,
             "</USER_MESSAGE>",
@@ -241,12 +247,13 @@ async def run_codex(
     personal_style: str = "",
     schema: Path | None = None,
     links: str = "",
+    help: str = "",
 ) -> CodexResult:
     """Run one turn. `raw` sends `user_prompt` verbatim (used to feed recalled notes back)."""
     prompt = (
         user_prompt
         if raw
-        else _prompt(user_prompt, memory, output_style(config), personal_style, links)
+        else _prompt(user_prompt, memory, output_style(config), personal_style, links, help)
     )
     plain = bool(personal_style)
     code, output, stderr = await _exec(prompt, config, images, effort, resume, schema, plain)

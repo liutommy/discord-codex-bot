@@ -216,3 +216,13 @@ async def test_run_codex_wraps_prompt_unless_raw_and_plain_follows_style(
     sent = fake.calls[-1]
     assert sent["prompt"] == "verbatim" and sent["plain"] is False
     assert sent["effort"] == "low" and sent["schema"] == Path("/s.json")
+
+
+def test_prompt_carries_the_help_sheet_and_the_no_invention_rule() -> None:
+    from discord_codex_bot.codex import _prompt
+
+    with_help = _prompt("q", help="這個 Bot 的斜線指令：\n/x — y")
+    assert "<HELP>\n這個 Bot 的斜線指令：\n/x — y\n</HELP>" in with_help
+    assert "never invent commands, options or abilities" in with_help
+    assert with_help.index("</HELP>") < with_help.index("<USER_MESSAGE>")
+    assert "<HELP>" not in _prompt("q")
