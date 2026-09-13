@@ -81,9 +81,10 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
     "-remind": (
         "設定提醒：到時 Bot 會在這個頻道 @你。時間可以寫相對（30分鐘後、2小時後、3天後）、"
         "今天／明天／後天加時間（明天 9:30、後天下午3點、21:00）、或日期（9/15 14:30）。"
-        "留空列出你的提醒，cancel 加編號取消。",
+        "who 可以指定要 @ 的人（留空＝提醒自己）。留空列出你的提醒，cancel 加編號取消。",
         [
             "/{p}-remind when:30分鐘後 text:去收衣服",
+            "/{p}-remind when:明天 20:00 text:開團囉 who:@小明",
             "/{p}-remind when:明天 9:30 text:開會前先看簡報",
             "/{p}-remind（留空：列出你的提醒）",
             "/{p}-remind cancel:3",

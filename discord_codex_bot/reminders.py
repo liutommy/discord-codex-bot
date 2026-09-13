@@ -106,7 +106,13 @@ class ReminderStore:
         self._path.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
 
     def add(
-        self, guild_id: int | None, channel_id: int, user_id: int, when: datetime, text: str
+        self,
+        guild_id: int | None,
+        channel_id: int,
+        user_id: int,
+        when: datetime,
+        text: str,
+        target_id: int | None = None,
     ) -> dict | str:
         """The stored reminder, or a user-facing reason it was refused."""
         now = datetime.now(UTC)
@@ -119,7 +125,7 @@ class ReminderStore:
         item = {
             "id": self._next_id, "guild_id": guild_id, "channel_id": channel_id,
             "user_id": user_id, "due": when.astimezone(UTC).isoformat(),
-            "text": text.strip()[:500],
+            "text": text.strip()[:500], "target_id": target_id or user_id,
         }
         self._next_id += 1
         self._items.append(item)

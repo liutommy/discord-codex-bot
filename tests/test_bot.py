@@ -692,6 +692,10 @@ async def test_fire_reminder_mentions_only_the_member(client) -> None:
     client.get_channel = lambda cid: Channel() if cid == 555 else None
     await client._fire_reminder({"channel_id": 555, "user_id": USER, "text": "收衣服"})
     assert sent == [(f"⏰ <@{USER}> 提醒：收衣服", True, False)]
+    await client._fire_reminder(
+        {"channel_id": 555, "user_id": USER, "target_id": 777, "text": "開團"}
+    )
+    assert sent[-1][0] == f"⏰ <@777> 提醒：開團（<@{USER}> 設的）"
 
 
 async def test_streamer_throttles_skips_tag_interims_and_clips(client, monkeypatch) -> None:

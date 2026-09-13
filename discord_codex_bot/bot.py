@@ -140,6 +140,11 @@ def request_only(answer: str) -> bool:
     return bool(answer.strip()) and not rest.strip()
 
 
+def _for_other(item: dict) -> bool:
+    """A reminder set for someone other than the member who set it."""
+    return item.get("target_id", item["user_id"]) != item["user_id"]
+
+
 def previews_from(messages) -> dict[str, Preview]:
     """Discord link embeds of `messages` as previews keyed by the embedded URL."""
     out: dict[str, Preview] = {}
@@ -825,14 +830,17 @@ class DiscordCodexClient(discord.Client):
         channel = self.get_channel(item["channel_id"]) or await self.fetch_channel(
             item["channel_id"]
         )
+        target = item.get("target_id") or item["user_id"]
+        by = f"（{'<@' + str(item['user_id']) + '>'} 設的）" if target != item["user_id"] else ""
         await channel.send(
-            f"⏰ <@{item['user_id']}> 提醒：{item['text']}",
+            f"⏰ <@{target}> 提醒：{item['text']}{by}",
             allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False),
         )
 
     @app_commands.describe(
         when="什麼時候：30分鐘後、2小時後、明天 9:30、後天下午3點、21:00、9/15 14:30",
         text="到時要提醒的內容",
+        who="要 @ 的人（留空＝提醒你自己）",
         cancel="要取消的提醒編號（用留空的 /指令 查看）",
     )
     async def remind_command(
@@ -840,6 +848,7 @@ class DiscordCodexClient(discord.Client):
         interaction: discord.Interaction,
         when: str | None = None,
         text: str | None = None,
+        who: discord.Member | None = None,
         cancel: int | None = None,
     ) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
@@ -857,11 +866,13 @@ class DiscordCodexClient(discord.Client):
                     f"看不懂時間「{when}」。可以寫：30分鐘後、明天 9:30、後天下午3點、9/15 14:30。"
                 )
             else:
+                target = who.id if who is not None else None
                 item = self.reminders.add(
-                    interaction.guild_id, interaction.channel_id, user_id, due, text
+                    interaction.guild_id, interaction.channel_id, user_id, due, text, target
                 )
+                whom = f"提醒 {who.display_name}" if who is not None else "提醒你"
                 message = item if isinstance(item, str) else (
-                    f"好，{describe(due)} 在這個頻道提醒你：{item['text']}（#{item['id']}）"
+                    f"好，{describe(due)} 在這個頻道{whom}：{item['text']}（#{item['id']}）"
                 )
         elif when or text:
             message = "要同時給 when（時間）和 text（內容）。"
@@ -869,7 +880,8 @@ class DiscordCodexClient(discord.Client):
             mine = self.reminders.for_user(user_id)
             message = "你沒有提醒。" if not mine else "你的提醒：\n" + "\n".join(
                 f"#{i['id']} {describe(_dt.fromisoformat(i['due']))}"
-                f" — {i['text']}" for i in mine
+                + (f" → <@{i['target_id']}>" if _for_other(i) else "")
+                + f" — {i['text']}" for i in mine
             )
         await interaction.response.send_message(message, ephemeral=True)
 

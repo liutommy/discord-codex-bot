@@ -77,3 +77,10 @@ async def test_reminder_loop_fires_due_items_and_survives_a_failure(tmp_path: Pa
     await asyncio.sleep(0.15)
     task.cancel()
     assert fired == ["b"] and store.for_user(3) == []
+
+
+def test_add_records_the_target_defaulting_to_the_setter(tmp_path: Path) -> None:
+    store = ReminderStore(tmp_path / "r.json")
+    soon = datetime.now(UTC) + timedelta(minutes=5)
+    assert store.add(1, 2, 3, soon, "x")["target_id"] == 3
+    assert store.add(1, 2, 3, soon, "y", target_id=9)["target_id"] == 9
