@@ -116,3 +116,39 @@ async def test_call_api_retries_a_throttled_reply_and_never_passes_it_off_as_dat
     monkeypatch.setattr(apis.aiohttp, "ClientSession", lambda **kw: broken)
     body = await call_api("lp", "x", registry, config)
     assert len(broken.calls) == 1 and "badvalue" in body and "bad where clause" in body
+
+
+def test_load_registry_reads_a_bot_password_login_and_stays_anonymous_without_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("WIKI_USER", "bot@app")
+    monkeypatch.setenv("WIKI_PASS", "secret")
+    spec = {"wiki": {"base": "https://w.example/api.php?", "login": {
+        "api": "https://w.example/api.php", "user": "${WIKI_USER}", "password": "${WIKI_PASS}"}}}
+    (tmp_path / "a.json").write_text(json.dumps(spec), "utf-8")
+    assert load_registry(tmp_path / "a.json")["wiki"].login["user"] == "bot@app"
+    monkeypatch.delenv("WIKI_PASS")
+    # credentials not configured: query anonymously (and wear the rate limit) rather than fail
+    assert load_registry(tmp_path / "a.json")["wiki"].login == {}
+
+
+async def test_call_api_logs_in_once_and_reuses_the_session(monkeypatch, config) -> None:
+    registry = {"wiki": Api("wiki", "https://w.example/api.php?", {}, "",
+                            {"api": "https://w.example/api.php", "user": "u", "password": "p"})}
+    apis._LOGGED_IN.discard("wiki")
+    logins = []
+
+    async def fake_login(api, cfg):
+        logins.append(api.name)
+        apis._LOGGED_IN.add(api.name)
+        return True
+
+    session = Session(Response(b'{"cargoquery":[]}'))
+    monkeypatch.setattr(apis, "_login", fake_login)
+    monkeypatch.setattr(apis.aiohttp, "ClientSession", lambda **kw: session)
+    try:
+        assert await call_api("wiki", "action=cargoquery", registry, config) == '{"cargoquery":[]}'
+        await call_api("wiki", "action=cargoquery&x=2", registry, config)
+        assert logins == ["wiki"]  # the cookie jar outlives the call; no login per query
+    finally:
+        apis._LOGGED_IN.discard("wiki")

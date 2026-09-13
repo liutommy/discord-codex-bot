@@ -39,6 +39,15 @@ class Api:
     base: str
     headers: dict[str, str] = field(default_factory=dict)
     doc: str = ""
+    # Optional MediaWiki bot-password login: {"api": ..., "user": ..., "password": ...}. An
+    # anonymous Cargo query is throttled within a couple of calls; a logged-in one is not.
+    login: dict[str, str] = field(default_factory=dict)
+
+
+# One cookie jar per API for the life of the process, so the login survives between calls
+# (each call still opens its own short-lived session).
+_JARS: dict[str, aiohttp.CookieJar] = {}
+_LOGGED_IN: set[str] = set()
 
 
 def _expand(value: str) -> str:
@@ -60,7 +69,12 @@ def load_registry(path: Path | None) -> dict[str, Api]:
             LOGGER.warning("api %r skipped: needs an https base", name)
             continue
         headers = {str(k): _expand(str(v)) for k, v in (spec.get("headers") or {}).items()}
-        out[str(name)] = Api(str(name), str(spec["base"]), headers, str(spec.get("doc") or ""))
+        login = {str(k): _expand(str(v)) for k, v in (spec.get("login") or {}).items()}
+        if not (login.get("user") and login.get("password")):
+            login = {}  # credentials not configured: stay anonymous rather than fail every call
+        out[str(name)] = Api(
+            str(name), str(spec["base"]), headers, str(spec.get("doc") or ""), login
+        )
     return out
 
 
@@ -100,10 +114,49 @@ def _api_error(body: str) -> tuple[str, str]:
 
 async def _get(url: str, api: Api, config: Config) -> tuple[int, str, str]:
     timeout = aiohttp.ClientTimeout(total=config.link_timeout_seconds)
-    async with aiohttp.ClientSession(timeout=timeout, headers=api.headers) as session:
+    jar = _JARS.setdefault(api.name, aiohttp.CookieJar())
+    async with aiohttp.ClientSession(
+        timeout=timeout, headers=api.headers, cookie_jar=jar
+    ) as session:
         async with session.get(url) as response:
             raw = await _read_bounded(response, config.link_max_bytes)
             return response.status, response.content_type, raw.decode("utf-8", errors="replace")
+
+
+async def _login(api: Api, config: Config) -> bool:
+    """MediaWiki bot-password handshake: fetch a login token, post the credentials, keep the
+    cookies in this API's jar. Never logs the password; a failure is a warning, not an error,
+    because an anonymous call still works (just throttled sooner)."""
+    endpoint = api.login.get("api") or api.base
+    timeout = aiohttp.ClientTimeout(total=config.link_timeout_seconds)
+    jar = _JARS.setdefault(api.name, aiohttp.CookieJar())
+    try:
+        async with aiohttp.ClientSession(
+            timeout=timeout, headers=api.headers, cookie_jar=jar
+        ) as session:
+            async with session.get(
+                f"{endpoint}?action=query&meta=tokens&type=login&format=json"
+            ) as response:
+                payload = await response.json(content_type=None)
+            token = ((payload.get("query") or {}).get("tokens") or {}).get("logintoken")
+            if not token:
+                LOGGER.warning("%s login: no token in reply", api.name)
+                return False
+            form = {"lgname": api.login["user"], "lgpassword": api.login["password"],
+                    "lgtoken": token}
+            async with session.post(
+                f"{endpoint}?action=login&format=json", data=form
+            ) as response:
+                result = (await response.json(content_type=None)).get("login") or {}
+    except (aiohttp.ClientError, TimeoutError, ValueError) as error:
+        LOGGER.warning("%s login failed: %s", api.name, type(error).__name__)
+        return False
+    if result.get("result") != "Success":
+        LOGGER.warning("%s login refused: %s", api.name, result.get("result"))
+        return False
+    LOGGER.info("%s logged in as %s", api.name, result.get("lgusername"))
+    _LOGGED_IN.add(api.name)
+    return True
 
 
 async def call_api(name: str, path: str, registry: dict[str, Api], config: Config) -> str:
@@ -117,6 +170,8 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     if "://" in path or path.startswith("//") or ".." in path:
         return "（path 只能是相對於該 API 的端點與查詢字串）"
     url = api.base + path.lstrip("/")
+    if api.login and api.name not in _LOGGED_IN:
+        await _login(api, config)
     body = ""
     for attempt in (1, 2):
         try:
@@ -128,6 +183,9 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
         if throttled and attempt == 1:
             LOGGER.info("%s throttled (%s); one retry in %ss", name, code or status,
                         RETRY_AFTER_SECONDS)
+            if api.login:  # a dropped session looks exactly like throttling: log in again
+                _LOGGED_IN.discard(api.name)
+                await _login(api, config)
             await asyncio.sleep(RETRY_AFTER_SECONDS)
             continue
         if throttled:
