@@ -6,6 +6,7 @@ from discord_codex_bot.config import Config
 from discord_codex_bot.harvest import harvest_thread, transcript
 from discord_codex_bot.memory import MemoryLimits, MemoryStore
 from discord_codex_bot.threads import ThreadStore
+from discord_codex_bot.usage import RateLimits
 
 LIMITS = MemoryLimits(200, 25_000, 50_000_000, 200_000_000, 2000, 50_000, 50, 3)
 
@@ -151,6 +152,11 @@ async def test_run_once_harvests_pending_threads_and_reports(
     tmp_path: Path, config: Config, monkeypatch
 ) -> None:
     config = replace(config, codex_home=tmp_path)
+
+    async def enough(_config):
+        return RateLimits(10, 10, "app-server")
+
+    monkeypatch.setattr(harvest, "query_rate_limits", enough)
     monkeypatch.setattr(harvest, "codex_runner", lambda cfg: _one_note)
     assert await run_once(config) == "nothing to harvest"
     _pending_thread(tmp_path, config, "t1")
@@ -167,11 +173,11 @@ async def test_run_once_gate_and_failure_reporting(
     config = replace(config, codex_home=tmp_path)
     _pending_thread(tmp_path, config, "t1")
     _rollout(tmp_path, "t1")
-    usage = {
-        "type": "event_msg",
-        "payload": {"type": "token_count", "rate_limits": {"primary": {"used_percent": 80.0}}},
-    }
-    (tmp_path / "sessions" / "rollout-usage.jsonl").write_text(json.dumps(usage) + "\n", "utf-8")
+
+    async def low(_config):
+        return RateLimits(80, 10, "app-server")
+
+    monkeypatch.setattr(harvest, "query_rate_limits", low)
     assert (await run_once(config)).startswith("skipped: 5h quota")
 
     async def broken(prompt: str) -> str:
@@ -195,6 +201,11 @@ async def test_harvest_forever_wakes_on_the_event(
     _rollout(tmp_path, "t1")
     store = MemoryStore(tmp_path / "memory", LIMITS)
     monkeypatch.setattr(harvest, "codex_runner", lambda cfg: _one_note)
+
+    async def enough(_config):
+        return RateLimits(10, 10, "app-server")
+
+    monkeypatch.setattr(harvest, "query_rate_limits", enough)
     done = asyncio.Event()
     reports: list[str] = []
 
@@ -221,7 +232,10 @@ async def test_harvest_forever_skips_when_quota_is_low(
     key = ThreadStore.key(1, 2, 3)
     threads.remember(key, "t1")
     threads.remember(key, "live")
-    monkeypatch.setattr(harvest, "_quota_ok", lambda cfg: False)
+    async def no_quota(_config):
+        return False
+
+    monkeypatch.setattr(harvest, "_quota_ok", no_quota)
     monkeypatch.setattr(harvest, "codex_runner", lambda cfg: _one_note)
 
     async def queue_run(operation):

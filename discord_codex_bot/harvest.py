@@ -11,7 +11,7 @@ from .config import Config
 from .memory import MemoryStore
 from .openrouter import load_transcript, message_text
 from .threads import ThreadStore
-from .usage import read_rate_limits
+from .usage import query_rate_limits
 
 LOGGER = logging.getLogger(__name__)
 Runner = Callable[[str], Awaitable[str]]
@@ -161,7 +161,7 @@ async def harvest_forever(
         candidates = threads.harvest_candidates()
         if not candidates:
             continue
-        if not _quota_ok(config):
+        if not await _quota_ok(config):
             continue
         for key, thread_id in candidates:
             await queue_run(
@@ -169,9 +169,12 @@ async def harvest_forever(
             )
 
 
-def _quota_ok(config: Config) -> bool:
-    limits = read_rate_limits(config)
-    remaining = 100.0 - limits.primary_used_percent if limits else 100.0
+async def _quota_ok(config: Config) -> bool:
+    limits = await query_rate_limits(config)
+    if limits is None:
+        LOGGER.warning("Harvest deferred: authoritative 5h usage is unknown")
+        return False
+    remaining = 100.0 - limits.primary_used_percent
     if remaining < config.consolidate_min_remaining_percent:
         LOGGER.info("Harvest deferred: 5h remaining %.0f%%", remaining)
         return False
@@ -216,7 +219,7 @@ async def run_once(config: Config, force: bool = False) -> str:
     candidates = threads.harvest_candidates()
     if not candidates:
         return "nothing to harvest"
-    if not force and not _quota_ok(config):
+    if not force and not await _quota_ok(config):
         return "skipped: 5h quota below the gate (use --force to override)"
     runner = codex_runner(config)
     lines = [await _harvest_one(threads, store, config, k, t, runner) for k, t in candidates]

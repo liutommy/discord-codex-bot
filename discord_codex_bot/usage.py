@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from .codex import run_codex
+from .codex import _safe_environment
 from .config import Config
+
+LOGGER = logging.getLogger(__name__)
+APP_SERVER_TIMEOUT_SECONDS = 20
 
 
 @dataclass(frozen=True, slots=True)
 class RateLimits:
     primary_used_percent: float  # 5-hour window
     secondary_used_percent: float  # 7-day window
-    source: Path
+    source: Path | str
 
 
 def read_rate_limits(config: Config) -> RateLimits | None:
@@ -46,6 +51,118 @@ def read_rate_limits(config: Config) -> RateLimits | None:
 
 
 async def probe_rate_limits(config: Config) -> RateLimits | None:
-    """Run the cheapest possible turn so Codex records fresh rate limits, then read them."""
-    await run_codex("回覆 OK 兩個字。", config, effort="low")
-    return read_rate_limits(config)
+    """Read the authoritative account limits without consuming a Codex turn."""
+    return await query_rate_limits(config)
+
+
+def parse_app_server_rate_limits(response: dict) -> RateLimits:
+    """Normalize one account/rateLimits/read JSON-RPC response.
+
+    Window duration is the stable discriminator: app-server names have changed before, while
+    the subscription windows remain five hours and seven days.
+    """
+    if response.get("error"):
+        raise ValueError("account/rateLimits/read returned an error")
+    result = response.get("result")
+    snapshot = result.get("rateLimits") if isinstance(result, dict) else None
+    if not isinstance(snapshot, dict):
+        raise ValueError("account/rateLimits/read returned no rateLimits")
+    windows = [snapshot.get("primary"), snapshot.get("secondary")]
+
+    def used(duration: int, fallback: int) -> float:
+        for window in windows:
+            if isinstance(window, dict) and window.get("windowDurationMins") == duration:
+                return float(window.get("usedPercent", 0.0))
+        window = windows[fallback]
+        return float(window.get("usedPercent", 0.0)) if isinstance(window, dict) else 0.0
+
+    return RateLimits(
+        primary_used_percent=used(300, 0),
+        secondary_used_percent=used(10_080, 1),
+        source="app-server account/rateLimits/read",
+    )
+
+
+async def _send(process: asyncio.subprocess.Process, message: dict) -> None:
+    if process.stdin is None:
+        raise RuntimeError("Codex app-server stdin unavailable")
+    process.stdin.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
+    await process.stdin.drain()
+
+
+async def _response(process: asyncio.subprocess.Process, request_id: int) -> dict:
+    if process.stdout is None:
+        raise RuntimeError("Codex app-server stdout unavailable")
+
+    async def wait() -> dict:
+        while raw := await process.stdout.readline():
+            try:
+                message = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if message.get("id") == request_id:
+                return message
+        raise RuntimeError("Codex app-server closed before replying")
+
+    return await asyncio.wait_for(wait(), timeout=APP_SERVER_TIMEOUT_SECONDS)
+
+
+async def query_rate_limits(config: Config) -> RateLimits | None:
+    """Query Codex app-server's account/rateLimits/read method.
+
+    No rollout or get_goal fallback is used: an unknown authoritative reading must defer optional
+    background AI work instead of being mistaken for available quota.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "codex",
+            "app-server",
+            "--stdio",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=_safe_environment(config),
+        )
+    except OSError as error:
+        LOGGER.warning("Codex app-server usage probe unavailable: %s", type(error).__name__)
+        return None
+    try:
+        await _send(
+            process,
+            {
+                "method": "initialize",
+                "id": 0,
+                "params": {
+                    "clientInfo": {
+                        "name": "discord_codex_bot",
+                        "title": "Discord Codex Bot",
+                        "version": "0.1.0",
+                    },
+                    "capabilities": {
+                        "experimentalApi": False,
+                        "requestAttestation": False,
+                        "optOutNotificationMethods": [],
+                    },
+                },
+            },
+        )
+        initialized = await _response(process, 0)
+        if initialized.get("error"):
+            raise RuntimeError("Codex app-server initialization failed")
+        await _send(process, {"method": "initialized", "params": {}})
+        await _send(
+            process,
+            {"method": "account/rateLimits/read", "id": 1, "params": None},
+        )
+        return parse_app_server_rate_limits(await _response(process, 1))
+    except (TimeoutError, RuntimeError, ValueError) as error:
+        LOGGER.warning("Codex app-server usage probe failed: %s", type(error).__name__)
+        return None
+    finally:
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()

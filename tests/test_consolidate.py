@@ -3,10 +3,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from discord_codex_bot.config import Config
 from discord_codex_bot.consolidate import _batches, consolidate_all, seconds_until
 from discord_codex_bot.memory import MemoryLimits, MemoryStore, Note
-from discord_codex_bot.usage import read_rate_limits
+from discord_codex_bot.usage import parse_app_server_rate_limits
 
 LIMITS = MemoryLimits(200, 25_000, 50_000_000, 200_000_000, 2000, 50_000, 50, 3)
 
@@ -66,27 +65,18 @@ def test_seconds_until_two_am_taipei() -> None:
     assert seconds_until(2, "Asia/Taipei", now=at_three) == 23 * 3600
 
 
-def test_read_rate_limits_from_newest_rollout(tmp_path: Path, config: Config) -> None:
-    from dataclasses import replace
-
-    config = replace(config, codex_home=tmp_path)
-    assert read_rate_limits(config) is None
-    day = tmp_path / "sessions" / "2026" / "09" / "11"
-    day.mkdir(parents=True)
-    event = {
-        "type": "event_msg",
-        "payload": {
-            "type": "token_count",
-            "rate_limits": {
-                "primary": {"used_percent": 17.0, "window_minutes": 300},
-                "secondary": {"used_percent": 50.0, "window_minutes": 10080},
-            },
-        },
+def test_parse_rate_limits_uses_app_server_window_durations() -> None:
+    response = {
+        "result": {
+            "rateLimits": {
+                "primary": {"usedPercent": 50.0, "windowDurationMins": 10_080},
+                "secondary": {"usedPercent": 17.0, "windowDurationMins": 300},
+            }
+        }
     }
-    (day / "rollout-a.jsonl").write_text(json.dumps(event) + "\n", "utf-8")
-    limits = read_rate_limits(config)
-    assert limits is not None
+    limits = parse_app_server_rate_limits(response)
     assert limits.primary_used_percent == 17.0 and limits.secondary_used_percent == 50.0
+    assert limits.source == "app-server account/rateLimits/read"
 
 
 # ----- _parse and consolidate_scope ----------------------------------------------------------

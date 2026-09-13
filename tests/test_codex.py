@@ -30,10 +30,12 @@ class FakeExec:
         self.replies = list(replies)
         self.calls: list[dict] = []
 
-    async def __call__(self, prompt, config, images, effort, resume, schema=None, plain=False):
+    async def __call__(
+        self, prompt, config, images, effort, resume, schema=None, plain=False, isolated=False
+    ):
         self.calls.append(
             dict(prompt=prompt, images=images, effort=effort, resume=resume, schema=schema,
-                 plain=plain)
+                 plain=plain, isolated=isolated)
         )
         return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
 
@@ -153,6 +155,27 @@ def test_arguments_combine_schema_images_and_plain_workspace(config: Config) -> 
     assert args[-6:] == ("-i", "/img/a.png", "-i", "/img/b.png", "--", "-")
     resumed = _arguments(config, resume="t", schema=Path("/s.json"))
     assert "--cd" not in resumed and "--output-schema" in resumed
+
+
+def test_isolated_arguments_disable_memory_history_and_tools(config: Config) -> None:
+    args = _arguments(config, isolated=True)
+    for value in (
+        "features.memories=false",
+        "memories.use_memories=false",
+        "memories.generate_memories=false",
+        'history.persistence="none"',
+        'web_search="disabled"',
+        "features.image_generation=false",
+        "features.multi_agent=false",
+    ):
+        assert value in args
+
+
+async def test_isolated_run_uses_plain_workspace(config: Config, monkeypatch) -> None:
+    fake = FakeExec((0, _events("ok", "t1"), ""))
+    monkeypatch.setattr(codex, "_exec", fake)
+    await run_codex("untrusted", config, raw=True, isolated=True)
+    assert fake.calls[0]["plain"] is True and fake.calls[0]["isolated"] is True
 
 
 async def test_run_codex_falls_back_to_a_new_thread_when_resume_fails(

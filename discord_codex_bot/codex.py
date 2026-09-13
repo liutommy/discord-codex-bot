@@ -181,6 +181,7 @@ def _arguments(
     resume: str = "",
     schema: Path | None = None,
     plain: bool = False,
+    isolated: bool = False,
 ) -> tuple[str, ...]:
     # Sandbox, tool feature flags and web search live in CODEX_HOME/config.toml (refreshed from
     # config/codex-config.toml at container start); only per-request values are passed here.
@@ -194,12 +195,25 @@ def _arguments(
     workspace = config.codex_workspace_plain if plain else config.codex_workspace
     tail = () if resume else ("--color", "never", "--cd", str(workspace))
     tail += schema_flags
+    isolated_flags = (
+        "-c", "features.memories=false",
+        "-c", "memories.use_memories=false",
+        "-c", "memories.generate_memories=false",
+        "-c", 'history.persistence="none"',
+        "-c", 'web_search="disabled"',
+        "-c", "features.image_generation=false",
+        "-c", "features.apps=false",
+        "-c", "features.browser_use=false",
+        "-c", "features.computer_use=false",
+        "-c", "features.multi_agent=false",
+    ) if isolated else ()
     return (
         *head,
         "--model",
         config.codex_model,
         "-c",
         f'model_reasoning_effort="{effort or config.codex_reasoning_effort}"',
+        *isolated_flags,
         "--ignore-rules",
         "--skip-git-repo-check",
         "--json",
@@ -246,10 +260,11 @@ async def _exec(
     resume: str,
     schema: Path | None = None,
     plain: bool = False,
+    isolated: bool = False,
 ) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         "codex",
-        *_arguments(config, images, effort, resume, schema, plain),
+        *_arguments(config, images, effort, resume, schema, plain, isolated),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -280,6 +295,7 @@ async def run_codex(
     help: str = "",
     files: str = "",
     on_delta=None,
+    isolated: bool = False,
 ) -> CodexResult:
     """Run one turn. `raw` sends `user_prompt` verbatim (used to feed recalled notes back).
     `on_delta` is accepted for interface parity and ignored: `codex exec --json` emits the agent
@@ -291,13 +307,17 @@ async def run_codex(
             user_prompt, memory, output_style(config), personal_style, links, help, files
         )
     )
-    plain = bool(personal_style)
-    code, output, stderr = await _exec(prompt, config, images, effort, resume, schema, plain)
+    plain = isolated or bool(personal_style)
+    code, output, stderr = await _exec(
+        prompt, config, images, effort, resume, schema, plain, isolated
+    )
     if code != 0 and resume:
         # The stored thread may have been rotated away or be unreadable; answer fresh instead.
         LOGGER.warning("Resume of thread %s failed (%s); starting a new thread", resume, code)
         resume = ""
-        code, output, stderr = await _exec(prompt, config, images, effort, resume, schema, plain)
+        code, output, stderr = await _exec(
+            prompt, config, images, effort, resume, schema, plain, isolated
+        )
     if code != 0:
         summary = " | ".join(stderr.splitlines()[-3:])
         raise RuntimeError(f"Codex exited with code {code}: {summary}")
