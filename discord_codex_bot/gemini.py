@@ -17,9 +17,12 @@ API = "https://generativelanguage.googleapis.com/v1beta"
 # the description it returns is injected into the prompt so every backend model can answer about
 # the clip. A YouTube URL is understood without downloading; other sources are sent inline.
 _INSTRUCTION = (
-    "你是影片理解工具。用繁體中文描述這段影片，作為另一個助理回答問題的背景資料：畫面發生什麼、"
-    "有哪些人物與動作、畫面上出現的文字、以及聽得到的對白或旁白重點。只客觀描述、不要評論或回答問題。"
+    "你是影片理解工具。用繁體中文整理這段影片，作為另一個助理回答問題的背景資料。"
+    "輸出格式：先一句總結，再依時間順序分段（每段標大約的時間點），每段寫畫面發生什麼、人物與動作、"
+    "畫面上的文字、對白或旁白重點；最後列出關鍵名詞（人名、作品名、卡名、產品名等原文）。"
+    "只輸出整理結果本身：不要寫思考過程、不要自問自答、不要評論、不要回答問題。"
 )
+RETRY_STATUSES = (429, 500, 503)  # transient on the free tier; one retry after a short pause
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,30 +40,45 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
+async def _post(config: Config, model: str, body: dict) -> tuple[int, dict]:
+    url = f"{API}/models/{model}:generateContent?key={config.gemini_api_key}"
+    timeout = aiohttp.ClientTimeout(total=config.gemini_timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=body) as response:
+            return response.status, await response.json(content_type=None)
+
+
 async def _generate(config: Config, parts: list[dict]) -> str | None:
-    """One generateContent call; the model's text, or None on any error/refusal so the caller
-    can fall back. Gemini is a fixed Google host, so no SSRF guard is needed here."""
+    """One generateContent call across the model chain (GEMINI_MODEL, then GEMINI_FALLBACK_MODEL),
+    retrying a transient status once; the text, or None on any error/refusal so the caller can
+    fall back further. Gemini is a fixed Google host, so no SSRF guard is needed here."""
     body = {
         "contents": [{"parts": parts}],
-        "generationConfig": {"maxOutputTokens": 700, "temperature": 0.2},
+        "generationConfig": {"maxOutputTokens": 2000, "temperature": 0.2},
     }
-    url = f"{API}/models/{config.gemini_model}:generateContent?key={config.gemini_api_key}"
-    timeout = aiohttp.ClientTimeout(total=config.gemini_timeout_seconds)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=body) as response:
-                payload = await response.json(content_type=None)
-                if response.status != 200:
-                    message = (payload.get("error") or {}).get("message", "")
-                    LOGGER.warning("Gemini HTTP %s: %s", response.status, message[:160])
-                    return None
-    except (aiohttp.ClientError, TimeoutError, ValueError) as error:
-        LOGGER.warning("Gemini request failed: %s", type(error).__name__)
+    models = [m for m in (config.gemini_model, config.gemini_fallback_model) if m]
+    payload: dict = {}
+    for model in dict.fromkeys(models):
+        for attempt in (1, 2):
+            try:
+                status, payload = await _post(config, model, body)
+            except (aiohttp.ClientError, TimeoutError, ValueError) as error:
+                LOGGER.warning("Gemini %s request failed: %s", model, type(error).__name__)
+                status, payload = 0, {}
+            if status == 200:
+                break
+            message = (payload.get("error") or {}).get("message", "") if payload else ""
+            LOGGER.warning("Gemini %s HTTP %s: %s", model, status, message[:160])
+            if status not in RETRY_STATUSES or attempt == 2:
+                break
+            await asyncio.sleep(2)
+        if payload.get("candidates"):
+            break
+    else:
+        return None
+    if not payload.get("candidates"):
         return None
     candidates = payload.get("candidates") or []
-    if not candidates:
-        LOGGER.warning("Gemini returned no candidate (%s)", payload.get("promptFeedback"))
-        return None
     reason = candidates[0].get("finishReason")
     if reason and reason not in ("STOP", "MAX_TOKENS"):
         LOGGER.warning("Gemini stopped early: %s", reason)  # SAFETY / RECITATION → fall back

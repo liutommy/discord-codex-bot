@@ -131,6 +131,7 @@ class Config:
     sandbox_url: str
     sandbox_timeout_seconds: int
     apis_path: Path | None
+    apis_max_chars: int
     openrouter_dir: Path
     openrouter_catalog_ttl_seconds: int
     openrouter_history_chars: int
@@ -146,6 +147,7 @@ class Config:
     link_preview_wait_seconds: float
     gemini_api_key: str
     gemini_model: str
+    gemini_fallback_model: str
     gemini_timeout_seconds: int
     gemini_video_inline_max_bytes: int
     gemini_video_max_chars: int
@@ -242,6 +244,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         sandbox_timeout_seconds=_bounded_int(values, "SANDBOX_TIMEOUT_SECONDS", 30, 1, 120),
         # Registered data APIs the model may call with <api/> (config/apis.json baked in).
         apis_path=Path(values.get("APIS_FILE", "/opt/discord-codex/apis.json")),
+        apis_max_chars=_positive_int(values, "APIS_MAX_CHARS", 60_000),  # schedules are long
         openrouter_dir=Path(
             values.get("OPENROUTER_DIR", "").strip()
             or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "openrouter")
@@ -270,12 +273,16 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         link_preview_wait_seconds=_positive_int(values, "LINK_PREVIEW_WAIT_SECONDS", 2),
         # Gemini free tier as a video-understanding tool (no billing): empty key = disabled.
         gemini_api_key=values.get("GEMINI_API_KEY", "").strip(),
-        gemini_model=values.get("GEMINI_MODEL", "").strip() or "gemini-flash-latest",
+        # Lite first: it writes clean descriptions (the thinking model leaks its reasoning into
+        # the text); the fuller model is the fallback when lite errors or refuses.
+        gemini_model=values.get("GEMINI_MODEL", "").strip() or "gemini-3.1-flash-lite",
+        gemini_fallback_model=values.get("GEMINI_FALLBACK_MODEL", "").strip()
+        or "gemini-flash-latest",
         gemini_timeout_seconds=_positive_int(values, "GEMINI_TIMEOUT_SECONDS", 180),
         gemini_video_inline_max_bytes=_positive_int(
             values, "GEMINI_VIDEO_INLINE_MAX_BYTES", 12_000_000
         ),
-        gemini_video_max_chars=_positive_int(values, "GEMINI_VIDEO_MAX_CHARS", 1500),
+        gemini_video_max_chars=_positive_int(values, "GEMINI_VIDEO_MAX_CHARS", 4000),
         # A video whose understanding runs past this gets a "still working" interim reply.
         video_interim_after_seconds=_positive_int(values, "VIDEO_INTERIM_AFTER_SECONDS", 8),
         # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.

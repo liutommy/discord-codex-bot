@@ -41,6 +41,9 @@ class Response:
     async def read(self, n):
         return self.body[:n]
 
+    async def iter_chunked(self, n):
+        yield self.body
+
     async def __aenter__(self):
         return self
 
@@ -73,9 +76,9 @@ async def test_call_api_builds_the_url_sends_headers_and_compacts_json(monkeypat
         return session
 
     monkeypatch.setattr(apis.aiohttp, "ClientSession", make_session)
-    body = await call_api("lol", "/getLeagues?hl=zh-TW", registry, config)
+    body = await call_api("lol", "/getLeagues?hl=zh-TW&amp;leagueId=1", registry, config)
     assert body == '{"data":{"a":[1,2]}}' and seen["headers"] == {"x-api-key": "k"}
-    assert session.calls == ["https://api.example/gw/getLeagues?hl=zh-TW"]
+    assert session.calls == ["https://api.example/gw/getLeagues?hl=zh-TW&leagueId=1"]  # unescaped
     assert "只能是相對" in await call_api("lol", "https://evil/x", registry, config)
     assert "只能是相對" in await call_api("lol", "../x", registry, config)
     assert "沒有叫 nope" in await call_api("nope", "x", registry, config)

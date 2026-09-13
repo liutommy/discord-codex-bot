@@ -7,6 +7,7 @@ strings, never hosts."""
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from pathlib import Path
 import aiohttp
 
 from .config import Config
+from .links import _read_bounded
 
 LOGGER = logging.getLogger(__name__)
 API_TAG = re.compile(
@@ -83,6 +85,7 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     api = registry.get(name)
     if api is None:
         return f"（沒有叫 {name} 的 API；可用：{'、'.join(registry) or '無'}）"
+    path = html.unescape(path)  # models tend to write &amp; inside tag attributes
     if "://" in path or path.startswith("//") or ".." in path:
         return "（path 只能是相對於該 API 的端點與查詢字串）"
     url = api.base + path.lstrip("/")
@@ -90,7 +93,7 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     try:
         async with aiohttp.ClientSession(timeout=timeout, headers=api.headers) as session:
             async with session.get(url) as response:
-                raw = await response.content.read(config.link_max_bytes)
+                raw = await _read_bounded(response, config.link_max_bytes)
                 status = response.status
                 content_type = response.content_type
     except (aiohttp.ClientError, TimeoutError) as error:
@@ -103,7 +106,7 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
             body = json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
         except ValueError:
             pass
-    return _bounded(body.strip() or "（空回應）", config.link_max_chars)
+    return _bounded(body.strip() or "（空回應）", config.apis_max_chars)
 
 
 def render_result(name: str, path: str, body: str) -> str:

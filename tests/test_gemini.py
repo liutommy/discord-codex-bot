@@ -230,3 +230,28 @@ async def test_understand_video_falls_through_to_yt_dlp_for_curated_hosts(
     assert blocked is None
     # a non-curated, non-youtube, non-x url is not a video target at all
     assert await links.understand_video("https://example.com/v", config, tmp_path) is None
+
+
+async def test_generate_retries_transient_errors_then_falls_back_to_the_next_model(
+    monkeypatch, config
+) -> None:
+    calls = []
+    responses = iter([(503, {"error": {"message": "busy"}}), (503, {"error": {"message": "busy"}}),
+                      (200, _candidate("備援答"))])
+
+    async def fake_post(cfg, model, body):
+        calls.append(model)
+        return next(responses)
+
+    async def no_sleep(seconds):
+        pass
+
+    monkeypatch.setattr(gemini, "_post", fake_post)
+    monkeypatch.setattr(gemini.asyncio, "sleep", no_sleep)
+    cfg = replace(config, gemini_model="lite", gemini_fallback_model="full")
+    assert await gemini.describe_youtube_url("https://youtu.be/x", cfg) == "備援答"
+    assert calls == ["lite", "lite", "full"]  # one retry on 503, then the fallback model
+    responses = iter([(400, {"error": {"message": "bad"}}), (400, {"error": {"message": "bad"}})])
+    calls.clear()
+    assert await gemini.describe_youtube_url("https://youtu.be/x", cfg) is None
+    assert calls == ["lite", "full"]  # a non-transient error is not retried, only handed on
