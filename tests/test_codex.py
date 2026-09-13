@@ -251,3 +251,12 @@ def test_prompt_carries_attached_files_as_untrusted_content() -> None:
     assert "<FILES>\n<FILE name=\"a.txt\">\nhello\n</FILE>\n</FILES>" in out
     assert "FILES, when present, holds the text of documents" in out
     assert "<FILES>" not in _prompt("q")
+
+
+def test_prompt_tells_the_model_the_current_taipei_time() -> None:
+    import re
+
+    from discord_codex_bot.codex import _prompt
+
+    pattern = r"Current time: \d{4}-\d{2}-\d{2} \d{2}:\d{2} \(\w+\) Asia/Taipei\."
+    assert re.search(pattern, _prompt("q"))

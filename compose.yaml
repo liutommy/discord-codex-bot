@@ -15,6 +15,7 @@ services:
       CODEX_HOME: /var/lib/codex
       CODEX_WORKSPACE: /workspace
       PYTHONUNBUFFERED: "1"
+      TZ: ${TZ:-Asia/Taipei}  # logs, backup names and note dates in the members' local time
     volumes:
       - type: volume
         source: codex-home
