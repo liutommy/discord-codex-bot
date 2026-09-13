@@ -1,0 +1,25 @@
+# SearXNG for the Bot's web-search tool. Reached only from the bot container over the compose
+# network (no host port). JSON output must be enabled explicitly; the rate limiter is off because
+# the only client is the Bot, which already serialises requests.
+use_default_settings: true
+
+general:
+  instance_name: "discord-codex-bot search"
+  debug: false
+
+server:
+  secret_key: "change-me-this-instance-is-not-reachable-from-outside"
+  limiter: false
+  image_proxy: false
+  public_instance: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "zh-TW"
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true

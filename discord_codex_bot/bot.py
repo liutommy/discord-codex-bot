@@ -13,7 +13,7 @@ from pathlib import Path
 import discord
 from discord import app_commands
 
-from . import gemini
+from . import gemini, search
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
@@ -133,7 +133,7 @@ def request_only(answer: str) -> bool:
     """True when the reply is nothing but read/fetch tags — the protocol for asking the Bot to
     read something. A tag embedded in prose (quoted from a fetched page, say) is just text."""
     rest = answer
-    for tag in (SEARCH_TAG, RECALL_TAG, FETCH_TAG):
+    for tag in (SEARCH_TAG, RECALL_TAG, FETCH_TAG, search.WEB_TAG):
         rest = tag.sub("", rest)
     return bool(answer.strip()) and not rest.strip()
 
@@ -486,7 +486,8 @@ class DiscordCodexClient(discord.Client):
                     break  # an answer that merely quotes a tag (e.g. from a page) is an answer
                 wanted = extract_read_requests(result.text)
                 urls = extract_fetch_tags(result.text)[: self.config.link_max_urls]
-                if not wanted and not urls:
+                queries = search.extract_web_queries(result.text)[:2]
+                if not wanted and not urls and not queries:
                     break
                 blocks = [
                     f'<RESULT kind="{kind}" scope="{scope}" target="{target}">\n'
@@ -494,6 +495,9 @@ class DiscordCodexClient(discord.Client):
                     + "\n</RESULT>"
                     for kind, scope, target, offset, lines in wanted
                 ]
+                for query in queries:
+                    provider, hits = await search.search_web(query, self.config)
+                    blocks.append(search.render_results(query, provider, hits))
                 extra: list[Path] = []
                 for i, (url, render) in enumerate(urls):
                     fetched, shots = await fetch_or_render(
@@ -923,7 +927,8 @@ class DiscordCodexClient(discord.Client):
             f"Codex：{codex}",
             "Antigravity：可選（Gemini／Claude）",
             " · ".join(routers) if routers else "OpenRouter／OrcaRouter：未設定",
-            f"影片理解：{'開' if gemini.available(self.config) else '關'} · 讀連結：開",
+            f"影片理解：{'開' if gemini.available(self.config) else '關'} · 讀連結：開"
+            f" · 搜尋：{'／'.join(n for n, _ in search.providers(self.config)) or '關'}",
         ]
         return "\n".join((
             "【你的設定】", model_line, style_line, thread_line, memory_line,

@@ -37,6 +37,34 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    depends_on:
+      - searxng
+
+  # Self-hosted web search for the Bot's <web> tool. No host port: only the bot container can
+  # reach it (http://searxng:8080 on the compose network), so it publishes nothing.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_searxng
+    restart: always
+    environment:
+      BASE_URL: http://searxng:8080/
+      SEARXNG_SETTINGS_PATH: /etc/searxng/settings.yml
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
 volumes:
   codex-home:

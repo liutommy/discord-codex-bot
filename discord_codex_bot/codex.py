@@ -119,6 +119,9 @@ def _prompt(
             " — the Bot fetches public http(s) pages only, bounded in size. When the member asks"
             " about pictures, layout or anything visual on a page, add render=\"1\" and the Bot"
             " attaches a full-page screenshot for you to look at.",
+            'To search the web, reply with ONLY <web query="…"/> (one or two queries); the Bot'
+            " returns titles, URLs and snippets, and you then <fetch> the pages worth reading."
+            " Search when the question needs current or verifiable facts you do not have.",
             "Notes are files; you only see their index lines. To look inside, reply with ONLY"
             " one or more of these tags and nothing else, and the results will be sent to you:"
             ' <search scope="permanent|user|guild" query="word|word"/> returns lines containing'

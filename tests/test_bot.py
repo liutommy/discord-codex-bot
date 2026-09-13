@@ -777,3 +777,29 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
                response=Response(), followup=Followup())
     await client.handle_answer_button(empty, "redo", USER)
     assert sent[-1][1].startswith("找不到原本的問題")
+
+
+async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monkeypatch) -> None:
+    from discord_codex_bot import search as search_module
+    from discord_codex_bot.bot import request_only
+
+    assert request_only('<web query="台北 夜市"/>') and not request_only("先說<web query=\"x\"/>")
+    replies = iter([
+        CodexResult('<web query="台北 夜市"/>', (), None, "t1", False),
+        CodexResult("答案", (), None, "t1", True),
+    ])
+    calls = []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    async def fake_search(query, config):
+        return "SearXNG", [search_module.Hit("士林夜市", "https://s.example", "有名")]
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(search_module, "search_web", fake_search)
+    result = await client._answer("推薦夜市", [], GUILD, USER)
+    assert result.text == "答案"
+    assert '<RESULT kind="web" query="台北 夜市" via="SearXNG">' in calls[1]
+    assert "1. 士林夜市 — https://s.example" in calls[1]

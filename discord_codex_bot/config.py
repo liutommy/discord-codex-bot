@@ -120,6 +120,10 @@ class Config:
     alert_after_failures: int
     alert_cooldown_minutes: int
     alert_login_check_minutes: int
+    search_url: str
+    search_api: str
+    search_api_key: str
+    search_max_results: int
     openrouter_dir: Path
     openrouter_catalog_ttl_seconds: int
     openrouter_history_chars: int
@@ -214,6 +218,12 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         alert_after_failures=_positive_int(values, "ALERT_AFTER_FAILURES", 3),
         alert_cooldown_minutes=_positive_int(values, "ALERT_COOLDOWN_MINUTES", 30),
         alert_login_check_minutes=_positive_int(values, "ALERT_LOGIN_CHECK_MINUTES", 60),
+        # Web search tool: a keyed API first (SEARCH_API=brave + key) when configured, then the
+        # self-hosted SearXNG on the compose network. Empty SEARCH_URL disables the fallback.
+        search_url=values.get("SEARCH_URL", "http://searxng:8080").strip(),
+        search_api=values.get("SEARCH_API", "").strip().lower(),
+        search_api_key=values.get("SEARCH_API_KEY", "").strip(),
+        search_max_results=_bounded_int(values, "SEARCH_MAX_RESULTS", 5, 1, 10),
         openrouter_dir=Path(
             values.get("OPENROUTER_DIR", "").strip()
             or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "openrouter")
