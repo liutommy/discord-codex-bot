@@ -982,3 +982,48 @@ def test_configure_logging_writes_to_the_host_dir_and_survives_an_unusable_one(
         root.handlers.clear()
         root.handlers.extend(saved_handlers)
         root.setLevel(saved_level)
+
+
+async def test_redo_puts_back_the_message_the_question_pointed_at(
+    client, backends, monkeypatch
+) -> None:
+    """A member who asks by replying to someone else's link has that link folded into the
+    prompt. The redo must fold it back in, or it re-asks the question with its subject gone."""
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(type(client), "user", property(lambda self: NS(id=999)))
+
+    class Response:
+        async def defer(self, thinking=False):
+            pass
+
+        async def send_message(self, text, ephemeral=False):
+            pass
+
+    class Followup:
+        async def send(self, text, files=None, view=None):
+            return NS(id=9999)
+
+    video = "https://www.youtube.com/watch?v=r28Uo9uWGSo"
+    pointed = NS(content=video, embeds=[], attachments=[],
+                 author=NS(display_name="030", id=5), reference=None, channel=None)
+
+    async def fetch_pointed(message_id):
+        return pointed
+
+    asked = NS(content="<@999> 整理一下影片大綱", embeds=[], attachments=[],
+               reference=NS(message_id=2, resolved=None),
+               channel=NS(fetch_message=fetch_pointed))
+
+    async def fetch_asked(message_id):
+        return asked
+
+    answer = NS(content="**問**：\n> 整理一下影片大綱\n\n看不到影片內容", id=4242,
+                reference=NS(message_id=1, resolved=None),
+                channel=NS(fetch_message=fetch_asked))
+    interaction = NS(message=answer, guild_id=GUILD, channel_id=555,
+                     response=Response(), followup=Followup())
+    await client.handle_answer_button(interaction, "redo", USER)
+    prompt = backends[0].calls[-1][0]
+    assert video in prompt  # the link lived in the quoted message, not in the member's own words
+    assert "整理一下影片大綱" in prompt and "030" in prompt

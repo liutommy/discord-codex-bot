@@ -779,6 +779,7 @@ class DiscordCodexClient(discord.Client):
         """🔁 / 👍 on an answer (owner already checked by the button)."""
         question, answer = await self._exchange_of(interaction.message)
         if action == "remember":
+            LOGGER.info("Button remember guild=%s user=%s", interaction.guild_id, user_id)
             name = (question or answer).strip().splitlines()[0][:30] or "對話"
             text = f"問：{question.strip()[:200]}\n答：{answer.strip()[:600]}"
             line = self.memory.add("user", interaction.guild_id, user_id, name, text)
@@ -800,9 +801,27 @@ class DiscordCodexClient(discord.Client):
         resume = self.threads.by_message(
             getattr(interaction.message, "id", None), plain=plain, model=model
         ) or self.threads.current(key, plain=plain, model=model)
+        # The member's own words are not always the whole question: asking by replying to someone
+        # else's message folds what they pointed at into the prompt (on_message does this), and a
+        # video link usually lives *there*, not in their text. Rebuild it the same way, or the
+        # redo re-asks "整理一下影片大綱" with no video to look at.
+        prompt, previews = question, {}
+        asked = await self._referenced(interaction.message)
+        pointed = await self._referenced(asked) if asked is not None else None
+        if pointed is not None and pointed.author != self.user:
+            # The quoted images are not re-downloaded here, so they are not announced as attached.
+            prompt = with_quoted_message(
+                question, pointed.author.display_name, pointed.content, 0
+            )
+        if asked is not None:
+            previews = await self._previews(asked, pointed)
+        LOGGER.info(
+            "Button redo guild=%s user=%s resume=%s quoted=%s",
+            interaction.guild_id, user_id, bool(resume), pointed is not None,
+        )
         result = await self._answer(
-            question, [], interaction.guild_id, user_id, resume=resume,
-            channel_id=interaction.channel_id,
+            prompt, [], interaction.guild_id, user_id, resume=resume,
+            channel_id=interaction.channel_id, previews=previews,
         )
         sent = await self.send_answer(
             interaction.followup, question, result, interaction.guild_id, user_id
