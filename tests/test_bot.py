@@ -729,8 +729,13 @@ async def test_exchange_of_uses_the_replied_message_or_the_quoted_block(
 
     monkeypatch.setattr(type(client), "user", property(lambda self: NS(id=999)))
     original = NS(content="<@999> 拉麵推薦？", channel=None)
+
+    async def fetch_message(message_id):
+        return original
+
     replied = NS(
-        content="去吃一蘭", reference=NS(message_id=1, resolved=original),
+        content="去吃一蘭", reference=NS(message_id=1, resolved=None),
+        channel=NS(fetch_message=fetch_message),
     )
     # a resolved reference is a discord.Message in production; the fallback path is exercised
     # by isinstance failing here, so also cover the quoted-block shape
