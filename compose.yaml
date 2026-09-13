@@ -43,6 +43,10 @@ services:
       start_period: 10s
     depends_on:
       - searxng
+      - sandbox
+    networks:
+      - default
+      - sandbox_net
 
   # Self-hosted web search for the Bot's <web> tool. No host port: only the bot container can
   # reach it (http://searxng:8080 on the compose network), so it publishes nothing.
@@ -69,6 +73,34 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
+
+  # The model's scratch computer: runs <run> snippets under hard limits. Unprivileged user,
+  # read-only rootfs, no capabilities, and only on the internal network — it cannot reach the
+  # internet or the host, and nothing but the bot can reach it.
+  sandbox:
+    build: ./sandbox
+    image: discord-codex-bot-sandbox:local
+    container_name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_sandbox
+    restart: always
+    init: true
+    read_only: true
+    tmpfs:
+      - /work:rw,nosuid,size=256m,uid=1000,gid=1000
+      - /tmp:rw,nosuid,size=64m,uid=1000,gid=1000
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 1.0
+    networks:
+      - sandbox_net
+
+networks:
+  default:
+  sandbox_net:
+    internal: true
 
 volumes:
   codex-home:

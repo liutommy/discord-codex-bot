@@ -11,10 +11,11 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime as _dt
 from pathlib import Path
 
+import aiohttp
 import discord
 from discord import app_commands
 
-from . import gemini, search
+from . import gemini, sandbox, search
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
@@ -142,7 +143,7 @@ def request_only(answer: str) -> bool:
     """True when the reply is nothing but read/fetch tags — the protocol for asking the Bot to
     read something. A tag embedded in prose (quoted from a fetched page, say) is just text."""
     rest = answer
-    for tag in (SEARCH_TAG, RECALL_TAG, FETCH_TAG, search.WEB_TAG):
+    for tag in (SEARCH_TAG, RECALL_TAG, FETCH_TAG, search.WEB_TAG, sandbox.RUN_TAG):
         rest = tag.sub("", rest)
     return bool(answer.strip()) and not rest.strip()
 
@@ -477,6 +478,8 @@ class DiscordCodexClient(discord.Client):
         images: list[Path] = []
         self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
         link_dir = Path(tempfile.mkdtemp(prefix="req-", dir=self.config.attachment_dir))
+        deliver_dir = Path(tempfile.mkdtemp(prefix="req-", dir=self.config.attachment_dir))
+        delivered: list[Path] = []  # sandbox-made files handed to the member with the answer
         try:
             documents: list[str] = []
             for attachment in attachments:
@@ -530,7 +533,8 @@ class DiscordCodexClient(discord.Client):
                 wanted = extract_read_requests(result.text)
                 urls = extract_fetch_tags(result.text)[: self.config.link_max_urls]
                 queries = search.extract_web_queries(result.text)[:2]
-                if not wanted and not urls and not queries:
+                runs = sandbox.extract_runs(result.text) if sandbox.available(self.config) else []
+                if not wanted and not urls and not queries and not runs:
                     break
                 blocks = [
                     f'<RESULT kind="{kind}" scope="{scope}" target="{target}">\n'
@@ -542,6 +546,20 @@ class DiscordCodexClient(discord.Client):
                     provider, hits = await search.search_web(query, self.config)
                     blocks.append(search.render_results(query, provider, hits))
                 extra: list[Path] = []
+                for i, (lang, code) in enumerate(runs):
+                    try:
+                        ran = await sandbox.run_code(
+                            lang, code, self.config, link_dir / f"run{i}"
+                        )
+                    except (aiohttp.ClientError, TimeoutError, ValueError) as error:
+                        ran = sandbox.RunResult(
+                            -1, False, "", f"沙盒無法使用：{type(error).__name__}"
+                        )
+                    blocks.append(sandbox.render_result(lang, ran))
+                    for produced in ran.files:
+                        delivered.append(self._keep_for_member(produced, deliver_dir))
+                        if produced.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                            extra.append(produced)
                 for i, (url, render) in enumerate(urls):
                     fetched, shots = await fetch_or_render(
                         url, self.config, link_dir / f"fetch{i}", render
@@ -563,10 +581,20 @@ class DiscordCodexClient(discord.Client):
                 self.memory.add(scope, guild_id, user_id, name, fact)
             text = self._apply_reminder_tags(text, guild_id, channel_id, user_id)
             await self.alerts.record_success(target.backend)
+            generated_dir = result.generated_dir
+            outgoing = tuple(result.images)  # not `images`: that list is cleaned up in finally
+            if delivered:
+                if generated_dir is None:
+                    generated_dir = deliver_dir  # the caller removes it after sending
+                else:
+                    delivered = [
+                        self._keep_for_member(path, generated_dir) for path in delivered
+                    ]
+                outgoing += tuple(delivered)
             return CodexResult(
                 truncate(text, self.config.max_response_chars),
-                result.images,
-                result.generated_dir,
+                outgoing,
+                generated_dir,
                 result.thread_id,
                 result.resumed,
             )
@@ -580,6 +608,8 @@ class DiscordCodexClient(discord.Client):
             for path in images:
                 remove_request_dir(path)
             remove_dir(link_dir)
+            if not delivered:
+                remove_dir(deliver_dir)
 
     def _read(
         self,
@@ -840,6 +870,15 @@ class DiscordCodexClient(discord.Client):
         finally:
             remove_dir(result.generated_dir)
 
+    @staticmethod
+    def _keep_for_member(path: Path, into: Path) -> Path:
+        """Copy a sandbox-made file out of the per-request scratch dir so it survives cleanup
+        until the answer (and the file) has been sent."""
+        into.mkdir(parents=True, exist_ok=True)
+        target = into / path.name
+        target.write_bytes(path.read_bytes())
+        return target
+
     def _apply_reminder_tags(
         self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
     ) -> str:
@@ -1049,7 +1088,8 @@ class DiscordCodexClient(discord.Client):
             "Antigravity：可選（Gemini／Claude）",
             " · ".join(routers) if routers else "OpenRouter／OrcaRouter：未設定",
             f"影片理解：{'開' if gemini.available(self.config) else '關'} · 讀連結：開"
-            f" · 搜尋：{'／'.join(n for n, _ in search.providers(self.config)) or '關'}",
+            f" · 搜尋：{'／'.join(n for n, _ in search.providers(self.config)) or '關'}"
+            f" · 沙盒：{'開' if sandbox.available(self.config) else '關'}",
         ]
         return "\n".join((
             "【你的設定】", model_line, style_line, thread_line, memory_line,

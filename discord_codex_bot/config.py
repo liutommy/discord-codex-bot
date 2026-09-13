@@ -128,6 +128,8 @@ class Config:
     backup_dir: Path | None
     backup_hour: int
     backup_keep_days: int
+    sandbox_url: str
+    sandbox_timeout_seconds: int
     openrouter_dir: Path
     openrouter_catalog_ttl_seconds: int
     openrouter_history_chars: int
@@ -234,6 +236,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         backup_dir=Path(values["BACKUP_DIR"]) if values.get("BACKUP_DIR", "").strip() else None,
         backup_hour=_bounded_int(values, "BACKUP_HOUR", 3, 0, 23),
         backup_keep_days=_positive_int(values, "BACKUP_KEEP_DAYS", 14),
+        # Sandbox sidecar for <run> snippets; empty SANDBOX_URL = the tool is not offered.
+        sandbox_url=values.get("SANDBOX_URL", "http://sandbox:8070").strip(),
+        sandbox_timeout_seconds=_bounded_int(values, "SANDBOX_TIMEOUT_SECONDS", 30, 1, 120),
         openrouter_dir=Path(
             values.get("OPENROUTER_DIR", "").strip()
             or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "openrouter")

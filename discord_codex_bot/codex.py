@@ -126,6 +126,11 @@ def _prompt(
             'To search the web, reply with ONLY <web query="…"/> (one or two queries); the Bot'
             " returns titles, URLs and snippets, and you then <fetch> the pages worth reading."
             " Search when the question needs current or verifiable facts you do not have.",
+            'To compute, transform data or produce a file, reply with ONLY <run lang="python">'
+            "code</run> (or lang=\"sh\"): it runs in an isolated sandbox with no network, a 30 s"
+            " limit and python3/ffmpeg/jq/pillow/pypdf/numpy available; print what you need to"
+            " see, save files under ./out/ and they come back to you and to the member. Use it for"
+            " arithmetic you cannot do reliably, data crunching, conversions and frame extraction.",
             "Notes are files; you only see their index lines. To look inside, reply with ONLY"
             " one or more of these tags and nothing else, and the results will be sent to you:"
             ' <search scope="permanent|user|guild" query="word|word"/> returns lines containing'

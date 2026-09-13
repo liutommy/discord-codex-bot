@@ -868,3 +868,37 @@ async def test_answer_creates_and_cancels_reminders_from_model_tags(
     assert result.text.endswith("⛔ 已取消提醒 #1") and client.reminders.for_user(USER) == []
     result = await client._answer("等一下提醒我", [], GUILD, USER, channel_id=555)
     assert "看不懂，提醒沒有設" in result.text
+
+
+async def test_recall_loop_runs_sandbox_snippets_and_delivers_files(
+    client, backends, monkeypatch, tmp_path
+) -> None:
+    from discord_codex_bot import sandbox as sandbox_module
+    from discord_codex_bot.bot import request_only
+
+    assert request_only('<run lang="python">print(1)</run>')
+    client.config = replace(client.config, attachment_dir=tmp_path)
+    replies = iter([
+        CodexResult('<run lang="python">\nprint(6*7)\n</run>', (), None, "t1", False),
+        CodexResult("答案是 42", (), None, "t1", True),
+    ])
+    prompts = []
+
+    async def fake_codex(text, config, **kw):
+        prompts.append((text, kw.get("images")))
+        return next(replies)
+
+    async def fake_run(lang, code, config, out_dir):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        chart = out_dir / "chart.png"
+        chart.write_bytes(b"png")
+        return sandbox_module.RunResult(0, False, "42\n", "", [chart], [])
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(sandbox_module, "run_code", fake_run)
+    result = await client._answer("算 6*7 並畫圖", [], GUILD, USER)
+    assert result.text == "答案是 42"
+    assert '<RESULT kind="run" lang="python" status="exit 0">\n42' in prompts[1][0]
+    assert [p.name for p in prompts[1][1]] == ["chart.png"]  # the model sees the picture
+    assert [p.name for p in result.images] == ["chart.png"] and result.generated_dir is not None
+    assert result.images[0].exists()  # survives _answer's cleanup for the caller to send
