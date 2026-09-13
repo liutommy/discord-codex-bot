@@ -52,7 +52,37 @@ def project_id(config: Config, workspace: Path) -> str:
     return ""
 
 
-async def _run(args: list[str], stdin: str, cwd: Path, config: Config) -> tuple[int, str, str]:
+async def _read_stream(process, on_delta) -> tuple[bytes, bytes]:
+    """Read stdout line by line, reporting the accumulated agent text as each `step_update`
+    text_delta lands; stderr is drained alongside so neither pipe can fill up and stall agy."""
+    out: list[bytes] = []
+    accumulated = ""
+
+    async def stdout_lines() -> None:
+        nonlocal accumulated
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                return
+            out.append(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            update = event.get("step_update") if event.get("event") == "step_update" else None
+            if update and update.get("step_type") == "agent_response" and update.get("text_delta"):
+                accumulated += str(update["text_delta"])
+                await on_delta(accumulated)
+
+    stderr_task = asyncio.ensure_future(process.stderr.read())
+    await stdout_lines()
+    await process.wait()
+    return b"".join(out), await stderr_task
+
+
+async def _run(
+    args: list[str], stdin: str, cwd: Path, config: Config, on_delta=None
+) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         "agy",
         *args,
@@ -64,9 +94,17 @@ async def _run(args: list[str], stdin: str, cwd: Path, config: Config) -> tuple[
         start_new_session=True,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(stdin.encode("utf-8")), timeout=config.codex_timeout_seconds
-        )
+        if on_delta is None:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(stdin.encode("utf-8")), timeout=config.codex_timeout_seconds
+            )
+        else:
+            process.stdin.write(stdin.encode("utf-8"))
+            await process.stdin.drain()
+            process.stdin.close()
+            stdout, stderr = await asyncio.wait_for(
+                _read_stream(process, on_delta), timeout=config.codex_timeout_seconds
+            )
     except TimeoutError:
         await _kill_process_group(process)
         raise RuntimeError("agy request timed out") from None
@@ -137,8 +175,10 @@ async def run_agy(
     links: str = "",
     help: str = "",
     files: str = "",
+    on_delta=None,
 ) -> CodexResult:
-    """One turn on Antigravity CLI with the same contract as run_codex.
+    """One turn on Antigravity CLI with the same contract as run_codex. `on_delta(text)` is
+    called with the accumulated answer as agy streams it.
 
     Images are made visible by adding their directory to the workspace (--add-dir) and telling the
     model to open them with view_file; agy has no attach-image flag in print mode.
@@ -169,13 +209,13 @@ async def run_agy(
             "不要搜尋或執行指令。）"
         )
     stdin = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
-    code, out, err = await _run(args, stdin, workspace, config)
+    code, out, err = await _run(args, stdin, workspace, config, on_delta)
     if code != 0 and resume:
         LOGGER.warning("agy resume of %s failed (%s); starting a new conversation", resume, code)
         index = args.index("--conversation")
         args = args[:index] + args[index + 2 :]
         resume = ""
-        code, out, err = await _run(args, stdin, workspace, config)
+        code, out, err = await _run(args, stdin, workspace, config, on_delta)
     conversation, response, error = parse_stream(out)
     if code != 0 or error:
         summary = error or " | ".join(err.strip().splitlines()[-3:])

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -37,7 +38,7 @@ class FakeRun:
         self.replies = list(replies)
         self.calls: list[dict] = []
 
-    async def __call__(self, args, stdin, cwd, config):
+    async def __call__(self, args, stdin, cwd, config, on_delta=None):
         self.calls.append(dict(args=list(args), stdin=stdin, cwd=cwd))
         return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
 
@@ -218,3 +219,40 @@ def test_environment_is_minimal_and_pins_home(agy_config: Config, monkeypatch) -
     env = agy._environment(agy_config)
     assert "DISCORD_TOKEN" not in env and env["HOME"] == str(agy_config.agy_home)
     assert env["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+
+
+async def test_run_streams_agent_text_deltas_while_agy_runs(monkeypatch, config) -> None:
+    """A stand-in `agy` prints step_update lines with pauses; on_delta must see the text grow
+    before the process ends, and the full stdout must still parse."""
+    from discord_codex_bot import agy as agy_module
+
+    def update(delta, state):
+        return json.dumps({"event": "step_update", "step_update": {
+            "step_type": "agent_response", "state": state, "text_delta": delta}})
+
+    events = [
+        json.dumps({"event": "init", "conversation_id": "c1"}),
+        update("Hel", "ACTIVE"),
+        "SLEEP",
+        update("lo", "DONE"),
+        json.dumps({"event": "result", "result": {
+            "conversation_id": "c1", "response": "Hello", "status": "SUCCESS"}}),
+    ]
+    script = ";".join(
+        "sleep 0.05" if e == "SLEEP" else "printf '%s\\n' '" + e.replace("'", "'\\''") + "'"
+        for e in events
+    )
+    real_exec = asyncio.create_subprocess_exec
+
+    async def fake_exec(program, *args, **kwargs):
+        return await real_exec("sh", "-c", script, **kwargs)
+
+    monkeypatch.setattr(agy_module.asyncio, "create_subprocess_exec", fake_exec)
+    seen = []
+
+    async def on_delta(text):
+        seen.append(text)
+
+    code, out, err = await agy_module._run(["x"], "{}", Path("/tmp"), config, on_delta)
+    assert code == 0 and seen == ["Hel", "Hello"]
+    assert agy_module.parse_stream(out) == ("c1", "Hello", "")

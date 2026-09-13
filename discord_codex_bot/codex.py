@@ -257,8 +257,11 @@ async def run_codex(
     links: str = "",
     help: str = "",
     files: str = "",
+    on_delta=None,
 ) -> CodexResult:
-    """Run one turn. `raw` sends `user_prompt` verbatim (used to feed recalled notes back)."""
+    """Run one turn. `raw` sends `user_prompt` verbatim (used to feed recalled notes back).
+    `on_delta` is accepted for interface parity and ignored: `codex exec --json` emits the agent
+    message only once it is complete (verified 2026-09-13), so Codex answers arrive in one go."""
     prompt = (
         user_prompt
         if raw

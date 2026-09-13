@@ -247,6 +247,7 @@ async def run_router(
     catalog: Catalog | None = None,
     help: str = "",
     files: str = "",
+    on_delta=None,
 ) -> CodexResult:
     """One turn on an OpenAI-compatible router with the same contract as run_codex. The
     conversation lives in a Bot-kept transcript (thread id `<prefix>…`); `resume` replays it,
@@ -284,11 +285,16 @@ async def run_router(
             "json_schema": {"name": "answer", "strict": True, "schema": json.loads(raw_schema)},
         }
     label = router.label
+    if on_delta is not None:
+        body["stream"] = True
     try:
         async with _session(config, config.codex_timeout_seconds, router) as session:
             async with session.post(f"{router.api}/chat/completions", json=body) as response:
                 status = response.status
-                payload = await response.json(content_type=None)
+                if on_delta is not None and status == 200:
+                    payload = await _read_sse(response, on_delta)
+                else:
+                    payload = await response.json(content_type=None)
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
         raise RuntimeError(f"{label} 連線失敗：{type(error).__name__}{UNSTABLE}") from error
     error = payload.get("error") if isinstance(payload, dict) else None
@@ -308,6 +314,32 @@ async def run_router(
                    {"role": "assistant", "content": text.strip()}],
     )
     return CodexResult(text.strip(), (), None, thread_id, resumed)
+
+
+async def _read_sse(response, on_delta) -> dict:
+    """Consume an OpenAI-style SSE stream, reporting the accumulated answer text after each
+    content delta (reasoning deltas are not shown), and return a completion-shaped payload."""
+    accumulated = ""
+    async for raw in response.content:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(chunk, dict) and chunk.get("error"):
+            return chunk  # surfaced by the caller like a non-streaming error payload
+        choices = chunk.get("choices") or []
+        delta = (choices[0].get("delta") or {}) if choices else {}
+        piece = delta.get("content")
+        if piece:
+            accumulated += str(piece)
+            await on_delta(accumulated)
+    return {"choices": [{"message": {"content": accumulated}}]}
 
 
 async def run_openrouter(user_prompt: str, config: Config, model: str, **kw) -> CodexResult:

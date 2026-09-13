@@ -282,3 +282,45 @@ def test_backends_accept_orcarouter_ids_too() -> None:
     target = resolve(choice, "low")
     assert (target.backend, target.model, target.effort) == (ORCAROUTER, "tencent/hy3-free", "low")
     assert router_choice(ORCAROUTER, "x/y-free", "Y").label == "OrcaRouter · Y"
+
+
+async def test_run_router_streams_content_deltas_and_ignores_reasoning(
+    monkeypatch, cfg: Config
+) -> None:
+    lines = [
+        b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n',
+        b'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n',
+        b'\n',
+        b'data: {"choices":[{"delta":{"content":"\u4f60"}}]}\n',
+        b'data: {"choices":[{"delta":{"content":"\u597d"}}]}\n',
+        b'data: [DONE]\n',
+        b'data: {"choices":[{"delta":{"content":"IGNORED"}}]}\n',
+    ]
+
+    class Body:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            for line in lines:
+                yield line
+
+    class Streaming(Response):
+        content = Body()
+
+    session = Session([Streaming({})])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    seen = []
+
+    async def on_delta(text):
+        seen.append(text)
+
+    result = await run_router(ORCA, "q", cfg, "tencent/hy3-free", on_delta=on_delta)
+    assert seen == ["你", "你好"] and result.text == "你好"
+    assert session.calls[0][2]["stream"] is True
+    # an error chunk inside the stream surfaces like a normal error
+    lines[:] = [b'data: {"error":{"message":"quota"}}\n']
+    session = Session([Streaming({})])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    with pytest.raises(RuntimeError, match="上游錯誤：quota"):
+        await run_router(ORCA, "q", cfg, "tencent/hy3-free", on_delta=on_delta)

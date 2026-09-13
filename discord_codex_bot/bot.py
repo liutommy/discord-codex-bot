@@ -83,6 +83,8 @@ SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label i
 EFFORT_CHOICES = [app_commands.Choice(name=v, value=k) for k, v in REASONING_EFFORTS.items()]
 VIDEO_INTERIM = "🎬 影片較長，前輩正在看，稍等…"
 THINKING = "🤔 思考中…"
+STREAM_EDIT_SECONDS = 1.5  # Discord edits per placeholder while an answer streams in
+STREAM_SHOW_CHARS = 1900
 CANCELLED = "⛔ 已取消。"
 PROVIDER_CHOICES = [
     app_commands.Choice(name="Codex", value="codex"),
@@ -406,8 +408,10 @@ class DiscordCodexClient(discord.Client):
         resume: str = "",
         previews: dict[str, Preview] | None = None,
         on_video_slow: Callable[[], Awaitable[None]] | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> CodexResult:
-        """Run one validated request through the member's backend; always returns text."""
+        """Run one validated request through the member's backend; always returns text.
+        `on_delta` receives the accumulated answer while a backend streams it (agy, routers)."""
         stored = self.memory.get_model(guild_id, user_id)
         choice = parse_choice(stored, self.config.codex_model)
         target = resolve(
@@ -415,6 +419,7 @@ class DiscordCodexClient(discord.Client):
         )
 
         async def turn(text: str, **kw) -> CodexResult:
+            kw.setdefault("on_delta", on_delta)
             if target.backend == AGY:
                 kw.pop("effort", None)
                 return await run_agy(text, self.config, target.model, **kw)
@@ -619,7 +624,7 @@ class DiscordCodexClient(discord.Client):
         async def on_video_slow() -> None:
             await show(VIDEO_INTERIM, view)
 
-        task = asyncio.create_task(start(on_video_slow))
+        task = asyncio.create_task(start(on_video_slow, self._streamer(show, view)))
         view.task = task
         self.active[key] = task
         try:
@@ -630,6 +635,24 @@ class DiscordCodexClient(discord.Client):
         finally:
             if self.active.get(key) is task:
                 self.active.pop(key, None)
+
+    @staticmethod
+    def _streamer(show, view):
+        """on_delta callback: paint the accumulated answer into the placeholder at most every
+        STREAM_EDIT_SECONDS, never a tag-only interim (a <fetch>/<search> request is not an
+        answer), and only the tail that fits a Discord message."""
+        state = {"at": float("-inf")}
+
+        async def on_delta(text: str) -> None:
+            if text.lstrip().startswith("<"):
+                return
+            now = time.monotonic()
+            if now - state["at"] < STREAM_EDIT_SECONDS:
+                return
+            state["at"] = now
+            await show(text[-STREAM_SHOW_CHARS:] + " ▌", view)
+
+        return on_delta
 
     def _answer_view(self, guild_id: int | None, user_id: int, prompt: str, result) -> AnswerView:
         return AnswerView(self, guild_id, user_id, prompt, result.text)
@@ -694,8 +717,9 @@ class DiscordCodexClient(discord.Client):
         # A fresh, unremembered turn: the summary must not become the member's conversation.
         result = await self._run_tracked(
             key, interaction.user.id, show,
-            lambda on_video_slow: self._answer(
+            lambda on_video_slow, on_delta: self._answer(
                 prompt, [], interaction.guild_id, interaction.user.id, resume="",
+                on_delta=on_delta,
             ),
         )
         if result is None:
@@ -1086,9 +1110,9 @@ class DiscordCodexClient(discord.Client):
 
         result = await self._run_tracked(
             key, interaction.user.id, show,
-            lambda on_video_slow: self._answer(
+            lambda on_video_slow, on_delta: self._answer(
                 prompt, attachments, interaction.guild_id, interaction.user.id, effort_value,
-                resume, on_video_slow=on_video_slow,
+                resume, on_video_slow=on_video_slow, on_delta=on_delta,
             ),
         )
         if result is None:
@@ -1187,9 +1211,9 @@ class DiscordCodexClient(discord.Client):
         async with message.channel.typing():
             result = await self._run_tracked(
                 key, message.author.id, show,
-                lambda on_video_slow: self._answer(
+                lambda on_video_slow, on_delta: self._answer(
                     prompt, attachments, guild_id, message.author.id, resume=resume,
-                    previews=previews, on_video_slow=on_video_slow,
+                    previews=previews, on_video_slow=on_video_slow, on_delta=on_delta,
                 ),
             )
         if result is None:

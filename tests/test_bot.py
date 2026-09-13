@@ -585,7 +585,7 @@ async def test_run_tracked_reports_cancellation_and_clears_the_active_slot(clien
     async def show(text, view):
         shown.append((text, type(view).__name__ if view else None))
 
-    async def start(on_video_slow):
+    async def start(on_video_slow, on_delta):
         await asyncio.sleep(5)
         return CodexResult("late", (), None, "t", False)
 
@@ -598,7 +598,7 @@ async def test_run_tracked_reports_cancellation_and_clears_the_active_slot(clien
     assert shown == [("🤔 思考中…", "CancelView"), ("⛔ 已取消。", None)]
     assert "k" not in client.active
 
-    async def quick(on_video_slow):
+    async def quick(on_video_slow, on_delta):
         return CodexResult("ok", (), None, "t", False)
 
     result = await client._run_tracked("k", USER, show, quick)
@@ -691,3 +691,32 @@ async def test_fire_reminder_mentions_only_the_member(client) -> None:
     client.get_channel = lambda cid: Channel() if cid == 555 else None
     await client._fire_reminder({"channel_id": 555, "user_id": USER, "text": "收衣服"})
     assert sent == [(f"⏰ <@{USER}> 提醒：收衣服", True, False)]
+
+
+async def test_streamer_throttles_skips_tag_interims_and_clips(client, monkeypatch) -> None:
+    import time as time_module
+
+    shown = []
+
+    async def show(text, view):
+        shown.append(text)
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(time_module, "monotonic", lambda: clock["t"])
+    on_delta = client._streamer(show, None)
+    await on_delta("<fetch url=\"https://x\"/>")  # a read request, not an answer
+    await on_delta("你好")
+    await on_delta("你好，我是")  # within 1.5s: suppressed
+    clock["t"] += 2
+    await on_delta("A" * 3000)
+    assert shown == ["你好 ▌", "A" * 1900 + " ▌"]
+
+
+async def test_answer_passes_on_delta_to_the_backend(client, backends) -> None:
+    codex, _ = backends
+
+    async def on_delta(text):
+        pass
+
+    await client._answer("q", [], GUILD, USER, on_delta=on_delta)
+    assert codex.calls[-1][2]["on_delta"] is on_delta
