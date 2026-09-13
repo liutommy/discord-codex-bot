@@ -15,6 +15,7 @@ from discord import app_commands
 from . import gemini
 from .access import check_access
 from .agy import run_agy
+from .alerts import Alerter, login_watch
 from .announce import announce_once
 from .attachments import (
     download_image,
@@ -186,6 +187,7 @@ class DiscordCodexClient(discord.Client):
         self.memory = MemoryStore(config.codex_home / "memory", limits)
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
+        self.alerts = Alerter(self, config)
         self.openrouter = Catalog(config)
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
@@ -286,6 +288,12 @@ class DiscordCodexClient(discord.Client):
     async def on_ready(self) -> None:
         LOGGER.info("Discord bot ready as %s", self.user)
         LOGGER.info("%s", await codex_login_status(self.config))
+        LOGGER.info("Alerts go to user %s", await self.alerts.resolve_owner() or "(none)")
+        if not getattr(self, "_login_watch", None):
+            self._login_watch = asyncio.create_task(login_watch(
+                self.alerts, self.config, codex_login_status,
+                self.config.alert_login_check_minutes * 60,
+            ))
         try:
             await announce_once(self, self.config)
         except Exception:
@@ -463,6 +471,7 @@ class DiscordCodexClient(discord.Client):
             text, facts = extract_memory_tags(result.text)
             for scope, name, fact in facts:
                 self.memory.add(scope, guild_id, user_id, name, fact)
+            await self.alerts.record_success(target.backend)
             return CodexResult(
                 truncate(text, self.config.max_response_chars),
                 result.images,
@@ -472,8 +481,9 @@ class DiscordCodexClient(discord.Client):
             )
         except QueueFullError:
             return CodexResult(QUEUE_FULL_MESSAGE)
-        except Exception:
+        except Exception as error:
             LOGGER.exception("Codex request failed guild=%s", guild_id)
+            await self.alerts.record_failure(target.backend, str(error))
             return CodexResult(FAILURE_MESSAGE.format(prefix=self.config.command_prefix))
         finally:
             for path in images:

@@ -116,6 +116,10 @@ class Config:
     agy_settings_path: Path
     openrouter_api_key: str
     orcarouter_api_key: str
+    alert_user_id: int
+    alert_after_failures: int
+    alert_cooldown_minutes: int
+    alert_login_check_minutes: int
     openrouter_dir: Path
     openrouter_catalog_ttl_seconds: int
     openrouter_history_chars: int
@@ -205,6 +209,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # OrcaRouter: same shape (OpenAI-compatible, free = -free ids); shares the transcript
         # dir, catalog TTL and history budget above.
         orcarouter_api_key=values.get("ORCAROUTER_API_KEY", "").strip(),
+        # Operator alerts by DM: repeated failures / lost login. Empty id = the application owner.
+        alert_user_id=int(values.get("ALERT_USER_ID", "").strip() or 0),
+        alert_after_failures=_positive_int(values, "ALERT_AFTER_FAILURES", 3),
+        alert_cooldown_minutes=_positive_int(values, "ALERT_COOLDOWN_MINUTES", 30),
+        alert_login_check_minutes=_positive_int(values, "ALERT_LOGIN_CHECK_MINUTES", 60),
         openrouter_dir=Path(
             values.get("OPENROUTER_DIR", "").strip()
             or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "openrouter")

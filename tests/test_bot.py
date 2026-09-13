@@ -623,3 +623,26 @@ async def test_stop_command_cancels_only_an_in_flight_request(client) -> None:
     await client.stop_command(interaction)
     await asyncio.sleep(0)
     assert sent[-1] == "已取消你在這個頻道進行中的請求。" and task.cancelled()
+
+
+async def test_answer_feeds_the_alerter(client, backends, monkeypatch) -> None:
+    events = []
+
+    async def failure(backend, error):
+        events.append(("fail", backend, error[:20]))
+
+    async def success(backend):
+        events.append(("ok", backend))
+
+    monkeypatch.setattr(client.alerts, "record_failure", failure)
+    monkeypatch.setattr(client.alerts, "record_success", success)
+    await client._answer("q", [], GUILD, USER)
+    assert events == [("ok", "codex")]
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("Codex exited with code 1: x")
+
+    monkeypatch.setattr(bot_module, "run_codex", boom)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text.startswith("Codex 執行失敗")
+    assert events[-1] == ("fail", "codex", "Codex exited with co")
