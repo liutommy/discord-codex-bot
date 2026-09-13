@@ -55,7 +55,8 @@ def test_store_add_list_cancel_due_and_persistence(tmp_path: Path) -> None:
     assert store.cancel(9, 1) is False  # not theirs
     assert store.cancel(3, 1) is True and [i["id"] for i in store.for_user(3)] == [2]
     reloaded = ReminderStore(path)
-    assert [i["id"] for i in reloaded.for_user(3)] == [2] and reloaded.add(1, 2, 3, soon, "n")["id"] == 3
+    assert [i["id"] for i in reloaded.for_user(3)] == [2]
+    assert reloaded.add(1, 2, 3, soon, "n")["id"] == 3
     assert reloaded.pop_due(now=datetime.now(UTC)) == []
     due = reloaded.pop_due(now=soon + timedelta(hours=2))
     assert sorted(i["id"] for i in due) == [2, 3] and reloaded.for_user(3) == []
