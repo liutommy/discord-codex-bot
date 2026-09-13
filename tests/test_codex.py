@@ -226,3 +226,19 @@ def test_prompt_carries_the_help_sheet_and_the_no_invention_rule() -> None:
     assert "never invent commands, options or abilities" in with_help
     assert with_help.index("</HELP>") < with_help.index("<USER_MESSAGE>")
     assert "<HELP>" not in _prompt("q")
+
+
+async def test_cancelling_a_request_kills_the_whole_process_group() -> None:
+    process = await asyncio.create_subprocess_exec(
+        "sh", "-c", "sleep 60 & echo $! ; wait",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, start_new_session=True,
+    )
+    grandchild_pid = int((await process.stdout.readline()).strip())
+    task = asyncio.get_running_loop().create_task(_communicate(process, "", timeout_seconds=30))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.returncode is not None
+    assert await _gone(grandchild_pid), "the grandchild outlived the cancellation"

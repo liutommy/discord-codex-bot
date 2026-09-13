@@ -7,7 +7,13 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from .codex import KILL_GRACE_SECONDS, MAX_PROCESS_OUTPUT_BYTES, CodexResult, _prompt, output_style
+from .codex import (
+    MAX_PROCESS_OUTPUT_BYTES,
+    CodexResult,
+    _kill_process_group,
+    _prompt,
+    output_style,
+)
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
@@ -62,17 +68,11 @@ async def _run(args: list[str], stdin: str, cwd: Path, config: Config) -> tuple[
             process.communicate(stdin.encode("utf-8")), timeout=config.codex_timeout_seconds
         )
     except TimeoutError:
-        for sig in (15, 9):
-            try:
-                os.killpg(process.pid, sig)
-            except ProcessLookupError:
-                break
-            try:
-                await asyncio.wait_for(process.wait(), timeout=KILL_GRACE_SECONDS)
-                break
-            except TimeoutError:
-                continue
+        await _kill_process_group(process)
         raise RuntimeError("agy request timed out") from None
+    except asyncio.CancelledError:
+        await _kill_process_group(process)  # a cancelled request must not leave agy running
+        raise
     if len(stdout) + len(stderr) > MAX_PROCESS_OUTPUT_BYTES:
         raise RuntimeError("agy output exceeded the process limit")
     return (

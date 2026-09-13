@@ -20,6 +20,7 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
         "inmu-king-status",
         "inmu-king-help",
         "inmu-king-reset",
+        "inmu-king-stop",
         "inmu-king-remember",
         "inmu-king-forget",
         "inmu-king-memory",
@@ -569,3 +570,56 @@ def test_help_guide_and_sheet_come_from_the_same_source(client) -> None:
     sheet = client.help_sheet()
     assert "/codex-help — 所有指令的說明與範例用法" in sheet
     assert "其他用法：@提及 Bot 也能問" in sheet and "**" not in sheet  # markdown stripped
+
+
+async def test_run_tracked_reports_cancellation_and_clears_the_active_slot(client) -> None:
+    import asyncio
+
+    shown = []
+
+    async def show(text, view):
+        shown.append((text, type(view).__name__ if view else None))
+
+    async def start(on_video_slow):
+        await asyncio.sleep(5)
+        return CodexResult("late", (), None, "t", False)
+
+    async def cancel_soon():
+        await asyncio.sleep(0.05)
+        client.active["k"].cancel()
+
+    asyncio.get_running_loop().create_task(cancel_soon())
+    assert await client._run_tracked("k", USER, show, start) is None
+    assert shown == [("🤔 思考中…", "CancelView"), ("⛔ 已取消。", None)]
+    assert "k" not in client.active
+
+    async def quick(on_video_slow):
+        return CodexResult("ok", (), None, "t", False)
+
+    result = await client._run_tracked("k", USER, show, quick)
+    assert result.text == "ok" and "k" not in client.active
+
+
+async def test_stop_command_cancels_only_an_in_flight_request(client) -> None:
+    import asyncio
+    from types import SimpleNamespace as NS
+
+    from discord_codex_bot.threads import ThreadStore
+
+    sent = []
+
+    class Response:
+        async def send_message(self, text, ephemeral=False):
+            sent.append(text)
+
+    channel_id = 222222222222222222  # the conftest allowlisted channel
+    interaction = NS(guild_id=GUILD, channel_id=channel_id, channel=None, user=NS(id=USER),
+                     response=Response())
+    await client.stop_command(interaction)
+    assert sent[-1] == "你在這個頻道沒有進行中的請求。"
+    key = ThreadStore.key(GUILD, channel_id, USER)
+    task = asyncio.get_running_loop().create_task(asyncio.sleep(5))
+    client.active[key] = task
+    await client.stop_command(interaction)
+    await asyncio.sleep(0)
+    assert sent[-1] == "已取消你在這個頻道進行中的請求。" and task.cancelled()

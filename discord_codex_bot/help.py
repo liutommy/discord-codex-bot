@@ -67,6 +67,11 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "忘掉你在這個頻道的對話脈絡，下一題從頭開始（記憶不會被刪）。",
         ["/{p}-reset"],
     ),
+    "-stop": (
+        "取消你在這個頻道進行中的請求（例如影片太長不想等）。"
+        "回答生成中的「🤔 思考中」訊息上也有 ❌ 按鈕。",
+        ["/{p}-stop"],
+    ),
 }
 
 # Abilities that are not commands; shown to members and told to the model alike.
@@ -79,6 +84,8 @@ FEATURES: list[str] = [
     "**模型來源**：Codex（預設）、Antigravity（Gemini／Claude）、"
     "OpenRouter 與 OrcaRouter 的免費模型；免費模型可能不穩或下架，回錯就換一個。",
     "**記憶**分個人與伺服器兩層，另有管理者維護的永久記憶；Bot 會在需要時自己查閱。",
+    "**回答上的按鈕**：生成中 ❌ 取消；答完後 🔁 用同一題重答（新開對話）、"
+    "👍 把這段問答記進個人記憶。只有發問的人能按。",
 ]
 
 

@@ -206,6 +206,9 @@ async def _communicate(
     except TimeoutError:
         await _kill_process_group(process)
         raise RuntimeError("Codex request timed out") from None
+    except asyncio.CancelledError:
+        await _kill_process_group(process)  # a cancelled request must not leave codex running
+        raise
 
 
 async def _exec(

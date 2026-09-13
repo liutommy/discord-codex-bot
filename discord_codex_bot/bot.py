@@ -63,6 +63,7 @@ from .openrouter import ROUTERS, Catalog, run_router
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
 from .threads import ThreadStore
+from .ui import AnswerView, CancelView
 
 LOGGER = logging.getLogger(__name__)
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
@@ -76,6 +77,8 @@ SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label i
 # Codex model name, which is also what load_config() falls back to.
 EFFORT_CHOICES = [app_commands.Choice(name=v, value=k) for k, v in REASONING_EFFORTS.items()]
 VIDEO_INTERIM = "🎬 影片較長，前輩正在看，稍等…"
+THINKING = "🤔 思考中…"
+CANCELLED = "⛔ 已取消。"
 PROVIDER_CHOICES = [
     app_commands.Choice(name="Codex", value="codex"),
     app_commands.Choice(name="Antigravity（Gemini／Claude）", value=AGY),
@@ -182,6 +185,7 @@ class DiscordCodexClient(discord.Client):
         )
         self.memory = MemoryStore(config.codex_home / "memory", limits)
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
+        self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.openrouter = Catalog(config)
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
@@ -246,6 +250,13 @@ class DiscordCodexClient(discord.Client):
                 name=f"{prefix}-reset",
                 description="忘掉你在此頻道的對話脈絡，下一題從頭開始",
                 callback=self.reset_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-stop",
+                description="取消你在此頻道進行中的請求（回答上也有 ❌ 按鈕）",
+                callback=self.stop_command,
             )
         )
 
@@ -551,6 +562,59 @@ class DiscordCodexClient(discord.Client):
 
     # ----- slash commands --------------------------------------------------------------------
 
+    async def _run_tracked(self, key: str, owner_id: int, show, start):
+        """Run one answer as a task the member can cancel (❌ on the placeholder, or -stop).
+        `show(text, view)` paints the placeholder; `start(on_video_slow)` returns the answer
+        coroutine. Returns the CodexResult, or None when the request was cancelled."""
+        view = CancelView(owner_id)
+        await show(THINKING, view)
+
+        async def on_video_slow() -> None:
+            await show(VIDEO_INTERIM, view)
+
+        task = asyncio.create_task(start(on_video_slow))
+        view.task = task
+        self.active[key] = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            await show(CANCELLED, None)
+            return None
+        finally:
+            if self.active.get(key) is task:
+                self.active.pop(key, None)
+
+    def _answer_view(self, guild_id: int | None, user_id: int, prompt: str, result) -> AnswerView:
+        return AnswerView(self, guild_id, user_id, prompt, result.text)
+
+    async def send_answer(self, destination, prompt: str, result, guild_id, user_id) -> None:
+        """Post an answer (with its buttons) through any `.send`-able destination — used by the
+        🔁 button, which lands the new answer as a follow-up."""
+        chunks = split_discord_message(result.text)
+        try:
+            await destination.send(
+                chunks[0], files=self._files(result),
+                view=self._answer_view(guild_id, user_id, prompt, result),
+            )
+            for chunk in chunks[1:]:
+                await destination.send(chunk)
+        finally:
+            remove_dir(result.generated_dir)
+
+    async def stop_command(self, interaction: discord.Interaction) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        key = ThreadStore.key(interaction.guild_id, interaction.channel_id, interaction.user.id)
+        task = self.active.get(key)
+        if task is not None and not task.done():
+            task.cancel()
+            text = "已取消你在這個頻道進行中的請求。"
+        else:
+            text = "你在這個頻道沒有進行中的請求。"
+        await interaction.response.send_message(text, ephemeral=True)
+
     async def help_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
         if reason:
@@ -850,16 +914,24 @@ class DiscordCodexClient(discord.Client):
         resume = "" if new else self.threads.current(key, plain=plain, model=model)
         await interaction.response.defer(thinking=True)
 
-        async def on_video_slow() -> None:
+        async def show(text: str, view) -> None:
             try:
-                await interaction.edit_original_response(content=VIDEO_INTERIM)
+                await interaction.edit_original_response(content=text, view=view)
             except discord.HTTPException:
                 pass
 
-        result = await self._answer(
-            prompt, attachments, interaction.guild_id, interaction.user.id, effort_value, resume,
-            on_video_slow=on_video_slow,
+        result = await self._run_tracked(
+            key, interaction.user.id, show,
+            lambda on_video_slow: self._answer(
+                prompt, attachments, interaction.guild_id, interaction.user.id, effort_value,
+                resume, on_video_slow=on_video_slow,
+            ),
         )
+        if result is None:
+            LOGGER.info(
+                "Cancelled slash guild=%s user=%s", interaction.guild_id, interaction.user.id
+            )
+            return
         # Discord does not echo slash command inputs, so quote the question above the answer.
         target = resolve(parse_choice(model, self.config.codex_model), effort_value)
         shown = self._effort_label(target)
@@ -874,7 +946,8 @@ class DiscordCodexClient(discord.Client):
         sent_id = None
         try:
             sent = await interaction.edit_original_response(
-                content=chunks[0], attachments=self._files(result)
+                content=chunks[0], attachments=self._files(result),
+                view=self._answer_view(interaction.guild_id, interaction.user.id, prompt, result),
             )
             sent_id = sent.id
             for chunk in chunks[1:]:
@@ -930,27 +1003,39 @@ class DiscordCodexClient(discord.Client):
         resume = self.threads.by_message(
             replied_to, plain=plain, model=model
         ) or self.threads.current(key, plain=plain, model=model)
-        interim: list[discord.Message] = []
+        placeholder: list[discord.Message] = []
 
-        async def on_video_slow() -> None:
+        async def show(text: str, view) -> None:
             try:
-                interim.append(await message.reply(VIDEO_INTERIM, mention_author=False))
+                if placeholder:
+                    await placeholder[0].edit(content=text, view=view)
+                else:
+                    placeholder.append(
+                        await message.reply(text, view=view, mention_author=False)
+                    )
             except discord.HTTPException:
                 pass
 
         async with message.channel.typing():
-            result = await self._answer(
-                prompt, attachments, guild_id, message.author.id, resume=resume,
-                previews=previews, on_video_slow=on_video_slow,
+            result = await self._run_tracked(
+                key, message.author.id, show,
+                lambda on_video_slow: self._answer(
+                    prompt, attachments, guild_id, message.author.id, resume=resume,
+                    previews=previews, on_video_slow=on_video_slow,
+                ),
             )
+        if result is None:
+            LOGGER.info("Cancelled @mention guild=%s user=%s", guild_id, message.author.id)
+            return
         chunks = split_discord_message(result.text)
         sent_id = None
         try:
             files = self._files(result)
-            if interim:
-                sent = await interim[0].edit(content=chunks[0], attachments=files)
+            view = self._answer_view(guild_id, message.author.id, prompt, result)
+            if placeholder:
+                sent = await placeholder[0].edit(content=chunks[0], attachments=files, view=view)
             else:
-                sent = await message.reply(chunks[0], files=files, mention_author=False)
+                sent = await message.reply(chunks[0], files=files, view=view, mention_author=False)
             sent_id = sent.id
             for chunk in chunks[1:]:
                 await message.channel.send(chunk)
