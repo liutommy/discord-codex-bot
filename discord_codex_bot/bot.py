@@ -64,6 +64,7 @@ from .memory import (
 from .openrouter import ROUTERS, Catalog, run_router
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
+from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
 from .threads import ThreadStore
 from .ui import AnswerView, CancelView
 
@@ -253,6 +254,13 @@ class DiscordCodexClient(discord.Client):
                 name=f"{prefix}-reset",
                 description="忘掉你在此頻道的對話脈絡，下一題從頭開始",
                 callback=self.reset_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-summary",
+                description="摘要這個頻道最近的對話（重點、結論、待辦）",
+                callback=self.summary_command,
             )
         )
         self.tree.add_command(
@@ -624,6 +632,71 @@ class DiscordCodexClient(discord.Client):
             )
             for chunk in chunks[1:]:
                 await destination.send(chunk)
+        finally:
+            remove_dir(result.generated_dir)
+
+    @app_commands.describe(
+        count=f"最近幾則（預設 {DEFAULT_MESSAGES}，最多 {MAX_MESSAGES}）",
+        hours="改成最近幾小時內的訊息（給了就不看 count）",
+        focus="選填：特別想知道什麼（例如「誰答應了什麼」）",
+    )
+    async def summary_command(
+        self,
+        interaction: discord.Interaction,
+        count: app_commands.Range[int, 5, MAX_MESSAGES] = DEFAULT_MESSAGES,
+        hours: app_commands.Range[int, 1, 168] | None = None,
+        focus: str | None = None,
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        try:
+            if hours is not None:
+                fetched = [m async for m in interaction.channel.history(
+                    limit=MAX_MESSAGES, after=since(hours), oldest_first=True
+                )]
+            else:
+                fetched = [m async for m in interaction.channel.history(limit=count)]
+                fetched.reverse()
+        except discord.HTTPException:
+            await interaction.edit_original_response(content="讀不到這個頻道的訊息紀錄。")
+            return
+        transcript = render_transcript(fetched)
+        if not transcript:
+            await interaction.edit_original_response(content="這段時間裡沒有可摘要的訊息。")
+            return
+        prompt = summary_prompt(
+            getattr(interaction.channel, "name", "此頻道"), transcript, len(fetched), focus or ""
+        )
+        key = ThreadStore.key(interaction.guild_id, interaction.channel_id, interaction.user.id)
+
+        async def show(text: str, view) -> None:
+            try:
+                await interaction.edit_original_response(content=text, view=view)
+            except discord.HTTPException:
+                pass
+
+        # A fresh, unremembered turn: the summary must not become the member's conversation.
+        result = await self._run_tracked(
+            key, interaction.user.id, show,
+            lambda on_video_slow: self._answer(
+                prompt, [], interaction.guild_id, interaction.user.id, resume="",
+            ),
+        )
+        if result is None:
+            return
+        chunks = split_discord_message(result.text)
+        try:
+            label = f"（最近 {hours} 小時）" if hours is not None else f"（最近 {len(fetched)} 則）"
+            await interaction.edit_original_response(
+                content=f"**頻道摘要{label}**\n{chunks[0]}", view=None
+            )
+            for chunk in chunks[1:]:
+                await interaction.followup.send(chunk)
+        except discord.HTTPException:
+            LOGGER.exception("Summary delivery failed guild=%s", interaction.guild_id)
         finally:
             remove_dir(result.generated_dir)
 

@@ -23,6 +23,7 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
         "inmu-king-help",
         "inmu-king-reset",
         "inmu-king-stop",
+        "inmu-king-summary",
         "inmu-king-remember",
         "inmu-king-forget",
         "inmu-king-memory",
