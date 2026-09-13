@@ -124,6 +124,7 @@ class Config:
     search_api: str
     search_api_key: str
     search_max_results: int
+    remember_emoji_name: str
     openrouter_dir: Path
     openrouter_catalog_ttl_seconds: int
     openrouter_history_chars: int
@@ -224,6 +225,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         search_api=values.get("SEARCH_API", "").strip().lower(),
         search_api_key=values.get("SEARCH_API_KEY", "").strip(),
         search_max_results=_bounded_int(values, "SEARCH_MAX_RESULTS", 5, 1, 10),
+        # The 👍 "remember" button uses this custom emoji when the guild has one of that name.
+        remember_emoji_name=values.get("REMEMBER_EMOJI_NAME", "114514").strip(),
         openrouter_dir=Path(
             values.get("OPENROUTER_DIR", "").strip()
             or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "openrouter")

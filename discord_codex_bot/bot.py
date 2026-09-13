@@ -659,8 +659,17 @@ class DiscordCodexClient(discord.Client):
 
         return on_delta
 
+    def _remember_emoji(self, guild_id: int | None):
+        """The guild's custom emoji named REMEMBER_EMOJI_NAME, or None for the default 👍."""
+        guild = self.get_guild(guild_id) if guild_id else None
+        wanted = self.config.remember_emoji_name
+        for emoji in getattr(guild, "emojis", ()) or ():
+            if emoji.name == wanted:
+                return discord.PartialEmoji(name=emoji.name, id=emoji.id, animated=emoji.animated)
+        return None
+
     def _answer_view(self, guild_id: int | None, user_id: int, prompt: str, result) -> AnswerView:
-        return AnswerView(user_id)
+        return AnswerView(user_id, self._remember_emoji(guild_id))
 
     async def _exchange_of(self, message: discord.Message) -> tuple[str, str]:
         """The question and answer behind one of the Bot's answer messages: an @mention answer

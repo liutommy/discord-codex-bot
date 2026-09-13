@@ -52,6 +52,7 @@ def config() -> Config:
         search_api="",
         search_api_key="",
         search_max_results=5,
+        remember_emoji_name="114514",
         openrouter_dir=Path("/var/lib/codex/openrouter"),
         openrouter_catalog_ttl_seconds=3600,
         openrouter_history_chars=60_000,

@@ -803,3 +803,18 @@ async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monke
     assert result.text == "答案"
     assert '<RESULT kind="web" query="台北 夜市" via="SearXNG">' in calls[1]
     assert "1. 士林夜市 — https://s.example" in calls[1]
+
+
+def test_remember_button_uses_the_guild_custom_emoji_when_present(client, monkeypatch) -> None:
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(client, "get_guild", lambda gid: NS(
+        emojis=[NS(name="other", id=1, animated=False), NS(name="114514", id=2, animated=False)]
+    ))
+    view = client._answer_view(GUILD, USER, "q", CodexResult("a"))
+    remember = [b for b in view.children if b.custom_id.startswith("inmu:remember")][0]
+    assert remember.item.emoji.id == 2 and remember.item.emoji.name == "114514"
+    monkeypatch.setattr(client, "get_guild", lambda gid: NS(emojis=[]))
+    view = client._answer_view(GUILD, USER, "q", CodexResult("a"))
+    remember = [b for b in view.children if b.custom_id.startswith("inmu:remember")][0]
+    assert str(remember.item.emoji) == "👍"

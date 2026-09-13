@@ -46,11 +46,11 @@ class AnswerButton(
     member's personal memory. The Bot does the work (`handle_answer_button`); this item only
     identifies the action and the owner, from the custom_id, and gates on the owner."""
 
-    def __init__(self, action: str, user_id: int) -> None:
-        label, emoji = _ACTIONS[action]
+    def __init__(self, action: str, user_id: int, emoji=None) -> None:
+        label, default_emoji = _ACTIONS[action]
         super().__init__(
             discord.ui.Button(
-                label=label, emoji=emoji, style=discord.ButtonStyle.secondary,
+                label=label, emoji=emoji or default_emoji, style=discord.ButtonStyle.secondary,
                 custom_id=f"inmu:{action}:{user_id}",
             )
         )
@@ -77,10 +77,10 @@ class AnswerView(discord.ui.View):
     """The two persistent answer buttons for one member (timeout=None: persistent views must
     never expire)."""
 
-    def __init__(self, user_id: int) -> None:
+    def __init__(self, user_id: int, remember_emoji=None) -> None:
         super().__init__(timeout=None)
         self.add_item(AnswerButton("redo", user_id))
-        self.add_item(AnswerButton("remember", user_id))
+        self.add_item(AnswerButton("remember", user_id, remember_emoji))
 
 
 def recover_exchange(content: str) -> tuple[str, str]:
