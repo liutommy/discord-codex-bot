@@ -18,6 +18,7 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
     assert {command.name for command in client.tree.get_commands()} == {
         "inmu-king",
         "inmu-king-status",
+        "inmu-king-help",
         "inmu-king-reset",
         "inmu-king-remember",
         "inmu-king-forget",
@@ -529,7 +530,7 @@ def test_help_sheet_is_generated_from_the_registered_commands(client) -> None:
     assert sheet.startswith("這個 Bot 的斜線指令（前綴 /codex）：")
     assert "/codex-status — " in sheet and "/codex-model — " in sheet
     assert "/codex-model — " in sheet and "（參數：" in sheet.split("/codex-model — ")[1]
-    assert "/codex-memory — " in sheet and "OrcaRouter" in sheet
+    assert "/codex-memory — " in sheet and "OrcaRouter" in sheet and "/codex-help — " in sheet
 
 
 async def test_answer_hands_the_help_sheet_to_the_backend(client, backends) -> None:
@@ -547,3 +548,24 @@ def test_memory_text_lists_one_scope_or_both(client) -> None:
     assert "[個人記憶索引]" in both and "[伺服器記憶索引]" in both and "開團" in both
     only_guild = client._memory_text(GUILD, USER, "guild")
     assert only_guild.startswith("[伺服器記憶索引]") and "拉麵" not in only_guild
+
+
+def test_every_registered_command_has_a_guide_entry_and_vice_versa(client) -> None:
+    """The maintenance guard: a new command without help text (or stale help for a removed
+    command) fails here, so the guide cannot drift from the code."""
+    from discord_codex_bot.help import COMMAND_GUIDE
+
+    prefix = client.config.command_prefix
+    registered = {c.name.removeprefix(prefix) for c in client.tree.get_commands()}
+    assert registered == set(COMMAND_GUIDE), (registered ^ set(COMMAND_GUIDE))
+
+
+def test_help_guide_and_sheet_come_from_the_same_source(client) -> None:
+    guide = client.help_guide()
+    assert guide.startswith("**/codex 指令說明**")
+    assert "**/codex-model**" in guide and "`/codex-model clear:True`" in guide
+    assert "`/codex-remember scope:個人 name:拉麵" in guide
+    assert "**不用指令也能做的事**" in guide and "@提及" in guide
+    sheet = client.help_sheet()
+    assert "/codex-help — 所有指令的說明與範例用法" in sheet
+    assert "其他用法：@提及 Bot 也能問" in sheet and "**" not in sheet  # markdown stripped

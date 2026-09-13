@@ -38,6 +38,7 @@ from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
+from .help import render_guide, render_sheet
 from .links import (
     FETCH_TAG,
     Preview,
@@ -228,8 +229,15 @@ class DiscordCodexClient(discord.Client):
         )
         self.tree.add_command(
             app_commands.Command(
+                name=f"{prefix}-help",
+                description="所有指令的說明與範例用法",
+                callback=self.help_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
                 name=f"{prefix}-status",
-                description="檢查 Bot 的 Codex 模型與訂閱登入狀態",
+                description="看你的模型／風格／續接／記憶設定與系統狀態",
                 callback=self.status_command,
             )
         )
@@ -296,24 +304,22 @@ class DiscordCodexClient(discord.Client):
                 return suffix
         return ""
 
+    def _command_rows(self) -> list[tuple[str, str, list[str]]]:
+        return [
+            (c.name, c.description, [p.name for p in c.parameters])
+            for c in sorted(self.tree.get_commands(), key=lambda c: c.name)
+        ]
+
     def help_sheet(self) -> str:
         """What this Bot can do, generated from the registered commands so it never drifts from
         the code; injected as HELP so the model can explain itself truthfully."""
-        prefix = self.config.command_prefix
-        lines = [f"這個 Bot 的斜線指令（前綴 /{prefix}）："]
-        for command in sorted(self.tree.get_commands(), key=lambda c: c.name):
-            params = "、".join(p.name for p in command.parameters)
-            suffix = f"（參數：{params}）" if params else ""
-            lines.append(f"/{command.name} — {command.description}{suffix}")
-        lines.append(
-            "其他用法：@提及 Bot 直接問；回覆某則訊息可接續那段對話、或讓 Bot 看那則訊息的圖；"
-            "貼連結會自動讀（含 X 貼文、Discord 預覽）；"
-            "貼影片連結會看影片（YouTube／X／TikTok 等）；"
-            "模型來源：Codex（預設）、Antigravity（Gemini／Claude）、"
-            "OpenRouter 與 OrcaRouter 的免費模型；"
-            "記憶分個人與伺服器兩層，另有管理者維護的永久記憶。"
+        return render_sheet(self.config.command_prefix, self._command_rows())
+
+    def help_guide(self) -> str:
+        """The detailed member guide behind /<prefix>-help (same source as the model's sheet)."""
+        return render_guide(
+            self.config.command_prefix, [row[0] for row in self._command_rows()]
         )
-        return "\n".join(lines)
 
     async def _understand_videos(
         self,
@@ -544,6 +550,16 @@ class DiscordCodexClient(discord.Client):
         return [discord.File(path) for path in result.images[:10]]
 
     # ----- slash commands --------------------------------------------------------------------
+
+    async def help_command(self, interaction: discord.Interaction) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        chunks = split_discord_message(self.help_guide())
+        await interaction.response.send_message(chunks[0], ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk, ephemeral=True)
 
     async def status_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
