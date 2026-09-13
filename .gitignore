@@ -12,3 +12,4 @@ persona/*
 !persona/README.md
 announce/*
 !announce/README.md
+backups/

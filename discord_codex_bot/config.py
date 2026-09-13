@@ -125,6 +125,9 @@ class Config:
     search_api_key: str
     search_max_results: int
     remember_emoji_name: str
+    backup_dir: Path | None
+    backup_hour: int
+    backup_keep_days: int
     openrouter_dir: Path
     openrouter_catalog_ttl_seconds: int
     openrouter_history_chars: int
@@ -227,6 +230,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         search_max_results=_bounded_int(values, "SEARCH_MAX_RESULTS", 5, 1, 10),
         # The 👍 "remember" button uses this custom emoji when the guild has one of that name.
         remember_emoji_name=values.get("REMEMBER_EMOJI_NAME", "114514").strip(),
+        # Daily backup of the Bot's own state into a bind-mounted host dir; empty = off.
+        backup_dir=Path(values["BACKUP_DIR"]) if values.get("BACKUP_DIR", "").strip() else None,
+        backup_hour=_bounded_int(values, "BACKUP_HOUR", 3, 0, 23),
+        backup_keep_days=_positive_int(values, "BACKUP_KEEP_DAYS", 14),
         openrouter_dir=Path(
             values.get("OPENROUTER_DIR", "").strip()
             or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "openrouter")

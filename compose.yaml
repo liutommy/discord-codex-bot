@@ -22,6 +22,9 @@ services:
       - type: volume
         source: agy-home
         target: /home/node/.gemini
+      - type: bind
+        source: ./backups
+        target: /backups
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m

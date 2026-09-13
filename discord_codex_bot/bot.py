@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import logging
 import re
 import tempfile
@@ -37,6 +38,7 @@ from .backends import (
     router_choice,
     split_stored,
 )
+from .backup import backup_forever, export_memory_zip
 from .codex import CodexResult, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
@@ -277,6 +279,13 @@ class DiscordCodexClient(discord.Client):
         )
         self.tree.add_command(
             app_commands.Command(
+                name=f"{prefix}-export",
+                description="把你在這個伺服器的個人記憶打包成 zip 給你（只有你看得到）",
+                callback=self.export_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
                 name=f"{prefix}-stop",
                 description="取消你在此頻道進行中的請求（回答上也有 ❌ 按鈕）",
                 callback=self.stop_command,
@@ -286,6 +295,7 @@ class DiscordCodexClient(discord.Client):
     async def setup_hook(self) -> None:
         self.add_dynamic_items(AnswerButton)  # answer buttons keep working across restarts
         self._sweeper = self.loop.create_task(sweep_forever(self.config))
+        self._backup_loop = self.loop.create_task(backup_forever(self.config))
         self._reminder_loop = self.loop.create_task(
             reminder_loop(self.reminders, self._fire_reminder, 30)
         )
@@ -841,6 +851,32 @@ class DiscordCodexClient(discord.Client):
                 f" — {i['text']}" for i in mine
             )
         await interaction.response.send_message(message, ephemeral=True)
+
+    async def export_command(self, interaction: discord.Interaction) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        root = self.memory.scope_dir("user", interaction.guild_id, interaction.user.id)
+        label = f"memory-{interaction.guild_id}-{interaction.user.id}"
+        data = await asyncio.to_thread(export_memory_zip, root, label)
+        if data is None:
+            await interaction.response.send_message(
+                "你在這個伺服器還沒有個人記憶。", ephemeral=True
+            )
+            return
+        if len(data) > 8_000_000:
+            await interaction.response.send_message(
+                f"你的記憶壓縮後有 {len(data) // 1_000_000} MB，超過 Discord 附件上限，"
+                "請找管理者拿。",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            "這是你的個人記憶（索引、archive、每則內容）：",
+            file=discord.File(io.BytesIO(data), filename=f"{label}.zip"),
+            ephemeral=True,
+        )
 
     async def stop_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
