@@ -12,11 +12,13 @@ from collections.abc import Iterable
 # suffix -> (what it does, worked examples). "{p}" is the command prefix.
 COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
     "": (
-        "問問題。可附一張圖、選推理強度、或用 new 忽略之前的對話從頭開始。"
+        "問問題。可附一張圖或一份檔案（PDF／文字／程式碼，Bot 會讀內容）、選推理強度、"
+        "或用 new 忽略之前的對話從頭開始。"
         "回覆會引用你的問題；同一頻道的下一題預設會接續上一段對話。",
         [
             "/{p} prompt:幫我解釋量子糾纏，三句話",
             "/{p} prompt:這張圖裡是什麼遊戲 image:（附上圖片）",
+            "/{p} prompt:幫我看這份合約有沒有坑 image:（附上 PDF）",
             "/{p} prompt:再來一題 effort:High",
             "/{p} prompt:換個話題 new:True",
         ],
@@ -76,7 +78,8 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
 
 # Abilities that are not commands; shown to members and told to the model alike.
 FEATURES: list[str] = [
-    "**@提及** Bot 也能問，不必打指令；訊息裡的圖片會一起看。",
+    "**@提及** Bot 也能問，不必打指令；訊息裡的圖片會一起看，"
+    "附的檔案（PDF／文字／程式碼）會讀內容。",
     "**回覆某則訊息**再 @Bot：接續那段對話，或讓 Bot 看那則訊息的文字與圖。",
     "**貼連結**會自動讀網頁（含 X／fixvx 貼文的全文與圖片；網站擋 Bot 時退回 Discord 預覽）。",
     "**貼影片連結**會看影片再回答：YouTube 直接看（長片也行），X、TikTok、Instagram、Bilibili、"

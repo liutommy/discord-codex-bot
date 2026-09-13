@@ -242,3 +242,12 @@ async def test_cancelling_a_request_kills_the_whole_process_group() -> None:
         await task
     assert process.returncode is not None
     assert await _gone(grandchild_pid), "the grandchild outlived the cancellation"
+
+
+def test_prompt_carries_attached_files_as_untrusted_content() -> None:
+    from discord_codex_bot.codex import _prompt
+
+    out = _prompt("q", files='<FILE name="a.txt">\nhello\n</FILE>')
+    assert "<FILES>\n<FILE name=\"a.txt\">\nhello\n</FILE>\n</FILES>" in out
+    assert "FILES, when present, holds the text of documents" in out
+    assert "<FILES>" not in _prompt("q")

@@ -7,6 +7,7 @@ dependencies = [
     "aiohttp>=3.9,<4",
     "youtube-transcript-api>=1.0,<2",
     "yt-dlp>=2025.1,<2026",
+    "pypdf>=5,<7",
     "discord.py>=2.6,<3",
     "playwright>=1.47,<2",
 ]

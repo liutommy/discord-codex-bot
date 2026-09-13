@@ -18,11 +18,12 @@ from .agy import run_agy
 from .alerts import Alerter, login_watch
 from .announce import announce_once
 from .attachments import (
-    download_image,
+    download_attachment,
+    extract_text,
     remove_dir,
     remove_request_dir,
     sweep_forever,
-    validate_image,
+    validate_attachment,
 )
 from .backends import (
     AGY,
@@ -316,11 +317,13 @@ class DiscordCodexClient(discord.Client):
         if not prompt or len(prompt) > self.config.max_prompt_chars:
             return f"prompt 必須介於 1 到 {self.config.max_prompt_chars} 個字元。"
         if len(attachments) > self.config.max_attachments:
-            return f"一次最多 {self.config.max_attachments} 張圖片。"
+            return f"一次最多 {self.config.max_attachments} 個附件。"
         for attachment in attachments:
-            suffix = validate_image(attachment.content_type, attachment.size, self.config)
-            if not suffix.startswith("."):
-                return suffix
+            kind, detail = validate_attachment(
+                attachment.content_type, attachment.filename, attachment.size, self.config
+            )
+            if not kind:
+                return detail
         return ""
 
     def _command_rows(self) -> list[tuple[str, str, list[str]]]:
@@ -407,9 +410,21 @@ class DiscordCodexClient(discord.Client):
         self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
         link_dir = Path(tempfile.mkdtemp(prefix="req-", dir=self.config.attachment_dir))
         try:
+            documents: list[str] = []
             for attachment in attachments:
-                suffix = validate_image(attachment.content_type, attachment.size, self.config)
-                images.append(await download_image(attachment, suffix, self.config))
+                kind, suffix = validate_attachment(
+                    attachment.content_type, attachment.filename, attachment.size, self.config
+                )
+                if kind == "image":
+                    images.append(await download_attachment(attachment, suffix, self.config))
+                elif kind == "document":
+                    saved = await download_attachment(attachment, suffix, self.config, "doc")
+                    text = await asyncio.to_thread(
+                        extract_text, saved, self.config.link_max_chars
+                    )
+                    documents.append(f'<FILE name="{attachment.filename}">\n{text}\n</FILE>')
+                    remove_request_dir(saved)
+            files = "\n\n".join(documents)
             permanent = self.permanent.index_text()
             memory = "\n\n".join(
                 section
@@ -434,6 +449,7 @@ class DiscordCodexClient(discord.Client):
                     personal_style=style,
                     links=links,
                     help=self.help_sheet(),
+                    files=files,
                 )
             )
             # On-demand reads (search snippets / paged recall): the Bot executes the request and
@@ -891,7 +907,7 @@ class DiscordCodexClient(discord.Client):
     @app_commands.describe(
         prompt="要交給 Codex 的問題",
         effort="選填：推理強度（預設 Medium）",
-        image="選填：一張要讓 Codex 看的圖片",
+        image="選填：一張圖片，或一份檔案（PDF／文字／程式碼）讓 Bot 讀",
         new="選填：忽略之前的對話，從頭開始",
     )
     @app_commands.choices(
@@ -993,8 +1009,12 @@ class DiscordCodexClient(discord.Client):
         # at it: its text and images are folded into this request.
         quoted = await self._referenced(message)
         if quoted is not None and quoted.author != self.user:
-            images = [a for a in quoted.attachments if (a.content_type or "").startswith("image/")]
-            attachments.extend(images)
+            usable = [
+                a for a in quoted.attachments
+                if validate_attachment(a.content_type, a.filename, a.size, self.config)[0]
+            ]
+            attachments.extend(usable)
+            images = [a for a in usable if (a.content_type or "").startswith("image/")]
             prompt = with_quoted_message(
                 prompt, quoted.author.display_name, quoted.content, len(images)
             )

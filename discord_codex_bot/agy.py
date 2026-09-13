@@ -136,6 +136,7 @@ async def run_agy(
     plain: bool = False,
     links: str = "",
     help: str = "",
+    files: str = "",
 ) -> CodexResult:
     """One turn on Antigravity CLI with the same contract as run_codex.
 
@@ -149,7 +150,9 @@ async def run_agy(
     prompt = (
         user_prompt
         if raw
-        else _prompt(user_prompt, memory, output_style(config), personal_style, links, help)
+        else _prompt(
+            user_prompt, memory, output_style(config), personal_style, links, help, files
+        )
     )
     args = ["--project", project, "--model", model, "--output-format", "stream-json"]
     args += ["--input-format", "stream-json", "--print-timeout", f"{config.codex_timeout_seconds}s"]

@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from discord_codex_bot.config import Config
 class FakeAttachment:
     content_type: str | None
     size: int
+    filename: str = "blob.bin"
 
 
 def test_registers_only_expected_slash_commands(config: Config) -> None:
@@ -41,7 +43,8 @@ def test_validate_rejects_too_many_or_non_image_attachments(config: Config) -> N
     images = [FakeAttachment("image/png", 10)] * config.max_attachments
     assert client._validate("q", images) == ""
     assert "最多" in client._validate("q", images + [FakeAttachment("image/png", 10)])
-    assert client._validate("q", [FakeAttachment("text/plain", 10)])
+    assert client._validate("q", [FakeAttachment("application/octet-stream", 10)])
+    assert client._validate("q", [FakeAttachment("text/plain", 10, "notes.txt")]) == ""  # document
     assert client._validate("", []) != ""
 
 
@@ -646,3 +649,30 @@ async def test_answer_feeds_the_alerter(client, backends, monkeypatch) -> None:
     result = await client._answer("q", [], GUILD, USER)
     assert result.text.startswith("Codex 執行失敗")
     assert events[-1] == ("fail", "codex", "Codex exited with co")
+
+
+async def test_answer_reads_attached_documents_into_a_files_block(
+    client, backends, tmp_path
+) -> None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class Doc:
+        content_type: str
+        size: int
+        filename: str
+        body: bytes
+
+        async def save(self, path):
+            await asyncio.to_thread(Path(path).write_bytes, self.body)
+
+    codex, _ = backends
+    client.config = replace(client.config, attachment_dir=tmp_path)
+    await client._answer(
+        "這兩份在講什麼", [Doc("text/plain", 5, "a.txt", b"hello file"),
+                            Doc("application/octet-stream", 3, "b.py", b"print(1)")], GUILD, USER,
+    )
+    kw = codex.calls[-1][2]
+    assert '<FILE name="a.txt">\nhello file\n</FILE>' in kw["files"]
+    assert '<FILE name="b.py">\nprint(1)\n</FILE>' in kw["files"]
+    assert kw["images"] == []
