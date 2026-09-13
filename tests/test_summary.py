@@ -43,4 +43,5 @@ def test_summary_prompt_wraps_the_transcript_as_untrusted_and_takes_a_focus() ->
 def test_since_is_utc_and_in_the_past() -> None:
     cutoff = since(2)
     assert cutoff.tzinfo is UTC
-    assert timedelta(hours=1, minutes=59) < datetime.now(UTC) - cutoff < timedelta(hours=2, seconds=5)
+    age = datetime.now(UTC) - cutoff
+    assert timedelta(hours=1, minutes=59) < age < timedelta(hours=2, seconds=5)
