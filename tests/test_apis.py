@@ -82,6 +82,37 @@ async def test_call_api_builds_the_url_sends_headers_and_compacts_json(monkeypat
     assert "只能是相對" in await call_api("lol", "https://evil/x", registry, config)
     assert "只能是相對" in await call_api("lol", "../x", registry, config)
     assert "沒有叫 nope" in await call_api("nope", "x", registry, config)
+    # HTTP 429 is throttling as well: retried once, then reported as throttling, not as an answer
+    async def no_sleep(seconds):
+        pass
+
     limited = Session(Response(b"limited", 429, "text/html"))
     monkeypatch.setattr(apis.aiohttp, "ClientSession", lambda **kw: limited)
-    assert (await call_api("lol", "x", registry, config)).startswith("（lol 回 HTTP 429：limited")
+    monkeypatch.setattr(apis.asyncio, "sleep", no_sleep)
+    body = await call_api("lol", "x", registry, config)
+    assert len(limited.calls) == 2 and "被限流" in body
+
+
+async def test_call_api_retries_a_throttled_reply_and_never_passes_it_off_as_data(
+    monkeypatch, config
+) -> None:
+    """MediaWiki answers a rate-limited query with HTTP 200 and an error body. Handing that to
+    the model as if it were data is how "come back in a minute" became "there is no record"."""
+    registry = {"lp": Api("lp", "https://api.example/", {}, "")}
+    throttled = Session(Response(b'{"error":{"code":"ratelimited","info":"slow down"}}'))
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(apis.aiohttp, "ClientSession", lambda **kw: throttled)
+    monkeypatch.setattr(apis.asyncio, "sleep", fake_sleep)
+    body = await call_api("lp", "action=cargoquery", registry, config)
+    # one retry, then give up rather than keep hammering a throttled source
+    assert len(throttled.calls) == 2 and slept == [apis.RETRY_AFTER_SECONDS]
+    assert "被限流" in body and "這不是查無資料" in body and "slow down" in body
+    # an error that is not throttling is reported as an error, and is not worth a retry
+    broken = Session(Response(b'{"error":{"code":"badvalue","info":"bad where clause"}}'))
+    monkeypatch.setattr(apis.aiohttp, "ClientSession", lambda **kw: broken)
+    body = await call_api("lp", "x", registry, config)
+    assert len(broken.calls) == 1 and "badvalue" in body and "bad where clause" in body

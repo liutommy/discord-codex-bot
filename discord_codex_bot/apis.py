@@ -7,6 +7,7 @@ strings, never hosts."""
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -26,6 +27,10 @@ API_TAG = re.compile(
 )
 MAX_CALLS_PER_ROUND = 2
 _ENV = re.compile(r"\$\{([A-Z0-9_]+)\}")
+# Some APIs report throttling *inside* a 200 response (MediaWiki answers a rate-limited query
+# with HTTP 200 and {"error":{"code":"ratelimited"}}), so the status code alone cannot be trusted.
+RATE_LIMIT_CODES = {"ratelimited", "rate_limited", "toomanyrequests"}
+RETRY_AFTER_SECONDS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,8 +85,31 @@ def _bounded(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[:limit]}\n[已截斷至 {limit} 字]"
 
 
+def _api_error(body: str) -> tuple[str, str]:
+    """("code", "info") when the body carries an API-level error the HTTP status did not report,
+    else ("", ""). Without this a throttled MediaWiki reply reaches the model as if it were data."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return "", ""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return "", ""
+    return str(error.get("code") or "unknown"), str(error.get("info") or "")[:200]
+
+
+async def _get(url: str, api: Api, config: Config) -> tuple[int, str, str]:
+    timeout = aiohttp.ClientTimeout(total=config.link_timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout, headers=api.headers) as session:
+        async with session.get(url) as response:
+            raw = await _read_bounded(response, config.link_max_bytes)
+            return response.status, response.content_type, raw.decode("utf-8", errors="replace")
+
+
 async def call_api(name: str, path: str, registry: dict[str, Api], config: Config) -> str:
-    """The response body (JSON compacted) for one registered call, or a user-readable failure."""
+    """The response body (JSON compacted) for one registered call, or a user-readable failure.
+    A throttled source is retried once and then reported as throttling, not as an empty result:
+    the model was answering "no record found" to what was really "come back in a minute"."""
     api = registry.get(name)
     if api is None:
         return f"（沒有叫 {name} 的 API；可用：{'、'.join(registry) or '無'}）"
@@ -89,24 +117,34 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     if "://" in path or path.startswith("//") or ".." in path:
         return "（path 只能是相對於該 API 的端點與查詢字串）"
     url = api.base + path.lstrip("/")
-    timeout = aiohttp.ClientTimeout(total=config.link_timeout_seconds)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout, headers=api.headers) as session:
-            async with session.get(url) as response:
-                raw = await _read_bounded(response, config.link_max_bytes)
-                status = response.status
-                content_type = response.content_type
-    except (aiohttp.ClientError, TimeoutError) as error:
-        return f"（{name} 呼叫失敗——{type(error).__name__}）"
-    body = raw.decode("utf-8", errors="replace")
-    if status >= 400:
-        return f"（{name} 回 HTTP {status}：{_bounded(body, 300)}）"
-    if "json" in content_type or body.lstrip().startswith(("{", "[")):
+    body = ""
+    for attempt in (1, 2):
         try:
-            body = json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
-        except ValueError:
-            pass
-    return _bounded(body.strip() or "（空回應）", config.apis_max_chars)
+            status, content_type, body = await _get(url, api, config)
+        except (aiohttp.ClientError, TimeoutError) as error:
+            return f"（{name} 呼叫失敗——{type(error).__name__}）"
+        code, info = _api_error(body)
+        throttled = status == 429 or code in RATE_LIMIT_CODES
+        if throttled and attempt == 1:
+            LOGGER.info("%s throttled (%s); one retry in %ss", name, code or status,
+                        RETRY_AFTER_SECONDS)
+            await asyncio.sleep(RETRY_AFTER_SECONDS)
+            continue
+        if throttled:
+            return (f"（{name} 被限流，已自動重試一次仍被擋。**這不是查無資料**：同一條查詢稍後"
+                    f"會成功。不要改寫成「沒有紀錄」，也不要換到查不到這類資料的來源硬答；"
+                    f"告訴成員稍後再問即可。{info}）")
+        if status >= 400:
+            return f"（{name} 回 HTTP {status}：{_bounded(body, 300)}）"
+        if code:
+            return f"（{name} 回報錯誤 {code}：{info}）"
+        if "json" in content_type or body.lstrip().startswith(("{", "[")):
+            try:
+                body = json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
+            except ValueError:
+                pass
+        return _bounded(body.strip() or "（空回應）", config.apis_max_chars)
+    return f"（{name} 被限流）"  # unreachable: both attempts return above
 
 
 def render_result(name: str, path: str, body: str) -> str:

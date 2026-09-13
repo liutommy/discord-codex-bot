@@ -1027,3 +1027,37 @@ async def test_redo_puts_back_the_message_the_question_pointed_at(
     prompt = backends[0].calls[-1][0]
     assert video in prompt  # the link lived in the quoted message, not in the member's own words
     assert "整理一下影片大綱" in prompt and "030" in prompt
+
+
+async def test_recall_loop_does_not_re_send_an_identical_api_query(
+    client, backends, monkeypatch
+) -> None:
+    """One model sent the same Leaguepedia query three times and burned the anonymous quota to
+    be told the same thing. A repeat gets the kept answer instead of another call."""
+    from discord_codex_bot import apis as apis_module
+
+    client.apis = {"lp": apis_module.Api("lp", "https://x/", {}, "doc")}
+    tag = '<api name="lp" path="tables=ScoreboardGames"/>'
+    replies = iter([
+        CodexResult(tag, (), None, "t1", False),
+        CodexResult(tag, (), None, "t1", False),
+        CodexResult("來源被限流，稍後再問", (), None, "t1", True),
+    ])
+    prompts = []
+
+    async def fake_codex(text, config, **kw):
+        prompts.append(text)
+        return next(replies)
+
+    calls = []
+
+    async def fake_call(name, path, registry, config):
+        calls.append((name, path))
+        return '{"error":{"code":"ratelimited"}}'
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(apis_module, "call_api", fake_call)
+    result = await client._answer("誰第一個在職業賽用上路凱莎", [], GUILD, USER)
+    assert result.text == "來源被限流，稍後再問"
+    assert calls == [("lp", "tables=ScoreboardGames")]  # asked once, not once per round
+    assert "沿用當時的結果" in prompts[2]

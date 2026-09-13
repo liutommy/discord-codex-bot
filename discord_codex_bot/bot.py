@@ -531,6 +531,10 @@ class DiscordCodexClient(discord.Client):
             )
             # On-demand reads (search snippets / paged recall): the Bot executes the request and
             # feeds the result back into the same thread. Bounded by MEMORY_RECALL_ROUNDS.
+            # Registered-API answers are kept for the whole turn: a model that re-sends the same
+            # query (one sent an identical Leaguepedia query three times) must not spend the
+            # source's quota again to be told the same thing.
+            api_seen: dict[tuple[str, str], str] = {}
             for _ in range(self.config.memory_recall_rounds):
                 if not request_only(result.text):
                     break  # an answer that merely quotes a tag (e.g. from a page) is an answer
@@ -551,7 +555,12 @@ class DiscordCodexClient(discord.Client):
                     provider, hits = await search.search_web(query, self.config)
                     blocks.append(search.render_results(query, provider, hits))
                 for name, path in api_calls:
-                    body = await apis.call_api(name, path, self.apis, self.config)
+                    body = api_seen.get((name, path))
+                    if body is None:
+                        body = await apis.call_api(name, path, self.apis, self.config)
+                        api_seen[(name, path)] = body
+                    else:
+                        body = f"（與稍早完全相同的查詢，沿用當時的結果）\n{body}"
                     blocks.append(apis.render_result(name, path, body))
                 extra: list[Path] = []
                 for i, (lang, code) in enumerate(runs):

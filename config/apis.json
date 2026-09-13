@@ -4,13 +4,13 @@
     "headers": {
       "x-api-key": "0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z"
     },
-    "doc": "英雄聯盟電競官方資料（賽程、比分、積分、直播）。常用 leagueId：LCK=98767991310872058、LPL=98767991314006698、LEC=98767991302996019、LCS=98767991299243165、LCP=113476371197627891、Worlds=98767975604431411、MSI=98767991325878492（其他用 getLeagues?hl=zh-TW 查）。getSchedule?hl=zh-TW&leagueId=<id> 回傳約 80 場、**依時間舊→新，最新在最後**（state=completed 的 match.teams[].result.gameWins 是比分；更舊用回傳的 pageToken）；getTournamentsForLeague?hl=zh-TW&leagueId=<id> 取 tournamentId 後 getStandings?hl=zh-TW&tournamentId=<id> 看積分；getLive?hl=zh-TW 看正在進行的比賽；getEventDetails?hl=zh-TW&id=<matchId> 看單場細節。path 裡的 & 就寫 &，不要寫 &amp;。"
+    "doc": "英雄聯盟電競官方資料：賽程、比分、積分、直播、VOD。**沒有**英雄選用（champion）、選手每場數據這類資料，問「誰用過什麼英雄」要改用 leaguepedia。常用 leagueId：LCK=98767991310872058、LPL=98767991314006698、LEC=98767991302996019、LCS=98767991299243165、LCP=113476371197627891、Worlds=98767975604431411、MSI=98767991325878492（其他用 getLeagues?hl=zh-TW 查）。getSchedule?hl=zh-TW&leagueId=<id> 回傳約 80 場、**依時間舊→新，最新在最後**（state=completed 的 match.teams[].result.gameWins 是比分；更舊用回傳的 pageToken）；getTournamentsForLeague?hl=zh-TW&leagueId=<id> 取 tournamentId 後 getStandings?hl=zh-TW&tournamentId=<id> 看積分；getLive?hl=zh-TW 看正在進行的比賽；getEventDetails?hl=zh-TW&id=<matchId> 看單場細節（只有隊伍與 VOD，沒有英雄）。path 裡的 & 就寫 &，不要寫 &amp;。"
   },
   "leaguepedia": {
     "base": "https://lol.fandom.com/api.php?",
     "headers": {
       "User-Agent": "discord-codex-bot/1.0"
     },
-    "doc": "Leaguepedia 的 Cargo 資料庫（歷史賽果、選手、隊伍、BP 等，比 lolesports 深但匿名有限速，被限速就改用 lolesports）。path 是 api.php 的查詢字串，例：action=cargoquery&format=json&tables=MatchSchedule&fields=DateTime_UTC,OverviewPage,Team1,Team2,Winner&where=OverviewPage%20LIKE%20%22LCK/2026%25%22&order_by=DateTime_UTC%20DESC&limit=20 ；選手用 tables=Players、隊伍用 tables=Teams、每局數據用 tables=ScoreboardGames。"
+    "doc": "Leaguepedia 的 Cargo 資料庫：歷史賽果、選手、隊伍、每場英雄選用與 BP。**「某英雄第一次／誰在職業賽用過」這類逐場歷史只有這裡查得到，lolesports 沒有**，所以被限流時不要改用 lolesports 硬答，Bot 會自動重試一次，仍被擋就告訴成員稍後再問。同一條查詢不要重複送，送過就等結果。path 是 api.php 的查詢字串，例：action=cargoquery&format=json&tables=MatchSchedule&fields=DateTime_UTC,OverviewPage,Team1,Team2,Winner&where=OverviewPage%20LIKE%20%22LCK/2026%25%22&order_by=DateTime_UTC%20DESC&limit=20 ；選手用 tables=Players、隊伍用 tables=Teams、每局數據與英雄用 tables=ScoreboardGames。"
   }
 }
