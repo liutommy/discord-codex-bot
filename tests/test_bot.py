@@ -469,3 +469,56 @@ async def test_model_options_lists_orcarouter_free_models_only_with_a_key(
     assert "OrcaRouter · tencent/hy3-free · 無" in described
     client.config = replace(client.config, orcarouter_api_key="")
     assert await client.model_options("orcarouter", "") == []  # no key → not offered
+
+
+async def test_status_text_reports_member_settings_and_system(client, monkeypatch) -> None:
+    from discord_codex_bot.openrouter import Model
+    from discord_codex_bot.threads import ThreadStore
+
+    async def login(config):
+        return "ChatGPT 訂閱登入有效"
+
+    async def no_refresh_or():
+        return client.openrouter.models
+
+    async def no_refresh_oc():
+        return client.orcarouter.models
+
+    monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(client.openrouter, "free_models", no_refresh_or)
+    monkeypatch.setattr(client.orcarouter, "free_models", no_refresh_oc)
+    client.openrouter.models = [Model("g/free", "G", True, False, 0)]
+    client.orcarouter.models = [Model("tencent/hy3-free", "hy3", False, False, 0)]
+
+    # defaults: nothing set, no thread
+    text = await client._status_text(GUILD, 555, USER)
+    assert "模型：Codex · gpt-5.6-luna · 強度 High（預設）" in text
+    assert "風格：無（用預設）" in text and "續接：無，下一句會新開對話" in text
+    assert "記憶：個人 0 條 / 0 KB（上限 50 MB） · 伺服器 0 條" in text
+    assert "永久 0 主題" in text
+    assert "Codex：ChatGPT 訂閱登入有效" in text
+    assert "OpenRouter 1 個免費模型 · OrcaRouter 1 個免費模型" in text
+    assert "影片理解：開 · 讀連結：開" in text
+
+    # a member with a router model, a style, memories and a resumable thread
+    client.memory.set_model(GUILD, USER, "orcarouter:tencent/hy3-free|low")
+    client.memory.set_style(GUILD, USER, "條列、少於 50 字")
+    client.memory.add("user", GUILD, USER, "拉麵", "小明喜歡拉麵")
+    key = ThreadStore.key(GUILD, 555, USER)
+    client.threads.remember(key, "oc-abc", None, plain=True, model="orcarouter:tencent/hy3-free")
+    text = await client._status_text(GUILD, 555, USER)
+    assert "模型：OrcaRouter · tencent/hy3-free · 強度 無（你設定） · 看不到圖" in text
+    assert "風格：條列、少於 50 字" in text
+    assert "續接：會接續 0 分鐘前的對話（OrcaRouter · tencent/hy3-free）" in text
+    assert "個人 1 條" in text
+
+    # switching model makes the old thread non-resumable: status says so
+    client.memory.set_model(GUILD, USER, "codex:gpt-5.6-luna")
+    text = await client._status_text(GUILD, 555, USER)
+    assert "續接：0 分鐘前的對話是 OrcaRouter · tencent/hy3-free／另一種風格，下一句會新開" in text
+
+    # a router without a key is not listed
+    client.config = replace(client.config, orcarouter_api_key="", gemini_api_key="")
+    text = await client._status_text(GUILD, 555, USER)
+    assert "OpenRouter 1 個免費模型" in text and "OrcaRouter" not in text.split("【系統】")[1]
+    assert "影片理解：關" in text

@@ -5,6 +5,7 @@ import hashlib
 import logging
 import re
 import tempfile
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
@@ -529,14 +530,77 @@ class DiscordCodexClient(discord.Client):
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
-        status = await codex_login_status(self.config)
-        default_label = REASONING_EFFORTS[self.config.codex_reasoning_effort]
-        await interaction.response.send_message(
-            f"{status}\n模型：{self.config.codex_model}\n"
-            f"預設推理強度：{default_label}"
-            f"（/{self.config.command_prefix} 可選 {'、'.join(REASONING_EFFORTS.values())}）",
-            ephemeral=True,
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        text = await self._status_text(
+            interaction.guild_id, interaction.channel_id, interaction.user.id
         )
+        await interaction.followup.send(text, ephemeral=True)
+
+    async def _status_text(
+        self, guild_id: int | None, channel_id: int | None, user_id: int
+    ) -> str:
+        """Two sections: what this member has set (model, style, whether the next request
+        continues a thread, memory sizes) and what the system offers. No usage figures: the
+        Codex quota is the operator's, and the routers' free limits are not published."""
+        stored = self.memory.get_model(guild_id, user_id)
+        chosen = parse_choice(stored, self.config.codex_model)
+        level = split_stored(stored)[1]
+        target = resolve(chosen, level or self.config.codex_reasoning_effort)
+        origin = "你設定" if stored else "預設"
+        model_line = f"模型：{chosen.label} · 強度 {self._effort_label(target)}（{origin}）"
+        if chosen.backend in ROUTER_BACKENDS:
+            info = self.catalogs[chosen.backend].get(chosen.family)
+            if info is not None and not info.image:
+                model_line += " · 看不到圖"
+        style = self.memory.get_style(guild_id, user_id)
+        style_line = f"風格：{style[:60]}" if style else "風格：無（用預設）"
+
+        key = ThreadStore.key(guild_id, channel_id, user_id)
+        entry = self.threads.live_entry(key)
+        if entry is None:
+            thread_line = "續接：無，下一句會新開對話"
+        else:
+            minutes = max(0, int((time.time() - float(entry["at"])) // 60))
+            previous = parse_choice(str(entry.get("model", "")), self.config.codex_model).label
+            if self.threads.current(key, plain=bool(style), model=chosen.value):
+                thread_line = (
+                    f"續接：會接續 {minutes} 分鐘前的對話（{previous}）"
+                    f"；/{self.config.command_prefix} 的 new 可重來"
+                )
+            else:
+                thread_line = (
+                    f"續接：{minutes} 分鐘前的對話是 {previous}／另一種風格，下一句會新開"
+                )
+
+        def scope_line(label: str, scope: str, owner: int | None, limit: int) -> str:
+            shown = len(self.memory.entries(scope, guild_id, owner))
+            total = len(self.memory.all_entries(scope, guild_id, owner))
+            used = self.memory.usage_bytes(scope, guild_id, owner)
+            text = f"{label} {total} 條 / {used // 1024} KB（上限 {limit // 1_000_000} MB）"
+            return text + (f"，{total - shown} 條已推到 archive" if total > shown else "")
+
+        memory_line = "記憶：" + " · ".join((
+            scope_line("個人", "user", user_id, self.config.memory_user_max_bytes),
+            scope_line("伺服器", "guild", None, self.config.memory_guild_max_bytes),
+            f"永久 {self.permanent.topic_count()} 主題",
+        ))
+
+        codex = await codex_login_status(self.config)
+        routers = []
+        for backend, catalog in self.catalogs.items():
+            if ROUTERS[backend].api_key(self.config):
+                count = len(await catalog.free_models())
+                routers.append(f"{ROUTERS[backend].label} {count} 個免費模型")
+        system = [
+            f"Codex：{codex}",
+            "Antigravity：可選（Gemini／Claude）",
+            " · ".join(routers) if routers else "OpenRouter／OrcaRouter：未設定",
+            f"影片理解：{'開' if gemini.available(self.config) else '關'} · 讀連結：開",
+        ]
+        return "\n".join((
+            "【你的設定】", model_line, style_line, thread_line, memory_line,
+            "", "【系統】", *system,
+        ))
 
     @app_commands.describe(
         scope="個人＝只對你；伺服器＝這裡所有人", name="短標題", text="要記住的內容"

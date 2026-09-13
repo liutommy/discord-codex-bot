@@ -394,6 +394,9 @@ class PermanentMemory:
         except OSError:
             return ""
 
+    def topic_count(self) -> int:
+        return len(self._topics())
+
     def _topics(self) -> list[Path]:
         topics = self._root / TOPIC_DIR
         return sorted(p for p in topics.glob("*.md") if p.is_file()) if topics.is_dir() else []

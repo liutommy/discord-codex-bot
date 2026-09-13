@@ -141,3 +141,13 @@ def test_reset_of_an_expired_thread_is_harvested_once(tmp_path: Path) -> None:
     assert store.harvest_candidates(now=later) == [(key, "a")]
     assert store.forget(key)  # pending and by_key both name "a": listed once
     assert store.harvest_candidates(now=later) == [(key, "a")]
+
+
+def test_live_entry_returns_the_record_only_while_live(tmp_path: Path) -> None:
+    store = ThreadStore(tmp_path / "t.json", ttl_seconds=100, version="v1")
+    key = ThreadStore.key(1, 2, 3)
+    assert store.live_entry(key) is None
+    store.remember(key, "t1", None, plain=False, model="codex:x")
+    entry = store.live_entry(key)
+    assert entry["thread_id"] == "t1" and entry["model"] == "codex:x" and "at" in entry
+    assert store.live_entry(key, now=entry["at"] + 101) is None  # past the TTL

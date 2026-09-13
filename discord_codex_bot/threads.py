@@ -40,6 +40,14 @@ class ThreadStore:
     def _live(self, entry: dict, now: float) -> bool:
         return entry.get("version", "") == self._version and now - float(entry["at"]) <= self._ttl
 
+    def live_entry(self, key: str, now: float | None = None) -> dict | None:
+        """The member's latest thread record for `key` while it is still within the TTL and the
+        current instruction version — whether or not the next request would resume it."""
+        entry = self._by_key.get(key)
+        if entry is None or not self._live(entry, time.time() if now is None else now):
+            return None
+        return dict(entry)
+
     def current(
         self, key: str, now: float | None = None, plain: bool = False, model: str = ""
     ) -> str:
