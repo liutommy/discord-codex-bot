@@ -236,8 +236,13 @@ async def test_generate_retries_transient_errors_then_falls_back_to_the_next_mod
     monkeypatch, config
 ) -> None:
     calls = []
-    responses = iter([(503, {"error": {"message": "busy"}}), (503, {"error": {"message": "busy"}}),
-                      (200, _candidate("備援答"))])
+    responses = iter(
+        [
+            (503, {"error": {"message": "busy"}}),
+            (503, {"error": {"message": "busy"}}),
+            (200, _candidate("備援答")),
+        ]
+    )
 
     async def fake_post(cfg, model, body):
         calls.append(model)

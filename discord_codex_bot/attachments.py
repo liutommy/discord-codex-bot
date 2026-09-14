@@ -22,13 +22,51 @@ IMAGE_SUFFIXES = {
 
 
 # Documents the Bot reads as text for the model (untrusted, bounded). Anything else is refused.
-DOCUMENT_TYPES = {"application/pdf": ".pdf", "application/json": ".json",
-                  "application/xml": ".xml", "application/x-yaml": ".yaml",
-                  "application/toml": ".toml", "application/javascript": ".js"}
+DOCUMENT_TYPES = {
+    "application/pdf": ".pdf",
+    "application/json": ".json",
+    "application/xml": ".xml",
+    "application/x-yaml": ".yaml",
+    "application/toml": ".toml",
+    "application/javascript": ".js",
+}
 CODE_SUFFIXES = {
-    ".txt", ".md", ".csv", ".log", ".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".css",
-    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".c", ".h", ".cpp", ".hpp",
-    ".cs", ".rb", ".php", ".sh", ".sql", ".lua", ".swift", ".dart", ".r", ".ini", ".cfg", ".env",
+    ".txt",
+    ".md",
+    ".csv",
+    ".log",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".html",
+    ".css",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cs",
+    ".rb",
+    ".php",
+    ".sh",
+    ".sql",
+    ".lua",
+    ".swift",
+    ".dart",
+    ".r",
+    ".ini",
+    ".cfg",
+    ".env",
 }
 ACCEPTED_DOCUMENTS = "PDF、純文字／Markdown／CSV、JSON／YAML／TOML／XML、程式碼檔"
 

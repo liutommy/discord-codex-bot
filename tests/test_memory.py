@@ -237,9 +237,11 @@ def test_rewrite_keeps_slugs_unique_and_backs_up_the_previous_state(tmp_path: Pa
     store.rewrite("guild", 1, None, [Note("n", "2026-09-04", "t")])
     assert (directory / ".backup" / "topics" / "綠茶-3.md").exists()
     assert not (directory / ".backup" / "topics" / "old.md").exists()  # one backup generation
-    assert store.usage_bytes("guild", 1, None) == sum(
-        p.stat().st_size for p in (directory / "topics").iterdir()
-    ) + (directory / INDEX_FILE).stat().st_size
+    assert (
+        store.usage_bytes("guild", 1, None)
+        == sum(p.stat().st_size for p in (directory / "topics").iterdir())
+        + (directory / INDEX_FILE).stat().st_size
+    )
 
 
 def test_add_avoids_slugs_already_in_the_archive(tmp_path: Path) -> None:

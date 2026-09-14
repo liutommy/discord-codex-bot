@@ -65,8 +65,13 @@ def parse_when(text: str, now: datetime | None = None) -> datetime | None:
         minute = int(match.group("m") or 0)
         try:
             when = now.replace(
-                year=year, month=int(match.group("mo")), day=int(match.group("d")),
-                hour=hour, minute=minute, second=0, microsecond=0,
+                year=year,
+                month=int(match.group("mo")),
+                day=int(match.group("d")),
+                hour=hour,
+                minute=minute,
+                second=0,
+                microsecond=0,
             )
         except ValueError:
             return None
@@ -109,6 +114,7 @@ def extract_reminder_tags(
 
 def render_pending(items: list[dict]) -> str:
     """The member's pending reminders as prompt lines (id, Taipei time, text)."""
+
     def note(item: dict) -> str:
         target = item.get("target_id")
         return f"（提醒 <@{target}>）" if target not in (None, item["user_id"]) else ""
@@ -162,9 +168,13 @@ class ReminderStore:
         if len(self.for_user(user_id)) >= MAX_PER_USER:
             return f"你已經有 {MAX_PER_USER} 個提醒了，先取消幾個。"
         item = {
-            "id": self._next_id, "guild_id": guild_id, "channel_id": channel_id,
-            "user_id": user_id, "due": when.astimezone(UTC).isoformat(),
-            "text": text.strip()[:500], "target_id": target_id or user_id,
+            "id": self._next_id,
+            "guild_id": guild_id,
+            "channel_id": channel_id,
+            "user_id": user_id,
+            "due": when.astimezone(UTC).isoformat(),
+            "text": text.strip()[:500],
+            "target_id": target_id or user_id,
         }
         self._next_id += 1
         self._items.append(item)

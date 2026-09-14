@@ -121,6 +121,7 @@ async def describe_video_bytes(path: Path, config: Config) -> str | None:
 async def youtube_transcript(video_id: str, config: Config) -> str | None:
     """The video's captions as plain text (no visuals); the cheap fallback when Gemini cannot
     watch it. Returns None when the clip has no captions or the library is unavailable."""
+
     def fetch() -> str | None:
         try:
             from youtube_transcript_api import YouTubeTranscriptApi

@@ -258,9 +258,7 @@ async def run_router(
     prompt = (
         user_prompt
         if raw
-        else _prompt(
-            user_prompt, memory, output_style(config), personal_style, links, help, files
-        )
+        else _prompt(user_prompt, memory, output_style(config), personal_style, links, help, files)
     )
     history = load_transcript(config, resume) if resume else []
     resumed = bool(history)
@@ -309,9 +307,14 @@ async def run_router(
     # Stored without the image bytes: replaying base64 every turn would swamp the history.
     stored_user = prompt + (f"\n\n[附圖 {len(images)} 張]" if images else "")
     _save_transcript(
-        config, thread_id, model,
-        history + [{"role": "user", "content": stored_user},
-                   {"role": "assistant", "content": text.strip()}],
+        config,
+        thread_id,
+        model,
+        history
+        + [
+            {"role": "user", "content": stored_user},
+            {"role": "assistant", "content": text.strip()},
+        ],
     )
     return CodexResult(text.strip(), (), None, thread_id, resumed)
 

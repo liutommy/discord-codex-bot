@@ -4,9 +4,9 @@ from discord_codex_bot.config import load_config, parse_id_set
 
 
 def test_parses_ids_without_duplicates() -> None:
-    assert parse_id_set(
-        "111111111111111111, 111111111111111111", "TEST"
-    ) == frozenset({111111111111111111})
+    assert parse_id_set("111111111111111111, 111111111111111111", "TEST") == frozenset(
+        {111111111111111111}
+    )
 
 
 def test_rejects_missing_allowlist_and_malformed_ids() -> None:

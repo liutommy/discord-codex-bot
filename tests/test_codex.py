@@ -41,8 +41,15 @@ class FakeExec:
         self, prompt, config, images, effort, resume, schema=None, plain=False, isolated=False
     ):
         self.calls.append(
-            dict(prompt=prompt, images=images, effort=effort, resume=resume, schema=schema,
-                 plain=plain, isolated=isolated)
+            dict(
+                prompt=prompt,
+                images=images,
+                effort=effort,
+                resume=resume,
+                schema=schema,
+                plain=plain,
+                isolated=isolated,
+            )
         )
         return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
 
@@ -425,9 +432,13 @@ def test_prompt_carries_the_help_sheet_and_the_no_invention_rule() -> None:
 
 async def test_cancelling_a_request_kills_the_whole_process_group() -> None:
     process = await asyncio.create_subprocess_exec(
-        "sh", "-c", "sleep 60 & echo $! ; wait",
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=True,
+        "sh",
+        "-c",
+        "sleep 60 & echo $! ; wait",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
     grandchild_pid = int((await process.stdout.readline()).strip())
     task = asyncio.get_running_loop().create_task(_communicate(process, "", timeout_seconds=30))
@@ -443,7 +454,7 @@ def test_prompt_carries_attached_files_as_untrusted_content() -> None:
     from discord_codex_bot.codex import _prompt
 
     out = _prompt("q", files='<FILE name="a.txt">\nhello\n</FILE>')
-    assert "<FILES>\n<FILE name=\"a.txt\">\nhello\n</FILE>\n</FILES>" in out
+    assert '<FILES>\n<FILE name="a.txt">\nhello\n</FILE>\n</FILES>' in out
     assert "FILES, when present, holds the text of documents" in out
     assert "<FILES>" not in _prompt("q")
 

@@ -18,23 +18,50 @@ from discord_codex_bot.openrouter import (
     trim_history,
 )
 
-CATALOG = {"data": [
-    {"id": "b/vision:free", "name": "Vision", "pricing": {"prompt": "0", "completion": "0"},
-     "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
-     "supported_parameters": ["reasoning", "tools"], "context_length": 4096},
-    {"id": "a/text:free", "name": "Alpha", "pricing": {"prompt": "0", "completion": "0"},
-     "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
-     "supported_parameters": ["tools"], "context_length": 8192},
-    {"id": "paid/model", "name": "Paid", "pricing": {"prompt": "0.001", "completion": "0"},
-     "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}},
-    {"id": "music/free", "name": "Music", "pricing": {"prompt": "0", "completion": "0"},
-     "architecture": {"input_modalities": ["text"], "output_modalities": ["text", "audio"]}},
-    {"id": "x/content-safety:free", "name": "Guard", "pricing": {"prompt": "0", "completion": "0"},
-     "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}},
-    {"id": "thinkingmachines/inkling:free", "name": "Ink",
-     "pricing": {"prompt": "0", "completion": "0"},
-     "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}},
-]}
+CATALOG = {
+    "data": [
+        {
+            "id": "b/vision:free",
+            "name": "Vision",
+            "pricing": {"prompt": "0", "completion": "0"},
+            "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
+            "supported_parameters": ["reasoning", "tools"],
+            "context_length": 4096,
+        },
+        {
+            "id": "a/text:free",
+            "name": "Alpha",
+            "pricing": {"prompt": "0", "completion": "0"},
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+            "supported_parameters": ["tools"],
+            "context_length": 8192,
+        },
+        {
+            "id": "paid/model",
+            "name": "Paid",
+            "pricing": {"prompt": "0.001", "completion": "0"},
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        },
+        {
+            "id": "music/free",
+            "name": "Music",
+            "pricing": {"prompt": "0", "completion": "0"},
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text", "audio"]},
+        },
+        {
+            "id": "x/content-safety:free",
+            "name": "Guard",
+            "pricing": {"prompt": "0", "completion": "0"},
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        },
+        {
+            "id": "thinkingmachines/inkling:free",
+            "name": "Ink",
+            "pricing": {"prompt": "0", "completion": "0"},
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+        },
+    ]
+}
 
 
 class Response:
@@ -83,8 +110,11 @@ def cfg(config: Config, tmp_path: Path) -> Config:
     (tmp_path / "ws" / "AGENTS.md").write_text("你是前輩", "utf-8")
     (tmp_path / "plain").mkdir()
     return replace(
-        config, openrouter_dir=tmp_path / "or", codex_workspace=tmp_path / "ws",
-        codex_workspace_plain=tmp_path / "plain", output_style_path=tmp_path / "none.md",
+        config,
+        openrouter_dir=tmp_path / "or",
+        codex_workspace=tmp_path / "ws",
+        codex_workspace_plain=tmp_path / "plain",
+        output_style_path=tmp_path / "none.md",
     )
 
 
@@ -109,8 +139,11 @@ async def test_catalog_caches_and_keeps_the_last_good_list(monkeypatch, cfg: Con
 
 
 def test_trim_history_keeps_newest_whole_messages_within_budget() -> None:
-    messages = [{"role": "user", "content": "a" * 50}, {"role": "assistant", "content": "b" * 50},
-                {"role": "user", "content": [{"type": "text", "text": "c" * 30}]}]
+    messages = [
+        {"role": "user", "content": "a" * 50},
+        {"role": "assistant", "content": "b" * 50},
+        {"role": "user", "content": [{"type": "text", "text": "c" * 30}]},
+    ]
     assert trim_history(messages, 90) == messages[1:]
     assert trim_history(messages, 10) == messages[2:]  # the newest always survives
     assert trim_history([], 10) == []
@@ -158,7 +191,12 @@ async def test_run_openrouter_resumes_and_respects_model_capabilities(
     second = Session([Response({"choices": [{"message": {"content": content}}]})])
     monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: second)
     two = await run_openrouter(
-        "q2", cfg, "a/text:free", images=[image], resume=one.thread_id, personal_style="短",
+        "q2",
+        cfg,
+        "a/text:free",
+        images=[image],
+        resume=one.thread_id,
+        personal_style="短",
         catalog=catalog,
     )
     assert two.text == "二" and two.resumed and two.thread_id == one.thread_id
@@ -169,7 +207,10 @@ async def test_run_openrouter_resumes_and_respects_model_capabilities(
     assert isinstance(body["messages"][-1]["content"], str)  # no image parts for a text model
     assert "這個模型看不到圖片" in body["messages"][-1]["content"]
     assert [m["role"] for m in load_transcript(cfg, one.thread_id)] == [
-        "user", "assistant", "user", "assistant"
+        "user",
+        "assistant",
+        "user",
+        "assistant",
     ]
     # an unknown thread id starts fresh instead of failing
     third = Session([Response({"choices": [{"message": {"content": "三"}}]})])
@@ -210,7 +251,9 @@ def test_backends_accept_any_openrouter_model_id() -> None:
     assert choice.value == "openrouter:google/gemma-4-31b-it:free"
     target = resolve(choice, "high")
     assert (target.backend, target.model, target.effort) == (
-        OPENROUTER, "google/gemma-4-31b-it:free", "high"
+        OPENROUTER,
+        "google/gemma-4-31b-it:free",
+        "high",
     )
     assert parse_choice("openrouter:", "gpt-5.6-luna").backend == "codex"  # empty id ⇒ default
 
@@ -219,21 +262,28 @@ def test_backends_accept_any_openrouter_model_id() -> None:
 from discord_codex_bot.openrouter import ROUTERS, Router, is_router_thread, run_router  # noqa: E402
 
 ORCA = ROUTERS["orcarouter"]
-ORCA_CATALOG = {"data": [
-    {"id": "orcarouter/free", "object": "model", "owned_by": "orcarouter"},
-    {"id": "deepseek/deepseek-v4-flash-free", "object": "model", "pricing": {"prompt": None}},
-    {"id": "tencent/hy3-free", "object": "model"},
-    {"id": "z-ai/glm-5.3-flash-free", "object": "model"},
-    {"id": "deepseek/deepseek-v4-flash", "object": "model",
-     "pricing": {"prompt": "0.0000001", "completion": "0.0000005"}},
-    {"id": "anthropic/claude-opus-5", "object": "model", "pricing": {"prompt": "0.00001"}},
-]}
+ORCA_CATALOG = {
+    "data": [
+        {"id": "orcarouter/free", "object": "model", "owned_by": "orcarouter"},
+        {"id": "deepseek/deepseek-v4-flash-free", "object": "model", "pricing": {"prompt": None}},
+        {"id": "tencent/hy3-free", "object": "model"},
+        {"id": "z-ai/glm-5.3-flash-free", "object": "model"},
+        {
+            "id": "deepseek/deepseek-v4-flash",
+            "object": "model",
+            "pricing": {"prompt": "0.0000001", "completion": "0.0000005"},
+        },
+        {"id": "anthropic/claude-opus-5", "object": "model", "pricing": {"prompt": "0.00001"}},
+    ]
+}
 
 
 def test_orcarouter_free_filter_is_the_dash_free_suffix_plus_its_free_router() -> None:
     models = parse_catalog(ORCA_CATALOG, ORCA)
     assert sorted(m.id for m in models) == [
-        "deepseek/deepseek-v4-flash-free", "orcarouter/free", "tencent/hy3-free",
+        "deepseek/deepseek-v4-flash-free",
+        "orcarouter/free",
+        "tencent/hy3-free",
         "z-ai/glm-5.3-flash-free",
     ]
     # no architecture listed → taken as a plain text model that takes no effort
@@ -266,8 +316,19 @@ async def test_run_router_on_orcarouter_uses_its_host_key_prefix_and_label(
     assert session.calls[0][1] == "https://api.orcarouter.ai/v1/chat/completions"
     assert load_transcript(cfg, result.thread_id)[1]["content"] == "哈囉"
     # the free tier's 429 is reported under the router's own name
-    session = Session([Response({"error": {"code": "free_rate_limited",
-                                           "message": "Free models are not available"}}, 429)])
+    session = Session(
+        [
+            Response(
+                {
+                    "error": {
+                        "code": "free_rate_limited",
+                        "message": "Free models are not available",
+                    }
+                },
+                429,
+            )
+        ]
+    )
     monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
     with pytest.raises(RuntimeError, match="OrcaRouter HTTP 429：Free models are not available"):
         await run_router(ORCA, "q", cfg, "tencent/hy3-free")
@@ -290,10 +351,10 @@ async def test_run_router_streams_content_deltas_and_ignores_reasoning(
     lines = [
         b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n',
         b'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n',
-        b'\n',
+        b"\n",
         b'data: {"choices":[{"delta":{"content":"\u4f60"}}]}\n',
         b'data: {"choices":[{"delta":{"content":"\u597d"}}]}\n',
-        b'data: [DONE]\n',
+        b"data: [DONE]\n",
         b'data: {"choices":[{"delta":{"content":"IGNORED"}}]}\n',
     ]
 

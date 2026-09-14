@@ -262,9 +262,9 @@ def extract_track_tags(
             (
                 source,
                 attrs.get("interest", "").strip(),
-                tuple(
-                    dict.fromkeys(int(i) for i in _MENTION.findall(attrs.get("who", "")))
-                )[:MAX_TRACK_MENTIONS],
+                tuple(dict.fromkeys(int(i) for i in _MENTION.findall(attrs.get("who", ""))))[
+                    :MAX_TRACK_MENTIONS
+                ],
                 int(every) if every.isdigit() else 0,
             )
         )
@@ -315,9 +315,7 @@ class TrackerStore:
                 }
                 for column, definition in columns:
                     if column not in existing:
-                        connection.execute(
-                            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-                        )
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
@@ -330,15 +328,27 @@ class TrackerStore:
     @staticmethod
     def _source(row: sqlite3.Row) -> Source:
         return Source(
-            row["id"], row["provider"], row["external_id"], row["locator"], row["cursor"],
-            json.loads(row["state_json"]), bool(row["baseline_complete"]), bool(row["active"]),
+            row["id"],
+            row["provider"],
+            row["external_id"],
+            row["locator"],
+            row["cursor"],
+            json.loads(row["state_json"]),
+            bool(row["baseline_complete"]),
+            bool(row["active"]),
         )
 
     @staticmethod
     def _watch(row: sqlite3.Row) -> Watch:
         return Watch(
-            row["id"], row["source_id"], row["guild_id"], row["channel_id"], row["user_id"],
-            row["interest"], bool(row["active"]), row["start_item_id"],
+            row["id"],
+            row["source_id"],
+            row["guild_id"],
+            row["channel_id"],
+            row["user_id"],
+            row["interest"],
+            bool(row["active"]),
+            row["start_item_id"],
             tuple(int(part) for part in str(row["mention_ids"] or "").split(",") if part),
             int(row["interval_minutes"] or 60),
             int(row["classified_at"] or 0),
@@ -347,17 +357,31 @@ class TrackerStore:
     @staticmethod
     def _item(row: sqlite3.Row) -> ContentItem:
         return ContentItem(
-            row["id"], row["source_id"], row["external_id"], row["url"], row["title"],
-            row["description"], row["published_at"], row["kind"], row["live_status"],
-            bool(row["baseline"]), json.loads(row["raw_json"]),
+            row["id"],
+            row["source_id"],
+            row["external_id"],
+            row["url"],
+            row["title"],
+            row["description"],
+            row["published_at"],
+            row["kind"],
+            row["live_status"],
+            bool(row["baseline"]),
+            json.loads(row["raw_json"]),
         )
 
     @staticmethod
     def _decision(row: sqlite3.Row) -> Decision:
         return Decision(
-            row["id"], row["watch_id"], row["item_id"], bool(row["notify"]),
-            row["confidence"], row["category"], row["reason"],
-            tuple(json.loads(row["matched_topics_json"])), row["status"],
+            row["id"],
+            row["watch_id"],
+            row["item_id"],
+            bool(row["notify"]),
+            row["confidence"],
+            row["category"],
+            row["reason"],
+            tuple(json.loads(row["matched_topics_json"])),
+            row["status"],
             str(row["message"] or ""),
         )
 
@@ -510,9 +534,17 @@ class TrackerStore:
                          live_status, baseline, raw_json, observed_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        source.id, item.external_id, item.url, item.title, item.description,
-                        item.published_at, item.kind, item.live_status, int(baseline),
-                        json.dumps(item.raw, ensure_ascii=False), _utc_now(),
+                        source.id,
+                        item.external_id,
+                        item.url,
+                        item.title,
+                        item.description,
+                        item.published_at,
+                        item.kind,
+                        item.live_status,
+                        int(baseline),
+                        json.dumps(item.raw, ensure_ascii=False),
+                        _utc_now(),
                     ),
                 )
                 if cursor.rowcount:
@@ -554,9 +586,16 @@ class TrackerStore:
                 groups[row["id"]] = (self._watch(row), [])
             groups[row["id"]][1].append(
                 ContentItem(
-                    row["item_id"], row["source_id"], row["item_external_id"], row["item_url"],
-                    row["item_title"], row["item_description"], row["item_published_at"],
-                    row["item_kind"], row["item_live_status"], bool(row["item_baseline"]),
+                    row["item_id"],
+                    row["source_id"],
+                    row["item_external_id"],
+                    row["item_url"],
+                    row["item_title"],
+                    row["item_description"],
+                    row["item_published_at"],
+                    row["item_kind"],
+                    row["item_live_status"],
+                    bool(row["item_baseline"]),
                     json.loads(row["item_raw_json"]),
                 )
             )
@@ -579,10 +618,16 @@ class TrackerStore:
                          matched_topics_json, status, message, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        watch.id, item.id, int(decision.notify), decision.confidence,
-                        decision.category, decision.reason,
+                        watch.id,
+                        item.id,
+                        int(decision.notify),
+                        decision.confidence,
+                        decision.category,
+                        decision.reason,
                         json.dumps(decision.matched_topics, ensure_ascii=False),
-                        "decided", decision.message, _utc_now(),
+                        "decided",
+                        decision.message,
+                        _utc_now(),
                     ),
                 )
                 # Every judgement is kept; only the ones worth interrupting someone are sent.
@@ -645,9 +690,7 @@ class TrackerStore:
                     "at": row["created_at"],
                     "title": row["title"],
                     "url": row["url"],
-                    "source": str(
-                        state.get("title") or state.get("login") or row["external_id"]
-                    ),
+                    "source": str(state.get("title") or state.get("login") or row["external_id"]),
                 }
             )
         return out
@@ -675,19 +718,38 @@ class TrackerStore:
         messages = []
         for row in rows:
             watch = Watch(
-                row["watch_id"], row["source_id"], row["guild_id"], row["channel_id"],
-                row["user_id"], row["interest"], bool(row["active"]),
+                row["watch_id"],
+                row["source_id"],
+                row["guild_id"],
+                row["channel_id"],
+                row["user_id"],
+                row["interest"],
+                bool(row["active"]),
                 row["start_item_id"],
             )
             item = ContentItem(
-                row["item_id"], row["source_id"], row["external_id"], row["url"], row["title"],
-                row["description"], row["published_at"], row["kind"], row["live_status"],
-                bool(row["baseline"]), json.loads(row["raw_json"]),
+                row["item_id"],
+                row["source_id"],
+                row["external_id"],
+                row["url"],
+                row["title"],
+                row["description"],
+                row["published_at"],
+                row["kind"],
+                row["live_status"],
+                bool(row["baseline"]),
+                json.loads(row["raw_json"]),
             )
             decision = Decision(
-                row["decision_id"], row["watch_id"], row["item_id"], bool(row["notify"]),
-                row["confidence"], row["category"], row["reason"],
-                tuple(json.loads(row["matched_topics_json"])), row["decision_status"],
+                row["decision_id"],
+                row["watch_id"],
+                row["item_id"],
+                bool(row["notify"]),
+                row["confidence"],
+                row["category"],
+                row["reason"],
+                tuple(json.loads(row["matched_topics_json"])),
+                row["decision_status"],
                 str(row["message"] or ""),
             )
             messages.append(OutboxMessage(row["outbox_id"], decision, watch, item, row["attempts"]))
@@ -816,7 +878,10 @@ class YouTubeFetcher:
         }
         async with self._session() as session:
             payload = await _json_request(
-                session, "GET", f"{self.API}/channels", params=params,
+                session,
+                "GET",
+                f"{self.API}/channels",
+                params=params,
                 limit=self.max_response_bytes,
             )
         items = payload.get("items", [])
@@ -937,9 +1002,17 @@ def _hydrate_youtube(item: ContentItem, detail: Mapping[str, Any]) -> ContentIte
         live_status = "completed" if live_details.get("actualEndTime") else "upcoming"
     description = str(snippet.get("description") or item.description)
     return ContentItem(
-        item.id, item.source_id, item.external_id, item.url, item.title, description,
-        item.published_at, "live" if live_status in {"live", "upcoming"} else item.kind,
-        live_status, item.baseline, detail,
+        item.id,
+        item.source_id,
+        item.external_id,
+        item.url,
+        item.title,
+        description,
+        item.published_at,
+        "live" if live_status in {"live", "upcoming"} else item.kind,
+        live_status,
+        item.baseline,
+        detail,
     )
 
 
@@ -1043,10 +1116,16 @@ class TwitchFetcher:
             if stream_id:
                 items.append(
                     ContentItem(
-                        None, source.id, f"stream:{stream_id}",
+                        None,
+                        source.id,
+                        f"stream:{stream_id}",
                         f"https://www.twitch.tv/{source.state.get('login', '')}",
-                        str(stream.get("title", "")), "", str(stream.get("started_at", "")),
-                        "live", "live", raw=stream,
+                        str(stream.get("title", "")),
+                        "",
+                        str(stream.get("started_at", "")),
+                        "live",
+                        "live",
+                        raw=stream,
                     )
                 )
         for video in videos.get("data", []):
@@ -1054,10 +1133,16 @@ class TwitchFetcher:
             if video_id:
                 items.append(
                     ContentItem(
-                        None, source.id, f"video:{video_id}", str(video.get("url", "")),
-                        str(video.get("title", "")), str(video.get("description", "")),
+                        None,
+                        source.id,
+                        f"video:{video_id}",
+                        str(video.get("url", "")),
+                        str(video.get("title", "")),
+                        str(video.get("description", "")),
                         str(video.get("published_at") or video.get("created_at", "")),
-                        "video", "completed", raw=video,
+                        "video",
+                        "completed",
+                        raw=video,
                     )
                 )
         items.sort(key=lambda item: item.published_at, reverse=True)
@@ -1179,7 +1264,12 @@ def parse_classifier_result(answer: str, items: Sequence[ContentItem]) -> list[D
     if not isinstance(decisions, list):
         raise ValueError("decisions must be an array")
     required = {
-        "external_item_id", "notify", "confidence", "category", "reason", "matched_topics",
+        "external_item_id",
+        "notify",
+        "confidence",
+        "category",
+        "reason",
+        "matched_topics",
         "message",
     }
     parsed = []
@@ -1198,8 +1288,12 @@ def parse_classifier_result(answer: str, items: Sequence[ContentItem]) -> list[D
             raise ValueError("message must be a string")
         parsed.append(
             DecisionInput(
-                str(value["external_item_id"]), value["notify"], float(value["confidence"]),
-                str(value["category"]), str(value["reason"]), tuple(value["matched_topics"]),
+                str(value["external_item_id"]),
+                value["notify"],
+                float(value["confidence"]),
+                str(value["category"]),
+                str(value["reason"]),
+                tuple(value["matched_topics"]),
                 str(value["message"])[:MAX_MESSAGE_CHARS].strip(),
             )
         )

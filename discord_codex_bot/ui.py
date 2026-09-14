@@ -51,7 +51,9 @@ class AnswerButton(
         label, default_emoji = _ACTIONS[action]
         super().__init__(
             discord.ui.Button(
-                label=label, emoji=emoji or default_emoji, style=discord.ButtonStyle.secondary,
+                label=label,
+                emoji=emoji or default_emoji,
+                style=discord.ButtonStyle.secondary,
                 custom_id=f"inmu:{action}:{user_id}",
             )
         )

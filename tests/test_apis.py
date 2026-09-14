@@ -9,12 +9,20 @@ from discord_codex_bot.apis import Api, call_api, extract_api_calls, load_regist
 
 def test_load_registry_expands_env_and_rejects_non_https(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SECRET_KEY", "s3cret")
-    (tmp_path / "apis.json").write_text(json.dumps({
-        "good": {"base": "https://api.example/v1/", "headers": {"x-key": "${SECRET_KEY}"},
-                 "doc": "用法"},
-        "bad": {"base": "http://plain.example/"},
-        "junk": "nope",
-    }), "utf-8")
+    (tmp_path / "apis.json").write_text(
+        json.dumps(
+            {
+                "good": {
+                    "base": "https://api.example/v1/",
+                    "headers": {"x-key": "${SECRET_KEY}"},
+                    "doc": "用法",
+                },
+                "bad": {"base": "http://plain.example/"},
+                "junk": "nope",
+            }
+        ),
+        "utf-8",
+    )
     registry = load_registry(tmp_path / "apis.json")
     assert list(registry) == ["good"]
     assert registry["good"].headers == {"x-key": "s3cret"} and registry["good"].doc == "用法"
@@ -82,6 +90,7 @@ async def test_call_api_builds_the_url_sends_headers_and_compacts_json(monkeypat
     assert "只能是相對" in await call_api("lol", "https://evil/x", registry, config)
     assert "只能是相對" in await call_api("lol", "../x", registry, config)
     assert "沒有叫 nope" in await call_api("nope", "x", registry, config)
+
     # HTTP 429 is throttling as well: retried once, then reported as throttling, not as an answer
     async def no_sleep(seconds):
         pass
@@ -123,8 +132,16 @@ def test_load_registry_reads_a_bot_password_login_and_stays_anonymous_without_on
 ) -> None:
     monkeypatch.setenv("WIKI_USER", "bot@app")
     monkeypatch.setenv("WIKI_PASS", "secret")
-    spec = {"wiki": {"base": "https://w.example/api.php?", "login": {
-        "api": "https://w.example/api.php", "user": "${WIKI_USER}", "password": "${WIKI_PASS}"}}}
+    spec = {
+        "wiki": {
+            "base": "https://w.example/api.php?",
+            "login": {
+                "api": "https://w.example/api.php",
+                "user": "${WIKI_USER}",
+                "password": "${WIKI_PASS}",
+            },
+        }
+    }
     (tmp_path / "a.json").write_text(json.dumps(spec), "utf-8")
     assert load_registry(tmp_path / "a.json")["wiki"].login["user"] == "bot@app"
     monkeypatch.delenv("WIKI_PASS")
@@ -133,8 +150,15 @@ def test_load_registry_reads_a_bot_password_login_and_stays_anonymous_without_on
 
 
 async def test_call_api_logs_in_once_and_reuses_the_session(monkeypatch, config) -> None:
-    registry = {"wiki": Api("wiki", "https://w.example/api.php?", {}, "",
-                            {"api": "https://w.example/api.php", "user": "u", "password": "p"})}
+    registry = {
+        "wiki": Api(
+            "wiki",
+            "https://w.example/api.php?",
+            {},
+            "",
+            {"api": "https://w.example/api.php", "user": "u", "password": "p"},
+        )
+    }
     apis._LOGGED_IN.discard("wiki")
     logins = []
 

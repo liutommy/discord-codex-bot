@@ -50,9 +50,7 @@ def test_make_backup_archives_the_bots_state_only(tmp_path: Path, config) -> Non
     assert not list((tmp_path / "backups").glob("*.tmp"))
     assert make_backup(replace(cfg, backup_dir=None)) is None
     empty = tmp_path / "empty"
-    empty_config = replace(
-        cfg, codex_home=empty, tracking_db_path=empty / "tracking.sqlite3"
-    )
+    empty_config = replace(cfg, codex_home=empty, tracking_db_path=empty / "tracking.sqlite3")
     assert make_backup(empty_config) is None
 
 

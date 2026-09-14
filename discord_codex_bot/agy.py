@@ -127,9 +127,13 @@ async def ensure_project(config: Config, workspace: Path) -> str:
         return existing
     code, _out, err = await _run(
         [
-            "--new-project", "-p", "回覆 OK",
-            "--model", config.agy_probe_model,
-            "--output-format", "json",
+            "--new-project",
+            "-p",
+            "回覆 OK",
+            "--model",
+            config.agy_probe_model,
+            "--output-format",
+            "json",
         ],
         "",
         workspace,
@@ -190,9 +194,7 @@ async def run_agy(
     prompt = (
         user_prompt
         if raw
-        else _prompt(
-            user_prompt, memory, output_style(config), personal_style, links, help, files
-        )
+        else _prompt(user_prompt, memory, output_style(config), personal_style, links, help, files)
     )
     args = ["--project", project, "--model", model, "--output-format", "stream-json"]
     args += ["--input-format", "stream-json", "--print-timeout", f"{config.codex_timeout_seconds}s"]

@@ -227,16 +227,24 @@ async def test_run_streams_agent_text_deltas_while_agy_runs(monkeypatch, config)
     from discord_codex_bot import agy as agy_module
 
     def update(delta, state):
-        return json.dumps({"event": "step_update", "step_update": {
-            "step_type": "agent_response", "state": state, "text_delta": delta}})
+        return json.dumps(
+            {
+                "event": "step_update",
+                "step_update": {"step_type": "agent_response", "state": state, "text_delta": delta},
+            }
+        )
 
     events = [
         json.dumps({"event": "init", "conversation_id": "c1"}),
         update("Hel", "ACTIVE"),
         "SLEEP",
         update("lo", "DONE"),
-        json.dumps({"event": "result", "result": {
-            "conversation_id": "c1", "response": "Hello", "status": "SUCCESS"}}),
+        json.dumps(
+            {
+                "event": "result",
+                "result": {"conversation_id": "c1", "response": "Hello", "status": "SUCCESS"},
+            }
+        ),
     ]
     script = ";".join(
         "sleep 0.05" if e == "SLEEP" else "printf '%s\\n' '" + e.replace("'", "'\\''") + "'"

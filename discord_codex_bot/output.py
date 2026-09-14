@@ -15,11 +15,7 @@ def format_reply(
     """Quote the question above the answer; Discord does not echo slash command inputs."""
     echoed = prompt if len(prompt) <= PROMPT_ECHO_CHARS else f"{prompt[:PROMPT_ECHO_CHARS]}…"
     quoted = "\n".join(f"> {line}" for line in echoed.splitlines() or [""])
-    tags = [
-        tag
-        for tag in (effort, "附圖" if has_image else "", "續接" if resumed else "")
-        if tag
-    ]
+    tags = [tag for tag in (effort, "附圖" if has_image else "", "續接" if resumed else "") if tag]
     suffix = f"（{'、'.join(tags)}）" if tags else ""
     return f"**問**{suffix}：\n{quoted}\n\n{answer}"
 

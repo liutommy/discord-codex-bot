@@ -165,9 +165,7 @@ async def test_answer_defaults_to_codex_with_stored_or_explicit_effort(client, b
     assert codex.calls[-1][2]["effort"] == "max" and codex.calls[-1][2]["resume"] == "t-old"
 
 
-async def test_tracking_classifier_is_isolated_and_bounded(
-    client, tmp_path, monkeypatch
-) -> None:
+async def test_tracking_classifier_is_isolated_and_bounded(client, tmp_path, monkeypatch) -> None:
     client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
     client.config = replace(
         client.config,
@@ -194,9 +192,7 @@ async def test_tracking_classifier_is_isolated_and_bounded(
     assert len(calls) == 2  # the window gate is the only limit; there is no daily cap
 
 
-async def test_tracking_tags_add_a_watch_and_switch_its_mode(
-    client, tmp_path, monkeypatch
-) -> None:
+async def test_tracking_tags_add_a_watch_and_switch_its_mode(client, tmp_path, monkeypatch) -> None:
     client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
     client.config = replace(client.config, youtube_api_key="key")
 
@@ -208,9 +204,10 @@ async def test_tracking_tags_add_a_watch_and_switch_its_mode(
     # number in the attribute cannot turn into a mention.
     friend = 222222222222222222
     added = await client._apply_tracking_tags(
-        "好，幫你追。\n"
-        f'<track source="https://www.youtube.com/@HoushouMarine" who="<@{friend}>"/>',
-        GUILD, 555, USER,
+        f'好，幫你追。\n<track source="https://www.youtube.com/@HoushouMarine" who="<@{friend}>"/>',
+        GUILD,
+        555,
+        USER,
     )
     assert "已新增追蹤 #1" in added and f"<@{friend}>" in added and "<track" not in added
     watch = client.tracker.watches(user_id=USER)[0]
@@ -319,9 +316,7 @@ async def test_answer_falls_back_with_a_distinct_notice_when_codex_is_overloaded
     assert result.thread_id == "" and not result.resumed
 
 
-async def test_answer_alerts_the_operator_when_the_codex_login_is_gone(
-    client, monkeypatch
-) -> None:
+async def test_answer_alerts_the_operator_when_the_codex_login_is_gone(client, monkeypatch) -> None:
     # Quota refills on its own; a lost login does not. The spare still answers, but the operator
     # hears about it on this request instead of at the next periodic login check.
     agy = FakeBackend("登入失效備援答案")
@@ -551,8 +546,10 @@ async def test_model_command_autocomplete_and_openrouter_reminder(client, monkey
         return client.openrouter.models
 
     monkeypatch.setattr(client.openrouter, "free_models", no_refresh)
-    client.openrouter.models = [Model("g/vision:free", "Vision", True, False, 1),
-                                Model("t/text:free", "Text", False, True, 1)]
+    client.openrouter.models = [
+        Model("g/vision:free", "Vision", True, False, 1),
+        Model("t/text:free", "Text", False, True, 1),
+    ]
     names = [c.name for c in await client.model_options("openrouter", "")]
     assert names == ["OpenRouter · Vision（看圖）", "OpenRouter · Text"]
     assert [c.value for c in await client.model_options("openrouter", "TEXT")] == [
@@ -578,13 +575,25 @@ def test_previews_from_reads_discord_embeds_preferring_the_proxied_picture() -> 
     from discord_codex_bot.bot import previews_from
 
     thumb = NS(url="https://cdn.dcard/1.jpg", proxy_url="https://images.discordapp.net/1.jpg")
-    article = NS(type="article", url="https://www.dcard.tw/f/x/p/1", title="T", description="D",
-                 thumbnail=thumb, image=None)
-    bare = NS(type="link", url="https://a.example", title=None, description=None,
-              thumbnail=NS(url=None, proxy_url=None), image=NS(url="https://a.example/i.png",
-              proxy_url=None))
-    gif = NS(type="gifv", url="https://tenor.com/x", title="", description="", thumbnail=None,
-             image=None)
+    article = NS(
+        type="article",
+        url="https://www.dcard.tw/f/x/p/1",
+        title="T",
+        description="D",
+        thumbnail=thumb,
+        image=None,
+    )
+    bare = NS(
+        type="link",
+        url="https://a.example",
+        title=None,
+        description=None,
+        thumbnail=NS(url=None, proxy_url=None),
+        image=NS(url="https://a.example/i.png", proxy_url=None),
+    )
+    gif = NS(
+        type="gifv", url="https://tenor.com/x", title="", description="", thumbnail=None, image=None
+    )
     previews = previews_from([NS(embeds=[article, gif]), NS(embeds=[bare, article])])
     assert list(previews) == ["https://www.dcard.tw/f/x/p/1", "https://a.example"]
     assert previews["https://www.dcard.tw/f/x/p/1"] == Preview(
@@ -606,9 +615,7 @@ async def test_answer_hands_previews_to_link_blocks(client, backends, monkeypatc
     assert seen == {"urls": ["https://x.example"], "previews": previews}
 
 
-async def test_understand_videos_races_the_timer_and_fires_the_interim(
-    client, monkeypatch
-) -> None:
+async def test_understand_videos_races_the_timer_and_fires_the_interim(client, monkeypatch) -> None:
     import asyncio
 
     from discord_codex_bot import bot as bm
@@ -626,9 +633,7 @@ async def test_understand_videos_races_the_timer_and_fires_the_interim(
         notices.append(1)
 
     monkeypatch.setattr(bm, "understand_video", slow_understand)
-    block = await client._understand_videos(
-        ["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow
-    )
+    block = await client._understand_videos(["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow)
     assert block == '<VIDEO url="https://youtu.be/dQw4w9WgXcQ">\n描述\n</VIDEO>'
     assert notices == [1]  # the slow clip fired the interim exactly once
 
@@ -651,9 +656,10 @@ async def test_understand_videos_stays_silent_when_fast_or_disabled(client, monk
     # no video urls, or Gemini disabled → no work, no notice
     assert await client._understand_videos(["https://example.com"], Path("/tmp"), on_slow) == ""
     monkeypatch.setattr(bm.gemini, "available", lambda config: False)
-    assert await client._understand_videos(
-        ["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow
-    ) == ""
+    assert (
+        await client._understand_videos(["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow)
+        == ""
+    )
 
 
 async def test_answer_dispatches_to_orcarouter_with_its_own_catalog(
@@ -785,7 +791,7 @@ def test_every_registered_command_has_a_guide_entry_and_vice_versa(client) -> No
 
     prefix = client.config.command_prefix
     registered = {c.name.removeprefix(prefix) for c in client.tree.get_commands()}
-    assert registered == set(COMMAND_GUIDE), (registered ^ set(COMMAND_GUIDE))
+    assert registered == set(COMMAND_GUIDE), registered ^ set(COMMAND_GUIDE)
 
 
 def test_help_guide_and_sheet_come_from_the_same_source(client) -> None:
@@ -840,8 +846,9 @@ async def test_stop_command_cancels_only_an_in_flight_request(client) -> None:
             sent.append(text)
 
     channel_id = 222222222222222222  # the conftest allowlisted channel
-    interaction = NS(guild_id=GUILD, channel_id=channel_id, channel=None, user=NS(id=USER),
-                     response=Response())
+    interaction = NS(
+        guild_id=GUILD, channel_id=channel_id, channel=None, user=NS(id=USER), response=Response()
+    )
     await client.stop_command(interaction)
     assert sent[-1] == "你在這個頻道沒有進行中的請求。"
     key = ThreadStore.key(GUILD, channel_id, USER)
@@ -893,8 +900,13 @@ async def test_answer_reads_attached_documents_into_a_files_block(
     codex, _ = backends
     client.config = replace(client.config, attachment_dir=tmp_path)
     await client._answer(
-        "這兩份在講什麼", [Doc("text/plain", 5, "a.txt", b"hello file"),
-                            Doc("application/octet-stream", 3, "b.py", b"print(1)")], GUILD, USER,
+        "這兩份在講什麼",
+        [
+            Doc("text/plain", 5, "a.txt", b"hello file"),
+            Doc("application/octet-stream", 3, "b.py", b"print(1)"),
+        ],
+        GUILD,
+        USER,
     )
     kw = codex.calls[-1][2]
     assert '<FILE name="a.txt">\nhello file\n</FILE>' in kw["files"]
@@ -930,7 +942,7 @@ async def test_streamer_throttles_skips_tag_interims_and_clips(client, monkeypat
     clock = {"t": 100.0}
     monkeypatch.setattr(time_module, "monotonic", lambda: clock["t"])
     on_delta = client._streamer(show, None)
-    await on_delta("<fetch url=\"https://x\"/>")  # a read request, not an answer
+    await on_delta('<fetch url="https://x"/>')  # a read request, not an answer
     await on_delta("你好")
     await on_delta("你好，我是")  # within 1.5s: suppressed
     clock["t"] += 2
@@ -960,7 +972,8 @@ async def test_exchange_of_uses_the_replied_message_or_the_quoted_block(
         return original
 
     replied = NS(
-        content="去吃一蘭", reference=NS(message_id=1, resolved=None),
+        content="去吃一蘭",
+        reference=NS(message_id=1, resolved=None),
         channel=NS(fetch_message=fetch_message),
     )
     # a resolved reference is a discord.Message in production; the fallback path is exercised
@@ -1011,8 +1024,13 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
     assert backends[0].calls[-1][0] == "今天吃什麼"
     assert backends[0].calls[-1][2]["resume"] == "thread-abc"
     assert client.threads.by_message(9999, plain=plain, model=model) == "t1"  # redo answer linked
-    empty = NS(message=NS(content="沒有引用", reference=None), guild_id=GUILD, channel_id=555,
-               response=Response(), followup=Followup())
+    empty = NS(
+        message=NS(content="沒有引用", reference=None),
+        guild_id=GUILD,
+        channel_id=555,
+        response=Response(),
+        followup=Followup(),
+    )
     await client.handle_answer_button(empty, "redo", USER)
     assert sent[-1][1].startswith("找不到原本的問題")
 
@@ -1021,11 +1039,13 @@ async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monke
     from discord_codex_bot import search as search_module
     from discord_codex_bot.bot import request_only
 
-    assert request_only('<web query="台北 夜市"/>') and not request_only("先說<web query=\"x\"/>")
-    replies = iter([
-        CodexResult('<web query="台北 夜市"/>', (), None, "t1", False),
-        CodexResult("答案", (), None, "t1", True),
-    ])
+    assert request_only('<web query="台北 夜市"/>') and not request_only('先說<web query="x"/>')
+    replies = iter(
+        [
+            CodexResult('<web query="台北 夜市"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
     calls = []
 
     async def fake_codex(text, config, **kw):
@@ -1046,9 +1066,13 @@ async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monke
 def test_remember_button_uses_the_guild_custom_emoji_when_present(client, monkeypatch) -> None:
     from types import SimpleNamespace as NS
 
-    monkeypatch.setattr(client, "get_guild", lambda gid: NS(
-        emojis=[NS(name="other", id=1, animated=False), NS(name="114514", id=2, animated=False)]
-    ))
+    monkeypatch.setattr(
+        client,
+        "get_guild",
+        lambda gid: NS(
+            emojis=[NS(name="other", id=1, animated=False), NS(name="114514", id=2, animated=False)]
+        ),
+    )
     view = client._answer_view(GUILD, USER, "q", CodexResult("a"))
     remember = [b for b in view.children if b.custom_id.startswith("inmu:remember")][0]
     assert remember.item.emoji.id == 2 and remember.item.emoji.name == "114514"
@@ -1077,13 +1101,19 @@ async def test_answer_creates_and_cancels_reminders_from_model_tags(
     client, backends, monkeypatch
 ) -> None:
     codex, _ = backends
-    replies = iter([
-        CodexResult(
-            '好，明天叫你。<remind when="2026-12-01 09:30" text="倒垃圾"/>', (), None, "t", False
-        ),
-        CodexResult('取消了。<cancel_reminder id="1"/>', (), None, "t", False),
-        CodexResult('這個不行。<remind when="等一下" text="x"/>', (), None, "t", False),
-    ])
+    replies = iter(
+        [
+            CodexResult(
+                '好，明天叫你。<remind when="2026-12-01 09:30" text="倒垃圾"/>',
+                (),
+                None,
+                "t",
+                False,
+            ),
+            CodexResult('取消了。<cancel_reminder id="1"/>', (), None, "t", False),
+            CodexResult('這個不行。<remind when="等一下" text="x"/>', (), None, "t", False),
+        ]
+    )
 
     async def fake_codex(text, config, **kw):
         fake_codex.prompts.append(kw)
@@ -1109,10 +1139,12 @@ async def test_recall_loop_runs_sandbox_snippets_and_delivers_files(
 
     assert request_only('<run lang="python">print(1)</run>')
     client.config = replace(client.config, attachment_dir=tmp_path)
-    replies = iter([
-        CodexResult('<run lang="python">\nprint(6*7)\n</run>', (), None, "t1", False),
-        CodexResult("答案是 42", (), None, "t1", True),
-    ])
+    replies = iter(
+        [
+            CodexResult('<run lang="python">\nprint(6*7)\n</run>', (), None, "t1", False),
+            CodexResult("答案是 42", (), None, "t1", True),
+        ]
+    )
     prompts = []
 
     async def fake_codex(text, config, **kw):
@@ -1144,10 +1176,12 @@ async def test_recall_loop_calls_registered_apis_and_help_lists_them(
     client.apis = {"lol": apis_module.Api("lol", "https://x/", {}, "先 getLeagues")}
     assert "- lol：先 getLeagues" in client.help_sheet()
     assert request_only('<api name="lol" path="getLeagues"/>')
-    replies = iter([
-        CodexResult('<api name="lol" path="getLeagues?hl=zh-TW"/>', (), None, "t1", False),
-        CodexResult("LCK 有 10 隊", (), None, "t1", True),
-    ])
+    replies = iter(
+        [
+            CodexResult('<api name="lol" path="getLeagues?hl=zh-TW"/>', (), None, "t1", False),
+            CodexResult("LCK 有 10 隊", (), None, "t1", True),
+        ]
+    )
     prompts = []
 
     async def fake_codex(text, config, **kw):
@@ -1181,8 +1215,7 @@ def test_configure_logging_writes_to_the_host_dir_and_survives_an_unusable_one(
             handler.flush()
         assert "hello-log" in (tmp_path / "logs" / "bot.log").read_text("utf-8")
         rotating = [
-            h for h in root.handlers
-            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+            h for h in root.handlers if isinstance(h, logging.handlers.TimedRotatingFileHandler)
         ]
         assert len(rotating) == 1 and rotating[0].backupCount == 3
         for handler in root.handlers:
@@ -1192,9 +1225,7 @@ def test_configure_logging_writes_to_the_host_dir_and_survives_an_unusable_one(
         blocker = tmp_path / "blocker"
         blocker.write_text("a file, not a directory", "utf-8")
         configure_logging(replace(config, log_dir=blocker / "logs"))
-        assert root.handlers and not any(
-            isinstance(h, logging.FileHandler) for h in root.handlers
-        )
+        assert root.handlers and not any(isinstance(h, logging.FileHandler) for h in root.handlers)
     finally:
         for handler in root.handlers:
             handler.close()
@@ -1224,24 +1255,38 @@ async def test_redo_puts_back_the_message_the_question_pointed_at(
             return NS(id=9999)
 
     video = "https://www.youtube.com/watch?v=r28Uo9uWGSo"
-    pointed = NS(content=video, embeds=[], attachments=[],
-                 author=NS(display_name="030", id=5), reference=None, channel=None)
+    pointed = NS(
+        content=video,
+        embeds=[],
+        attachments=[],
+        author=NS(display_name="030", id=5),
+        reference=None,
+        channel=None,
+    )
 
     async def fetch_pointed(message_id):
         return pointed
 
-    asked = NS(content="<@999> 整理一下影片大綱", embeds=[], attachments=[],
-               reference=NS(message_id=2, resolved=None),
-               channel=NS(fetch_message=fetch_pointed))
+    asked = NS(
+        content="<@999> 整理一下影片大綱",
+        embeds=[],
+        attachments=[],
+        reference=NS(message_id=2, resolved=None),
+        channel=NS(fetch_message=fetch_pointed),
+    )
 
     async def fetch_asked(message_id):
         return asked
 
-    answer = NS(content="**問**：\n> 整理一下影片大綱\n\n看不到影片內容", id=4242,
-                reference=NS(message_id=1, resolved=None),
-                channel=NS(fetch_message=fetch_asked))
-    interaction = NS(message=answer, guild_id=GUILD, channel_id=555,
-                     response=Response(), followup=Followup())
+    answer = NS(
+        content="**問**：\n> 整理一下影片大綱\n\n看不到影片內容",
+        id=4242,
+        reference=NS(message_id=1, resolved=None),
+        channel=NS(fetch_message=fetch_asked),
+    )
+    interaction = NS(
+        message=answer, guild_id=GUILD, channel_id=555, response=Response(), followup=Followup()
+    )
     await client.handle_answer_button(interaction, "redo", USER)
     prompt = backends[0].calls[-1][0]
     assert video in prompt  # the link lived in the quoted message, not in the member's own words
@@ -1257,11 +1302,13 @@ async def test_recall_loop_does_not_re_send_an_identical_api_query(
 
     client.apis = {"lp": apis_module.Api("lp", "https://x/", {}, "doc")}
     tag = '<api name="lp" path="tables=ScoreboardGames"/>'
-    replies = iter([
-        CodexResult(tag, (), None, "t1", False),
-        CodexResult(tag, (), None, "t1", False),
-        CodexResult("來源被限流，稍後再問", (), None, "t1", True),
-    ])
+    replies = iter(
+        [
+            CodexResult(tag, (), None, "t1", False),
+            CodexResult(tag, (), None, "t1", False),
+            CodexResult("來源被限流，稍後再問", (), None, "t1", True),
+        ]
+    )
     prompts = []
 
     async def fake_codex(text, config, **kw):

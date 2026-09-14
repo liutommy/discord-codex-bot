@@ -450,10 +450,14 @@ class DiscordCodexClient(discord.Client):
         LOGGER.info("%s", await codex_login_status(self.config))
         LOGGER.info("Alerts go to user %s", await self.alerts.resolve_owner() or "(none)")
         if not getattr(self, "_login_watch", None):
-            self._login_watch = asyncio.create_task(login_watch(
-                self.alerts, self.config, codex_login_status,
-                self.config.alert_login_check_minutes * 60,
-            ))
+            self._login_watch = asyncio.create_task(
+                login_watch(
+                    self.alerts,
+                    self.config,
+                    codex_login_status,
+                    self.config.alert_login_check_minutes * 60,
+                )
+            )
         try:
             await announce_once(self, self.config)
         except Exception:
@@ -556,7 +560,10 @@ class DiscordCodexClient(discord.Client):
             # leaves nothing in the host log to find it by.
             LOGGER.info(
                 "Access refused guild=%s channel=%s parent=%s: %s",
-                guild_id, channel_id, parent_id, decision.reason,
+                guild_id,
+                channel_id,
+                parent_id,
+                decision.reason,
             )
         return "" if decision.allowed else decision.reason
 
@@ -589,9 +596,7 @@ class DiscordCodexClient(discord.Client):
 
     def help_guide(self) -> str:
         """The detailed member guide behind /<prefix>-help (same source as the model's sheet)."""
-        return render_guide(
-            self.config.command_prefix, [row[0] for row in self._command_rows()]
-        )
+        return render_guide(self.config.command_prefix, [row[0] for row in self._command_rows()])
 
     async def _understand_videos(
         self,
@@ -608,11 +613,14 @@ class DiscordCodexClient(discord.Client):
 
         async def describe() -> list[str]:
             done = await asyncio.gather(
-                *(understand_video(u, self.config, out_dir / f"vid{i}")
-                  for i, u in enumerate(targets))
+                *(
+                    understand_video(u, self.config, out_dir / f"vid{i}")
+                    for i, u in enumerate(targets)
+                )
             )
-            return [f'<VIDEO url="{u}">\n{d}\n</VIDEO>' for u, d in zip(targets, done, strict=True)
-                    if d]
+            return [
+                f'<VIDEO url="{u}">\n{d}\n</VIDEO>' for u, d in zip(targets, done, strict=True) if d
+            ]
 
         task = asyncio.create_task(describe())
         try:
@@ -662,8 +670,13 @@ class DiscordCodexClient(discord.Client):
                 catalog = self.catalogs[via.backend]
                 await catalog.free_models()  # image / effort capability lookup
                 return await run_router(
-                    ROUTERS[via.backend], text, self.config, via.model,
-                    effort=via.effort, catalog=catalog, **kw,
+                    ROUTERS[via.backend],
+                    text,
+                    self.config,
+                    via.model,
+                    effort=via.effort,
+                    catalog=catalog,
+                    **kw,
                 )
             return await run_codex(text, self.config, effort=via.effort, **kw)
 
@@ -708,9 +721,7 @@ class DiscordCodexClient(discord.Client):
                     images.append(await download_attachment(attachment, suffix, self.config))
                 elif kind == "document":
                     saved = await download_attachment(attachment, suffix, self.config, "doc")
-                    text = await asyncio.to_thread(
-                        extract_text, saved, self.config.link_max_chars
-                    )
+                    text = await asyncio.to_thread(extract_text, saved, self.config.link_max_chars)
                     documents.append(f'<FILE name="{attachment.filename}">\n{text}\n</FILE>')
                     remove_request_dir(saved)
             files = "\n\n".join(documents)
@@ -781,9 +792,7 @@ class DiscordCodexClient(discord.Client):
                 extra: list[Path] = []
                 for i, (lang, code) in enumerate(runs):
                     try:
-                        ran = await sandbox.run_code(
-                            lang, code, self.config, link_dir / f"run{i}"
-                        )
+                        ran = await sandbox.run_code(lang, code, self.config, link_dir / f"run{i}")
                     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
                         ran = sandbox.RunResult(
                             -1, False, "", f"沙盒無法使用：{type(error).__name__}"
@@ -821,9 +830,7 @@ class DiscordCodexClient(discord.Client):
                 if generated_dir is None:
                     generated_dir = deliver_dir  # the caller removes it after sending
                 else:
-                    delivered = [
-                        self._keep_for_member(path, generated_dir) for path in delivered
-                    ]
+                    delivered = [self._keep_for_member(path, generated_dir) for path in delivered]
                 outgoing += tuple(delivered)
             if fell_back:
                 # Say which model actually answered: the persona and the answer both change.
@@ -1051,18 +1058,24 @@ class DiscordCodexClient(discord.Client):
         pointed = await self._referenced(asked) if asked is not None else None
         if pointed is not None and pointed.author != self.user:
             # The quoted images are not re-downloaded here, so they are not announced as attached.
-            prompt = with_quoted_message(
-                question, pointed.author.display_name, pointed.content, 0
-            )
+            prompt = with_quoted_message(question, pointed.author.display_name, pointed.content, 0)
         if asked is not None:
             previews = await self._previews(asked, pointed)
         LOGGER.info(
             "Button redo guild=%s user=%s resume=%s quoted=%s",
-            interaction.guild_id, user_id, bool(resume), pointed is not None,
+            interaction.guild_id,
+            user_id,
+            bool(resume),
+            pointed is not None,
         )
         result = await self._answer(
-            prompt, [], interaction.guild_id, user_id, resume=resume,
-            channel_id=interaction.channel_id, previews=previews,
+            prompt,
+            [],
+            interaction.guild_id,
+            user_id,
+            resume=resume,
+            channel_id=interaction.channel_id,
+            previews=previews,
         )
         sent = await self.send_answer(
             interaction.followup, question, result, interaction.guild_id, user_id
@@ -1077,7 +1090,8 @@ class DiscordCodexClient(discord.Client):
         chunks = split_discord_message(result.text)
         try:
             sent = await destination.send(
-                chunks[0], files=self._files(result),
+                chunks[0],
+                files=self._files(result),
                 view=self._answer_view(guild_id, user_id, prompt, result),
             )
             for chunk in chunks[1:]:
@@ -1105,9 +1119,12 @@ class DiscordCodexClient(discord.Client):
         await interaction.response.defer(thinking=True)
         try:
             if hours is not None:
-                fetched = [m async for m in interaction.channel.history(
-                    limit=MAX_MESSAGES, after=since(hours), oldest_first=True
-                )]
+                fetched = [
+                    m
+                    async for m in interaction.channel.history(
+                        limit=MAX_MESSAGES, after=since(hours), oldest_first=True
+                    )
+                ]
             else:
                 fetched = [m async for m in interaction.channel.history(limit=count)]
                 fetched.reverse()
@@ -1131,9 +1148,15 @@ class DiscordCodexClient(discord.Client):
 
         # A fresh, unremembered turn: the summary must not become the member's conversation.
         result = await self._run_tracked(
-            key, interaction.user.id, show,
+            key,
+            interaction.user.id,
+            show,
             lambda on_video_slow, on_delta: self._answer(
-                prompt, [], interaction.guild_id, interaction.user.id, resume="",
+                prompt,
+                [],
+                interaction.guild_id,
+                interaction.user.id,
+                resume="",
                 on_delta=on_delta,
             ),
         )
@@ -1233,7 +1256,11 @@ class DiscordCodexClient(discord.Client):
             external_id, state = await resolver.resolve(locator)
             tracked = store.add_source(provider, external_id, locator, state)
             watch = store.add_watch(
-                tracked.id, guild_id, channel_id, user_id, policy,
+                tracked.id,
+                guild_id,
+                channel_id,
+                user_id,
+                policy,
                 mention_ids=mention_ids,
                 interval_minutes=interval_minutes or self.config.tracking_classify_interval_minutes,
             )
@@ -1292,7 +1319,11 @@ class DiscordCodexClient(discord.Client):
             )
         LOGGER.info(
             "Tracking tags guild=%s channel=%s user=%s adds=%d every=%d",
-            guild_id, channel_id, user_id, len(adds), len(intervals),
+            guild_id,
+            channel_id,
+            user_id,
+            len(adds),
+            len(intervals),
         )
         return f"{clean}\n\n" + "\n".join(notes)
 
@@ -1355,17 +1386,25 @@ class DiscordCodexClient(discord.Client):
                     interaction.guild_id, interaction.channel_id, user_id, due, text, target
                 )
                 whom = f"提醒 {who.display_name}" if who is not None else "提醒你"
-                message = item if isinstance(item, str) else (
-                    f"好，{describe(due)} 在這個頻道{whom}：{item['text']}（#{item['id']}）"
+                message = (
+                    item
+                    if isinstance(item, str)
+                    else (f"好，{describe(due)} 在這個頻道{whom}：{item['text']}（#{item['id']}）")
                 )
         elif when or text:
             message = "要同時給 when（時間）和 text（內容）。"
         else:
             mine = self.reminders.for_user(user_id)
-            message = "你沒有提醒。" if not mine else "你的提醒：\n" + "\n".join(
-                f"#{i['id']} {describe(_dt.fromisoformat(i['due']))}"
-                + (f" → <@{i['target_id']}>" if _for_other(i) else "")
-                + f" — {i['text']}" for i in mine
+            message = (
+                "你沒有提醒。"
+                if not mine
+                else "你的提醒：\n"
+                + "\n".join(
+                    f"#{i['id']} {describe(_dt.fromisoformat(i['due']))}"
+                    + (f" → <@{i['target_id']}>" if _for_other(i) else "")
+                    + f" — {i['text']}"
+                    for i in mine
+                )
             )
         await interaction.response.send_message(message, ephemeral=True)
 
@@ -1395,9 +1434,7 @@ class DiscordCodexClient(discord.Client):
             )
             return
         actions = (
-            int(bool(source and source.strip()))
-            + int(cancel is not None)
-            + int(log is not None)
+            int(bool(source and source.strip())) + int(cancel is not None) + int(log is not None)
         )
         if actions > 1 or (interest and not source):
             await interaction.response.send_message(
@@ -1507,9 +1544,7 @@ class DiscordCodexClient(discord.Client):
         )
         await interaction.followup.send(text, ephemeral=True)
 
-    async def _status_text(
-        self, guild_id: int | None, channel_id: int | None, user_id: int
-    ) -> str:
+    async def _status_text(self, guild_id: int | None, channel_id: int | None, user_id: int) -> str:
         """Two sections: what this member has set (model, style, whether the next request
         continues a thread, memory sizes) and what the system offers. No usage figures: the
         Codex quota is the operator's, and the routers' free limits are not published."""
@@ -1539,9 +1574,7 @@ class DiscordCodexClient(discord.Client):
                     f"；/{self.config.command_prefix} 的 new 可重來"
                 )
             else:
-                thread_line = (
-                    f"續接：{minutes} 分鐘前的對話是 {previous}／另一種風格，下一句會新開"
-                )
+                thread_line = f"續接：{minutes} 分鐘前的對話是 {previous}／另一種風格，下一句會新開"
 
         def scope_line(label: str, scope: str, owner: int | None, limit: int) -> str:
             shown = len(self.memory.entries(scope, guild_id, owner))
@@ -1550,11 +1583,13 @@ class DiscordCodexClient(discord.Client):
             text = f"{label} {total} 條 / {used // 1024} KB（上限 {limit // 1_000_000} MB）"
             return text + (f"，{total - shown} 條已推到 archive" if total > shown else "")
 
-        memory_line = "記憶：" + " · ".join((
-            scope_line("個人", "user", user_id, self.config.memory_user_max_bytes),
-            scope_line("伺服器", "guild", None, self.config.memory_guild_max_bytes),
-            f"永久 {self.permanent.topic_count()} 主題",
-        ))
+        memory_line = "記憶：" + " · ".join(
+            (
+                scope_line("個人", "user", user_id, self.config.memory_user_max_bytes),
+                scope_line("伺服器", "guild", None, self.config.memory_guild_max_bytes),
+                f"永久 {self.permanent.topic_count()} 主題",
+            )
+        )
 
         codex = await codex_login_status(self.config)
         routers = []
@@ -1571,10 +1606,18 @@ class DiscordCodexClient(discord.Client):
             f" · 沙盒：{'開' if sandbox.available(self.config) else '關'}"
             f" · 資料 API：{'／'.join(self.apis) or '無'}",
         ]
-        return "\n".join((
-            "【你的設定】", model_line, style_line, thread_line, memory_line,
-            "", "【系統】", *system,
-        ))
+        return "\n".join(
+            (
+                "【你的設定】",
+                model_line,
+                style_line,
+                thread_line,
+                memory_line,
+                "",
+                "【系統】",
+                *system,
+            )
+        )
 
     @app_commands.describe(
         scope="個人＝只對你；伺服器＝這裡所有人", name="短標題", text="要記住的內容"
@@ -1795,10 +1838,18 @@ class DiscordCodexClient(discord.Client):
                 pass
 
         result = await self._run_tracked(
-            key, interaction.user.id, show,
+            key,
+            interaction.user.id,
+            show,
             lambda on_video_slow, on_delta: self._answer(
-                prompt, attachments, interaction.guild_id, interaction.user.id, effort_value,
-                resume, on_video_slow=on_video_slow, on_delta=on_delta,
+                prompt,
+                attachments,
+                interaction.guild_id,
+                interaction.user.id,
+                effort_value,
+                resume,
+                on_video_slow=on_video_slow,
+                on_delta=on_delta,
                 channel_id=interaction.channel_id,
             ),
         )
@@ -1821,7 +1872,8 @@ class DiscordCodexClient(discord.Client):
         sent_id = None
         try:
             sent = await interaction.edit_original_response(
-                content=chunks[0], attachments=self._files(result),
+                content=chunks[0],
+                attachments=self._files(result),
                 view=self._answer_view(interaction.guild_id, interaction.user.id, prompt, result),
             )
             sent_id = sent.id
@@ -1844,7 +1896,9 @@ class DiscordCodexClient(discord.Client):
         # it a request cannot be traced back to where its side effects landed.
         LOGGER.info(
             "Completed slash guild=%s channel=%s user=%s",
-            interaction.guild_id, interaction.channel_id, interaction.user.id,
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.user.id,
         )
 
     # ----- @mention entry point --------------------------------------------------------------
@@ -1864,7 +1918,8 @@ class DiscordCodexClient(discord.Client):
         quoted = await self._referenced(message)
         if quoted is not None and quoted.author != self.user:
             usable = [
-                a for a in quoted.attachments
+                a
+                for a in quoted.attachments
                 if validate_attachment(a.content_type, a.filename, a.size, self.config)[0]
             ]
             attachments.extend(usable)
@@ -1894,18 +1949,24 @@ class DiscordCodexClient(discord.Client):
                 if placeholder:
                     await placeholder[0].edit(content=text, view=view)
                 else:
-                    placeholder.append(
-                        await message.reply(text, view=view, mention_author=False)
-                    )
+                    placeholder.append(await message.reply(text, view=view, mention_author=False))
             except discord.HTTPException:
                 pass
 
         async with message.channel.typing():
             result = await self._run_tracked(
-                key, message.author.id, show,
+                key,
+                message.author.id,
+                show,
                 lambda on_video_slow, on_delta: self._answer(
-                    prompt, attachments, guild_id, message.author.id, resume=resume,
-                    previews=previews, on_video_slow=on_video_slow, on_delta=on_delta,
+                    prompt,
+                    attachments,
+                    guild_id,
+                    message.author.id,
+                    resume=resume,
+                    previews=previews,
+                    on_video_slow=on_video_slow,
+                    on_delta=on_delta,
                     channel_id=message.channel.id,
                 ),
             )
@@ -1935,7 +1996,9 @@ class DiscordCodexClient(discord.Client):
         self._remember(key, result.thread_id, sent_id, plain, model)
         LOGGER.info(
             "Completed @mention guild=%s channel=%s user=%s",
-            message.guild.id, message.channel.id, message.author.id,
+            message.guild.id,
+            message.channel.id,
+            message.author.id,
         )
 
 
@@ -1955,7 +2018,9 @@ def configure_logging(config: Config) -> None:
     try:
         config.log_dir.mkdir(parents=True, exist_ok=True)
         rotating = logging.handlers.TimedRotatingFileHandler(
-            config.log_dir / "bot.log", when="midnight", backupCount=config.log_keep_days,
+            config.log_dir / "bot.log",
+            when="midnight",
+            backupCount=config.log_keep_days,
             encoding="utf-8",
         )
     except OSError as error:

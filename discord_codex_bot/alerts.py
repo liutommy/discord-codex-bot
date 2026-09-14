@@ -13,8 +13,15 @@ from .config import Config
 LOGGER = logging.getLogger(__name__)
 # Failures that mean "the operator must act now", alerted on first sight rather than by streak.
 _IMMEDIATE = (
-    "login", "logged in", "unauthorized", "401", "invalid api key", "authentication",
-    "credential", "尚未以 chatgpt", "not logged",
+    "login",
+    "logged in",
+    "unauthorized",
+    "401",
+    "invalid api key",
+    "authentication",
+    "credential",
+    "尚未以 chatgpt",
+    "not logged",
 )
 
 

@@ -109,9 +109,7 @@ class MemoryStore:
 
     def all_entries(self, scope: str, guild_id: int | None, user_id: int | None) -> list[Entry]:
         directory = self.scope_dir(scope, guild_id, user_id)
-        return self._read_index(directory / INDEX_FILE) + self._read_index(
-            directory / ARCHIVE_FILE
-        )
+        return self._read_index(directory / INDEX_FILE) + self._read_index(directory / ARCHIVE_FILE)
 
     def index_text(self, scope: str, guild_id: int | None, user_id: int | None) -> str:
         """The injected window: the first index_max_lines / index_max_bytes of MEMORY.md."""
@@ -145,10 +143,9 @@ class MemoryStore:
         directory = self.scope_dir(scope, guild_id, user_id)
         body = f"# {name.strip()}\n\n{date.today().isoformat()}\n\n{text}\n"
         needed = len(body.encode("utf-8")) + 120
-        while (
-            self.usage_bytes(scope, guild_id, user_id) + needed > self.capacity(scope)
-            and self._evict_oldest(directory)
-        ):
+        while self.usage_bytes(scope, guild_id, user_id) + needed > self.capacity(
+            scope
+        ) and self._evict_oldest(directory):
             pass
         entries = self._read_index(directory / INDEX_FILE)
         slug = slugify(name)
@@ -406,9 +403,7 @@ class PermanentMemory:
             (path.stem, path.name, path.read_text("utf-8", errors="ignore").splitlines())
             for path in self._topics()
         ]
-        return search_snippets(
-            sources, query, self._limits, f"（「{query}」沒有命中任何永久記憶）"
-        )
+        return search_snippets(sources, query, self._limits, f"（「{query}」沒有命中任何永久記憶）")
 
     def recall(self, name: str, offset: int = 1, lines: int | None = None) -> str:
         if name == LIST_NAME:

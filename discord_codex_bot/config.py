@@ -197,9 +197,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         allowed_guild_ids=parse_id_set(
             values.get("ALLOWED_GUILD_IDS"), "ALLOWED_GUILD_IDS", required=True
         ),
-        allowed_channel_ids=parse_id_set(
-            values.get("ALLOWED_CHANNEL_IDS"), "ALLOWED_CHANNEL_IDS"
-        ),
+        allowed_channel_ids=parse_id_set(values.get("ALLOWED_CHANNEL_IDS"), "ALLOWED_CHANNEL_IDS"),
         command_prefix=_command_prefix(values),
         codex_model=values.get("CODEX_MODEL", "").strip() or "gpt-5.6-luna",
         codex_reasoning_effort=_effort(values),

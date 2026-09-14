@@ -8,18 +8,24 @@ from discord_codex_bot.summary import render_transcript, since, summary_prompt
 
 def msg(text, who="小明", bot=False, minute=0, attachments=0, embeds=0):
     return NS(
-        content=text, attachments=[1] * attachments, embeds=[1] * embeds,
+        content=text,
+        attachments=[1] * attachments,
+        embeds=[1] * embeds,
         created_at=datetime(2026, 9, 13, 4, minute, tzinfo=UTC),
         author=NS(display_name=who, bot=bot),
     )
 
 
 def test_render_transcript_lines_markers_and_tail_bound() -> None:
-    text = render_transcript([
-        msg("早安", minute=1), msg("", minute=2),
-        msg("看這個", "阿花", minute=3, attachments=1, embeds=2),
-        msg("我是機器人", "Inmu King", bot=True, minute=4), msg("", minute=5, attachments=1),
-    ])
+    text = render_transcript(
+        [
+            msg("早安", minute=1),
+            msg("", minute=2),
+            msg("看這個", "阿花", minute=3, attachments=1, embeds=2),
+            msg("我是機器人", "Inmu King", bot=True, minute=4),
+            msg("", minute=5, attachments=1),
+        ]
+    )
     assert text.splitlines() == [
         "09/13 12:01 小明：早安",
         "09/13 12:03 阿花：看這個 [附件 1 個] [連結預覽 2 個]",

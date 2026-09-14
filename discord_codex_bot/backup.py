@@ -23,7 +23,11 @@ from .consolidate import seconds_until
 LOGGER = logging.getLogger(__name__)
 # Relative to codex_home: everything the Bot itself wrote and would miss after a lost volume.
 BACKUP_MEMBERS = (
-    "memory", "openrouter", "discord_threads.json", "reminders.json", "announced.json",
+    "memory",
+    "openrouter",
+    "discord_threads.json",
+    "reminders.json",
+    "announced.json",
 )
 TRACKING_DB = "tracking.sqlite3"
 ARCHIVE_PREFIX = "discord-codex-bot-"

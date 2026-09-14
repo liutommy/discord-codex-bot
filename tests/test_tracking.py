@@ -44,9 +44,7 @@ def content(source_id: int, external_id: str, title: str = "重大告知") -> Co
 
 
 def classifier_answer(prompt: str, *, notify: bool = True) -> str:
-    start = prompt.index("UNTRUSTED_SOCIAL_CONTENT_JSON:") + len(
-        "UNTRUSTED_SOCIAL_CONTENT_JSON:"
-    )
+    start = prompt.index("UNTRUSTED_SOCIAL_CONTENT_JSON:") + len("UNTRUSTED_SOCIAL_CONTENT_JSON:")
     items, _ = json.JSONDecoder().raw_decode(prompt[start:].lstrip())
     return json.dumps(
         {
@@ -182,9 +180,7 @@ def test_track_tags_are_parsed_like_reminder_tags() -> None:
     ]
     assert intervals == []
     # interest and who are optional: the default policy applies and only the owner is pinged.
-    _clean, bare, _every = extract_track_tags(
-        '<track source="https://www.twitch.tv/chibidoki"/>'
-    )
+    _clean, bare, _every = extract_track_tags('<track source="https://www.twitch.tv/chibidoki"/>')
     assert bare == [("https://www.twitch.tv/chibidoki", "", (), 0)]
     assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [])
 
@@ -209,9 +205,7 @@ def test_a_decision_without_wording_is_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="decision fields"):
         parse_classifier_result(without, items)
-    answer = classifier_answer(
-        'UNTRUSTED_SOCIAL_CONTENT_JSON: [{"external_item_id": "v1"}]'
-    )
+    answer = classifier_answer('UNTRUSTED_SOCIAL_CONTENT_JSON: [{"external_item_id": "v1"}]')
     assert parse_classifier_result(answer, items)[0].message == "前輩發現有大事了"
 
 
@@ -274,9 +268,10 @@ async def test_web_source_turns_new_links_into_items(tmp_path: Path) -> None:
     # is the model's job, not a rule about URL shapes. Off-site links and the page itself are
     # excluded because they are not this source.
     found = {item.external_id: item.title for item in first.items}
-    assert "https://yu-gi-oh.jp/news/aaa/" in found and found[
-        "https://yu-gi-oh.jp/news/aaa/"
-    ] == headline
+    assert (
+        "https://yu-gi-oh.jp/news/aaa/" in found
+        and found["https://yu-gi-oh.jp/news/aaa/"] == headline
+    )
     assert "https://yu-gi-oh.jp/books/" in found  # navigation: the baseline absorbs it
     assert "https://twitter.com/share" not in found
     assert "https://yu-gi-oh.jp/news/" not in found
@@ -346,9 +341,7 @@ def test_prune_drops_history_but_never_the_dedupe_rows(tmp_path: Path) -> None:
     assert removed["outbox"] == 1 and removed["decisions"] == 1
     assert removed["items_trimmed"] == 1 and store.decisions() == []
     with sqlite3.connect(tmp_path / "tracking.sqlite3") as connection:
-        kept = connection.execute(
-            "SELECT external_id, raw_json, description FROM items"
-        ).fetchall()
+        kept = connection.execute("SELECT external_id, raw_json, description FROM items").fetchall()
     assert kept == [("old", "{}", "")]  # the row survives, only its bulk is cleared
     # That surviving row is the whole point: the same content is not ingested as new again,
     # so pruning can never cause a re-classification or a duplicate notification.

@@ -142,11 +142,12 @@ async def _login(api: Api, config: Config) -> bool:
             if not token:
                 LOGGER.warning("%s login: no token in reply", api.name)
                 return False
-            form = {"lgname": api.login["user"], "lgpassword": api.login["password"],
-                    "lgtoken": token}
-            async with session.post(
-                f"{endpoint}?action=login&format=json", data=form
-            ) as response:
+            form = {
+                "lgname": api.login["user"],
+                "lgpassword": api.login["password"],
+                "lgtoken": token,
+            }
+            async with session.post(f"{endpoint}?action=login&format=json", data=form) as response:
                 result = (await response.json(content_type=None)).get("login") or {}
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
         LOGGER.warning("%s login failed: %s", api.name, type(error).__name__)
@@ -181,17 +182,20 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
         code, info = _api_error(body)
         throttled = status == 429 or code in RATE_LIMIT_CODES
         if throttled and attempt == 1:
-            LOGGER.info("%s throttled (%s); one retry in %ss", name, code or status,
-                        RETRY_AFTER_SECONDS)
+            LOGGER.info(
+                "%s throttled (%s); one retry in %ss", name, code or status, RETRY_AFTER_SECONDS
+            )
             if api.login:  # a dropped session looks exactly like throttling: log in again
                 _LOGGED_IN.discard(api.name)
                 await _login(api, config)
             await asyncio.sleep(RETRY_AFTER_SECONDS)
             continue
         if throttled:
-            return (f"（{name} 被限流，已自動重試一次仍被擋。**這不是查無資料**：同一條查詢稍後"
-                    f"會成功。不要改寫成「沒有紀錄」，也不要換到查不到這類資料的來源硬答；"
-                    f"告訴成員稍後再問即可。{info}）")
+            return (
+                f"（{name} 被限流，已自動重試一次仍被擋。**這不是查無資料**：同一條查詢稍後"
+                f"會成功。不要改寫成「沒有紀錄」，也不要換到查不到這類資料的來源硬答；"
+                f"告訴成員稍後再問即可。{info}）"
+            )
         if status >= 400:
             return f"（{name} 回 HTTP {status}：{_bounded(body, 300)}）"
         if code:

@@ -124,7 +124,8 @@ def test_extract_fetch_tags_reads_render_attribute_and_merges_duplicates() -> No
         ' <fetch url="https://a.example/p" render="true"></fetch> <fetch url="ftp://x"/>'
     )
     assert extract_fetch_tags(answer) == [
-        ("https://a.example/p", True), ("https://b.example/q", True)
+        ("https://a.example/p", True),
+        ("https://b.example/q", True),
     ]
     assert extract_fetch_tags('<fetch url="https://c.example" render="0"/>') == [
         ("https://c.example", False)
@@ -158,9 +159,18 @@ def test_html_to_text_keeps_article_links_when_given_a_base() -> None:
 
 @pytest.mark.parametrize(
     ("ip", "public"),
-    [("8.8.8.8", True), ("10.0.0.1", False), ("127.0.0.1", False), ("169.254.1.1", False),
-     ("192.168.1.1", False), ("::1", False), ("fe80::1", False), ("2606:4700::1", True),
-     ("0.0.0.0", False), ("224.0.0.1", False)],
+    [
+        ("8.8.8.8", True),
+        ("10.0.0.1", False),
+        ("127.0.0.1", False),
+        ("169.254.1.1", False),
+        ("192.168.1.1", False),
+        ("::1", False),
+        ("fe80::1", False),
+        ("2606:4700::1", True),
+        ("0.0.0.0", False),
+        ("224.0.0.1", False),
+    ],
 )
 def test_public_address_guard(ip: str, public: bool) -> None:
     assert _public_address(ip) is public
@@ -212,14 +222,18 @@ async def test_fetch_or_render_falls_back_only_when_blocked_or_asked(
     monkeypatch.setattr(links, "render_link", fake_render)
     assert await fetch_or_render("https://ok.example", config, tmp_path) == ("text", [])
     assert await fetch_or_render("https://blocked.example", config, tmp_path) == (
-        "rendered", [tmp_path / "page.jpg"]
+        "rendered",
+        [tmp_path / "page.jpg"],
     )
     assert await fetch_or_render("https://ok.example", config, tmp_path, render=True) == (
-        "rendered", [tmp_path / "page.jpg"]
+        "rendered",
+        [tmp_path / "page.jpg"],
     )
     assert calls == [
-        "fetch https://ok.example", "fetch https://blocked.example",
-        "render https://blocked.example", "render https://ok.example",
+        "fetch https://ok.example",
+        "fetch https://blocked.example",
+        "render https://blocked.example",
+        "render https://ok.example",
     ]
 
 
@@ -250,6 +264,7 @@ async def test_fetch_link_clips_text_and_reports_bot_challenge(monkeypatch, conf
 
         async def read(self, n: int) -> bytes:
             return self._body[:n]
+
         async def iter_chunked(self, n: int):
             yield await self.read(n)
 
@@ -300,7 +315,8 @@ async def test_render_link_reports_missing_chromium_when_playwright_is_unavailab
     monkeypatch.setattr(links, "_resolve_public", _resolve_ok)
     monkeypatch.setitem(sys.modules, "playwright.async_api", None)
     assert await render_link("https://ok.example/", config, None) == (
-        "（https://ok.example/：此部署沒有 Chromium，無法渲染）", None
+        "（https://ok.example/：此部署沒有 Chromium，無法渲染）",
+        None,
     )
 
 
@@ -359,21 +375,32 @@ async def test_guard_route_allows_public_hosts_only_and_caches_per_host(monkeypa
     monkeypatch.setattr(links, "_resolve_public", resolve)
     hosts: dict[str, bool] = {}
     outcomes = []
-    for url in ("https://ok.example/a.js", "http://lan.example/x", "https://ok.example/b.png",
-                "ftp://ok.example/c", "http://lan.example/y"):
+    for url in (
+        "https://ok.example/a.js",
+        "http://lan.example/x",
+        "https://ok.example/b.png",
+        "ftp://ok.example/c",
+        "http://lan.example/y",
+    ):
         route = FakeRoute(url)
         await links._guard_route(route, route.request, hosts)
         outcomes.append(route.outcome)
-    assert outcomes == ["continue", "abort:blockedbyclient", "continue", "abort:blockedbyclient",
-                        "abort:blockedbyclient"]
+    assert outcomes == [
+        "continue",
+        "abort:blockedbyclient",
+        "continue",
+        "abort:blockedbyclient",
+        "abort:blockedbyclient",
+    ]
     assert seen == ["ok.example", "lan.example"]  # one resolution per host, then cached
 
 
 async def test_public_resolver_refuses_private_answers_at_connect_time(monkeypatch) -> None:
     async def fake_super(self, host, port=0, family=socket.AF_INET):
         ip = "10.0.0.5" if host == "rebind.example" else "93.184.216.34"
-        return [{"hostname": host, "host": ip, "port": port, "family": family, "proto": 6,
-                 "flags": 0}]
+        return [
+            {"hostname": host, "host": ip, "port": port, "family": family, "proto": 6, "flags": 0}
+        ]
 
     monkeypatch.setattr(links.ThreadedResolver, "resolve", fake_super)
     resolver = links._PublicResolver()
@@ -416,7 +443,8 @@ async def test_render_link_uses_the_browser_version_without_the_headless_token(
 
 def test_x_status_recognises_x_and_its_mirrors_only() -> None:
     assert links.x_status("https://fixvx.com/aiban_imas/status/2098659648509559228") == (
-        "aiban_imas", "2098659648509559228"
+        "aiban_imas",
+        "2098659648509559228",
     )
     assert links.x_status("https://www.x.com/a_b/status/12345?s=20")[1] == "12345"
     assert links.x_status("https://mobile.twitter.com/a/status/12345/photo/1")[1] == "12345"
@@ -433,6 +461,7 @@ async def test_fetch_link_treats_a_redirect_shell_as_blocked(monkeypatch, config
 
         async def read(self, n: int) -> bytes:
             return b"<title>Redirecting...</title><p>Redirecting\u2026</p>"
+
         async def iter_chunked(self, n: int):
             yield await self.read(n)
 
@@ -467,16 +496,24 @@ async def test_fetch_link_treats_a_redirect_shell_as_blocked(monkeypatch, config
 async def test_fetch_x_status_returns_text_and_downloads_media(
     monkeypatch, config: Config, tmp_path: Path
 ) -> None:
-    payload = {"tweet": {
-        "text": "…？", "created_at": "Sat Sep 12 06:27:00 +0000 2026",
-        "author": {"name": "あいばん", "screen_name": "aiban_imas"},
-        "media": {"all": [
-            {"type": "photo", "url": "https://pbs.twimg.com/media/a.jpg?name=orig"},
-            {"type": "video", "url": "https://video.twimg.com/v.mp4",
-             "thumbnail_url": "https://pbs.twimg.com/thumb.jpg"},
-        ]},
-        "quote": {"text": "原文", "author": {"screen_name": "someone"}},
-    }}
+    payload = {
+        "tweet": {
+            "text": "…？",
+            "created_at": "Sat Sep 12 06:27:00 +0000 2026",
+            "author": {"name": "あいばん", "screen_name": "aiban_imas"},
+            "media": {
+                "all": [
+                    {"type": "photo", "url": "https://pbs.twimg.com/media/a.jpg?name=orig"},
+                    {
+                        "type": "video",
+                        "url": "https://video.twimg.com/v.mp4",
+                        "thumbnail_url": "https://pbs.twimg.com/thumb.jpg",
+                    },
+                ]
+            },
+            "quote": {"text": "原文", "author": {"screen_name": "someone"}},
+        }
+    }
     fetched: list[str] = []
 
     class Response:
@@ -490,6 +527,7 @@ async def test_fetch_x_status_returns_text_and_downloads_media(
 
         async def read(self, n: int) -> bytes:
             return b"jpegbytes"
+
         async def iter_chunked(self, n: int):
             yield await self.read(n)
 
@@ -520,7 +558,8 @@ async def test_fetch_x_status_returns_text_and_downloads_media(
     assert (tmp_path / "x" / "x1.jpg").read_bytes() == b"jpegbytes"
     assert fetched == [
         "https://api.fxtwitter.com/aiban_imas/status/2098659648509559228",
-        "https://pbs.twimg.com/media/a.jpg?name=large", "https://pbs.twimg.com/thumb.jpg",
+        "https://pbs.twimg.com/media/a.jpg?name=large",
+        "https://pbs.twimg.com/thumb.jpg",
     ]
 
 
@@ -603,7 +642,8 @@ async def test_fetch_or_render_uses_the_discord_preview_only_when_the_site_is_un
     monkeypatch.setattr(links, "render_link", fake_render)
     no_image = links.Preview("https://blocked.example/p", "", "只有描述")
     assert await fetch_or_render("https://blocked.example/p", config, None, preview=no_image) == (
-        "（Discord 預覽，不是全文；網站本身擋住了 Bot。）\n只有描述", []
+        "（Discord 預覽，不是全文；網站本身擋住了 Bot。）\n只有描述",
+        [],
     )
 
 
