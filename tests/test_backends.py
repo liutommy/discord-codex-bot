@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from discord_codex_bot.agy import parse_stream
 from discord_codex_bot.backends import (
     AGY,
@@ -14,6 +16,46 @@ from discord_codex_bot.memory import MemoryLimits, MemoryStore
 from discord_codex_bot.threads import ThreadStore
 
 LIMITS = MemoryLimits(200, 25_000, 50_000_000, 200_000_000, 2000, 50_000, 50, 3)
+
+
+async def test_run_batch_moves_to_the_spare_backend_when_the_quota_is_spent(
+    config, monkeypatch
+) -> None:
+    from discord_codex_bot import agy as agy_module
+    from discord_codex_bot import codex as codex_module
+    from discord_codex_bot.backends import run_batch
+    from discord_codex_bot.codex import CodexResult, CodexUsageLimit
+
+    seen: dict[str, object] = {}
+
+    async def spent(*_args, **_kw):
+        raise CodexUsageLimit("You've hit your usage limit.")
+
+    async def spare(prompt, cfg, model, **kw):
+        seen["model"], seen["schema"], seen["plain"] = model, kw.get("schema"), kw.get("plain")
+        return CodexResult("備援結果")
+
+    monkeypatch.setattr(codex_module, "run_codex", spent)
+    monkeypatch.setattr(agy_module, "run_agy", spare)
+    assert await run_batch("classify", config, schema=Path("/s.json")) == "備援結果"
+    # The batch keeps its structured-output contract on the spare backend, in its own workspace.
+    assert seen["model"] == "gemini-3.8-flash-medium"
+    assert seen["schema"] == Path("/s.json") and seen["plain"] is True
+
+
+async def test_run_batch_reports_the_failure_when_there_is_no_spare(config, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from discord_codex_bot import codex as codex_module
+    from discord_codex_bot.backends import run_batch
+    from discord_codex_bot.codex import CodexUsageLimit
+
+    async def spent(*_args, **_kw):
+        raise CodexUsageLimit("spent")
+
+    monkeypatch.setattr(codex_module, "run_codex", spent)
+    with pytest.raises(CodexUsageLimit):
+        await run_batch("x", replace(config, codex_fallback_model=""))
 
 
 def test_fallback_target_refuses_codex_and_carries_its_own_effort() -> None:

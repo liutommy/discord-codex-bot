@@ -95,8 +95,9 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "追蹤 YouTube 或 Twitch 頻道。新增時預設為 shadow，會在目前頻道顯示每筆內容的"
         "『會／不會提醒』判斷；確認後用 live 編號切成正式模式，之後只有符合條件的新內容會 @你。"
         "留空列出你的追蹤，cancel 加編號取消。"
-        "新增、查看、切正式、切回 shadow 也可以直接跟 Bot 說（@Bot 用講的就行）；"
-        "預設只 @ 你，明講要一起通知誰就會加上那些人。取消只能用指令。",
+        "新增、查看、切正式、切回 shadow、改判斷頻率都可以直接跟 Bot 說（@Bot 用講的就行）；"
+        "預設只 @ 你，明講要一起通知誰就會加上那些人。取消只能用指令。"
+        "來源本身照常定期抓，但每個追蹤預設每 60 分鐘才讓 AI 判斷一次，說一聲就能改。",
         [
             "/{p}-track source:https://www.youtube.com/@HoushouMarine",
             "/{p}-track source:https://www.twitch.tv/chibidoki interest:重大公告或特別企劃",

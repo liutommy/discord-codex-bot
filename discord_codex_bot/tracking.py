@@ -75,6 +75,10 @@ class Watch:
     start_item_id: int = 0
     # Extra people to @ besides the owner, when the member asked for them by name.
     mention_ids: tuple[int, ...] = ()
+    # How often this watch may spend a classification. Fetching stays on the global interval
+    # because it is free; only the model costs quota, so it gets its own, slower clock.
+    interval_minutes: int = 60
+    classified_at: int = 0  # unix seconds; integer so no timestamp format can disagree
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +170,8 @@ CREATE TABLE IF NOT EXISTS watches (
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     start_item_id INTEGER NOT NULL DEFAULT 0,
     mention_ids TEXT NOT NULL DEFAULT '',
+    interval_minutes INTEGER NOT NULL DEFAULT 60 CHECK (interval_minutes > 0),
+    classified_at INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     UNIQUE(source_id, guild_id, channel_id, user_id, interest)
 );
@@ -214,33 +220,54 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, id);
 # Natural-language control of watches, in the same shape as reminders' <remind>: the model
 # appends a tag after its answer and the Bot performs it. Ids are never invented — the member's
 # own watches are listed in the prompt, exactly like pending reminders are.
-TRACK_TAG = re.compile(
-    r'<track\s+source="([^"]{1,500})"(?:\s+interest="([^"]{0,2000})")?'
-    r'(?:\s+who="([^"]{0,200})")?\s*/?>(?:\s*</track>)?'
-)
+# Attributes are parsed by name rather than in a fixed order: a model that writes who= before
+# interest= would otherwise have the later attributes silently dropped.
+TRACK_TAG = re.compile(r'<track((?:\s+[a-z_]{1,10}="[^"]{0,2000}")+)\s*/?>(?:\s*</track>)?')
 TRACK_LIVE_TAG = re.compile(r'<track_live\s+id="([0-9]{1,9})"\s*/?>(?:\s*</track_live>)?')
 TRACK_SHADOW_TAG = re.compile(r'<track_shadow\s+id="([0-9]{1,9})"\s*/?>(?:\s*</track_shadow>)?')
+TRACK_EVERY_TAG = re.compile(
+    r'<track_every\s+id="([0-9]{1,9})"\s+minutes="([0-9]{1,5})"\s*/?>(?:\s*</track_every>)?'
+)
+_ATTR = re.compile(r'([a-z_]{1,10})="([^"]{0,2000})"')
 _MENTION = re.compile(r"<?@?!?([0-9]{17,20})>?")
 MAX_TRACK_TAGS = 3
 MAX_TRACK_MENTIONS = 5
 
-TrackAdd = tuple[str, str, tuple[int, ...]]
+# (source, interest, extra mentions, interval in minutes — 0 means "operator default")
+TrackAdd = tuple[str, str, tuple[int, ...], int]
 
 
-def extract_track_tags(answer: str) -> tuple[str, list[TrackAdd], list[int], list[int]]:
-    """(answer without the tags, watches to add, ids to make live, ids to put back in shadow)."""
-    adds: list[TrackAdd] = [
-        (
-            source.strip(),
-            interest.strip(),
-            tuple(dict.fromkeys(int(i) for i in _MENTION.findall(who)))[:MAX_TRACK_MENTIONS],
+def extract_track_tags(
+    answer: str,
+) -> tuple[str, list[TrackAdd], list[int], list[int], list[tuple[int, int]]]:
+    """(answer without the tags, watches to add, make-live ids, back-to-shadow ids,
+    (id, minutes) interval changes)."""
+    adds: list[TrackAdd] = []
+    for body in TRACK_TAG.findall(answer):
+        attrs = dict(_ATTR.findall(body))
+        source = attrs.get("source", "").strip()
+        if not source:
+            continue  # a <track> without a source is not an instruction we can carry out
+        every = attrs.get("every", "0").strip()
+        adds.append(
+            (
+                source,
+                attrs.get("interest", "").strip(),
+                tuple(
+                    dict.fromkeys(int(i) for i in _MENTION.findall(attrs.get("who", "")))
+                )[:MAX_TRACK_MENTIONS],
+                int(every) if every.isdigit() else 0,
+            )
         )
-        for source, interest, who in TRACK_TAG.findall(answer)
-    ][:MAX_TRACK_TAGS]
     lives = [int(i) for i in TRACK_LIVE_TAG.findall(answer)][:MAX_TRACK_TAGS]
     shadows = [int(i) for i in TRACK_SHADOW_TAG.findall(answer)][:MAX_TRACK_TAGS]
-    clean = TRACK_SHADOW_TAG.sub("", TRACK_LIVE_TAG.sub("", TRACK_TAG.sub("", answer))).strip()
-    return clean, adds, lives, shadows
+    every_changes = [
+        (int(watch_id), int(minutes)) for watch_id, minutes in TRACK_EVERY_TAG.findall(answer)
+    ][:MAX_TRACK_TAGS]
+    clean = answer
+    for pattern in (TRACK_EVERY_TAG, TRACK_SHADOW_TAG, TRACK_LIVE_TAG, TRACK_TAG):
+        clean = pattern.sub("", clean)
+    return clean.strip(), adds[:MAX_TRACK_TAGS], lives, shadows, every_changes
 
 
 def render_watches(watches: Sequence[Watch], labels: Mapping[int, str]) -> str:
@@ -248,7 +275,7 @@ def render_watches(watches: Sequence[Watch], labels: Mapping[int, str]) -> str:
     without inventing an id — the same trick the pending-reminder section uses."""
     return "\n".join(
         f"#{watch.id} [{'shadow' if watch.shadow else '正式'}] "
-        f"{labels.get(watch.source_id, '?')}"
+        f"{labels.get(watch.source_id, '?')} 每 {watch.interval_minutes} 分鐘判斷一次"
         + (f"（另外 @ {len(watch.mention_ids)} 人）" if watch.mention_ids else "")
         for watch in watches
     )
@@ -266,10 +293,15 @@ class TrackerStore:
             # existed never gains it: adding one to SCHEMA alone would make every query against
             # the live file fail. New columns have to be added here as well.
             existing = {row["name"] for row in connection.execute("PRAGMA table_info(watches)")}
-            if "mention_ids" not in existing:
-                connection.execute(
-                    "ALTER TABLE watches ADD COLUMN mention_ids TEXT NOT NULL DEFAULT ''"
-                )
+            for column, definition in (
+                ("mention_ids", "TEXT NOT NULL DEFAULT ''"),
+                ("interval_minutes", "INTEGER NOT NULL DEFAULT 60"),
+                ("classified_at", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column not in existing:
+                    connection.execute(
+                        f"ALTER TABLE watches ADD COLUMN {column} {definition}"
+                    )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
@@ -292,6 +324,8 @@ class TrackerStore:
             row["id"], row["source_id"], row["guild_id"], row["channel_id"], row["user_id"],
             row["interest"], bool(row["shadow"]), bool(row["active"]), row["start_item_id"],
             tuple(int(part) for part in str(row["mention_ids"] or "").split(",") if part),
+            int(row["interval_minutes"] or 60),
+            int(row["classified_at"] or 0),
         )
 
     @staticmethod
@@ -361,6 +395,7 @@ class TrackerStore:
         *,
         shadow: bool = True,
         mention_ids: Sequence[int] = (),
+        interval_minutes: int = 60,
     ) -> Watch:
         interest = interest.strip()
         if not interest:
@@ -375,10 +410,11 @@ class TrackerStore:
             connection.execute(
                 """INSERT INTO watches(
                      source_id, guild_id, channel_id, user_id, interest, shadow, start_item_id,
-                     mention_ids, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mention_ids, interval_minutes, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(source_id, guild_id, channel_id, user_id, interest) DO UPDATE SET
-                     active=1, shadow=excluded.shadow, mention_ids=excluded.mention_ids""",
+                     active=1, shadow=excluded.shadow, mention_ids=excluded.mention_ids,
+                     interval_minutes=excluded.interval_minutes""",
                 (
                     source_id,
                     guild_id,
@@ -388,6 +424,7 @@ class TrackerStore:
                     int(shadow),
                     start_item_id,
                     extra,
+                    max(1, int(interval_minutes)),
                     _utc_now(),
                 ),
             )
@@ -418,6 +455,23 @@ class TrackerStore:
                 "UPDATE watches SET active=? WHERE id=?", (int(active), watch_id)
             ).rowcount
         return bool(changed)
+
+    def mark_classified(self, watch_id: int) -> None:
+        """Stamp a classification attempt — failures included, so a watch that keeps erroring
+        waits out its interval instead of burning quota on every fetch pass."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE watches SET classified_at=? WHERE id=?", (int(time.time()), watch_id)
+            )
+
+    def set_watch_interval(self, watch_id: int, minutes: int, user_id: int | None = None) -> bool:
+        query = "UPDATE watches SET interval_minutes=? WHERE id=?"
+        params: list[object] = [max(1, int(minutes)), watch_id]
+        if user_id is not None:
+            query += " AND user_id=?"
+            params.append(user_id)
+        with self._connect() as connection:
+            return bool(connection.execute(query, params).rowcount)
 
     def set_watch_shadow(self, watch_id: int, shadow: bool, user_id: int | None = None) -> bool:
         query, params = "UPDATE watches SET shadow=? WHERE id=?", [int(shadow), watch_id]
@@ -481,6 +535,8 @@ class TrackerStore:
                    LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
                    WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id
                      AND (i.baseline=0 OR w.shadow=1)
+                     AND CAST(strftime('%s', 'now') AS INTEGER) - w.classified_at
+                         >= w.interval_minutes * 60
                    ORDER BY w.id, i.published_at, i.id"""
             ).fetchall()
         groups: dict[int, tuple[Watch, list[ContentItem]]] = {}
@@ -994,6 +1050,7 @@ async def run_tracking_once(
             stats["decisions"] += len(decisions)
         finally:
             stats["classifier_calls"] += 1
+            store.mark_classified(watch.id)
     for message in store.pending_outbox():
         try:
             await deliverer(message)

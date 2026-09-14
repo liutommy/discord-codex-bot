@@ -186,7 +186,12 @@ def _prompt(
             " recent items without pinging anyone). When they are happy with those judgements,"
             ' append <track_live id="N"/> to start real pings, or <track_shadow id="N"/> to put'
             " one back into shadow, using an id from that section; never invent ids. Deleting a"
-            " watch is a slash command, not a tag.",
+            " watch is a slash command, not a tag."
+            ' Add every="60" to <track> when the member asks how often it should be judged, and'
+            ' <track_every id="N" minutes="120"/> to change an existing one. Attribute order'
+            " does not matter. The source is always checked on the Bot's own schedule; this only"
+            " sets how often that watch may spend a judgement, so a slower number is cheaper and"
+            " a faster one is only worth it for sources that change constantly.",
             "If the member states a durable fact or preference about themselves, or the server"
             " agrees on something everyone should remember, append"
             ' <memory scope="user" name="short title">one sentence</memory> or'

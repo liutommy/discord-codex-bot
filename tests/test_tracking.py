@@ -194,22 +194,54 @@ def test_track_tags_are_parsed_like_reminder_tags() -> None:
         ' who="<@111111111111111111> <@222222222222222222>"/>'
         '<track_live id="3"/><track_shadow id="4"/>'
     )
-    clean, adds, lives, shadows = extract_track_tags(answer)
+    clean, adds, lives, shadows, intervals = extract_track_tags(answer)
     assert clean == "好，幫你追起來。"
     assert adds == [
         (
             "https://www.youtube.com/@HoushouMarine",
             "重大公告",
             (111111111111111111, 222222222222222222),
+            0,  # no every= : the operator default applies
         )
     ]
-    assert lives == [3] and shadows == [4]
+    assert lives == [3] and shadows == [4] and intervals == []
     # interest and who are optional: the default policy applies and only the owner is pinged.
-    _clean, bare, _lives, _shadows = extract_track_tags(
+    _clean, bare, _lives, _shadows, _every = extract_track_tags(
         '<track source="https://www.twitch.tv/chibidoki"/>'
     )
-    assert bare == [("https://www.twitch.tv/chibidoki", "", ())]
-    assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [], [])
+    assert bare == [("https://www.twitch.tv/chibidoki", "", (), 0)]
+    assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [], [], [])
+
+
+def test_track_tag_attributes_are_read_by_name_not_by_order() -> None:
+    # A model that writes the attributes in another order must not lose the later ones.
+    _clean, adds, _lives, _shadows, _every = extract_track_tags(
+        '<track every="30" who="<@111111111111111111>" source="https://www.twitch.tv/x"/>'
+    )
+    assert adds == [("https://www.twitch.tv/x", "", (111111111111111111,), 30)]
+    # A <track> with no source is not an instruction we can carry out.
+    assert extract_track_tags('<track interest="whatever"/>')[1] == []
+    _clean, _adds, _l, _s, intervals = extract_track_tags('<track_every id="7" minutes="120"/>')
+    assert intervals == [(7, 120)]
+
+
+def test_a_watch_is_only_classified_once_per_its_own_interval(tmp_path: Path) -> None:
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("youtube", "UC1", "@one")
+    watch = store.add_watch(source.id, 1, 2, 3, shadow=True, interval_minutes=60)
+    store.ingest(source, FetchResult((content(source.id, "a"),), "a"))
+    store.ingest(source, FetchResult((content(source.id, "b"),), "b"))
+    assert [w.id for w, _items in store.pending_by_watch()] == [watch.id]
+    # Fetching stays on the global interval; a classification attempt starts this watch's clock.
+    store.mark_classified(watch.id)
+    assert store.pending_by_watch() == []
+    # Asking for a faster clock lets the next pass through again.
+    assert store.set_watch_interval(watch.id, 1, user_id=3)
+    assert not store.set_watch_interval(watch.id, 1, user_id=999)  # not their watch
+    store._connect().execute(
+        "UPDATE watches SET classified_at = classified_at - 120 WHERE id=?", (watch.id,)
+    ).connection.commit()
+    assert [w.id for w, _items in store.pending_by_watch()] == [watch.id]
 
 
 def test_extra_mentions_drop_the_owner_and_duplicates(tmp_path: Path) -> None:
@@ -221,16 +253,19 @@ def test_extra_mentions_drop_the_owner_and_duplicates(tmp_path: Path) -> None:
     assert store.watches(user_id=3)[0].mention_ids == (4, 5)
 
 
-def test_a_database_made_before_mention_ids_gains_the_column(tmp_path: Path) -> None:
+def test_a_database_made_before_the_new_columns_gains_them(tmp_path: Path) -> None:
     path = tmp_path / "tracking.sqlite3"
     store = TrackerStore(path)
     source = store.add_source("youtube", "UC1", "@one")
     store.add_watch(source.id, 1, 2, 3)
-    with sqlite3.connect(path) as connection:  # pretend the file predates the column
-        connection.execute("ALTER TABLE watches DROP COLUMN mention_ids")
+    with sqlite3.connect(path) as connection:  # pretend the file predates the columns
+        for column in ("mention_ids", "interval_minutes", "classified_at"):
+            connection.execute(f"ALTER TABLE watches DROP COLUMN {column}")
     # SCHEMA is CREATE TABLE IF NOT EXISTS only: without the explicit migration every watch
     # query against this file would raise "no such column".
-    assert TrackerStore(path).watches(user_id=3)[0].mention_ids == ()
+    restored = TrackerStore(path).watches(user_id=3)[0]
+    assert restored.mention_ids == ()
+    assert restored.interval_minutes == 60 and restored.classified_at == 0
 
 
 def test_watch_mode_is_only_changed_by_its_owner(tmp_path: Path) -> None:

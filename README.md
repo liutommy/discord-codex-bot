@@ -178,9 +178,16 @@ releases, concerts/events, anniversaries/milestones, hiatus/return/graduation, m
 and rare charity/subathon/marathon streams. Routine streams, clips, repeated merchandise, and
 uncertain titles are ignored.
 
+Fetching and judging run on two different clocks. Every source is fetched on
+`TRACKING_INTERVAL_MINUTES` (15) because HTTP costs nothing, but a single watch only spends a
+classification every `TRACKING_CLASSIFY_INTERVAL_MINUTES` (60) — the part that costs subscription
+quota. Each watch stores its own interval, an attempt stamps its clock (failures included, so a
+broken source cannot burn quota every pass), and a member can change theirs by asking.
+
 Watches can also be managed by asking in words, the way reminders can: the model appends
-`<track source="…" interest="…" who="…"/>`, `<track_live id="N"/>` or `<track_shadow id="N"/>`
-after its answer and the Bot performs it, reporting what it did. A watch pings its owner; other
+`<track source="…" interest="…" who="…" every="60"/>`, `<track_live id="N"/>`,
+`<track_shadow id="N"/>` or `<track_every id="N" minutes="120"/>` after its answer and the Bot
+performs it, reporting what it did. Attributes are read by name, not by position. A watch pings its owner; other
 people are added only when the member names them in the request, exactly like `<remind who=…>`.
 The member's own watches are listed in the prompt, so an id is never guessed — the store also
 refuses to change a watch that belongs to someone else. Cancelling stays a slash command: it

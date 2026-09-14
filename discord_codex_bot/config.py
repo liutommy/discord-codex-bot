@@ -175,6 +175,7 @@ class Config:
     tracking_db_path: Path
     tracking_interval_seconds: int
     tracking_min_remaining_percent: int
+    tracking_classify_interval_minutes: int
     tracking_max_per_user: int
     tracking_schema_path: Path
     tracking_reasoning_effort: str
@@ -343,6 +344,12 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # 0 = no gate, for the same reason as CONSOLIDATE_MIN_REMAINING_PERCENT above.
         tracking_min_remaining_percent=_bounded_int(
             values, "TRACKING_MIN_REMAINING_PERCENT", 0, 0, 100
+        ),
+        # Fetching every source stays on TRACKING_INTERVAL_MINUTES because HTTP is free; this is
+        # how often a single watch may spend a classification, which is what costs quota. Each
+        # watch stores its own and members can change it in words.
+        tracking_classify_interval_minutes=_positive_int(
+            values, "TRACKING_CLASSIFY_INTERVAL_MINUTES", 60
         ),
         tracking_max_per_user=_positive_int(values, "TRACKING_MAX_PER_USER", 10),
         tracking_schema_path=Path(

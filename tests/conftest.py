@@ -92,6 +92,7 @@ def config() -> Config:
         tracking_db_path=Path("/var/lib/codex/tracking.sqlite3"),
         tracking_interval_seconds=900,
         tracking_min_remaining_percent=50,
+        tracking_classify_interval_minutes=60,
         tracking_max_per_user=10,
         tracking_schema_path=Path("/opt/discord-codex/tracking-schema.json"),
         tracking_reasoning_effort="high",

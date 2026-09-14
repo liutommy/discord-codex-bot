@@ -1138,6 +1138,7 @@ class DiscordCodexClient(discord.Client):
         guild_id: int | None,
         channel_id: int | None,
         user_id: int,
+        interval_minutes: int = 0,
     ) -> tuple[str, object | None]:
         """Resolve one source and start a shadow watch on it. Returns (message, watch or None);
         shared by the slash command and the <track> tag so both enforce the same limits."""
@@ -1170,6 +1171,7 @@ class DiscordCodexClient(discord.Client):
             watch = store.add_watch(
                 tracked.id, guild_id, channel_id, user_id, policy,
                 shadow=True, mention_ids=mention_ids,
+                interval_minutes=interval_minutes or self.config.tracking_classify_interval_minutes,
             )
         except (ProviderError, aiohttp.ClientError, TimeoutError, ValueError) as error:
             LOGGER.warning("Tracking source resolution failed (%s)", type(error).__name__)
@@ -1182,6 +1184,7 @@ class DiscordCodexClient(discord.Client):
         )
         return (
             f"已新增追蹤 #{watch.id}：{provider} · {label}{also}\n"
+            f"每 {watch.interval_minutes} 分鐘判斷一次（抓取仍然照常，只有判斷受此節制）。"
             "目前是 shadow：第一輪會把近期內容的『會／不會提醒』判斷貼到此頻道，"
             f"確認正常後說一聲切正式，或用 /{self.config.command_prefix}-track live:{watch.id}。",
             watch,
@@ -1193,18 +1196,25 @@ class DiscordCodexClient(discord.Client):
         """Create / promote / demote the watches the model asked for and append a confirmation.
         Deleting is deliberately not a tag: it discards the watch's baseline, and rebuilding one
         costs a whole classification pass, so it stays an explicit slash command."""
-        clean, adds, lives, shadows = extract_track_tags(text)
-        if not adds and not lives and not shadows:
+        clean, adds, lives, shadows, intervals = extract_track_tags(text)
+        if not adds and not lives and not shadows and not intervals:
             return text
         store = self.tracker
         if store is None:
             return f"{clean}\n\n（社群追蹤尚未啟用。）"
         notes: list[str] = []
-        for locator, interest, who in adds:
+        for locator, interest, who, every in adds:
             note, _watch = await self._add_watch(
-                locator, interest, who, guild_id, channel_id, user_id
+                locator, interest, who, guild_id, channel_id, user_id, every
             )
             notes.append(note)
+        for watch_id, minutes in intervals:
+            done = store.set_watch_interval(watch_id, minutes, user_id)
+            notes.append(
+                f"⏱️ 追蹤 #{watch_id} 改成每 {max(1, minutes)} 分鐘判斷一次。"
+                if done
+                else f"（找不到你的追蹤 #{watch_id}）"
+            )
         for watch_id in lives:
             done = store.set_watch_shadow(watch_id, False, user_id)
             notes.append(
@@ -1220,8 +1230,8 @@ class DiscordCodexClient(discord.Client):
                 else f"（找不到你的追蹤 #{watch_id}）"
             )
         LOGGER.info(
-            "Tracking tags user=%s adds=%d live=%d shadow=%d",
-            user_id, len(adds), len(lives), len(shadows),
+            "Tracking tags user=%s adds=%d live=%d shadow=%d every=%d",
+            user_id, len(adds), len(lives), len(shadows), len(intervals),
         )
         return f"{clean}\n\n" + "\n".join(notes)
 
