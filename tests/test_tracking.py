@@ -245,9 +245,16 @@ def test_a_watch_is_only_classified_once_per_its_own_interval(tmp_path: Path) ->
 
 
 async def test_web_source_turns_new_links_into_items(tmp_path: Path) -> None:
+    # Shaped like the real page: the site's navigation comes first and the articles follow, so
+    # a fetcher that just takes links in order would never reach an article at all.
     pages = [
-        "標題：NEWS\n2026/09/14 CARD <https://yu-gi-oh.jp/news/aaa/> 新カード公開\n"
-        "NEWS <https://yu-gi-oh.jp/news/> 分享 <https://twitter.com/share>\n",
+        "標題：NEWS\n"
+        "<https://yu-gi-oh.jp/> https://yu-gi-oh.jp/\n"
+        "<https://yu-gi-oh.jp/books/> BOOKS\n"
+        "<https://yu-gi-oh.jp/anime/> ANIME\n"
+        "<https://yu-gi-oh.jp/news/> NEWS\n"
+        "<https://twitter.com/share> 分享\n"
+        "2026/09/14 CARD\n<https://yu-gi-oh.jp/news/aaa/> 新カード公開\n",
     ]
 
     async def read_page(_url):
@@ -260,7 +267,8 @@ async def test_web_source_turns_new_links_into_items(tmp_path: Path) -> None:
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("web", "https://yu-gi-oh.jp/news/", "https://yu-gi-oh.jp/news/")
     first = await fetcher.fetch(source)
-    # Off-site links and the page's own address are navigation, not its content.
+    # Only links below the tracked page survive: off-site, the page itself, the site menu and
+    # the bare logo anchor are navigation, not content.
     assert [item.external_id for item in first.items] == ["https://yu-gi-oh.jp/news/aaa/"]
     assert first.items[0].title == "新カード公開"
     store.ingest(source, first)
@@ -269,7 +277,7 @@ async def test_web_source_turns_new_links_into_items(tmp_path: Path) -> None:
     again = await fetcher.fetch(store.get_source(source.id))
     assert store.ingest(store.get_source(source.id), again) == []
 
-    pages.append(pages[-1] + "2026/09/15 CARD <https://yu-gi-oh.jp/news/bbb/> 另一則\n")
+    pages.append(pages[-1] + "<https://yu-gi-oh.jp/news/bbb/> 另一則\n")
     later = await fetcher.fetch(store.get_source(source.id))
     fresh = store.ingest(store.get_source(source.id), later)
     assert [item.external_id for item in fresh] == ["https://yu-gi-oh.jp/news/bbb/"]

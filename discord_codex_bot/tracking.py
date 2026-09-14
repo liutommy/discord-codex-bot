@@ -1056,19 +1056,25 @@ class WebFetcher:
 
     async def fetch(self, source: Source) -> FetchResult:
         text = await self.read_page(source.external_id)
-        host = urlsplit(source.external_id).hostname or ""
-        page = source.external_id.rstrip("/")
+        page = urlsplit(source.external_id)
+        host = page.hostname or ""
+        root = page.path if page.path.endswith("/") else page.path.rsplit("/", 1)[0] + "/"
         items: list[ContentItem] = []
-        for link, label in WEB_LINK.findall(text):
-            # Off-site links on a news index are navigation, sharing widgets and ads; the
-            # articles themselves live on the same host.
-            if urlsplit(link).hostname != host or link.rstrip("/") == page:
+        for link, raw_label in WEB_LINK.findall(text):
+            target = urlsplit(link)
+            label = raw_label.strip()
+            # An index links to its articles *below* itself. Everything else on the page is the
+            # site's own navigation, which sits above the articles in document order — taking
+            # links as they come would fill the whole budget with the menu and never reach a
+            # single article (measured on yu-gi-oh.jp: 20 items, all of them nav).
+            if target.hostname != host or not target.path.startswith(root):
                 continue
+            if target.path.rstrip("/") == root.rstrip("/"):
+                continue
+            if not label or label == link:
+                continue  # a bare logo or icon anchor carries no headline
             items.append(
-                ContentItem(
-                    None, source.id, link, link, label.strip()[:300] or link, "",
-                    _utc_now(), "page",
-                )
+                ContentItem(None, source.id, link, link, label[:300], "", _utc_now(), "page")
             )
             if len(items) >= self.max_items:
                 break
