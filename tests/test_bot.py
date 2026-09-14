@@ -45,11 +45,14 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
     assert client.intents.message_content
 
 
-def test_tracking_provider_supports_only_youtube_and_twitch() -> None:
+def test_tracking_provider_prefers_the_specific_source_over_a_plain_page() -> None:
+    # Order is the invariant worth guarding: a YouTube URL silently falling through to the
+    # page reader would still "work", but would lose titles, publish times and the feed.
     assert tracking_provider("https://www.youtube.com/@HoushouMarine") == "youtube"
     assert tracking_provider("https://www.twitch.tv/chibidoki") == "twitch"
-    with pytest.raises(ValueError, match="只支援"):
-        tracking_provider("https://example.com/person")
+    assert tracking_provider("https://yu-gi-oh.jp/news/") == "web"
+    with pytest.raises(ValueError, match="追蹤需要"):
+        tracking_provider("ftp://example.com/person")
 
 
 def test_strip_mention_removes_every_bot_mention_form() -> None:

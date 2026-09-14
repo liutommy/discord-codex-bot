@@ -15,11 +15,13 @@ from discord_codex_bot.tracking import (
     TrackerStore,
     TwitchFetcher,
     Watch,
+    WebFetcher,
     _read_bounded,
     build_classifier_prompt,
     extract_track_tags,
     parse_classifier_result,
     parse_twitch_locator,
+    parse_web_locator,
     parse_youtube_atom,
     parse_youtube_locator,
     run_tracking_once,
@@ -240,6 +242,44 @@ def test_a_watch_is_only_classified_once_per_its_own_interval(tmp_path: Path) ->
         "UPDATE watches SET classified_at = classified_at - 120 WHERE id=?", (watch.id,)
     ).connection.commit()
     assert [w.id for w, _items in store.pending_by_watch()] == [watch.id]
+
+
+async def test_web_source_turns_new_links_into_items(tmp_path: Path) -> None:
+    pages = [
+        "標題：NEWS\n2026/09/14 CARD <https://yu-gi-oh.jp/news/aaa/> 新カード公開\n"
+        "NEWS <https://yu-gi-oh.jp/news/> 分享 <https://twitter.com/share>\n",
+    ]
+
+    async def read_page(_url):
+        return pages[-1]
+
+    fetcher = WebFetcher(read_page)
+    url, state = await fetcher.resolve("https://yu-gi-oh.jp/news/?x=1")
+    assert url == "https://yu-gi-oh.jp/news/?x=1" and state["title"] == "NEWS"
+
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("web", "https://yu-gi-oh.jp/news/", "https://yu-gi-oh.jp/news/")
+    first = await fetcher.fetch(source)
+    # Off-site links and the page's own address are navigation, not its content.
+    assert [item.external_id for item in first.items] == ["https://yu-gi-oh.jp/news/aaa/"]
+    assert first.items[0].title == "新カード公開"
+    store.ingest(source, first)
+
+    # An unchanged page yields nothing new, so the model is never called for it.
+    again = await fetcher.fetch(store.get_source(source.id))
+    assert store.ingest(store.get_source(source.id), again) == []
+
+    pages.append(pages[-1] + "2026/09/15 CARD <https://yu-gi-oh.jp/news/bbb/> 另一則\n")
+    later = await fetcher.fetch(store.get_source(source.id))
+    fresh = store.ingest(store.get_source(source.id), later)
+    assert [item.external_id for item in fresh] == ["https://yu-gi-oh.jp/news/bbb/"]
+
+
+def test_web_locator_requires_a_public_http_url() -> None:
+    assert parse_web_locator(" https://example.com ") == "https://example.com/"
+    for bad in ("ftp://example.com", "not a url", ""):
+        with pytest.raises(ValueError, match="網頁追蹤"):
+            parse_web_locator(bad)
 
 
 def test_prune_drops_history_but_never_the_dedupe_rows(tmp_path: Path) -> None:

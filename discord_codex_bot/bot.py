@@ -88,9 +88,11 @@ from .tracking import (
     Source,
     TrackerStore,
     TwitchFetcher,
+    WebFetcher,
     YouTubeFetcher,
     extract_track_tags,
     parse_twitch_locator,
+    parse_web_locator,
     parse_youtube_locator,
     render_watches,
     tracking_loop,
@@ -124,14 +126,19 @@ FREE_MODEL_NOTE = "免費模型可能隨時不穩或下架，失敗時請換一�
 
 
 def tracking_provider(locator: str) -> str:
-    """Return the provider for a supported locator without doing network I/O."""
-    for provider, parser in (("youtube", parse_youtube_locator), ("twitch", parse_twitch_locator)):
+    """Return the provider for a supported locator without doing network I/O. The specific
+    providers are tried first; anything else that is a public page is tracked as a page."""
+    for provider, parser in (
+        ("youtube", parse_youtube_locator),
+        ("twitch", parse_twitch_locator),
+        ("web", parse_web_locator),
+    ):
         try:
             parser(locator)
         except ValueError:
             continue
         return provider
-    raise ValueError("目前只支援 YouTube 頻道與 Twitch 頻道網址。")
+    raise ValueError("追蹤需要 YouTube 頻道、Twitch 頻道，或任何 http(s) 網頁網址。")
 
 
 def tracking_message(message: OutboxMessage, source_label: str = "") -> str:
@@ -284,6 +291,7 @@ class DiscordCodexClient(discord.Client):
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
         self.youtube_tracker = YouTubeFetcher(config.youtube_api_key)
         self.twitch_tracker = TwitchFetcher(config.twitch_client_id, config.twitch_client_secret)
+        self.web_tracker = WebFetcher(self._read_page)
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-remember",
@@ -456,12 +464,21 @@ class DiscordCodexClient(discord.Client):
             self.config.tracking_keep_days,
         )
 
+    async def _read_page(self, url: str) -> str:
+        """One page as text, with its links kept inline. No out_dir: a background poll has
+        nobody to show a screenshot to, and nothing to clean up afterwards."""
+        text, _shots = await fetch_or_render(url, self.config, None, False)
+        return text
+
     async def _fetch_tracking_source(self, source: Source):
-        if source.provider == "youtube":
-            return await self.youtube_tracker.fetch(source)
-        if source.provider == "twitch":
-            return await self.twitch_tracker.fetch(source)
-        raise ProviderError(f"unsupported provider: {source.provider}")
+        fetcher = {
+            "youtube": self.youtube_tracker,
+            "twitch": self.twitch_tracker,
+            "web": self.web_tracker,
+        }.get(source.provider)
+        if fetcher is None:
+            raise ProviderError(f"unsupported provider: {source.provider}")
+        return await fetcher.fetch(source)
 
     async def _classify_tracking(self, prompt: str) -> str:
         if self.tracker is None:
@@ -1180,7 +1197,11 @@ class DiscordCodexClient(discord.Client):
             self.config.twitch_client_id and self.config.twitch_client_secret
         ):
             return "管理者尚未設定 TWITCH_CLIENT_ID／TWITCH_CLIENT_SECRET。", None
-        resolver = self.youtube_tracker if provider == "youtube" else self.twitch_tracker
+        resolver = {
+            "youtube": self.youtube_tracker,
+            "twitch": self.twitch_tracker,
+            "web": self.web_tracker,
+        }[provider]
         try:
             external_id, state = await resolver.resolve(locator)
             tracked = store.add_source(provider, external_id, locator, state)

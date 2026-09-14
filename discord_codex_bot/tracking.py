@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -236,6 +236,9 @@ MAX_TRACK_TAGS = 3
 MAX_TRACK_MENTIONS = 5
 # The model writes the notification itself; this only stops a runaway one from filling a message.
 MAX_MESSAGE_CHARS = 600
+# How the Bot's page reader hands back a link: the absolute target is emitted where the anchor
+# opens, so the anchor's own text — the headline — follows it, not precedes it.
+WEB_LINK = re.compile(r"<(https?://[^>\s]+)>[ \t]*([^\n<>]{0,120})")
 
 # (source, interest, extra mentions, interval in minutes — 0 means "operator default")
 TrackAdd = tuple[str, str, tuple[int, ...], int]
@@ -1018,6 +1021,59 @@ class TwitchFetcher:
         state = dict(source.state)
         state["online"] = bool(streams.get("data"))
         return FetchResult(tuple(items), cursor, state)
+
+
+def parse_web_locator(locator: str) -> str:
+    """A public http(s) page, normalised so the same page is one source."""
+    parts = urlsplit(locator.strip())
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("網頁追蹤需要 http 或 https 網址。")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
+
+
+class WebFetcher:
+    """Any public page as a source: the links on it are the items.
+
+    A page has no item boundaries and no ids of its own, which is why web tracking looked
+    expensive at first — the only way to notice a change would have been to ask a model every
+    time. Once the Bot started keeping anchors when it reads a page, the links became exactly the
+    stable ids a feed would have given: a URL that was not on the page last time is new content,
+    and a page whose links are unchanged yields no items at all, so the model is never called.
+    """
+
+    def __init__(self, read_page: Callable[[str], Awaitable[str]], max_items: int = 20) -> None:
+        self.read_page = read_page  # async (url) -> page text with links kept inline as <url>
+        self.max_items = max_items
+
+    async def resolve(self, locator: str) -> tuple[str, Mapping[str, Any]]:
+        url = parse_web_locator(locator)
+        text = (await self.read_page(url)).strip()
+        if not text:
+            raise ProviderError("這個網址讀不到內容")
+        first = text.splitlines()[0]
+        title = first.removeprefix("標題：").strip() if first.startswith("標題：") else ""
+        return url, {"title": title or url}
+
+    async def fetch(self, source: Source) -> FetchResult:
+        text = await self.read_page(source.external_id)
+        host = urlsplit(source.external_id).hostname or ""
+        page = source.external_id.rstrip("/")
+        items: list[ContentItem] = []
+        for link, label in WEB_LINK.findall(text):
+            # Off-site links on a news index are navigation, sharing widgets and ads; the
+            # articles themselves live on the same host.
+            if urlsplit(link).hostname != host or link.rstrip("/") == page:
+                continue
+            items.append(
+                ContentItem(
+                    None, source.id, link, link, label.strip()[:300] or link, "",
+                    _utc_now(), "page",
+                )
+            )
+            if len(items) >= self.max_items:
+                break
+        cursor = items[-1].external_id if items else source.cursor
+        return FetchResult(tuple(items), cursor, dict(source.state))
 
 
 def build_classifier_prompt(

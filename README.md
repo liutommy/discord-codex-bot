@@ -169,6 +169,15 @@ Recreate the Bot, then add the two test watches in Discord:
 /codex-track
 ```
 
+Besides YouTube and Twitch channels, any public page can be a source. A page has no item
+boundaries and no ids of its own, which is what made web tracking look expensive: noticing a
+change would have meant asking a model every poll. Since the Bot started keeping anchors when it
+reads a page, the links on it *are* the stable ids a feed would have provided — a URL that was
+not there last time is new content, and an unchanged page produces no items at all, so the model
+is not called. Only same-host links count; off-site ones on a news index are navigation, sharing
+widgets and ads. This also works on sites that refuse plain HTTP (Konami's Yu-Gi-Oh site answers
+403 and is read through Chromium) because it goes through the same reader as `<fetch>`.
+
 A watch is live the moment it is made. It only ever considers content published after that — the
 first sight of a source is its baseline and is never classified — and it posts only the items that
 match, mentioning the watch's owner. The model decides both halves: whether the item is worth an
