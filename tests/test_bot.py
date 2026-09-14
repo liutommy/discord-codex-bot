@@ -101,6 +101,7 @@ from discord_codex_bot.bot import FAILURE_MESSAGE, QUEUE_FULL_MESSAGE  # noqa: E
 from discord_codex_bot.codex import (  # noqa: E402
     CodexResult,
     CodexServerOverloaded,
+    CodexUnauthorized,
     CodexUsageLimit,
 )
 from discord_codex_bot.links import Preview  # noqa: E402
@@ -315,6 +316,30 @@ async def test_answer_falls_back_with_a_distinct_notice_when_codex_is_overloaded
     assert "額度用完了" not in result.text
     assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)
     assert "resume" not in agy.calls[0][2]
+    assert result.thread_id == "" and not result.resumed
+
+
+async def test_answer_alerts_the_operator_when_the_codex_login_is_gone(
+    client, monkeypatch
+) -> None:
+    # Quota refills on its own; a lost login does not. The spare still answers, but the operator
+    # hears about it on this request instead of at the next periodic login check.
+    agy = FakeBackend("登入失效備援答案")
+    alerts: list[tuple[str, str]] = []
+
+    async def gone(*_args, **_kw):
+        raise CodexUnauthorized("Unauthorized", "unauthorized")
+
+    async def login_lost(backend, detail):
+        alerts.append((backend, detail))
+
+    monkeypatch.setattr(bot_module, "run_codex", gone)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    monkeypatch.setattr(client.alerts, "login_lost", login_lost)
+    result = await client._answer("q", [], GUILD, USER, resume="t-old")
+    assert "登入失效備援答案" in result.text and "Codex 登入失效" in result.text
+    assert "已通知管理員" in result.text and "額度用完了" not in result.text
+    assert alerts == [("Codex", "Unauthorized")]
     assert result.thread_id == "" and not result.resumed
 
 

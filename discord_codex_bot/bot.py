@@ -47,6 +47,7 @@ from .codex import (
     CodexFallbackError,
     CodexResult,
     CodexServerOverloaded,
+    CodexUnauthorized,
     CodexUsageLimit,
     codex_login_status,
     run_codex,
@@ -685,6 +686,10 @@ class DiscordCodexClient(discord.Client):
                 )
                 target, fell_back = spare, True
                 fallback_reason = unavailable
+                if isinstance(unavailable, CodexUnauthorized):
+                    # Quota comes back by itself; a lost login does not. Tell the operator now
+                    # rather than let the spare hide it until the next periodic login check.
+                    await self.alerts.login_lost("Codex", str(unavailable))
                 kw.pop("resume", None)
                 return await run_on(target, text, **kw)
 
@@ -827,7 +832,9 @@ class DiscordCodexClient(discord.Client):
                     reason, follow_up = "Codex 額度用完了", "額度恢復後會自動換回"
                 elif isinstance(fallback_reason, CodexServerOverloaded):
                     reason, follow_up = "Codex 模型暫時滿載", "下一次請求會再嘗試 Codex"
-                else:  # future CodexFallbackError subtype
+                elif isinstance(fallback_reason, CodexUnauthorized):
+                    reason, follow_up = "Codex 登入失效", "已通知管理員，修好前先由備援回答"
+                else:  # CodexServiceError and any future CodexFallbackError subtype
                     reason, follow_up = "Codex 服務暫時無法使用", "下一次請求會再嘗試 Codex"
                 text = (
                     f"（{reason}，這則改用 {target.model} 回答；"

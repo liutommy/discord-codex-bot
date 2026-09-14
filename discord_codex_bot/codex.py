@@ -72,6 +72,10 @@ class CodexFallbackError(RuntimeError):
     this class: falling back for those would hide a broken Bot deployment.
     """
 
+    def __init__(self, message: str, info: str = "") -> None:
+        super().__init__(message)
+        self.info = info  # Codex's `codex_error_info` code, when one was found
+
 
 class CodexUsageLimit(CodexFallbackError):
     """The ChatGPT subscription's quota is spent. Carries Codex's own message, which names the
@@ -80,6 +84,34 @@ class CodexUsageLimit(CodexFallbackError):
 
 class CodexServerOverloaded(CodexFallbackError):
     """The selected Codex model is temporarily at capacity on the service."""
+
+
+class CodexServiceError(CodexFallbackError):
+    """A transient service-side failure: a 429 that is not quota, a 5xx, a lost connection, or
+    a stream that dropped or gave up retrying. Codex has already retried what it will."""
+
+
+class CodexUnauthorized(CodexFallbackError):
+    """The ChatGPT login is gone. The spare keeps answering and the operator must be told:
+    nothing recovers this without `codex login`."""
+
+
+# The subset of Codex's `CodexErrorInfo` (codex-rs/protocol, 18 variants) that the spare backend
+# may answer through. The rest stays a normal failure on purpose: `bad_request` and
+# `sandbox_error` are Bot or container bugs a fallback would hide, `session_budget_exceeded` is
+# local config, `context_window_exceeded` wants a fresh thread rather than another model, and the
+# policy refusals must not be routed around by asking somewhere else.
+FALLBACK_INFO: dict[str, type[CodexFallbackError]] = {
+    "usage_limit_exceeded": CodexUsageLimit,
+    "server_overloaded": CodexServerOverloaded,
+    "rate_limit_exceeded": CodexServiceError,
+    "internal_server_error": CodexServiceError,
+    "http_connection_failed": CodexServiceError,
+    "response_stream_connection_failed": CodexServiceError,
+    "response_stream_disconnected": CodexServiceError,
+    "response_too_many_failed_attempts": CodexServiceError,
+    "unauthorized": CodexUnauthorized,
+}
 
 
 def _error_payloads(node):
@@ -95,20 +127,63 @@ def _error_payloads(node):
             yield from _error_payloads(value)
 
 
-def parse_fallback_error(stdout: str) -> CodexFallbackError | None:
+def _classify(error: dict) -> CodexFallbackError | None:
+    info = str(error.get("codex_error_info") or "")
+    kind = FALLBACK_INFO.get(info)
+    if kind is None:
+        return None
+    return kind(str(error.get("message") or info.replace("_", " ")), info)
+
+
+def _rollout_events(codex_home: Path, thread_id: str):
+    """Events of the rollout Codex wrote for `thread_id` (sessions/YYYY/MM/DD, UTC date);
+    nothing when it cannot be found or read."""
+    found = sorted((codex_home / "sessions").glob(f"*/*/*/rollout-*-{thread_id}.jsonl"))
+    if not found:
+        return
+    try:
+        text = found[-1].read_text("utf-8", errors="replace")
+    except OSError:
+        return
+    yield from _events(text)
+
+
+def _turn_failure(events) -> str:
+    """The message of a failed exec turn (`error` / `turn.failed` events), else ""."""
+    for event in events:
+        if event.get("type") == "error":
+            return str(event.get("message") or "")
+        if event.get("type") == "turn.failed":
+            return str((event.get("error") or {}).get("message") or "")
+    return ""
+
+
+def parse_fallback_error(
+    stdout: str, codex_home: Path | None = None, thread_id: str = ""
+) -> CodexFallbackError | None:
     """Return a typed remote failure that may use the spare backend, if one is present.
 
-    These failures live inside Codex's JSONL while stderr can be empty. Match only explicit
-    service error codes; an arbitrary non-zero exit remains a normal runtime failure.
+    `codex exec --json` reports a failed turn as `error` / `turn.failed` events that carry the
+    message only (codex-cli 0.153.4 against a real spent quota, 2026-09-14; upstream
+    `exec_events.rs` has no code field either). The structured `codex_error_info` lives in the
+    rollout Codex writes under CODEX_HOME for the thread the stream announced first -- or, on a
+    resumed turn that announces nothing, the `thread_id` the caller already knows. Three sources
+    of one fact, in decreasing trust: a code in the stream, the code in the rollout, then the one
+    message actually observed. stderr is never consulted: on the real failure it held nothing but
+    the stdin prompt.
     """
-    for event in _events(stdout):
-        for error in _error_payloads(event):
-            info = error.get("codex_error_info")
-            message = str(error.get("message") or "")
-            if info == "usage_limit_exceeded":
-                return CodexUsageLimit(message or "Codex usage limit reached")
-            if info == "server_overloaded":
-                return CodexServerOverloaded(message or "Selected Codex model is at capacity")
+    events = list(_events(stdout))
+    for error in _error_payloads(events):
+        if found := _classify(error):
+            return found
+    thread_id = parse_thread_id(stdout) or thread_id
+    if codex_home and thread_id:
+        for error in _error_payloads(list(_rollout_events(codex_home, thread_id))):
+            if found := _classify(error):
+                return found
+    message = _turn_failure(events)
+    if "usage limit" in message.lower():
+        return CodexUsageLimit(message, "usage_limit_exceeded")
     return None
 
 
@@ -392,7 +467,7 @@ async def run_codex(
     code, output, stderr = await _exec(
         prompt, config, images, effort, resume, schema, plain, isolated
     )
-    if unavailable := parse_fallback_error(output):
+    if unavailable := parse_fallback_error(output, config.codex_home, resume):
         raise unavailable  # before the resume retry: a fresh thread cannot fix a remote outage
     if code != 0 and resume:
         # The stored thread may have been rotated away or be unreadable; answer fresh instead.
@@ -401,7 +476,7 @@ async def run_codex(
         code, output, stderr = await _exec(
             prompt, config, images, effort, resume, schema, plain, isolated
         )
-        if unavailable := parse_fallback_error(output):
+        if unavailable := parse_fallback_error(output, config.codex_home, resume):
             raise unavailable
     if code != 0:
         summary = " | ".join(stderr.splitlines()[-3:])
