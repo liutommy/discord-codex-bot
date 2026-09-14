@@ -1241,8 +1241,17 @@ class DiscordCodexClient(discord.Client):
             return f"{clean}\n\n（社群追蹤尚未啟用。）"
         notes: list[str] = []
         for locator, interest, who, every in adds:
-            note, _watch = await self._add_watch(
+            note, watch = await self._add_watch(
                 locator, interest, who, guild_id, channel_id, user_id, every
+            )
+            # A refusal only ever reached the member as text: the log recorded that a tag had
+            # been parsed and nothing more, so a watch that was never created looked exactly
+            # like one that was. Record the outcome, not just the intent.
+            LOGGER.info(
+                "Tracking add user=%s source=%r -> %s",
+                user_id,
+                locator[:120],
+                f"#{getattr(watch, 'id', '?')}" if watch is not None else note[:100],
             )
             notes.append(note)
         for watch_id, minutes in intervals:
