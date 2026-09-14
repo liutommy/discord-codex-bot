@@ -8,11 +8,14 @@ import pytest
 
 from discord_codex_bot import codex
 from discord_codex_bot.codex import (
+    CodexFallbackError,
+    CodexServerOverloaded,
     CodexUsageLimit,
     _arguments,
     _communicate,
     _safe_environment,
     parse_codex_jsonl,
+    parse_fallback_error,
     parse_usage_limit,
     run_codex,
 )
@@ -59,6 +62,22 @@ def test_usage_limit_is_read_from_the_stream_not_the_exit_code() -> None:
     assert parse_usage_limit(other) == ""
 
 
+def test_server_overload_is_a_typed_fallback_error() -> None:
+    overloaded = json.dumps(
+        {
+            "type": "turn.complete",
+            "error": {
+                "message": "Selected model is at capacity. Please try a different model.",
+                "codex_error_info": "server_overloaded",
+            },
+        }
+    )
+    error = parse_fallback_error(overloaded)
+    assert isinstance(error, CodexServerOverloaded)
+    assert isinstance(error, CodexFallbackError)
+    assert "at capacity" in str(error)
+
+
 async def test_run_codex_raises_usage_limit_without_retrying_the_resume(
     config: Config, monkeypatch
 ) -> None:
@@ -70,6 +89,24 @@ async def test_run_codex_raises_usage_limit_without_retrying_the_resume(
     with pytest.raises(CodexUsageLimit, match="usage limit"):
         await run_codex("q", config, resume="t-old")
     assert len(fake.calls) == 1  # retrying a spent quota only wastes the member's wait
+
+
+async def test_run_codex_raises_server_overload_without_retrying_the_resume(
+    config: Config, monkeypatch
+) -> None:
+    overloaded = json.dumps(
+        {
+            "error": {
+                "message": "Selected model is at capacity. Please try a different model.",
+                "codex_error_info": "server_overloaded",
+            }
+        }
+    )
+    fake = FakeExec((1, overloaded, ""))
+    monkeypatch.setattr(codex, "_exec", fake)
+    with pytest.raises(CodexServerOverloaded, match="at capacity"):
+        await run_codex("q", config, resume="t-old")
+    assert [call["resume"] for call in fake.calls] == ["t-old"]
 
 
 def test_child_environment_excludes_discord_secrets(config: Config, monkeypatch) -> None:
@@ -218,6 +255,24 @@ async def test_run_codex_falls_back_to_a_new_thread_when_resume_fails(
     result = await run_codex("q", config, resume="t-old")
     assert [c["resume"] for c in fake.calls] == ["t-old", ""]
     assert result.text == "hi" and result.thread_id == "t-new" and result.resumed is False
+
+
+async def test_run_codex_recognises_server_overload_from_the_fresh_retry(
+    config: Config, monkeypatch
+) -> None:
+    overloaded = json.dumps(
+        {
+            "error": {
+                "message": "Selected model is at capacity. Please try a different model.",
+                "codex_error_info": "server_overloaded",
+            }
+        }
+    )
+    fake = FakeExec((1, "", "thread not found"), (1, overloaded, ""))
+    monkeypatch.setattr(codex, "_exec", fake)
+    with pytest.raises(CodexServerOverloaded, match="at capacity"):
+        await run_codex("q", config, resume="t-old")
+    assert [call["resume"] for call in fake.calls] == ["t-old", ""]
 
 
 async def test_run_codex_keeps_the_resumed_thread_id(config: Config, monkeypatch) -> None:

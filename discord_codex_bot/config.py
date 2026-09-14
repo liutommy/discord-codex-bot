@@ -202,7 +202,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         command_prefix=_command_prefix(values),
         codex_model=values.get("CODEX_MODEL", "").strip() or "gpt-5.6-luna",
         codex_reasoning_effort=_effort(values),
-        # Spare backend for when the operator's ChatGPT quota runs out, written like a member's
+        # Spare backend for spent ChatGPT quota or temporary Codex model capacity, written like a
         # stored model ("<backend>:<family>|<effort>"). Empty = report the failure instead.
         codex_fallback_model=values.get(
             "CODEX_FALLBACK_MODEL", "agy:gemini-3.8-flash|medium"

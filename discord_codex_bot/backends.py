@@ -110,32 +110,38 @@ async def run_batch(
 ) -> str:
     """One background turn (memory consolidation, social classification) as text.
 
-    Batch jobs have nobody watching to retry them, so a spent subscription must not simply fail:
-    the same CODEX_FALLBACK_MODEL that answers members takes over. agy keeps its own deny-list
+    Batch jobs have nobody watching to retry them, so a spent subscription or temporarily full
+    model must not simply fail: the same CODEX_FALLBACK_MODEL that answers members takes over.
+    agy keeps its own deny-list
     (commands, writes, URL reads and MCP are all refused) and is given a fresh conversation each
     time, which is what `isolated` buys on the Codex side.
     """
     from .agy import run_agy
-    from .codex import CodexUsageLimit, run_codex
+    from .codex import CodexFallbackError, run_codex
 
     try:
         result = await run_codex(
             prompt, config, effort=effort, raw=True, schema=schema, isolated=isolated
         )
         return result.text
-    except CodexUsageLimit as spent:
+    except CodexFallbackError as unavailable:
         spare = fallback_target(
             config.codex_fallback_model, config.codex_model, config.codex_reasoning_effort
         )
         if spare is None or spare.backend != AGY:
             raise
-        LOGGER.warning("Codex quota spent (%s); running this batch on %s", spent, spare.model)
+        LOGGER.warning(
+            "Codex unavailable (%s: %s); running this batch on %s",
+            type(unavailable).__name__,
+            unavailable,
+            spare.model,
+        )
         result = await run_agy(prompt, config, spare.model, raw=True, schema=schema, plain=True)
         return result.text
 
 
 def fallback_target(stored: str, codex_model: str, default_effort: str) -> Resolved | None:
-    """The spare backend to answer on while the operator's Codex quota is spent, written like a
+    """The spare backend to answer on while Codex quota/capacity is unavailable, written like a
     member's stored model ("<backend>:<family>|<effort>"). Empty means no fallback; so does Codex
     itself, which cannot stand in for its own outage."""
     if not stored:

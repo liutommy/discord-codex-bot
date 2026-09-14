@@ -98,7 +98,11 @@ import pytest  # noqa: E402
 
 from discord_codex_bot import bot as bot_module  # noqa: E402
 from discord_codex_bot.bot import FAILURE_MESSAGE, QUEUE_FULL_MESSAGE  # noqa: E402
-from discord_codex_bot.codex import CodexResult, CodexUsageLimit  # noqa: E402
+from discord_codex_bot.codex import (  # noqa: E402
+    CodexResult,
+    CodexServerOverloaded,
+    CodexUsageLimit,
+)
 from discord_codex_bot.links import Preview  # noqa: E402
 from discord_codex_bot.queue import SerialQueue  # noqa: E402
 from discord_codex_bot.tracking import (  # noqa: E402
@@ -294,6 +298,26 @@ async def test_answer_falls_back_to_the_spare_backend_when_codex_quota_is_spent(
     assert result.thread_id == "" and not result.resumed  # nothing to resume back on Codex
 
 
+async def test_answer_falls_back_with_a_distinct_notice_when_codex_is_overloaded(
+    client, monkeypatch
+) -> None:
+    agy = FakeBackend("滿載備援答案")
+
+    async def overloaded(*_args, **_kw):
+        raise CodexServerOverloaded("Selected model is at capacity.")
+
+    monkeypatch.setattr(bot_module, "run_codex", overloaded)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    result = await client._answer("q", [], GUILD, USER, resume="t-old")
+    assert "滿載備援答案" in result.text
+    assert "Codex 模型暫時滿載" in result.text
+    assert "下一次請求會再嘗試 Codex" in result.text
+    assert "額度用完了" not in result.text
+    assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)
+    assert "resume" not in agy.calls[0][2]
+    assert result.thread_id == "" and not result.resumed
+
+
 async def test_answer_without_a_spare_backend_reports_the_failure(client, monkeypatch) -> None:
     async def spent(*_args, **_kw):
         raise CodexUsageLimit("quota spent")
@@ -372,7 +396,7 @@ async def test_answer_stores_and_strips_memory_tags(client, backends) -> None:
 
 
 async def test_answer_truncates_and_reports_failures(client, backends, monkeypatch) -> None:
-    codex, _ = backends
+    codex, agy = backends
     codex.replies = ["x" * 100]
     client.config = replace(client.config, max_response_chars=30)
     result = await client._answer("q", [], GUILD, USER)
@@ -384,6 +408,7 @@ async def test_answer_truncates_and_reports_failures(client, backends, monkeypat
     monkeypatch.setattr(bot_module, "run_codex", boom)
     failed = await client._answer("q", [], GUILD, USER)
     assert failed.text == FAILURE_MESSAGE.format(prefix="codex") and failed.thread_id == ""
+    assert agy.calls == []  # arbitrary RuntimeError must not be hidden by the spare backend
     client.queue = SerialQueue(0)
     assert (await client._answer("q", [], GUILD, USER)).text == QUEUE_FULL_MESSAGE
 

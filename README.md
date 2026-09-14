@@ -258,15 +258,16 @@ sign-in lives in the `<name>_agy_home` volume: run `agy` inside the container on
 old one. Google's content policy may reject prompts on the Gemini models that the Claude models
 accept. Release announcements (`announce/latest.md`) are posted only to `ANNOUNCE_CHANNEL_IDS`.
 
-When the ChatGPT subscription's quota runs out, Codex reports it *inside* its JSONL stream
-(`codex_error_info: usage_limit_exceeded`, with an empty stderr), so the exit code alone cannot
-tell quota apart from a crash. The Bot recognises that case and answers the rest of the request on
+When the ChatGPT subscription quota runs out or the selected model is temporarily at capacity,
+Codex reports it *inside* its JSONL stream (`codex_error_info: usage_limit_exceeded` or
+`server_overloaded`, often with an empty stderr), so the exit code alone cannot tell these remote
+conditions apart from a crash. The Bot recognises both and answers the rest of the request on
 `CODEX_FALLBACK_MODEL` (default `agy:gemini-3.8-flash|medium`, written like a member's stored
 model; empty disables it and the member gets the usual failure message). The reply says which
 model answered, and that thread is not remembered as resumable — a Codex thread id means nothing
 to another backend. The member's own model choice is untouched; the next request tries Codex
-again. Social-tracking classification deliberately has no such fallback: its safety comes from the
-isolated Codex run.
+again. Background classification and memory jobs use the same fallback while preserving their
+isolated/fresh-run settings.
 
 Links are read by the Bot itself, so both backends see the same thing: every http(s) URL in a
 member's message (up to `LINK_MAX_URLS`) is fetched, converted to text (`LINK_MAX_CHARS` per page)

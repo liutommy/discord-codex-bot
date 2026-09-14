@@ -65,9 +65,21 @@ def parse_thread_id(stdout: str) -> str:
     return ""
 
 
-class CodexUsageLimit(RuntimeError):
+class CodexFallbackError(RuntimeError):
+    """A remote Codex condition that the configured spare backend can answer through.
+
+    Local configuration, process, timeout and output errors deliberately do not inherit from
+    this class: falling back for those would hide a broken Bot deployment.
+    """
+
+
+class CodexUsageLimit(CodexFallbackError):
     """The ChatGPT subscription's quota is spent. Carries Codex's own message, which names the
     reset time. Not a malfunction: the caller answers on the spare backend instead of alerting."""
+
+
+class CodexServerOverloaded(CodexFallbackError):
+    """The selected Codex model is temporarily at capacity on the service."""
 
 
 def _error_payloads(node):
@@ -83,14 +95,30 @@ def _error_payloads(node):
             yield from _error_payloads(value)
 
 
-def parse_usage_limit(stdout: str) -> str:
-    """Codex's usage-limit message when the run died of quota, else "". The failure is reported
-    *inside* the JSONL stream — stderr is empty — so the exit code alone cannot identify it."""
+def parse_fallback_error(stdout: str) -> CodexFallbackError | None:
+    """Return a typed remote failure that may use the spare backend, if one is present.
+
+    These failures live inside Codex's JSONL while stderr can be empty. Match only explicit
+    service error codes; an arbitrary non-zero exit remains a normal runtime failure.
+    """
     for event in _events(stdout):
         for error in _error_payloads(event):
-            if error.get("codex_error_info") == "usage_limit_exceeded":
-                return str(error.get("message") or "Codex usage limit reached")
-    return ""
+            info = error.get("codex_error_info")
+            message = str(error.get("message") or "")
+            if info == "usage_limit_exceeded":
+                return CodexUsageLimit(message or "Codex usage limit reached")
+            if info == "server_overloaded":
+                return CodexServerOverloaded(message or "Selected Codex model is at capacity")
+    return None
+
+
+def parse_usage_limit(stdout: str) -> str:
+    """Codex's usage-limit message when the run died of quota, else "".
+
+    Kept as a public compatibility helper; new callers should use :func:`parse_fallback_error`.
+    """
+    error = parse_fallback_error(stdout)
+    return str(error) if isinstance(error, CodexUsageLimit) else ""
 
 
 def collect_generated_images(
@@ -359,8 +387,8 @@ async def run_codex(
     code, output, stderr = await _exec(
         prompt, config, images, effort, resume, schema, plain, isolated
     )
-    if spent := parse_usage_limit(output):
-        raise CodexUsageLimit(spent)  # before the resume retry: a retry would hit the same wall
+    if unavailable := parse_fallback_error(output):
+        raise unavailable  # before the resume retry: a fresh thread cannot fix a remote outage
     if code != 0 and resume:
         # The stored thread may have been rotated away or be unreadable; answer fresh instead.
         LOGGER.warning("Resume of thread %s failed (%s); starting a new thread", resume, code)
@@ -368,6 +396,8 @@ async def run_codex(
         code, output, stderr = await _exec(
             prompt, config, images, effort, resume, schema, plain, isolated
         )
+        if unavailable := parse_fallback_error(output):
+            raise unavailable
     if code != 0:
         summary = " | ".join(stderr.splitlines()[-3:])
         raise RuntimeError(f"Codex exited with code {code}: {summary}")

@@ -43,7 +43,14 @@ from .backends import (
     split_stored,
 )
 from .backup import backup_forever, export_memory_zip
-from .codex import CodexResult, CodexUsageLimit, codex_login_status, run_codex
+from .codex import (
+    CodexFallbackError,
+    CodexResult,
+    CodexServerOverloaded,
+    CodexUsageLimit,
+    codex_login_status,
+    run_codex,
+)
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
@@ -644,6 +651,7 @@ class DiscordCodexClient(discord.Client):
             self.config.codex_reasoning_effort,
         )
         fell_back = False
+        fallback_reason: CodexFallbackError | None = None
 
         async def run_on(via, text: str, **kw) -> CodexResult:
             if via.backend == AGY:
@@ -659,18 +667,24 @@ class DiscordCodexClient(discord.Client):
             return await run_codex(text, self.config, effort=via.effort, **kw)
 
         async def turn(text: str, **kw) -> CodexResult:
-            nonlocal target, fell_back
+            nonlocal target, fell_back, fallback_reason
             kw.setdefault("on_delta", on_delta)
             try:
                 return await run_on(target, text, **kw)
-            except CodexUsageLimit as spent:
+            except CodexFallbackError as unavailable:
                 if spare is None:
                     raise
-                # The subscription is spent. Answer on the spare backend for the rest of this
-                # request — switching mid-request keeps the recall loop's resume ids on one
-                # backend, since a Codex thread id means nothing to agy or a router.
-                LOGGER.warning("Codex quota spent (%s); answering with %s", spent, spare.model)
+                # Answer on the spare backend for the rest of this request. Switching mid-request
+                # keeps the recall loop's resume ids on one backend, since a Codex thread id means
+                # nothing to agy or a router.
+                LOGGER.warning(
+                    "Codex unavailable (%s: %s); answering with %s",
+                    type(unavailable).__name__,
+                    unavailable,
+                    spare.model,
+                )
                 target, fell_back = spare, True
+                fallback_reason = unavailable
                 kw.pop("resume", None)
                 return await run_on(target, text, **kw)
 
@@ -809,9 +823,15 @@ class DiscordCodexClient(discord.Client):
             if fell_back:
                 # Say which model actually answered: the persona and the answer both change.
                 # The thread id is dropped so nothing tries to resume it back on Codex.
+                if isinstance(fallback_reason, CodexUsageLimit):
+                    reason, follow_up = "Codex 額度用完了", "額度恢復後會自動換回"
+                elif isinstance(fallback_reason, CodexServerOverloaded):
+                    reason, follow_up = "Codex 模型暫時滿載", "下一次請求會再嘗試 Codex"
+                else:  # future CodexFallbackError subtype
+                    reason, follow_up = "Codex 服務暫時無法使用", "下一次請求會再嘗試 Codex"
                 text = (
-                    f"（Codex 額度用完了，這則改用 {target.model} 回答；"
-                    "額度恢復後會自動換回，這串不會續接。）\n\n" + text
+                    f"（{reason}，這則改用 {target.model} 回答；"
+                    f"{follow_up}，這串不會續接。）\n\n" + text
                 )
             return CodexResult(
                 truncate(text, self.config.max_response_chars),

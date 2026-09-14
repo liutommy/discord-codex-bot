@@ -43,6 +43,29 @@ async def test_run_batch_moves_to_the_spare_backend_when_the_quota_is_spent(
     assert seen["schema"] == Path("/s.json") and seen["plain"] is True
 
 
+async def test_run_batch_moves_to_the_spare_backend_when_codex_is_overloaded(
+    config, monkeypatch
+) -> None:
+    from discord_codex_bot import agy as agy_module
+    from discord_codex_bot import codex as codex_module
+    from discord_codex_bot.backends import run_batch
+    from discord_codex_bot.codex import CodexResult, CodexServerOverloaded
+
+    seen: dict[str, object] = {}
+
+    async def overloaded(*_args, **_kw):
+        raise CodexServerOverloaded("Selected model is at capacity.")
+
+    async def spare(prompt, cfg, model, **kw):
+        seen["model"], seen["plain"] = model, kw.get("plain")
+        return CodexResult("滿載備援結果")
+
+    monkeypatch.setattr(codex_module, "run_codex", overloaded)
+    monkeypatch.setattr(agy_module, "run_agy", spare)
+    assert await run_batch("classify", config, isolated=True) == "滿載備援結果"
+    assert seen == {"model": "gemini-3.8-flash-medium", "plain": True}
+
+
 async def test_run_batch_reports_the_failure_when_there_is_no_spare(config, monkeypatch) -> None:
     from dataclasses import replace
 
