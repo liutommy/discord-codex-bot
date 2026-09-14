@@ -220,15 +220,24 @@ async def test_tracking_tags_add_a_watch_and_switch_its_mode(
     )
 
 
-def test_notification_pings_the_owner_and_anyone_they_named_and_carries_the_link() -> None:
+def test_notification_uses_the_wording_the_model_wrote() -> None:
     watch = Watch(1, 1, GUILD, 555, USER, "policy", mention_ids=(7, 8))
     item = ContentItem(1, 1, "v1", "https://example.com/v1", "新曲發表", "", "now", "video")
-    decision = Decision(1, 1, 1, True, 0.9, "新曲", "符合政策", (), "decided")
+    said = "前輩發現星街彗星發新曲了，而且是久違的原創曲"
+    decision = Decision(1, 1, 1, True, 0.9, "新曲", "符合政策", (), "decided", said)
     text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "星街彗星")
-    assert text.startswith(f"<@{USER}> <@7> <@8> 前輩發現星街彗星有新曲了")
+    assert text.startswith(f"<@{USER}> <@7> <@8> {said}")
     assert "https://example.com/v1" in text
     # Category, confidence and reasoning are log material, not notification material.
     assert "符合政策" not in text and "0.9" not in text
+
+
+def test_notification_falls_back_when_the_model_wrote_no_wording() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy")
+    item = ContentItem(1, 1, "v1", "https://example.com/v1", "新曲發表", "", "now", "video")
+    decision = Decision(1, 1, 1, True, 0.9, "新曲", "符合政策", (), "decided")
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "星街彗星")
+    assert "前輩發現星街彗星有新曲了" in text
 
 
 def test_a_notification_never_carries_a_mention_from_the_social_text() -> None:
@@ -236,10 +245,12 @@ def test_a_notification_never_carries_a_mention_from_the_social_text() -> None:
     item = ContentItem(
         1, 1, "v1", "https://example.com/v1", "@everyone 新衣裝公開", "", "now", "video"
     )
-    decision = Decision(1, 1, 1, True, 0.9, "新衣裝", "@everyone 符合", (), "decided")
+    # Even the model's own wording is derived from untrusted text, so it is escaped too.
+    decision = Decision(
+        1, 1, 1, True, 0.9, "新衣裝", "@everyone 符合", (), "decided", "@everyone 新衣裝公開了"
+    )
     text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "星街彗星")
-    assert "@everyone" not in text  # social text is escaped before Discord sees it
-    assert text.startswith(f"<@{USER}> 前輩發現星街彗星有新衣裝了")
+    assert "@everyone" not in text and text.startswith(f"<@{USER}> ")
 
 
 async def test_tracking_classifier_defers_before_calling_the_model(

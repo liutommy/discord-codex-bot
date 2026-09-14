@@ -171,7 +171,11 @@ Recreate the Bot, then add the two test watches in Discord:
 
 A watch is live the moment it is made. It only ever considers content published after that — the
 first sight of a source is its baseline and is never classified — and it posts only the items that
-match, mentioning the watch's owner. Items judged not worth a notification are recorded and stay
+match, mentioning the watch's owner. The model decides both halves: whether the item is worth an
+interruption *and* how to say it. It is given the source's identity and the member's own policy,
+and returns the sentence to send; the Bot only does what the model cannot — escaping mentions out
+of untrusted text, bounding the length, adding the link and the @. A decision carrying no wording
+(one made before this existed) falls back to a plain generated line. Items judged not worth a notification are recorded and stay
 silent. `/codex-track log:<id>` shows that judgement history to the member who owns the watch and
 to nobody else: it is the log behind the notifications, not something to push into a channel.
 `/codex-track cancel:<id>` removes a watch. The default policy alerts on major announcements, new models/outfits/3D, music

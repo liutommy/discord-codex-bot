@@ -15,7 +15,8 @@
           "confidence",
           "category",
           "reason",
-          "matched_topics"
+          "matched_topics",
+          "message"
         ],
         "properties": {
           "external_item_id": {"type": "string", "minLength": 1},
@@ -26,7 +27,8 @@
           "matched_topics": {
             "type": "array",
             "items": {"type": "string"}
-          }
+          },
+          "message": {"type": "string", "maxLength": 600}
         }
       }
     }

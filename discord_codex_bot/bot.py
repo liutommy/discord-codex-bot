@@ -139,13 +139,18 @@ def tracking_message(message: OutboxMessage, source_label: str = "") -> str:
     and reasoning are log material — read on request, never pushed at the member. Social text
     is escaped before Discord sees it."""
     item, decision, watch = message.item, message.decision, message.watch
-    who = discord.utils.escape_mentions(source_label.strip())[:80] or "追蹤的頻道"
-    what = discord.utils.escape_mentions(decision.category.strip())[:60] or "新內容"
     title = discord.utils.escape_mentions(item.title.strip())[:300] or "（無標題）"
+    # What the model wrote, having read the content, the policy and the source. The fallback is
+    # only for a decision made before the model was asked for wording.
+    said = discord.utils.escape_mentions(decision.message.strip())[:600]
+    if not said:
+        who = discord.utils.escape_mentions(source_label.strip())[:80] or "追蹤的頻道"
+        what = discord.utils.escape_mentions(decision.category.strip())[:60] or "新內容"
+        said = f"前輩發現{who}有{what}了"
     # The owner always; anyone else only because the member named them when asking.
     targets = [uid for uid in (watch.user_id, *watch.mention_ids) if uid]
     mention = " ".join(f"<@{uid}>" for uid in targets)
-    body = f"前輩發現{who}有{what}了\n**{title}**\n{item.url}"
+    body = f"{said}\n**{title}**\n{item.url}"
     return truncate(f"{mention} {body}" if mention else body, 1900)
 
 
