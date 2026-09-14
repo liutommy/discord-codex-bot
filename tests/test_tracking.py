@@ -242,6 +242,38 @@ def test_a_watch_is_only_classified_once_per_its_own_interval(tmp_path: Path) ->
     assert [w.id for w, _items in store.pending_by_watch()] == [watch.id]
 
 
+def test_prune_drops_history_but_never_the_dedupe_rows(tmp_path: Path) -> None:
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("youtube", "UC1", "@one")
+    store.add_watch(source.id, 1, 2, 3)
+    store.ingest(source, FetchResult((content(source.id, "old"),), "old"))
+    with sqlite3.connect(tmp_path / "tracking.sqlite3") as connection:
+        connection.execute("UPDATE items SET observed_at='2000-01-01T00:00:00+00:00'")
+        connection.execute(
+            """INSERT INTO decisions(watch_id, item_id, notify, confidence, category, reason,
+                                     matched_topics_json, status, message, created_at)
+               VALUES (1, 1, 1, 0.9, 'x', 'x', '[]', 'decided', 'x',
+                       '2000-01-01T00:00:00+00:00')"""
+        )
+        connection.execute(
+            """INSERT INTO outbox(decision_id, status, delivered_at)
+               VALUES (1, 'delivered', '2000-01-01T00:00:00+00:00')"""
+        )
+    removed = store.prune(90)
+    assert removed["outbox"] == 1 and removed["decisions"] == 1
+    assert removed["items_trimmed"] == 1 and store.decisions() == []
+    with sqlite3.connect(tmp_path / "tracking.sqlite3") as connection:
+        kept = connection.execute(
+            "SELECT external_id, raw_json, description FROM items"
+        ).fetchall()
+    assert kept == [("old", "{}", "")]  # the row survives, only its bulk is cleared
+    # That surviving row is the whole point: the same content is not ingested as new again,
+    # so pruning can never cause a re-classification or a duplicate notification.
+    again = store.ingest(store.get_source(source.id), FetchResult((content(source.id, "old"),)))
+    assert again == []
+    assert store.prune(0) == {}  # 0 disables housekeeping entirely
+
+
 def test_extra_mentions_drop_the_owner_and_duplicates(tmp_path: Path) -> None:
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("youtube", "UC1", "@one")

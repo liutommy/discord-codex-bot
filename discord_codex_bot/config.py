@@ -176,6 +176,7 @@ class Config:
     tracking_interval_seconds: int
     tracking_min_remaining_percent: int
     tracking_classify_interval_minutes: int
+    tracking_keep_days: int
     tracking_max_per_user: int
     tracking_schema_path: Path
     tracking_reasoning_effort: str
@@ -351,6 +352,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         tracking_classify_interval_minutes=_positive_int(
             values, "TRACKING_CLASSIFY_INTERVAL_MINUTES", 60
         ),
+        # How long the judgement history is kept. Items themselves are never deleted — their
+        # (source, external_id) row is what stops old content being seen as new again.
+        tracking_keep_days=_positive_int(values, "TRACKING_KEEP_DAYS", 90),
         tracking_max_per_user=_positive_int(values, "TRACKING_MAX_PER_USER", 10),
         tracking_schema_path=Path(
             values.get("TRACKING_SCHEMA_FILE", "/opt/discord-codex/tracking-schema.json")

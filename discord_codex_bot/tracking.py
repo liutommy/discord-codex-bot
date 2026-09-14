@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -588,6 +588,32 @@ class TrackerStore:
                         "INSERT INTO outbox(decision_id) VALUES (?)", (cursor.lastrowid,)
                     )
 
+    def prune(self, keep_days: int) -> dict[str, int]:
+        """Drop the history nobody reads any more.
+
+        Items keep their rows however old they get: the unique (source, external_id) pair is the
+        only thing stopping already-seen content from being ingested as new, re-classified and
+        re-announced. Deleting them to save bytes would cost quota and repeat notifications, so
+        only their bulky fields are cleared. Delivered outbox rows have no reader at all once
+        they are sent, and decisions expire on a window because they are a log, not a record.
+        """
+        if keep_days <= 0:
+            return {}
+        cutoff = (datetime.now(UTC) - timedelta(days=keep_days)).isoformat()
+        with self._connect() as connection:
+            outbox = connection.execute(
+                "DELETE FROM outbox WHERE status='delivered' AND delivered_at < ?", (cutoff,)
+            ).rowcount
+            decisions = connection.execute(
+                "DELETE FROM decisions WHERE created_at < ?", (cutoff,)
+            ).rowcount
+            trimmed = connection.execute(
+                """UPDATE items SET raw_json='{}', description=''
+                   WHERE observed_at < ? AND (raw_json != '{}' OR description != '')""",
+                (cutoff,),
+            ).rowcount
+        return {"outbox": outbox, "decisions": decisions, "items_trimmed": trimmed}
+
     def recent_decisions(
         self, user_id: int, limit: int = 10, watch_id: int | None = None
     ) -> list[dict]:
@@ -1136,10 +1162,19 @@ async def tracking_loop(
     classifier: Classifier,
     deliverer: Deliverer,
     interval_seconds: float,
+    keep_days: int = 0,
 ) -> None:
+    pruned_at = 0.0
     while True:
         try:
             await run_tracking_once(store, fetcher, classifier, deliverer)
+            # Once a day is enough for housekeeping, and keeping the gate here leaves
+            # run_tracking_once free of a clock.
+            if keep_days > 0 and time.monotonic() - pruned_at >= 86_400:
+                pruned_at = time.monotonic()
+                removed = await asyncio.to_thread(store.prune, keep_days)
+                if any(removed.values()):
+                    LOGGER.info("Tracking history pruned: %s", removed)
         except asyncio.CancelledError:
             raise
         except Exception:

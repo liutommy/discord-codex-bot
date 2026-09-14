@@ -453,6 +453,7 @@ class DiscordCodexClient(discord.Client):
             self._classify_tracking,
             self._deliver_tracking,
             self.config.tracking_interval_seconds,
+            self.config.tracking_keep_days,
         )
 
     async def _fetch_tracking_source(self, source: Source):
