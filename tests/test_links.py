@@ -140,6 +140,22 @@ def test_html_to_text_drops_scripts_keeps_title_and_block_breaks() -> None:
     assert html_to_text(html) == ("T", "one\n\ntwo & three")
 
 
+def test_html_to_text_keeps_article_links_when_given_a_base() -> None:
+    html = (
+        '<html><body><a href="/news/detail/123">新カード</a>'
+        '<a href="#top">top</a><a href="https://other.example/x">other</a>'
+        '<a href="/news/detail/123">again</a></body></html>'
+    )
+    _title, text = html_to_text(html, "https://yu-gi-oh.jp/news/")
+    # Without this the model can read that an article exists but cannot hand over its URL.
+    assert "https://yu-gi-oh.jp/news/detail/123" in text
+    assert "https://other.example/x" in text
+    assert "#top" not in text  # an in-page anchor is not an article link
+    assert text.count("https://yu-gi-oh.jp/news/detail/123") == 1  # deduplicated
+    # No base: the old text-only behaviour is unchanged, so existing callers keep working.
+    assert "http" not in html_to_text(html)[1]
+
+
 @pytest.mark.parametrize(
     ("ip", "public"),
     [("8.8.8.8", True), ("10.0.0.1", False), ("127.0.0.1", False), ("169.254.1.1", False),

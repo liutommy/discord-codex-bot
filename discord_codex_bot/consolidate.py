@@ -8,7 +8,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from .codex import run_codex
+from .backends import run_batch
 from .config import Config
 from .memory import SCOPES, MemoryStore, Note
 from .usage import probe_rate_limits
@@ -104,10 +104,7 @@ def seconds_until(hour: int, timezone: str, now: datetime | None = None) -> floa
 
 def codex_runner(config: Config) -> Runner:
     async def run(prompt: str) -> str:
-        result = await run_codex(
-            prompt, config, raw=True, schema=config.consolidate_schema_path
-        )
-        return result.text
+        return await run_batch(prompt, config, schema=config.consolidate_schema_path)
 
     return run
 
@@ -130,7 +127,7 @@ async def run_once(config: Config, force: bool = False) -> str:
             config.memory_search_context_lines,
         ),
     )
-    if not force:
+    if not force and config.consolidate_min_remaining_percent > 0:
         limits = await probe_rate_limits(config)
         remaining = 100.0 - limits.primary_used_percent if limits else -1.0
         if remaining < config.consolidate_min_remaining_percent:
@@ -145,18 +142,20 @@ async def consolidate_forever(store: MemoryStore, config: Config, queue_run) -> 
     while True:
         await asyncio.sleep(seconds_until(config.consolidate_hour, config.consolidate_timezone))
         try:
-            limits = await queue_run(lambda: probe_rate_limits(config))
-            if limits is None:
-                LOGGER.warning("Consolidation skipped: rate limits unknown")
-                continue
-            remaining = 100.0 - limits.primary_used_percent
-            if remaining < config.consolidate_min_remaining_percent:
-                LOGGER.info(
-                    "Consolidation skipped: 5h remaining %.0f%% < %d%%",
-                    remaining,
-                    config.consolidate_min_remaining_percent,
-                )
-                continue
+            remaining = 100.0
+            if config.consolidate_min_remaining_percent > 0:
+                limits = await queue_run(lambda: probe_rate_limits(config))
+                if limits is None:
+                    LOGGER.warning("Consolidation skipped: rate limits unknown")
+                    continue
+                remaining = 100.0 - limits.primary_used_percent
+                if remaining < config.consolidate_min_remaining_percent:
+                    LOGGER.info(
+                        "Consolidation skipped: 5h remaining %.0f%% < %d%%",
+                        remaining,
+                        config.consolidate_min_remaining_percent,
+                    )
+                    continue
             summary = await queue_run(
                 lambda: consolidate_all(store, runner, config.consolidate_max_input_bytes)
             )

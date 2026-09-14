@@ -9,7 +9,7 @@ import socket
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import aiohttp
 from aiohttp.resolver import ThreadedResolver
@@ -18,6 +18,9 @@ from . import gemini
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
+# Anchors kept per page. A news index is mostly navigation, so this is enough to carry the
+# articles themselves without letting a menu-heavy site flood the prompt.
+_MAX_LINKS = 60
 URL_RE = re.compile(r"https?://[^\s<>()\[\]\"'`]+")
 FETCH_TAG = re.compile(
     r'<fetch\s+url="(https?://[^"]{1,2000})"(?:\s+render="([^"]*)")?\s*/?>(?:\s*</fetch>)?'
@@ -149,12 +152,28 @@ def extract_fetch_tags(answer: str) -> list[tuple[str, bool]]:
 
 
 class _Text(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, base_url: str = "") -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.title = ""
         self._skip = 0
         self._in_title = False
+        self._base = base_url
+        self._seen: set[str] = set()
+
+    def _link(self, attrs) -> None:
+        """Keep an anchor's target next to its text. Without this the model can read that an
+        article exists but cannot hand the member its URL — the page's own links are dropped."""
+        if not self._base or self._skip or len(self._seen) >= _MAX_LINKS:
+            return
+        href = next((v for k, v in attrs if k == "href" and v), "")
+        if not href or href.startswith(("#", "javascript:", "mailto:", "data:")):
+            return
+        absolute = urljoin(self._base, href)
+        if not absolute.startswith(("http://", "https://")) or absolute in self._seen:
+            return
+        self._seen.add(absolute)
+        self.parts.append(f" <{absolute}>")
 
     def handle_starttag(self, tag, attrs):
         if tag in _SKIP:
@@ -163,6 +182,8 @@ class _Text(HTMLParser):
             self._in_title = True
         elif tag in _BLOCK:
             self.parts.append("\n")
+        elif tag == "a":
+            self._link(attrs)
 
     def handle_endtag(self, tag):
         if tag in _SKIP and self._skip:
@@ -179,8 +200,10 @@ class _Text(HTMLParser):
             self.parts.append(data)
 
 
-def html_to_text(html: str) -> tuple[str, str]:
-    parser = _Text()
+def html_to_text(html: str, base_url: str = "") -> tuple[str, str]:
+    """(title, text). With `base_url`, each anchor's absolute target is kept inline as <url> so
+    the model can quote a link it found; without it the old text-only behaviour applies."""
+    parser = _Text(base_url)
     parser.feed(html)
     text = "".join(parser.parts)
     text = re.sub(r"[ \t\r\f\v]+", " ", text)
@@ -257,7 +280,9 @@ async def fetch_link(url: str, config: Config) -> str:
         return f"（{url}：抓取失敗——{type(error).__name__}）"
     body = raw.decode(response.charset or "utf-8", errors="replace")
     if "html" in content_type:
-        title, text = html_to_text(body)
+        # Resolve relative links against where we actually landed, falling back to what we
+        # asked for: after a redirect those differ, and without a redirect they are the same.
+        title, text = html_to_text(body, str(getattr(response, "url", "") or url))
         if _challenge(title):
             return f"（{url}：被網站的機器人驗證擋住，打不開）"
     elif content_type.startswith("text/") or "json" in content_type or "xml" in content_type:

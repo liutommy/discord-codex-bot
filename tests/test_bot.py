@@ -172,15 +172,15 @@ async def test_tracking_classifier_is_isolated_and_bounded(
     async def limits(_config):
         return RateLimits(10, 20, "test")
 
-    async def codex(prompt, config, **kwargs):
+    async def batch(prompt, config, **kwargs):
         calls.append((prompt, config, kwargs))
-        return CodexResult('{"decisions":[]}')
+        return '{"decisions":[]}'
 
     monkeypatch.setattr(bot_module, "probe_rate_limits", limits)
-    monkeypatch.setattr(bot_module, "run_codex", codex)
+    monkeypatch.setattr(bot_module, "run_batch", batch)
     assert await client._classify_tracking("classify") == '{"decisions":[]}'
     kwargs = calls[0][2]
-    assert kwargs["raw"] and kwargs["isolated"] and kwargs["effort"] == "high"
+    assert kwargs["isolated"] and kwargs["effort"] == "high"
     assert kwargs["schema"] == client.config.tracking_schema_path
     await client._classify_tracking("again")
     assert len(calls) == 2  # the window gate is the only limit; there is no daily cap
@@ -250,12 +250,12 @@ async def test_tracking_classifier_defers_before_calling_the_model(
     async def limits(_config):
         return RateLimits(55, 10, "test")
 
-    async def codex(prompt, config, **kwargs):
+    async def batch(prompt, config, **kwargs):
         calls.append(prompt)
-        return CodexResult("{}")
+        return "{}"
 
     monkeypatch.setattr(bot_module, "probe_rate_limits", limits)
-    monkeypatch.setattr(bot_module, "run_codex", codex)
+    monkeypatch.setattr(bot_module, "run_batch", batch)
     with pytest.raises(RuntimeError, match="below the tracking gate"):
         await client._classify_tracking("classify")
     assert calls == []

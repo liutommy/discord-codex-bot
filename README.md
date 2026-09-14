@@ -154,7 +154,7 @@ Put the credentials only in the ignored `.env` file and enable the worker:
 ```dotenv
 TRACKING_ENABLED=true
 TRACKING_INTERVAL_MINUTES=15
-TRACKING_MIN_REMAINING_PERCENT=50
+TRACKING_MIN_REMAINING_PERCENT=0
 TRACKING_REASONING_EFFORT=high
 YOUTUBE_API_KEY=<restricted YouTube API key>
 TWITCH_CLIENT_ID=<Twitch client id>
@@ -191,9 +191,13 @@ Codex memories, history persistence, web search, apps, browser/computer use, ima
 multi-agent features disabled. Before each classifier call the Bot reads
 `account/rateLimits/read`; if either the five-hour or weekly window has less than
 `TRACKING_MIN_REMAINING_PERCENT` remaining, it keeps the item pending for a later poll. That
-window gate is the only limit — classification is not capped per day, and it does not fall back
-to another backend, because the isolated Codex run is what makes reading untrusted social text
-safe. Provider credentials are excluded from the Codex child environment.
+gate defaults to `0`, meaning the probe is skipped entirely: a spent subscription now runs the
+classification on `CODEX_FALLBACK_MODEL` instead of failing, so there is nothing to hold quota
+back for. agy is acceptable here because its own settings deny commands, writes, URL reads and
+MCP, and each classification is a fresh conversation — the properties `isolated` buys on the
+Codex side. Memory consolidation follows the same rule through
+`CONSOLIDATE_MIN_REMAINING_PERCENT`. Provider credentials are excluded from the Codex child
+environment.
 Tracking state and its durable notification outbox live in `CODEX_HOME/tracking.sqlite3` and are
 included in the daily backup through SQLite's online backup API.
 
@@ -343,15 +347,19 @@ The rule is a state, not an event: whatever makes a thread non-resumable (TTL, i
 fingerprint, workspace switch, `new:True`, `-reset`, being replaced) makes it a harvest
 candidate, and a switch wakes the pass immediately instead of waiting for the interval. Each
 thread is harvested once per retirement — a thread continued afterwards by replying to an old
-answer is harvested again when it retires next. The pass waits while the last known 5-hour
-reading is under `CONSOLIDATE_MIN_REMAINING_PERCENT`. Operators can run it on demand inside the container with
+answer is harvested again when it retires next. The pass shares
+`CONSOLIDATE_MIN_REMAINING_PERCENT` with the nightly consolidation, and at its default of `0`
+never defers: a spent subscription runs on `CODEX_FALLBACK_MODEL` instead.
+Operators can run it on demand inside the container with
 `python -m discord_codex_bot.harvest` (`--force` ignores the quota gate); the nightly
 consolidation has the same entry point, `python -m discord_codex_bot.consolidate [--force]`.
 
 Notes are consolidated once a day. At `CONSOLIDATE_HOUR` (`CONSOLIDATE_TIMEZONE`, default 02:00
-Asia/Taipei) the Bot runs one minimal Codex turn so the session rollout carries fresh
-`rate_limits`, reads the 5-hour window's `used_percent`, and proceeds only if at least
-`CONSOLIDATE_MIN_REMAINING_PERCENT` (50) remains. It then rewrites every scope of every guild
+Asia/Taipei) the Bot rewrites every scope of every guild. `CONSOLIDATE_MIN_REMAINING_PERCENT`
+defaults to `0`, so it simply runs: a spent subscription falls back to `CODEX_FALLBACK_MODEL`
+rather than failing. Set a percentage and the Bot first reads the five-hour window's
+`usedPercent` from the Codex app-server (no turn spent) and skips the night when less than that
+remains. The rewrite goes through every scope of every guild
 (server-wide and each member) through `codex exec --output-schema`: duplicates and fragments are
 merged, contradictions resolved newest-wins, nothing invented. Input is fed in batches of
 `CONSOLIDATE_MAX_INPUT_BYTES`; each scope's previous state is kept in `.backup/` until the next

@@ -6,7 +6,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 
-from .codex import run_codex
+from .backends import run_batch
 from .config import Config
 from .memory import MemoryStore
 from .openrouter import load_transcript, message_text
@@ -132,10 +132,7 @@ async def harvest_thread(
 
 def codex_runner(config: Config) -> Runner:
     async def run(prompt: str) -> str:
-        result = await run_codex(
-            prompt, config, raw=True, schema=config.consolidate_schema_path
-        )
-        return result.text
+        return await run_batch(prompt, config, schema=config.consolidate_schema_path)
 
     return run
 
@@ -170,6 +167,10 @@ async def harvest_forever(
 
 
 async def _quota_ok(config: Config) -> bool:
+    if config.consolidate_min_remaining_percent <= 0:
+        # No gate set: a spent subscription now falls back to CODEX_FALLBACK_MODEL instead of
+        # failing, so neither a low reading nor an unknown one is a reason to defer.
+        return True
     limits = await query_rate_limits(config)
     if limits is None:
         LOGGER.warning("Harvest deferred: authoritative 5h usage is unknown")

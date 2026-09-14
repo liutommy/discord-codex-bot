@@ -39,6 +39,7 @@ from .backends import (
     parse_choice,
     resolve,
     router_choice,
+    run_batch,
     split_stored,
 )
 from .backup import backup_forever, export_memory_zip
@@ -453,26 +454,26 @@ class DiscordCodexClient(discord.Client):
             raise RuntimeError("tracking is disabled")
 
         async def classify() -> str:
-            limits = await probe_rate_limits(self.config)
-            if limits is None:
-                raise RuntimeError("Codex usage is unknown; tracking classification deferred")
-            remaining = min(
-                100.0 - limits.primary_used_percent,
-                100.0 - limits.secondary_used_percent,
-            )
-            if remaining < self.config.tracking_min_remaining_percent:
-                raise RuntimeError("Codex remaining quota is below the tracking gate")
-            # No spare backend here on purpose: the classifier reads untrusted social text and
-            # depends on the isolated Codex run (memories/history/tools off) for that safety.
-            result = await run_codex(
+            gate = self.config.tracking_min_remaining_percent
+            if gate > 0:
+                # Only worth probing when a gate is actually set: with a spare backend a spent
+                # subscription is survivable, so "quota unknown" no longer has to stop the pass.
+                limits = await probe_rate_limits(self.config)
+                if limits is None:
+                    raise RuntimeError("Codex usage is unknown; tracking classification deferred")
+                remaining = min(
+                    100.0 - limits.primary_used_percent,
+                    100.0 - limits.secondary_used_percent,
+                )
+                if remaining < gate:
+                    raise RuntimeError("Codex remaining quota is below the tracking gate")
+            return await run_batch(
                 prompt,
                 self.config,
-                effort=self.config.tracking_reasoning_effort,
-                raw=True,
                 schema=self.config.tracking_schema_path,
+                effort=self.config.tracking_reasoning_effort,
                 isolated=True,
             )
-            return result.text
 
         return await self.queue.run(classify)
 

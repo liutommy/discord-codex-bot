@@ -33,7 +33,10 @@ def test_loads_safe_operational_defaults() -> None:
     assert config.max_queued_jobs == 10
     assert not config.tracking_enabled
     assert config.tracking_interval_seconds == 900
-    assert config.tracking_min_remaining_percent == 50
+    # 0 = no gate: a spent subscription falls back instead of failing, so batch work no longer
+    # has to hold quota back.
+    assert config.tracking_min_remaining_percent == 0
+    assert config.consolidate_min_remaining_percent == 0
     assert config.tracking_reasoning_effort == "high"
     assert config.codex_fallback_model == "agy:gemini-3.8-flash|medium"
 

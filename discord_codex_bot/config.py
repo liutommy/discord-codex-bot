@@ -322,8 +322,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.
         consolidate_hour=_bounded_int(values, "CONSOLIDATE_HOUR", 2, 0, 23),
         consolidate_timezone=values.get("CONSOLIDATE_TIMEZONE", "").strip() or "Asia/Taipei",
+        # 0 = no gate: a spent subscription now falls back to CODEX_FALLBACK_MODEL instead of
+        # failing, so holding quota back from the nightly job only delays it for no gain. Raise
+        # it again to keep that much of the five-hour window for members' own questions.
         consolidate_min_remaining_percent=_bounded_int(
-            values, "CONSOLIDATE_MIN_REMAINING_PERCENT", 50, 0, 100
+            values, "CONSOLIDATE_MIN_REMAINING_PERCENT", 0, 0, 100
         ),
         consolidate_max_input_bytes=_positive_int(values, "CONSOLIDATE_MAX_INPUT_BYTES", 100_000),
         consolidate_schema_path=Path(
@@ -337,8 +340,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "tracking.sqlite3")
         ),
         tracking_interval_seconds=_positive_int(values, "TRACKING_INTERVAL_MINUTES", 15) * 60,
+        # 0 = no gate, for the same reason as CONSOLIDATE_MIN_REMAINING_PERCENT above.
         tracking_min_remaining_percent=_bounded_int(
-            values, "TRACKING_MIN_REMAINING_PERCENT", 50, 0, 100
+            values, "TRACKING_MIN_REMAINING_PERCENT", 0, 0, 100
         ),
         tracking_max_per_user=_positive_int(values, "TRACKING_MAX_PER_USER", 10),
         tracking_schema_path=Path(

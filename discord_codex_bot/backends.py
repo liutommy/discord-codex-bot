@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
+LOGGER = logging.getLogger(__name__)
 CODEX = "codex"
 AGY = "agy"
 OPENROUTER = "openrouter"
@@ -96,6 +98,40 @@ def parse_choice(value: str, codex_model: str) -> ModelChoice:
             if slug in by_effort.values():
                 return parse_choice(f"{AGY}:{fam}", codex_model)
     return choices(codex_model)[0]
+
+
+async def run_batch(
+    prompt: str,
+    config,
+    *,
+    schema=None,
+    effort: str = "",
+    isolated: bool = False,
+) -> str:
+    """One background turn (memory consolidation, social classification) as text.
+
+    Batch jobs have nobody watching to retry them, so a spent subscription must not simply fail:
+    the same CODEX_FALLBACK_MODEL that answers members takes over. agy keeps its own deny-list
+    (commands, writes, URL reads and MCP are all refused) and is given a fresh conversation each
+    time, which is what `isolated` buys on the Codex side.
+    """
+    from .agy import run_agy
+    from .codex import CodexUsageLimit, run_codex
+
+    try:
+        result = await run_codex(
+            prompt, config, effort=effort, raw=True, schema=schema, isolated=isolated
+        )
+        return result.text
+    except CodexUsageLimit as spent:
+        spare = fallback_target(
+            config.codex_fallback_model, config.codex_model, config.codex_reasoning_effort
+        )
+        if spare is None or spare.backend != AGY:
+            raise
+        LOGGER.warning("Codex quota spent (%s); running this batch on %s", spent, spare.model)
+        result = await run_agy(prompt, config, spare.model, raw=True, schema=schema, plain=True)
+        return result.text
 
 
 def fallback_target(stored: str, codex_model: str, default_effort: str) -> Resolved | None:
