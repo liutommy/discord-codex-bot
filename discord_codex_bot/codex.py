@@ -182,10 +182,10 @@ def _prompt(
             ' <track source="https://…" interest="what is worth pinging about"'
             ' who="<@user id> <@user id>"/> after your answer — omit who to ping only the'
             " member, add ids when they explicitly ask for other people too; omit interest to"
-            " use the default policy. A new watch starts in shadow (it posts its judgement of"
-            " recent items without pinging anyone). When they are happy with those judgements,"
-            ' append <track_live id="N"/> to start real pings, or <track_shadow id="N"/> to put'
-            " one back into shadow, using an id from that section; never invent ids. Deleting a"
+            " use the default policy. A watch is live from the moment it is made: it notifies"
+            " about content published after that, never about what is already there, and only"
+            " when the content matches. The judgement history is a slash command the member"
+            " runs themselves — never offer to post it into the channel. Deleting a"
             " watch is a slash command, not a tag."
             ' Add every="60" to <track> when the member asks how often it should be judged, and'
             ' <track_every id="N" minutes="120"/> to change an existing one. Attribute order'

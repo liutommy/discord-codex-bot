@@ -169,11 +169,12 @@ Recreate the Bot, then add the two test watches in Discord:
 /codex-track
 ```
 
-New watches start in shadow mode. The first pass classifies the recent baseline and posts a card
-for every item, including `不提醒`, so the model can be evaluated. Shadow cards do not mention the
-member. After the decisions look right, promote each watch with `/codex-track live:<id>`; formal
-mode posts only matching new items and mentions that watch's owner. `/codex-track cancel:<id>`
-removes a watch. The default policy alerts on major announcements, new models/outfits/3D, music
+A watch is live the moment it is made. It only ever considers content published after that — the
+first sight of a source is its baseline and is never classified — and it posts only the items that
+match, mentioning the watch's owner. Items judged not worth a notification are recorded and stay
+silent. `/codex-track log:<id>` shows that judgement history to the member who owns the watch and
+to nobody else: it is the log behind the notifications, not something to push into a channel.
+`/codex-track cancel:<id>` removes a watch. The default policy alerts on major announcements, new models/outfits/3D, music
 releases, concerts/events, anniversaries/milestones, hiatus/return/graduation, major collaborations,
 and rare charity/subathon/marathon streams. Routine streams, clips, repeated merchandise, and
 uncertain titles are ignored.
@@ -185,9 +186,10 @@ quota. Each watch stores its own interval, an attempt stamps its clock (failures
 broken source cannot burn quota every pass), and a member can change theirs by asking.
 
 Watches can also be managed by asking in words, the way reminders can: the model appends
-`<track source="…" interest="…" who="…" every="60"/>`, `<track_live id="N"/>`,
-`<track_shadow id="N"/>` or `<track_every id="N" minutes="120"/>` after its answer and the Bot
-performs it, reporting what it did. Attributes are read by name, not by position. A watch pings its owner; other
+`<track source="…" interest="…" who="…" every="60"/>` or `<track_every id="N" minutes="120"/>`
+after its answer and the Bot performs it, reporting what it did. Attributes are read by name, not
+by position. There is no mode to switch and no way to ask for the judgement log in words — that
+is a slash command the member runs for themselves. A watch pings its owner; other
 people are added only when the member names them in the request, exactly like `<remind who=…>`.
 The member's own watches are listed in the prompt, so an id is never guessed — the store also
 refuses to change a watch that belongs to someone else. Cancelling stays a slash command: it
@@ -210,7 +212,8 @@ included in the daily backup through SQLite's online backup API.
 
 Social titles and descriptions remain untrusted even though they are JSON-encoded in the prompt:
 the output schema prevents structural escape, but it cannot guarantee that a model will never make
-a schema-valid false positive. Keep new watches in shadow until their decisions look acceptable.
+a schema-valid false positive. Check `/codex-track log:<id>` after the first few notifications to
+see what it judged and why.
 Notification delivery is intentionally at-least-once; a process crash after Discord accepts a
 message but before SQLite records delivery can produce one duplicate after restart.
 

@@ -70,7 +70,6 @@ class Watch:
     channel_id: int
     user_id: int
     interest: str
-    shadow: bool = True
     active: bool = True
     start_item_id: int = 0
     # Extra people to @ besides the owner, when the member asked for them by name.
@@ -223,8 +222,6 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, id);
 # Attributes are parsed by name rather than in a fixed order: a model that writes who= before
 # interest= would otherwise have the later attributes silently dropped.
 TRACK_TAG = re.compile(r'<track((?:\s+[a-z_]{1,10}="[^"]{0,2000}")+)\s*/?>(?:\s*</track>)?')
-TRACK_LIVE_TAG = re.compile(r'<track_live\s+id="([0-9]{1,9})"\s*/?>(?:\s*</track_live>)?')
-TRACK_SHADOW_TAG = re.compile(r'<track_shadow\s+id="([0-9]{1,9})"\s*/?>(?:\s*</track_shadow>)?')
 TRACK_EVERY_TAG = re.compile(
     r'<track_every\s+id="([0-9]{1,9})"\s+minutes="([0-9]{1,5})"\s*/?>(?:\s*</track_every>)?'
 )
@@ -239,9 +236,9 @@ TrackAdd = tuple[str, str, tuple[int, ...], int]
 
 def extract_track_tags(
     answer: str,
-) -> tuple[str, list[TrackAdd], list[int], list[int], list[tuple[int, int]]]:
-    """(answer without the tags, watches to add, make-live ids, back-to-shadow ids,
-    (id, minutes) interval changes)."""
+) -> tuple[str, list[TrackAdd], list[tuple[int, int]]]:
+    """(answer without the tags, watches to add, (id, minutes) interval changes). A watch is
+    live from the moment it is made, so there is no mode to switch."""
     adds: list[TrackAdd] = []
     for body in TRACK_TAG.findall(answer):
         attrs = dict(_ATTR.findall(body))
@@ -259,23 +256,21 @@ def extract_track_tags(
                 int(every) if every.isdigit() else 0,
             )
         )
-    lives = [int(i) for i in TRACK_LIVE_TAG.findall(answer)][:MAX_TRACK_TAGS]
-    shadows = [int(i) for i in TRACK_SHADOW_TAG.findall(answer)][:MAX_TRACK_TAGS]
     every_changes = [
         (int(watch_id), int(minutes)) for watch_id, minutes in TRACK_EVERY_TAG.findall(answer)
     ][:MAX_TRACK_TAGS]
     clean = answer
-    for pattern in (TRACK_EVERY_TAG, TRACK_SHADOW_TAG, TRACK_LIVE_TAG, TRACK_TAG):
+    for pattern in (TRACK_EVERY_TAG, TRACK_TAG):
         clean = pattern.sub("", clean)
-    return clean.strip(), adds[:MAX_TRACK_TAGS], lives, shadows, every_changes
+    return clean.strip(), adds[:MAX_TRACK_TAGS], every_changes
 
 
 def render_watches(watches: Sequence[Watch], labels: Mapping[int, str]) -> str:
     """The member's watches as prompt lines (id, mode, source), so the model can act on one
     without inventing an id — the same trick the pending-reminder section uses."""
     return "\n".join(
-        f"#{watch.id} [{'shadow' if watch.shadow else '正式'}] "
-        f"{labels.get(watch.source_id, '?')} 每 {watch.interval_minutes} 分鐘判斷一次"
+        f"#{watch.id} {labels.get(watch.source_id, '?')}"
+        f" 每 {watch.interval_minutes} 分鐘判斷一次"
         + (f"（另外 @ {len(watch.mention_ids)} 人）" if watch.mention_ids else "")
         for watch in watches
     )
@@ -322,7 +317,7 @@ class TrackerStore:
     def _watch(row: sqlite3.Row) -> Watch:
         return Watch(
             row["id"], row["source_id"], row["guild_id"], row["channel_id"], row["user_id"],
-            row["interest"], bool(row["shadow"]), bool(row["active"]), row["start_item_id"],
+            row["interest"], bool(row["active"]), row["start_item_id"],
             tuple(int(part) for part in str(row["mention_ids"] or "").split(",") if part),
             int(row["interval_minutes"] or 60),
             int(row["classified_at"] or 0),
@@ -393,7 +388,6 @@ class TrackerStore:
         user_id: int,
         interest: str = INTEREST_POLICY,
         *,
-        shadow: bool = True,
         mention_ids: Sequence[int] = (),
         interval_minutes: int = 60,
     ) -> Watch:
@@ -406,14 +400,15 @@ class TrackerStore:
             latest = connection.execute(
                 "SELECT COALESCE(MAX(id), 0) FROM items WHERE source_id=?", (source_id,)
             ).fetchone()[0]
-            start_item_id = 0 if shadow else int(latest)
+            # A watch is about what happens from now on: everything already fetched is behind it.
+            start_item_id = int(latest)
             connection.execute(
                 """INSERT INTO watches(
                      source_id, guild_id, channel_id, user_id, interest, shadow, start_item_id,
                      mention_ids, interval_minutes, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(source_id, guild_id, channel_id, user_id, interest) DO UPDATE SET
-                     active=1, shadow=excluded.shadow, mention_ids=excluded.mention_ids,
+                     active=1, shadow=0, mention_ids=excluded.mention_ids,
                      interval_minutes=excluded.interval_minutes""",
                 (
                     source_id,
@@ -421,7 +416,7 @@ class TrackerStore:
                     channel_id,
                     user_id,
                     interest,
-                    int(shadow),
+                    0,  # the column stays for old rows; nothing branches on it any more
                     start_item_id,
                     extra,
                     max(1, int(interval_minutes)),
@@ -473,15 +468,6 @@ class TrackerStore:
         with self._connect() as connection:
             return bool(connection.execute(query, params).rowcount)
 
-    def set_watch_shadow(self, watch_id: int, shadow: bool, user_id: int | None = None) -> bool:
-        query, params = "UPDATE watches SET shadow=? WHERE id=?", [int(shadow), watch_id]
-        if user_id is not None:
-            query += " AND user_id=?"
-            params.append(user_id)
-        with self._connect() as connection:
-            changed = connection.execute(query, params).rowcount
-        return bool(changed)
-
     def delete_watch(self, watch_id: int, user_id: int | None = None) -> bool:
         query, params = "DELETE FROM watches WHERE id=?", [watch_id]
         if user_id is not None:
@@ -523,7 +509,8 @@ class TrackerStore:
         return [self._item(row) for row in rows]
 
     def pending_by_watch(self) -> list[tuple[Watch, list[ContentItem]]]:
-        """Undecided items; historical baseline is classified only while a watch is in shadow."""
+        """Undecided items published after the watch was created. The first sight of a source is
+        its baseline and is never classified: a new watch is about what happens from now on."""
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT w.*, i.id AS item_id, i.external_id AS item_external_id,
@@ -534,7 +521,7 @@ class TrackerStore:
                    FROM watches w JOIN items i ON i.source_id=w.source_id
                    LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
                    WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id
-                     AND (i.baseline=0 OR w.shadow=1)
+                     AND i.baseline=0
                      AND CAST(strftime('%s', 'now') AS INTEGER) - w.classified_at
                          >= w.interval_minutes * 60
                    ORDER BY w.id, i.published_at, i.id"""
@@ -573,14 +560,49 @@ class TrackerStore:
                         watch.id, item.id, int(decision.notify), decision.confidence,
                         decision.category, decision.reason,
                         json.dumps(decision.matched_topics, ensure_ascii=False),
-                        "shadow" if watch.shadow else "decided", _utc_now(),
+                        "decided", _utc_now(),
                     ),
                 )
-                should_deliver = watch.shadow or (decision.notify and not item.baseline)
+                # Every judgement is kept; only the ones worth interrupting someone are sent.
+                # The rest are the log behind the notifications, read on request.
+                should_deliver = decision.notify and not item.baseline
                 if cursor.rowcount and should_deliver:
                     connection.execute(
                         "INSERT INTO outbox(decision_id) VALUES (?)", (cursor.lastrowid,)
                     )
+
+    def recent_decisions(
+        self, user_id: int, limit: int = 10, watch_id: int | None = None
+    ) -> list[dict]:
+        """This member's own latest judgements, newest first: what was seen and why it was or
+        was not worth a notification. Read on request — never pushed into a channel."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT d.notify, d.category, d.reason, d.created_at,
+                          i.title, i.url, s.state_json, s.external_id
+                   FROM decisions d JOIN watches w ON w.id=d.watch_id
+                   JOIN items i ON i.id=d.item_id JOIN sources s ON s.id=w.source_id
+                   WHERE w.user_id=? AND (? IS NULL OR w.id=?)
+                   ORDER BY d.id DESC LIMIT ?""",
+                (user_id, watch_id, watch_id, max(1, min(int(limit), 25))),
+            ).fetchall()
+        out = []
+        for row in rows:
+            state = json.loads(row["state_json"] or "{}")
+            out.append(
+                {
+                    "notify": bool(row["notify"]),
+                    "category": row["category"],
+                    "reason": row["reason"],
+                    "at": row["created_at"],
+                    "title": row["title"],
+                    "url": row["url"],
+                    "source": str(
+                        state.get("title") or state.get("login") or row["external_id"]
+                    ),
+                }
+            )
+        return out
 
     def decisions(self) -> list[Decision]:
         with self._connect() as connection:
@@ -594,7 +616,7 @@ class TrackerStore:
                           d.id AS decision_id, d.watch_id, d.item_id, d.notify, d.confidence,
                           d.category, d.reason, d.matched_topics_json, d.status AS decision_status,
                           w.source_id, w.guild_id, w.channel_id, w.user_id, w.interest,
-                          w.shadow, w.active, w.start_item_id,
+                          w.active, w.start_item_id,
                           i.external_id, i.url, i.title, i.description, i.published_at,
                           i.kind, i.live_status, i.baseline, i.raw_json
                    FROM outbox o JOIN decisions d ON d.id=o.decision_id
@@ -605,7 +627,7 @@ class TrackerStore:
         for row in rows:
             watch = Watch(
                 row["watch_id"], row["source_id"], row["guild_id"], row["channel_id"],
-                row["user_id"], row["interest"], bool(row["shadow"]), bool(row["active"]),
+                row["user_id"], row["interest"], bool(row["active"]),
                 row["start_item_id"],
             )
             item = ContentItem(

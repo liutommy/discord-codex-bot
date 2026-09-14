@@ -67,8 +67,8 @@ def test_store_schema_idempotency_crud_and_restart(tmp_path: Path) -> None:
     store = TrackerStore(path)
     source = store.add_source("youtube", "UC1", "https://youtube.com/@one", {"title": "one"})
     assert store.add_source("youtube", "UC1", "@one").id == source.id
-    watch = store.add_watch(source.id, 1, 2, 3, "重大公告", shadow=False)
-    assert store.add_watch(source.id, 1, 2, 3, "重大公告", shadow=False).id == watch.id
+    watch = store.add_watch(source.id, 1, 2, 3, "重大公告")
+    assert store.add_watch(source.id, 1, 2, 3, "重大公告").id == watch.id
 
     first = store.ingest(source, FetchResult((content(source.id, "v1"),), "v1", {"x": 1}))
     assert len(first) == 1 and first[0].baseline is True
@@ -90,29 +90,17 @@ def test_new_watch_starts_after_items_already_seen_by_shared_source(tmp_path: Pa
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("youtube", "UC1", "@one")
     store.ingest(source, FetchResult((content(source.id, "old"),), "old"))
-    watch = store.add_watch(source.id, 1, 2, 3, shadow=False)
+    watch = store.add_watch(source.id, 1, 2, 3)
     assert watch.start_item_id > 0 and store.pending_by_watch() == []
     current = store.get_source(source.id)
     store.ingest(current, FetchResult((content(source.id, "new"),), "new"))
     assert [item.external_id for _, items in store.pending_by_watch() for item in items] == ["new"]
 
 
-def test_new_shadow_watch_reviews_items_already_fetched_for_shared_source(tmp_path: Path) -> None:
-    store = TrackerStore(tmp_path / "tracking.sqlite3")
-    source = store.add_source("youtube", "UC1", "@one")
-    store.ingest(source, FetchResult((content(source.id, "old"),), "old"))
-    watch = store.add_watch(source.id, 1, 2, 3, shadow=True)
-    pending = store.pending_by_watch()
-    assert watch.start_item_id == 0
-    assert [(current.id, [item.external_id for item in items]) for current, items in pending] == [
-        (watch.id, ["old"])
-    ]
-
-
 async def test_first_observation_is_baseline_without_real_notification(tmp_path: Path) -> None:
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("youtube", "UC1", "@one")
-    store.add_watch(source.id, 1, 2, 3, shadow=False)
+    store.add_watch(source.id, 1, 2, 3)
     ai_calls = []
     deliveries = []
 
@@ -131,40 +119,19 @@ async def test_first_observation_is_baseline_without_real_notification(tmp_path:
     assert ai_calls == [] and deliveries == [] and store.decisions() == []
 
 
-async def test_shadow_baseline_is_recorded_and_delivered_as_evaluation(tmp_path: Path) -> None:
-    store = TrackerStore(tmp_path / "tracking.sqlite3")
-    source = store.add_source("youtube", "UC1", "@one")
-    store.add_watch(source.id, 1, 2, 3, shadow=True)
-    delivered = []
-
-    async def fetch(current):
-        return FetchResult((content(current.id, "old"),), "old")
-
-    async def classify(prompt):
-        return classifier_answer(prompt)
-
-    async def deliver(message):
-        delivered.append(message)
-
-    stats = await run_tracking_once(store, fetch, classify, deliver)
-    assert stats["classifier_calls"] == 1 and stats["decisions"] == 1
-    assert store.decisions()[0].status == "shadow"
-    assert len(delivered) == 1 and delivered[0].watch.shadow
-    assert store.pending_outbox() == []
-
-
 async def test_unique_source_fetch_batching_and_zero_ai_without_new_content(tmp_path: Path) -> None:
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("youtube", "UC1", "@one")
-    store.add_watch(source.id, 1, 2, 3, shadow=True)
-    store.add_watch(source.id, 1, 2, 4, shadow=True)
+    store.add_watch(source.id, 1, 2, 3)
+    store.add_watch(source.id, 1, 2, 4)
     fetches = 0
     ai_prompts = []
+    seen = ["v1", "v2"]
 
     async def fetch(current):
         nonlocal fetches
         fetches += 1
-        return FetchResult((content(current.id, "v1"), content(current.id, "v2")), "v2")
+        return FetchResult(tuple(content(current.id, e) for e in seen), seen[-1])
 
     async def classify(prompt):
         ai_prompts.append(prompt)
@@ -175,16 +142,21 @@ async def test_unique_source_fetch_batching_and_zero_ai_without_new_content(tmp_
     async def deliver(message):
         deliveries.append(message)
 
+    # First sight of a source is its baseline: fetched and stored, never handed to the model.
     first = await run_tracking_once(store, fetch, classify, deliver)
     assert fetches == 1 and first["new_items"] == 2
-    assert len(ai_prompts) == 2  # one batch per watch
-    assert all(prompt.count("external_item_id") == 2 for prompt in ai_prompts)
-    assert len(deliveries) == 4  # shadow reports every decision, including notify=false
+    assert ai_prompts == [] and deliveries == []
 
+    seen.append("v3")
     second = await run_tracking_once(store, fetch, classify, deliver)
-    assert fetches == 2
-    assert second == {"sources": 1, "new_items": 0}
-    assert len(ai_prompts) == 2
+    assert fetches == 2 and second["new_items"] == 1
+    assert len(ai_prompts) == 2  # one batch per watch, the shared source fetched once
+    assert all(prompt.count("external_item_id") == 1 for prompt in ai_prompts)
+    assert deliveries == []  # notify=false is recorded, never pushed
+
+    third = await run_tracking_once(store, fetch, classify, deliver)
+    assert fetches == 3 and third == {"sources": 1, "new_items": 0}
+    assert len(ai_prompts) == 2  # nothing new: the model is not called at all
 
 
 def test_track_tags_are_parsed_like_reminder_tags() -> None:
@@ -192,9 +164,8 @@ def test_track_tags_are_parsed_like_reminder_tags() -> None:
         "好，幫你追起來。\n"
         '<track source="https://www.youtube.com/@HoushouMarine" interest="重大公告"'
         ' who="<@111111111111111111> <@222222222222222222>"/>'
-        '<track_live id="3"/><track_shadow id="4"/>'
     )
-    clean, adds, lives, shadows, intervals = extract_track_tags(answer)
+    clean, adds, intervals = extract_track_tags(answer)
     assert clean == "好，幫你追起來。"
     assert adds == [
         (
@@ -204,33 +175,33 @@ def test_track_tags_are_parsed_like_reminder_tags() -> None:
             0,  # no every= : the operator default applies
         )
     ]
-    assert lives == [3] and shadows == [4] and intervals == []
+    assert intervals == []
     # interest and who are optional: the default policy applies and only the owner is pinged.
-    _clean, bare, _lives, _shadows, _every = extract_track_tags(
+    _clean, bare, _every = extract_track_tags(
         '<track source="https://www.twitch.tv/chibidoki"/>'
     )
     assert bare == [("https://www.twitch.tv/chibidoki", "", (), 0)]
-    assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [], [], [])
+    assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [])
 
 
 def test_track_tag_attributes_are_read_by_name_not_by_order() -> None:
     # A model that writes the attributes in another order must not lose the later ones.
-    _clean, adds, _lives, _shadows, _every = extract_track_tags(
+    _clean, adds, _every = extract_track_tags(
         '<track every="30" who="<@111111111111111111>" source="https://www.twitch.tv/x"/>'
     )
     assert adds == [("https://www.twitch.tv/x", "", (111111111111111111,), 30)]
     # A <track> with no source is not an instruction we can carry out.
     assert extract_track_tags('<track interest="whatever"/>')[1] == []
-    _clean, _adds, _l, _s, intervals = extract_track_tags('<track_every id="7" minutes="120"/>')
+    _clean, _adds, intervals = extract_track_tags('<track_every id="7" minutes="120"/>')
     assert intervals == [(7, 120)]
 
 
 def test_a_watch_is_only_classified_once_per_its_own_interval(tmp_path: Path) -> None:
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("youtube", "UC1", "@one")
-    watch = store.add_watch(source.id, 1, 2, 3, shadow=True, interval_minutes=60)
-    store.ingest(source, FetchResult((content(source.id, "a"),), "a"))
-    store.ingest(source, FetchResult((content(source.id, "b"),), "b"))
+    store.ingest(source, FetchResult((content(source.id, "a"),), "a"))  # baseline
+    watch = store.add_watch(source.id, 1, 2, 3, interval_minutes=60)
+    store.ingest(store.get_source(source.id), FetchResult((content(source.id, "b"),), "b"))
     assert [w.id for w, _items in store.pending_by_watch()] == [watch.id]
     # Fetching stays on the global interval; a classification attempt starts this watch's clock.
     store.mark_classified(watch.id)
@@ -268,21 +239,12 @@ def test_a_database_made_before_the_new_columns_gains_them(tmp_path: Path) -> No
     assert restored.interval_minutes == 60 and restored.classified_at == 0
 
 
-def test_watch_mode_is_only_changed_by_its_owner(tmp_path: Path) -> None:
-    store = TrackerStore(tmp_path / "tracking.sqlite3")
-    source = store.add_source("youtube", "UC1", "@one")
-    watch = store.add_watch(source.id, 1, 2, 3, shadow=True)
-    assert not store.set_watch_shadow(watch.id, False, user_id=4)
-    assert store.set_watch_shadow(watch.id, False, user_id=3)
-    assert not store.watches(user_id=3)[0].shadow
-
-
 async def test_decision_is_persisted_before_delivery_and_retry_does_not_call_ai(
     tmp_path: Path,
 ) -> None:
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("youtube", "UC1", "@one")
-    store.add_watch(source.id, 1, 2, 3, shadow=False)
+    store.add_watch(source.id, 1, 2, 3)
     # Establish a quiet baseline first.
     store.ingest(source, FetchResult((content(source.id, "old"),), "old"))
     ai_calls = 0

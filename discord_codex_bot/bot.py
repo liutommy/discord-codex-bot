@@ -134,27 +134,35 @@ def tracking_provider(locator: str) -> str:
     raise ValueError("目前只支援 YouTube 頻道與 Twitch 頻道網址。")
 
 
-def tracking_message(message: OutboxMessage) -> str:
-    """Render one bounded notification; social text is escaped before Discord sees it."""
+def tracking_message(message: OutboxMessage, source_label: str = "") -> str:
+    """One notification in the Bot's own voice: who, what, and the link. Category, confidence
+    and reasoning are log material — read on request, never pushed at the member. Social text
+    is escaped before Discord sees it."""
     item, decision, watch = message.item, message.decision, message.watch
+    who = discord.utils.escape_mentions(source_label.strip())[:80] or "追蹤的頻道"
+    what = discord.utils.escape_mentions(decision.category.strip())[:60] or "新內容"
     title = discord.utils.escape_mentions(item.title.strip())[:300] or "（無標題）"
-    category = discord.utils.escape_mentions(decision.category.strip())[:100] or "未分類"
-    reason = discord.utils.escape_mentions(decision.reason.strip())[:500] or "未提供理由"
-    topics = "、".join(discord.utils.escape_mentions(v)[:80] for v in decision.matched_topics[:5])
-    if decision.status == "shadow":
-        verdict = "會提醒" if decision.notify else "不提醒"
-        baseline = " · 歷史基準" if item.baseline else ""
-        head = f"🧪 **追蹤測試：{verdict}**{baseline}"
-        mention = ""
-    else:
-        head = "🔔 **社群追蹤提醒**"
-        # The owner always; anyone else only because the member named them when asking.
-        targets = [uid for uid in (watch.user_id, *watch.mention_ids) if uid]
-        mention = " ".join(f"<@{uid}>" for uid in targets) + " " if targets else ""
-    detail = f"\n分類：{category} · 信心 {decision.confidence:.0%}"
-    if topics:
-        detail += f" · 命中：{topics}"
-    return truncate(f"{mention}{head}\n**{title}**{detail}\n理由：{reason}\n{item.url}", 1900)
+    # The owner always; anyone else only because the member named them when asking.
+    targets = [uid for uid in (watch.user_id, *watch.mention_ids) if uid]
+    mention = " ".join(f"<@{uid}>" for uid in targets)
+    body = f"前輩發現{who}有{what}了\n**{title}**\n{item.url}"
+    return truncate(f"{mention} {body}" if mention else body, 1900)
+
+
+def render_decision_log(rows: list[dict]) -> str:
+    """The judgement history for one member, shown only to them. This is the log behind the
+    notifications: every item that was looked at, and why it was or was not worth interrupting."""
+    if not rows:
+        return "還沒有判斷紀錄。追蹤只看建立之後的新內容，所以剛建立時這裡是空的。"
+    lines = ["你的追蹤判斷紀錄（最新在上，只有你看得到）："]
+    for row in rows:
+        mark = "🔔 提醒了" if row["notify"] else "🔇 沒提醒"
+        when = str(row["at"])[:16].replace("T", " ")
+        title = discord.utils.escape_mentions(str(row["title"]))[:120]
+        reason = discord.utils.escape_mentions(str(row["reason"]))[:200] or "未提供理由"
+        source = discord.utils.escape_mentions(str(row["source"]))[:60]
+        lines.append(f"{mark} · {when} · {source}\n　{title}\n　理由：{reason}\n　{row['url']}")
+    return "\n".join(lines)
 
 
 def instructions_version(config: Config) -> str:
@@ -485,14 +493,16 @@ class DiscordCodexClient(discord.Client):
         reason = self._access(message.watch.guild_id, channel, message.watch.channel_id)
         if channel_guild != message.watch.guild_id or reason:
             raise RuntimeError("tracking destination is outside the configured allowlist")
-        mentioned = (
-            [message.watch.user_id, *message.watch.mention_ids]
-            if message.decision.status != "shadow"
-            else []
-        )
+        mentioned = [message.watch.user_id, *message.watch.mention_ids]
         allowed_users = [discord.Object(id=uid) for uid in mentioned if uid] or False
+        source = self.tracker.get_source(message.watch.source_id) if self.tracker else None
+        label = ""
+        if source is not None:
+            label = str(
+                source.state.get("title") or source.state.get("login") or source.external_id
+            )
         await channel.send(
-            tracking_message(message),
+            tracking_message(message, label),
             allowed_mentions=discord.AllowedMentions(
                 users=allowed_users, everyone=False, roles=False, replied_user=False
             ),
@@ -1140,7 +1150,7 @@ class DiscordCodexClient(discord.Client):
         user_id: int,
         interval_minutes: int = 0,
     ) -> tuple[str, object | None]:
-        """Resolve one source and start a shadow watch on it. Returns (message, watch or None);
+        """Resolve one source and start watching it. Returns (message, watch or None);
         shared by the slash command and the <track> tag so both enforce the same limits."""
         store = self.tracker
         if store is None:
@@ -1170,7 +1180,7 @@ class DiscordCodexClient(discord.Client):
             tracked = store.add_source(provider, external_id, locator, state)
             watch = store.add_watch(
                 tracked.id, guild_id, channel_id, user_id, policy,
-                shadow=True, mention_ids=mention_ids,
+                mention_ids=mention_ids,
                 interval_minutes=interval_minutes or self.config.tracking_classify_interval_minutes,
             )
         except (ProviderError, aiohttp.ClientError, TimeoutError, ValueError) as error:
@@ -1184,9 +1194,9 @@ class DiscordCodexClient(discord.Client):
         )
         return (
             f"已新增追蹤 #{watch.id}：{provider} · {label}{also}\n"
-            f"每 {watch.interval_minutes} 分鐘判斷一次（抓取仍然照常，只有判斷受此節制）。"
-            "目前是 shadow：第一輪會把近期內容的『會／不會提醒』判斷貼到此頻道，"
-            f"確認正常後說一聲切正式，或用 /{self.config.command_prefix}-track live:{watch.id}。",
+            f"從現在起有符合的新內容就會通知（每 {watch.interval_minutes} 分鐘判斷一次，"
+            "建立之前的舊內容不算）。判斷過程用 "
+            f"/{self.config.command_prefix}-track log:{watch.id} 查，只有你看得到。",
             watch,
         )
 
@@ -1196,8 +1206,8 @@ class DiscordCodexClient(discord.Client):
         """Create / promote / demote the watches the model asked for and append a confirmation.
         Deleting is deliberately not a tag: it discards the watch's baseline, and rebuilding one
         costs a whole classification pass, so it stays an explicit slash command."""
-        clean, adds, lives, shadows, intervals = extract_track_tags(text)
-        if not adds and not lives and not shadows and not intervals:
+        clean, adds, intervals = extract_track_tags(text)
+        if not adds and not intervals:
             return text
         store = self.tracker
         if store is None:
@@ -1215,23 +1225,8 @@ class DiscordCodexClient(discord.Client):
                 if done
                 else f"（找不到你的追蹤 #{watch_id}）"
             )
-        for watch_id in lives:
-            done = store.set_watch_shadow(watch_id, False, user_id)
-            notes.append(
-                f"🔔 追蹤 #{watch_id} 已切成正式提醒。"
-                if done
-                else f"（找不到你的追蹤 #{watch_id}）"
-            )
-        for watch_id in shadows:
-            done = store.set_watch_shadow(watch_id, True, user_id)
-            notes.append(
-                f"🧪 追蹤 #{watch_id} 已切回 shadow，之後不會 @ 人。"
-                if done
-                else f"（找不到你的追蹤 #{watch_id}）"
-            )
         LOGGER.info(
-            "Tracking tags user=%s adds=%d live=%d shadow=%d every=%d",
-            user_id, len(adds), len(lives), len(shadows), len(intervals),
+            "Tracking tags user=%s adds=%d every=%d", user_id, len(adds), len(intervals)
         )
         return f"{clean}\n\n" + "\n".join(notes)
 
@@ -1312,7 +1307,7 @@ class DiscordCodexClient(discord.Client):
         source="YouTube 頻道或 Twitch 頻道網址；留空列出你的追蹤",
         interest="選填：你特別想知道的內容；留空使用預設重大事件政策",
         cancel="取消你的追蹤編號",
-        live="把你的 shadow 追蹤編號切成正式提醒",
+        log="看判斷紀錄：這個追蹤最近判斷了什麼、為什麼提醒或不提醒（只有你看得到）",
     )
     async def track_command(
         self,
@@ -1320,7 +1315,7 @@ class DiscordCodexClient(discord.Client):
         source: str | None = None,
         interest: str | None = None,
         cancel: int | None = None,
-        live: int | None = None,
+        log: int | None = None,
     ) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
         if reason:
@@ -1336,11 +1331,11 @@ class DiscordCodexClient(discord.Client):
         actions = (
             int(bool(source and source.strip()))
             + int(cancel is not None)
-            + int(live is not None)
+            + int(log is not None)
         )
         if actions > 1 or (interest and not source):
             await interaction.response.send_message(
-                "新增、取消、切換正式提醒一次只能做一件；interest 必須和 source 一起使用。",
+                "新增、取消、看判斷紀錄一次只能做一件；interest 必須和 source 一起使用。",
                 ephemeral=True,
             )
             return
@@ -1349,14 +1344,11 @@ class DiscordCodexClient(discord.Client):
             text = f"已取消追蹤 #{cancel}。" if deleted else f"找不到你的追蹤 #{cancel}。"
             await interaction.response.send_message(text, ephemeral=True)
             return
-        if live is not None:
-            changed = store.set_watch_shadow(live, False, interaction.user.id)
-            text = (
-                f"追蹤 #{live} 已切成正式提醒；之後只有符合政策的新內容會在頻道 @你。"
-                if changed
-                else f"找不到你的追蹤 #{live}。"
+        if log is not None:
+            rows = store.recent_decisions(interaction.user.id, 10, log or None)
+            await interaction.response.send_message(
+                truncate(render_decision_log(rows), 1900), ephemeral=True
             )
-            await interaction.response.send_message(text, ephemeral=True)
             return
         if not source or not source.strip():
             watches = store.watches(user_id=interaction.user.id, active_only=True)
@@ -1368,8 +1360,10 @@ class DiscordCodexClient(discord.Client):
                     tracked = store.get_source(watch.source_id)
                     if tracked is None:
                         continue
-                    mode = "shadow" if watch.shadow else "正式"
-                    lines.append(f"#{watch.id} [{mode}] {tracked.provider} · {tracked.locator}")
+                    lines.append(
+                        f"#{watch.id} {tracked.provider} · {tracked.locator}"
+                        f"（每 {watch.interval_minutes} 分鐘判斷一次）"
+                    )
                 text = "你的社群追蹤：\n" + "\n".join(lines)
             await interaction.response.send_message(truncate(text, 1900), ephemeral=True)
             return

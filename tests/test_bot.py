@@ -206,38 +206,40 @@ async def test_tracking_tags_add_a_watch_and_switch_its_mode(
     )
     assert "已新增追蹤 #1" in added and f"<@{friend}>" in added and "<track" not in added
     watch = client.tracker.watches(user_id=USER)[0]
-    assert watch.shadow and watch.mention_ids == (friend,)
+    assert watch.mention_ids == (friend,) and watch.interval_minutes == 60
     # The member's own watches are listed in the prompt, so ids never have to be invented.
-    assert f"#{watch.id} [shadow] youtube" in client._tracked_lines(USER)
-    live = await client._apply_tracking_tags(f'<track_live id="{watch.id}"/>', GUILD, 555, USER)
-    assert "已切成正式提醒" in live and not client.tracker.watches(user_id=USER)[0].shadow
-    # Someone else's watch is not theirs to promote: the store checks the owner.
+    assert f"#{watch.id} youtube" in client._tracked_lines(USER)
+    slower = await client._apply_tracking_tags(
+        f'<track_every id="{watch.id}" minutes="180"/>', GUILD, 555, USER
+    )
+    assert "每 180 分鐘" in slower
+    assert client.tracker.watches(user_id=USER)[0].interval_minutes == 180
+    # Someone else's watch is not theirs to retune: the store checks the owner.
     assert "找不到你的追蹤" in await client._apply_tracking_tags(
-        f'<track_live id="{watch.id}"/>', GUILD, 555, 999
+        f'<track_every id="{watch.id}" minutes="5"/>', GUILD, 555, 999
     )
-    back = await client._apply_tracking_tags(
-        f'<track_shadow id="{watch.id}"/>', GUILD, 555, USER
-    )
-    assert "已切回 shadow" in back and client.tracker.watches(user_id=USER)[0].shadow
 
 
-def test_live_card_pings_the_owner_and_anyone_they_named() -> None:
-    watch = Watch(1, 1, GUILD, 555, USER, "policy", shadow=False, mention_ids=(7, 8))
+def test_notification_pings_the_owner_and_anyone_they_named_and_carries_the_link() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy", mention_ids=(7, 8))
     item = ContentItem(1, 1, "v1", "https://example.com/v1", "新曲發表", "", "now", "video")
-    decision = Decision(1, 1, 1, True, 0.9, "音樂", "符合政策", (), "live")
-    text = tracking_message(OutboxMessage(1, decision, watch, item, 0))
-    assert text.startswith(f"<@{USER}> <@7> <@8> 🔔")
+    decision = Decision(1, 1, 1, True, 0.9, "新曲", "符合政策", (), "decided")
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "星街彗星")
+    assert text.startswith(f"<@{USER}> <@7> <@8> 前輩發現星街彗星有新曲了")
+    assert "https://example.com/v1" in text
+    # Category, confidence and reasoning are log material, not notification material.
+    assert "符合政策" not in text and "0.9" not in text
 
 
-def test_pending_shadow_card_stays_non_mentioning_after_watch_goes_live() -> None:
-    watch = Watch(1, 1, GUILD, 555, USER, "policy", shadow=False)
+def test_a_notification_never_carries_a_mention_from_the_social_text() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy")
     item = ContentItem(
-        1, 1, "v1", "https://example.com/v1", "@everyone normal stream", "", "now", "video"
+        1, 1, "v1", "https://example.com/v1", "@everyone 新衣裝公開", "", "now", "video"
     )
-    decision = Decision(1, 1, 1, False, 0.9, "日常", "@everyone 不符合", (), "shadow")
-    text = tracking_message(OutboxMessage(1, decision, watch, item, 0))
-    assert text.startswith("🧪 **追蹤測試：不提醒**")
-    assert f"<@{USER}>" not in text and "@everyone" not in text
+    decision = Decision(1, 1, 1, True, 0.9, "新衣裝", "@everyone 符合", (), "decided")
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "星街彗星")
+    assert "@everyone" not in text  # social text is escaped before Discord sees it
+    assert text.startswith(f"<@{USER}> 前輩發現星街彗星有新衣裝了")
 
 
 async def test_tracking_classifier_defers_before_calling_the_model(
