@@ -174,8 +174,13 @@ boundaries and no ids of its own, which is what made web tracking look expensive
 change would have meant asking a model every poll. Since the Bot started keeping anchors when it
 reads a page, the links on it *are* the stable ids a feed would have provided — a URL that was
 not there last time is new content, and an unchanged page produces no items at all, so the model
-is not called. Only same-host links count; off-site ones on a news index are navigation, sharing
-widgets and ads. This also works on sites that refuse plain HTTP (Konami's Yu-Gi-Oh site answers
+is not called. Only same-host links count — that is what the source *is*, not a guess about which
+links matter. Nothing tries to work out which of them is an article: three attempts at that (by
+URL shape, then by label length) each worked on the site they were written against and failed on
+the next, so the division of labour is now the same one the rest of the Bot uses — code remembers
+exactly which URLs have been seen, the model reads them and decides which is worth telling someone
+about. A site's navigation is stable, so it arrives in the first fetch, which is the baseline and
+is never classified. This also works on sites that refuse plain HTTP (Konami's Yu-Gi-Oh site answers
 403 and is read through Chromium) because it goes through the same reader as `<fetch>`.
 
 A watch is live the moment it is made. It only ever considers content published after that — the

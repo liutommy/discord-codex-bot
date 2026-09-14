@@ -247,6 +247,7 @@ def test_a_watch_is_only_classified_once_per_its_own_interval(tmp_path: Path) ->
 async def test_web_source_turns_new_links_into_items(tmp_path: Path) -> None:
     # Shaped like the measured page: navigation first, then pagination, then the articles —
     # and the headline sits on the line *after* its URL, not beside it.
+    headline = "『CROSS ART COLLECTION』で登場する新テーマ「罪宝」のカード画像を公開！"
     pages = [
         "標題：NEWS\n"
         " <https://yu-gi-oh.jp/> \n https://yu-gi-oh.jp/ \n"
@@ -254,7 +255,7 @@ async def test_web_source_turns_new_links_into_items(tmp_path: Path) -> None:
         " <https://yu-gi-oh.jp/news/> \n NEWS \n"
         " <https://twitter.com/share> \n 分享 \n"
         " <https://yu-gi-oh.jp/news/page/2/> \n 2 \n"
-        " 2026/09/14 CARD \n <https://yu-gi-oh.jp/news/aaa/> \n 新カード公開 \n",
+        f" 2026/09/14 CARD \n <https://yu-gi-oh.jp/news/aaa/> \n {headline} \n",
     ]
 
     async def read_page(_url):
@@ -267,20 +268,52 @@ async def test_web_source_turns_new_links_into_items(tmp_path: Path) -> None:
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("web", "https://yu-gi-oh.jp/news/", "https://yu-gi-oh.jp/news/")
     first = await fetcher.fetch(source)
-    # Only links below the tracked page survive: off-site, the page itself, the site menu,
-    # the bare logo anchor and the pagination are navigation, not content.
-    assert [item.external_id for item in first.items] == ["https://yu-gi-oh.jp/news/aaa/"]
-    assert first.items[0].title == "新カード公開"
+    # Every same-site link becomes a candidate; deciding which is worth telling someone about
+    # is the model's job, not a rule about URL shapes. Off-site links and the page itself are
+    # excluded because they are not this source.
+    found = {item.external_id: item.title for item in first.items}
+    assert "https://yu-gi-oh.jp/news/aaa/" in found and found[
+        "https://yu-gi-oh.jp/news/aaa/"
+    ] == headline
+    assert "https://yu-gi-oh.jp/books/" in found  # navigation: the baseline absorbs it
+    assert "https://twitter.com/share" not in found
+    assert "https://yu-gi-oh.jp/news/" not in found
     store.ingest(source, first)
 
     # An unchanged page yields nothing new, so the model is never called for it.
     again = await fetcher.fetch(store.get_source(source.id))
     assert store.ingest(store.get_source(source.id), again) == []
 
-    pages.append(pages[-1] + " <https://yu-gi-oh.jp/news/bbb/> \n 另一則 \n")
+    pages.append(
+        pages[-1] + " <https://yu-gi-oh.jp/news/bbb/> \n コナミスタイル限定商品の発売が決定！ \n"
+    )
     later = await fetcher.fetch(store.get_source(source.id))
     fresh = store.ingest(store.get_source(source.id), later)
     assert [item.external_id for item in fresh] == ["https://yu-gi-oh.jp/news/bbb/"]
+
+
+async def test_web_source_does_not_depend_on_where_posts_live() -> None:
+    # Shaped like blog.python.org: the index is the site root and the posts live at /2026/…,
+    # so anything deciding by URL shape breaks here. Nothing decides by URL shape any more.
+    page = (
+        "標題：Python Insider\n"
+        " <https://blog.python.org/blog> \n Blog \n"
+        " <https://blog.python.org/tags> \n Browse by Tag \n"
+        " <https://blog.python.org/2026/09/python-3150-rc2> \n"
+        " Python 3.15.0 candidate 2 is here! \n"
+    )
+
+    async def read_page(_url):
+        return page
+
+    result = await WebFetcher(read_page).fetch(
+        Source(1, "web", "https://blog.python.org/", "https://blog.python.org/")
+    )
+    found = {item.external_id: item.title for item in result.items}
+    assert found["https://blog.python.org/2026/09/python-3150-rc2"] == (
+        "Python 3.15.0 candidate 2 is here!"
+    )
+    assert "https://blog.python.org/blog" in found  # kept; the model decides it is not news
 
 
 def test_web_locator_requires_a_public_http_url() -> None:

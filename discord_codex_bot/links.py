@@ -18,9 +18,11 @@ from . import gemini
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
-# Anchors kept per page. A news index is mostly navigation, so this is enough to carry the
-# articles themselves without letting a menu-heavy site flood the prompt.
-_MAX_LINKS = 60
+# Anchors kept per page. 60 was measured to be binding on two of three real indexes, which is
+# the dangerous kind of limit: a menu-heavy page can spend the whole budget before reaching a
+# single article, and nothing downstream can recover what was never emitted. The page text is
+# still bounded by LINK_MAX_CHARS, so this only widens what may appear within that.
+_MAX_LINKS = 120
 URL_RE = re.compile(r"https?://[^\s<>()\[\]\"'`]+")
 FETCH_TAG = re.compile(
     r'<fetch\s+url="(https?://[^"]{1,2000})"(?:\s+render="([^"]*)")?\s*/?>(?:\s*</fetch>)?'

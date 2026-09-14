@@ -240,7 +240,7 @@ MAX_MESSAGE_CHARS = 600
 # the URL sits alone on its own line and the headline is on the next one, so the gap between
 # them has to be allowed to cross a newline.
 #   ' 2026/09/14 CARD \n <https://…/news/qi6fbzww3/> \n Vジャンプ…公開！ \n'
-WEB_LINK = re.compile(r"<(https?://[^>\s]+)>\s{0,4}([^\n<>]{1,160})")
+WEB_LINK = re.compile(r"<(https?://[^>\s]+)>\s{0,4}([^\n<>]{0,160})")
 
 # (source, interest, extra mentions, interval in minutes — 0 means "operator default")
 TrackAdd = tuple[str, str, tuple[int, ...], int]
@@ -1036,14 +1036,22 @@ def parse_web_locator(locator: str) -> str:
 class WebFetcher:
     """Any public page as a source: the links on it are the items.
 
-    A page has no item boundaries and no ids of its own, which is why web tracking looked
-    expensive at first — the only way to notice a change would have been to ask a model every
-    time. Once the Bot started keeping anchors when it reads a page, the links became exactly the
-    stable ids a feed would have given: a URL that was not on the page last time is new content,
-    and a page whose links are unchanged yields no items at all, so the model is never called.
+    A page has no item boundaries and no ids of its own. Once the Bot started keeping anchors
+    when it reads a page, the links became exactly the stable ids a feed would have given: a URL
+    that was not there last time is new, and an unchanged page yields nothing at all.
+
+    Deciding which of those links is *worth telling someone about* is deliberately not done
+    here. Three attempts at guessing it from URL shape and label length each worked on the site
+    they were written against and failed on the next one; judging content is what the model is
+    for. Code keeps the part it does better than a model — remembering exactly which URLs have
+    already been seen, which is what makes a duplicate notification impossible.
     """
 
-    def __init__(self, read_page: Callable[[str], Awaitable[str]], max_items: int = 20) -> None:
+    # Matches the reader's own anchor cap. A tighter number here would decide *which* links the
+    # model ever sees — on a menu-heavy page the site's navigation comes first in document order
+    # and would spend the whole budget before a single article, which is a code decision wearing
+    # the costume of a model decision. The only bound left is the one that exists for prompt size.
+    def __init__(self, read_page: Callable[[str], Awaitable[str]], max_items: int = 120) -> None:
         self.read_page = read_page  # async (url) -> page text with links kept inline as <url>
         self.max_items = max_items
 
@@ -1058,32 +1066,22 @@ class WebFetcher:
 
     async def fetch(self, source: Source) -> FetchResult:
         text = await self.read_page(source.external_id)
-        page = urlsplit(source.external_id)
-        host = page.hostname or ""
-        root = page.path if page.path.endswith("/") else page.path.rsplit("/", 1)[0] + "/"
-        items: list[ContentItem] = []
+        host = urlsplit(source.external_id).hostname or ""
+        page = source.external_id.rstrip("/")
+        best: dict[str, str] = {}
         for link, raw_label in WEB_LINK.findall(text):
-            target = urlsplit(link)
             label = raw_label.strip()
-            # An index links to its articles *below* itself. Everything else on the page is the
-            # site's own navigation, which sits above the articles in document order — taking
-            # links as they come would fill the whole budget with the menu and never reach a
-            # single article (measured on yu-gi-oh.jp: 20 items, all of them nav).
-            if target.hostname != host or not target.path.startswith(root):
+            # Same site only: that is what this source *is*, not a guess about which links
+            # matter. The site's own navigation is stable, so it lands in the first fetch —
+            # the baseline, which is never classified — and never reaches the model again.
+            if urlsplit(link).hostname != host or link.rstrip("/") == page:
                 continue
-            tail = target.path[len(root):].strip("/")
-            # `` is the index itself; `page/2` is its pagination, whose label is the page
-            # number — both are navigation, and letting the label cross a newline lets them
-            # back in unless they are named here.
-            if not tail or tail.split("/")[0] == "page" or label.isdigit():
-                continue
-            if label == link:
-                continue  # a bare logo or icon anchor carries no headline
-            items.append(
-                ContentItem(None, source.id, link, link, label[:300], "", _utc_now(), "page")
-            )
-            if len(items) >= self.max_items:
-                break
+            if len(label) > len(best.get(link, "")):
+                best[link] = label  # the same target can appear as an image and as its headline
+        items = [
+            ContentItem(None, source.id, link, link, (label or link)[:300], "", _utc_now(), "page")
+            for link, label in list(best.items())[: self.max_items]
+        ]
         cursor = items[-1].external_id if items else source.cursor
         return FetchResult(tuple(items), cursor, dict(source.state))
 
