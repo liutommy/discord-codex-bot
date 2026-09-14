@@ -11,11 +11,13 @@ from discord_codex_bot.tracking import (
     ContentItem,
     DecisionInput,
     FetchResult,
+    ProviderError,
     Source,
     TrackerStore,
     TwitchFetcher,
     Watch,
     WebFetcher,
+    YouTubeFetcher,
     _read_bounded,
     build_classifier_prompt,
     extract_track_tags,
@@ -475,6 +477,62 @@ class EmptySession:
 
     async def __aexit__(self, *args):
         return None
+
+
+async def test_youtube_fetch_uses_the_uploads_playlist_and_keeps_titles(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_json_request(_session, _method, url, params=None, limit=0):
+        calls.append((url, dict(params or {})))
+        if url.endswith("/playlistItems"):
+            return {
+                "items": [
+                    {
+                        "contentDetails": {
+                            "videoId": "vid1",
+                            "videoPublishedAt": "2026-09-13T11:12:47Z",
+                        },
+                        # publishedAt here is when the video entered the playlist, which is not
+                        # the same thing and must not be the one that reaches the store.
+                        "snippet": {
+                            "title": "新曲MV公開",
+                            "description": "desc",
+                            "publishedAt": "2020-01-01T00:00:00Z",
+                        },
+                    }
+                ]
+            }
+        return {
+            "items": [
+                {
+                    "id": "vid1",
+                    "snippet": {"liveBroadcastContent": "none", "description": "desc"},
+                    "liveStreamingDetails": {},
+                }
+            ]
+        }
+
+    monkeypatch.setattr("discord_codex_bot.tracking._json_request", fake_json_request)
+    fetcher = YouTubeFetcher("key", session_factory=lambda **kw: EmptySession())
+    result = await fetcher.fetch(Source(1, "youtube", "UC5CwaMl1eIgY8h02uZw7u8A", "@x"))
+
+    listing_url, listing_params = calls[0]
+    assert listing_url.endswith("/playlistItems")
+    # The uploads playlist is the channel id with UC -> UU.
+    assert listing_params["playlistId"] == "UU5CwaMl1eIgY8h02uZw7u8A"
+    # Without snippet every item would arrive untitled and _hydrate_youtube would not fix it,
+    # leaving the classifier to judge blind.
+    assert "snippet" in listing_params["part"]
+    item = result.items[0]
+    assert item.title == "新曲MV公開"
+    assert item.published_at == "2026-09-13T11:12:47Z"
+
+
+async def test_youtube_fetch_needs_an_api_key() -> None:
+    with pytest.raises(ProviderError, match="YOUTUBE_API_KEY"):
+        await YouTubeFetcher("", session_factory=lambda **kw: EmptySession()).fetch(
+            Source(1, "youtube", "UC1", "@x")
+        )
 
 
 class TwitchFixture(TwitchFetcher):

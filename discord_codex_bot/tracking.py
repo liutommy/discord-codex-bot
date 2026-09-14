@@ -826,16 +826,54 @@ class YouTubeFetcher:
         return str(channel["id"]), {"title": channel.get("snippet", {}).get("title", "")}
 
     async def fetch(self, source: Source) -> FetchResult:
+        """Latest uploads through the Data API.
+
+        This used to read the channel's Atom feed. On 2026-09-14 every form of
+        `youtube.com/feeds/videos.xml` began answering 404 — measured from two hosts, with and
+        without a browser User-Agent, by `channel_id` and by `playlist_id`, while the channel's
+        own page answered 200. The cause is not ours to confirm; the uploads playlist reaches
+        the same videos with the key this Bot already holds, so it is what we depend on now.
+        """
+        if not self.api_key:
+            raise ProviderError("YouTube tracking needs YOUTUBE_API_KEY")
+        # Every channel's uploads live in a playlist whose id is the channel id with UC -> UU.
+        uploads = "UU" + source.external_id[2:]
         async with self._session() as session:
-            async with session.get(
-                self.FEED, params={"channel_id": source.external_id}
-            ) as response:
-                if response.status == 429:
-                    raise ProviderRateLimited(_rate_limit_delay(response.headers))
-                body = await _read_bounded(response, self.max_response_bytes)
-                if response.status >= 400:
-                    raise ProviderError(f"YouTube feed returned HTTP {response.status}")
-            items = list(parse_youtube_atom(body, source.id))
+            listing = await _json_request(
+                session,
+                "GET",
+                f"{self.API}/playlistItems",
+                params={
+                    # snippet as well as contentDetails: _hydrate_youtube keeps whatever title it
+                    # is given, so taking only contentDetails would leave every item untitled and
+                    # the classifier judging blind.
+                    "part": "snippet,contentDetails",
+                    "playlistId": uploads,
+                    "maxResults": "20",
+                    "key": self.api_key,
+                },
+                limit=self.max_response_bytes,
+            )
+            items = []
+            for entry in listing.get("items", []):
+                detail = entry.get("contentDetails", {})
+                snippet = entry.get("snippet", {})
+                video_id = str(detail.get("videoId") or "")
+                if not video_id:
+                    continue
+                items.append(
+                    ContentItem(
+                        None,
+                        source.id,
+                        video_id,
+                        f"https://youtu.be/{video_id}",
+                        str(snippet.get("title") or "").strip(),
+                        str(snippet.get("description") or "").strip(),
+                        # The video's own publish time, not when it entered the playlist.
+                        str(detail.get("videoPublishedAt") or "").strip(),
+                        "video",
+                    )
+                )
             if items and self.api_key:
                 details = await _json_request(
                     session,
@@ -855,6 +893,10 @@ class YouTubeFetcher:
 
 
 def parse_youtube_atom(body: bytes, source_id: int) -> tuple[ContentItem, ...]:
+    """Kept, but nothing calls it since 2026-09-14: the Atom endpoint it parses returns 404 for
+    every channel and every URL form we can reach. Deleting working, tested code on the strength
+    of an outage whose cause we could not confirm is the less reversible choice, so it waits here
+    until the endpoint is known to be gone for good."""
     if b"<!DOCTYPE" in body.upper() or b"<!ENTITY" in body.upper():
         raise ProviderError("unsafe XML declaration")
     try:
