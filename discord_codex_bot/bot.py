@@ -122,6 +122,13 @@ EFFORT_CHOICES = [app_commands.Choice(name=v, value=k) for k, v in REASONING_EFF
 VIDEO_INTERIM = "🎬 影片較長，前輩正在看，稍等…"
 THINKING = "🤔 思考中…"
 STREAM_EDIT_SECONDS = 1.5  # Discord edits per placeholder while an answer streams in
+# Why the last request fell back, for /status only. type() match, not isinstance: these are
+# sibling subclasses, and anything not listed (CodexServiceError, future kinds) reads as generic.
+_FALLBACK_LABEL = {
+    CodexUsageLimit: "額度用完",
+    CodexServerOverloaded: "模型滿載",
+    CodexUnauthorized: "登入失效",
+}
 STREAM_SHOW_CHARS = 1900
 CANCELLED = "⛔ 已取消。"
 PROVIDER_CHOICES = [
@@ -290,6 +297,9 @@ class DiscordCodexClient(discord.Client):
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.alerts = Alerter(self, config)
+        # The most recent request answered on the spare backend: (when, why, which model).
+        # Shown by /status only; the answer itself carries no notice.
+        self._last_fallback: tuple[float, CodexFallbackError, str] | None = None
         self._emoji_cache: dict[int, dict[str, discord.PartialEmoji]] = {}
         self.reminders = ReminderStore(config.codex_home / "reminders.json")
         self.apis = apis.load_registry(config.apis_path)
@@ -660,7 +670,6 @@ class DiscordCodexClient(discord.Client):
             self.config.codex_reasoning_effort,
         )
         fell_back = False
-        fallback_reason: CodexFallbackError | None = None
 
         async def run_on(via, text: str, **kw) -> CodexResult:
             if via.backend == AGY:
@@ -681,7 +690,7 @@ class DiscordCodexClient(discord.Client):
             return await run_codex(text, self.config, effort=via.effort, **kw)
 
         async def turn(text: str, **kw) -> CodexResult:
-            nonlocal target, fell_back, fallback_reason
+            nonlocal target, fell_back
             kw.setdefault("on_delta", on_delta)
             try:
                 return await run_on(target, text, **kw)
@@ -698,7 +707,7 @@ class DiscordCodexClient(discord.Client):
                     spare.model,
                 )
                 target, fell_back = spare, True
-                fallback_reason = unavailable
+                self._last_fallback = (time.time(), unavailable, spare.model)
                 if isinstance(unavailable, CodexUnauthorized):
                     # Quota comes back by itself; a lost login does not. Tell the operator now
                     # rather than let the spare hide it until the next periodic login check.
@@ -832,21 +841,9 @@ class DiscordCodexClient(discord.Client):
                 else:
                     delivered = [self._keep_for_member(path, generated_dir) for path in delivered]
                 outgoing += tuple(delivered)
-            if fell_back:
-                # Say which model actually answered: the persona and the answer both change.
-                # The thread id is dropped so nothing tries to resume it back on Codex.
-                if isinstance(fallback_reason, CodexUsageLimit):
-                    reason, follow_up = "Codex 額度用完了", "額度恢復後會自動換回"
-                elif isinstance(fallback_reason, CodexServerOverloaded):
-                    reason, follow_up = "Codex 模型暫時滿載", "下一次請求會再嘗試 Codex"
-                elif isinstance(fallback_reason, CodexUnauthorized):
-                    reason, follow_up = "Codex 登入失效", "已通知管理員，修好前先由備援回答"
-                else:  # CodexServiceError and any future CodexFallbackError subtype
-                    reason, follow_up = "Codex 服務暫時無法使用", "下一次請求會再嘗試 Codex"
-                text = (
-                    f"（{reason}，這則改用 {target.model} 回答；"
-                    f"{follow_up}，這串不會續接。）\n\n" + text
-                )
+            # A fallback is not announced in the answer (owner ruling 2026-09-14: the member
+            # gains nothing from it; /status shows the last one). The thread id is dropped so
+            # nothing tries to resume it back on Codex.
             return CodexResult(
                 truncate(text, self.config.max_response_chars),
                 outgoing,
@@ -1546,8 +1543,9 @@ class DiscordCodexClient(discord.Client):
 
     async def _status_text(self, guild_id: int | None, channel_id: int | None, user_id: int) -> str:
         """Two sections: what this member has set (model, style, whether the next request
-        continues a thread, memory sizes) and what the system offers. No usage figures: the
-        Codex quota is the operator's, and the routers' free limits are not published."""
+        continues a thread, memory sizes) and what the system offers. The system section carries
+        the live Codex quota and the last spare-backend fallback, so a member who gets no notice
+        in the answer itself can still see here that Codex is at its limit right now."""
         stored = self.memory.get_model(guild_id, user_id)
         chosen = parse_choice(stored, self.config.codex_model)
         level = split_stored(stored)[1]
@@ -1592,6 +1590,19 @@ class DiscordCodexClient(discord.Client):
         )
 
         codex = await codex_login_status(self.config)
+        limits = await probe_rate_limits(self.config)
+        if limits is not None:
+            codex += (
+                f" · 額度 5h {limits.primary_used_percent:.0f}%"
+                f" / 7d {limits.secondary_used_percent:.0f}%"
+            )
+        else:
+            codex += " · 額度讀不到"
+        if self._last_fallback is not None:
+            when, why, model = self._last_fallback
+            mins = max(0, int((time.time() - when) // 60))
+            label = _FALLBACK_LABEL.get(type(why), "服務異常")
+            codex += f"\n　└ 備援：{mins} 分鐘前{label}，改用 {model} 回答"
         routers = []
         for backend, catalog in self.catalogs.items():
             if ROUTERS[backend].api_key(self.config):

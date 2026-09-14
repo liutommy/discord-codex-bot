@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import logging.handlers
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -290,15 +291,15 @@ async def test_answer_falls_back_to_the_spare_backend_when_codex_quota_is_spent(
     monkeypatch.setattr(bot_module, "run_codex", spent)
     monkeypatch.setattr(bot_module, "run_agy", agy)
     result = await client._answer("q", [], GUILD, USER, resume="t-old")
-    assert "備援答案" in result.text and "Codex 額度用完了" in result.text
+    assert result.text == "備援答案"  # no notice: the member gains nothing from it (owner ruling)
     assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)  # CODEX_FALLBACK_MODEL default
+    when, why, model = client._last_fallback  # /status is where the fallback shows
+    assert isinstance(why, CodexUsageLimit) and model == "gemini-3.8-flash-medium"
     assert "resume" not in agy.calls[0][2]  # a Codex thread id means nothing to agy
     assert result.thread_id == "" and not result.resumed  # nothing to resume back on Codex
 
 
-async def test_answer_falls_back_with_a_distinct_notice_when_codex_is_overloaded(
-    client, monkeypatch
-) -> None:
+async def test_answer_falls_back_silently_when_codex_is_overloaded(client, monkeypatch) -> None:
     agy = FakeBackend("滿載備援答案")
 
     async def overloaded(*_args, **_kw):
@@ -307,10 +308,8 @@ async def test_answer_falls_back_with_a_distinct_notice_when_codex_is_overloaded
     monkeypatch.setattr(bot_module, "run_codex", overloaded)
     monkeypatch.setattr(bot_module, "run_agy", agy)
     result = await client._answer("q", [], GUILD, USER, resume="t-old")
-    assert "滿載備援答案" in result.text
-    assert "Codex 模型暫時滿載" in result.text
-    assert "下一次請求會再嘗試 Codex" in result.text
-    assert "額度用完了" not in result.text
+    assert result.text == "滿載備援答案"
+    assert isinstance(client._last_fallback[1], CodexServerOverloaded)
     assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)
     assert "resume" not in agy.calls[0][2]
     assert result.thread_id == "" and not result.resumed
@@ -332,8 +331,7 @@ async def test_answer_alerts_the_operator_when_the_codex_login_is_gone(client, m
     monkeypatch.setattr(bot_module, "run_agy", agy)
     monkeypatch.setattr(client.alerts, "login_lost", login_lost)
     result = await client._answer("q", [], GUILD, USER, resume="t-old")
-    assert "登入失效備援答案" in result.text and "Codex 登入失效" in result.text
-    assert "已通知管理員" in result.text and "額度用完了" not in result.text
+    assert result.text == "登入失效備援答案"  # the operator is told, the member is not
     assert alerts == [("Codex", "Unauthorized")]
     assert result.thread_id == "" and not result.resumed
 
@@ -719,7 +717,11 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     async def no_refresh_oc():
         return client.orcarouter.models
 
+    async def usage(config):
+        return RateLimits(12.0, 3.0, "test")
+
     monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", usage)
     monkeypatch.setattr(client.openrouter, "free_models", no_refresh_or)
     monkeypatch.setattr(client.orcarouter, "free_models", no_refresh_oc)
     client.openrouter.models = [Model("g/free", "G", True, False, 0)]
@@ -731,7 +733,8 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     assert "風格：無（用預設）" in text and "續接：無，下一句會新開對話" in text
     assert "記憶：個人 0 條 / 0 KB（上限 50 MB） · 伺服器 0 條" in text
     assert "永久 0 主題" in text
-    assert "Codex：ChatGPT 訂閱登入有效" in text
+    assert "Codex：ChatGPT 訂閱登入有效 · 額度 5h 12% / 7d 3%" in text
+    assert "備援：" not in text  # nothing has fallen back
     assert "OpenRouter 1 個免費模型 · OrcaRouter 1 個免費模型" in text
     assert "影片理解：開 · 讀連結：開" in text
 
@@ -757,6 +760,46 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     text = await client._status_text(GUILD, 555, USER)
     assert "OpenRouter 1 個免費模型" in text and "OrcaRouter" not in text.split("【系統】")[1]
     assert "影片理解：關" in text
+
+
+async def test_status_shows_the_live_quota_and_the_last_fallback(client, monkeypatch) -> None:
+    # The member gets no notice in the answer (owner ruling); /status is the one place that
+    # shows Codex is spent and the spare is answering. 100% + a recent fallback = "right now".
+    async def login(config):
+        return "ChatGPT 訂閱登入有效"
+
+    async def usage(config):
+        return RateLimits(100.0, 40.0, "test")
+
+    client.config = replace(
+        client.config, openrouter_api_key="", orcarouter_api_key="", gemini_api_key=""
+    )
+    monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", usage)
+    client._last_fallback = (
+        time.time() - 120,
+        CodexUsageLimit("spent", "usage_limit_exceeded"),
+        "gemini-3.8-flash-medium",
+    )
+    text = await client._status_text(GUILD, 555, USER)
+    assert "額度 5h 100% / 7d 40%" in text
+    assert "備援：2 分鐘前額度用完，改用 gemini-3.8-flash-medium 回答" in text
+
+
+async def test_status_says_when_the_quota_is_unreadable(client, monkeypatch) -> None:
+    async def login(config):
+        return "ChatGPT 訂閱登入有效"
+
+    async def no_usage(config):
+        return None
+
+    client.config = replace(
+        client.config, openrouter_api_key="", orcarouter_api_key="", gemini_api_key=""
+    )
+    monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", no_usage)
+    text = await client._status_text(GUILD, 555, USER)
+    assert "額度讀不到" in text
 
 
 def test_help_sheet_is_generated_from_the_registered_commands(client) -> None:
