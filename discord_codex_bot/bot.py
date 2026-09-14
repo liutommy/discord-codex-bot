@@ -496,12 +496,21 @@ class DiscordCodexClient(discord.Client):
 
     def _access(self, guild_id: int | None, channel: object, channel_id: int | None) -> str:
         """Empty string when allowed, otherwise the user-facing rejection reason."""
+        parent_id = getattr(channel, "parent_id", None)
         decision = check_access(
             guild_id=guild_id,
             channel_id=channel_id,
-            parent_channel_id=getattr(channel, "parent_id", None),
+            parent_channel_id=parent_id,
             config=self.config,
         )
+        if not decision.allowed:
+            # Every command funnels through here, so this is the only place a refusal can be
+            # recorded. Without it a mistyped allowlist turns the Bot off for a whole guild and
+            # leaves nothing in the host log to find it by.
+            LOGGER.info(
+                "Access refused guild=%s channel=%s parent=%s: %s",
+                guild_id, channel_id, parent_id, decision.reason,
+            )
         return "" if decision.allowed else decision.reason
 
     def _validate(self, prompt: str, attachments: Sequence[discord.Attachment]) -> str:
