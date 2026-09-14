@@ -88,6 +88,7 @@ def config() -> Config:
         consolidate_min_remaining_percent=50,
         consolidate_max_input_bytes=100_000,
         consolidate_schema_path=Path("/opt/discord-codex/consolidate-schema.json"),
+        harvest_schema_path=Path("/opt/discord-codex/harvest-schema.json"),
         tracking_enabled=False,
         tracking_db_path=Path("/var/lib/codex/tracking.sqlite3"),
         tracking_interval_seconds=900,

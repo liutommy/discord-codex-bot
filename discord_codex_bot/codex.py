@@ -229,7 +229,12 @@ def _prompt(
             " agrees on something everyone should remember, append"
             ' <memory scope="user" name="short title">one sentence</memory> or'
             ' <memory scope="guild" name="short title">one sentence</memory> after your answer.'
-            " Never emit the tag for questions, opinions, or one-off requests.",
+            " Never emit the tag for questions, opinions, or one-off requests."
+            " Tracking/reminder operations, settings, filters, destinations, status and results"
+            " belong to the feature store, not personal memory. A tracking request alone is not"
+            " evidence of a durable preference. Never store assistant-inferred preferences or"
+            " conditions. If the member separately states a durable preference alongside an"
+            " operation, remember only that explicit preference, not the operation.",
             "OUTPUT_STYLE, when present, is the operator's default formatting and voice for every"
             " answer. PERSONAL_STYLE, when present, is this member's own preference and wins over"
             " OUTPUT_STYLE wherever they conflict. Follow them unless the member asks otherwise.",

@@ -171,6 +171,7 @@ class Config:
     consolidate_min_remaining_percent: int
     consolidate_max_input_bytes: int
     consolidate_schema_path: Path
+    harvest_schema_path: Path
     tracking_enabled: bool
     tracking_db_path: Path
     tracking_interval_seconds: int
@@ -333,6 +334,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         consolidate_max_input_bytes=_positive_int(values, "CONSOLIDATE_MAX_INPUT_BYTES", 100_000),
         consolidate_schema_path=Path(
             values.get("CONSOLIDATE_SCHEMA_FILE", "/opt/discord-codex/consolidate-schema.json")
+        ),
+        harvest_schema_path=Path(
+            values.get("HARVEST_SCHEMA_FILE", "/opt/discord-codex/harvest-schema.json")
         ),
         # Optional social-source tracking. Provider credentials stay in the Bot process; Codex
         # child processes receive the allowlisted environment from codex._safe_environment.
