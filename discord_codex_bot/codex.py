@@ -177,6 +177,16 @@ def _prompt(
             " 30分鐘後 or 明天 9:30 are also accepted); the Bot creates it and confirms. When"
             ' they ask to cancel one, append <cancel_reminder id="N"/> using an id from that'
             " section; never invent ids.",
+            "MEMORY may end with a [社群追蹤] section: this member's YouTube/Twitch watches"
+            " (#id, mode, source). To start one, append"
+            ' <track source="https://…" interest="what is worth pinging about"'
+            ' who="<@user id> <@user id>"/> after your answer — omit who to ping only the'
+            " member, add ids when they explicitly ask for other people too; omit interest to"
+            " use the default policy. A new watch starts in shadow (it posts its judgement of"
+            " recent items without pinging anyone). When they are happy with those judgements,"
+            ' append <track_live id="N"/> to start real pings, or <track_shadow id="N"/> to put'
+            " one back into shadow, using an id from that section; never invent ids. Deleting a"
+            " watch is a slash command, not a tag.",
             "If the member states a durable fact or preference about themselves, or the server"
             " agrees on something everyone should remember, append"
             ' <memory scope="user" name="short title">one sentence</memory> or'

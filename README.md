@@ -178,6 +178,14 @@ releases, concerts/events, anniversaries/milestones, hiatus/return/graduation, m
 and rare charity/subathon/marathon streams. Routine streams, clips, repeated merchandise, and
 uncertain titles are ignored.
 
+Watches can also be managed by asking in words, the way reminders can: the model appends
+`<track source="…" interest="…" who="…"/>`, `<track_live id="N"/>` or `<track_shadow id="N"/>`
+after its answer and the Bot performs it, reporting what it did. A watch pings its owner; other
+people are added only when the member names them in the request, exactly like `<remind who=…>`.
+The member's own watches are listed in the prompt, so an id is never guessed — the store also
+refuses to change a watch that belongs to someone else. Cancelling stays a slash command: it
+discards the watch's baseline, and rebuilding one costs a whole classification pass.
+
 Classification always uses the operator-controlled Codex model and `high` effort. It runs with
 Codex memories, history persistence, web search, apps, browser/computer use, image generation, and
 multi-agent features disabled. Before each classifier call the Bot reads

@@ -186,6 +186,49 @@ async def test_tracking_classifier_is_isolated_and_bounded(
     assert len(calls) == 2  # the window gate is the only limit; there is no daily cap
 
 
+async def test_tracking_tags_add_a_watch_and_switch_its_mode(
+    client, tmp_path, monkeypatch
+) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    client.config = replace(client.config, youtube_api_key="key")
+
+    async def resolve(_locator):
+        return "UC1", {"title": "Marine"}
+
+    monkeypatch.setattr(client.youtube_tracker, "resolve", resolve)
+    # A real Discord id: <track who=…> only accepts 17-20 digit snowflakes, so that a stray
+    # number in the attribute cannot turn into a mention.
+    friend = 222222222222222222
+    added = await client._apply_tracking_tags(
+        "好，幫你追。\n"
+        f'<track source="https://www.youtube.com/@HoushouMarine" who="<@{friend}>"/>',
+        GUILD, 555, USER,
+    )
+    assert "已新增追蹤 #1" in added and f"<@{friend}>" in added and "<track" not in added
+    watch = client.tracker.watches(user_id=USER)[0]
+    assert watch.shadow and watch.mention_ids == (friend,)
+    # The member's own watches are listed in the prompt, so ids never have to be invented.
+    assert f"#{watch.id} [shadow] youtube" in client._tracked_lines(USER)
+    live = await client._apply_tracking_tags(f'<track_live id="{watch.id}"/>', GUILD, 555, USER)
+    assert "已切成正式提醒" in live and not client.tracker.watches(user_id=USER)[0].shadow
+    # Someone else's watch is not theirs to promote: the store checks the owner.
+    assert "找不到你的追蹤" in await client._apply_tracking_tags(
+        f'<track_live id="{watch.id}"/>', GUILD, 555, 999
+    )
+    back = await client._apply_tracking_tags(
+        f'<track_shadow id="{watch.id}"/>', GUILD, 555, USER
+    )
+    assert "已切回 shadow" in back and client.tracker.watches(user_id=USER)[0].shadow
+
+
+def test_live_card_pings_the_owner_and_anyone_they_named() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy", shadow=False, mention_ids=(7, 8))
+    item = ContentItem(1, 1, "v1", "https://example.com/v1", "新曲發表", "", "now", "video")
+    decision = Decision(1, 1, 1, True, 0.9, "音樂", "符合政策", (), "live")
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0))
+    assert text.startswith(f"<@{USER}> <@7> <@8> 🔔")
+
+
 def test_pending_shadow_card_stays_non_mentioning_after_watch_goes_live() -> None:
     watch = Watch(1, 1, GUILD, 555, USER, "policy", shadow=False)
     item = ContentItem(

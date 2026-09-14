@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from discord_codex_bot.tracking import (
     Watch,
     _read_bounded,
     build_classifier_prompt,
+    extract_track_tags,
     parse_classifier_result,
     parse_twitch_locator,
     parse_youtube_atom,
@@ -183,6 +185,52 @@ async def test_unique_source_fetch_batching_and_zero_ai_without_new_content(tmp_
     assert fetches == 2
     assert second == {"sources": 1, "new_items": 0}
     assert len(ai_prompts) == 2
+
+
+def test_track_tags_are_parsed_like_reminder_tags() -> None:
+    answer = (
+        "好，幫你追起來。\n"
+        '<track source="https://www.youtube.com/@HoushouMarine" interest="重大公告"'
+        ' who="<@111111111111111111> <@222222222222222222>"/>'
+        '<track_live id="3"/><track_shadow id="4"/>'
+    )
+    clean, adds, lives, shadows = extract_track_tags(answer)
+    assert clean == "好，幫你追起來。"
+    assert adds == [
+        (
+            "https://www.youtube.com/@HoushouMarine",
+            "重大公告",
+            (111111111111111111, 222222222222222222),
+        )
+    ]
+    assert lives == [3] and shadows == [4]
+    # interest and who are optional: the default policy applies and only the owner is pinged.
+    _clean, bare, _lives, _shadows = extract_track_tags(
+        '<track source="https://www.twitch.tv/chibidoki"/>'
+    )
+    assert bare == [("https://www.twitch.tv/chibidoki", "", ())]
+    assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [], [])
+
+
+def test_extra_mentions_drop_the_owner_and_duplicates(tmp_path: Path) -> None:
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("youtube", "UC1", "@one")
+    # The owner is mentioned unconditionally at delivery, so keeping them here would double it.
+    watch = store.add_watch(source.id, 1, 2, 3, mention_ids=(4, 3, 4, 5))
+    assert watch.mention_ids == (4, 5)
+    assert store.watches(user_id=3)[0].mention_ids == (4, 5)
+
+
+def test_a_database_made_before_mention_ids_gains_the_column(tmp_path: Path) -> None:
+    path = tmp_path / "tracking.sqlite3"
+    store = TrackerStore(path)
+    source = store.add_source("youtube", "UC1", "@one")
+    store.add_watch(source.id, 1, 2, 3)
+    with sqlite3.connect(path) as connection:  # pretend the file predates the column
+        connection.execute("ALTER TABLE watches DROP COLUMN mention_ids")
+    # SCHEMA is CREATE TABLE IF NOT EXISTS only: without the explicit migration every watch
+    # query against this file would raise "no such column".
+    assert TrackerStore(path).watches(user_id=3)[0].mention_ids == ()
 
 
 def test_watch_mode_is_only_changed_by_its_owner(tmp_path: Path) -> None:

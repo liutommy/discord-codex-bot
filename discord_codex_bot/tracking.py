@@ -73,6 +73,8 @@ class Watch:
     shadow: bool = True
     active: bool = True
     start_item_id: int = 0
+    # Extra people to @ besides the owner, when the member asked for them by name.
+    mention_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +165,7 @@ CREATE TABLE IF NOT EXISTS watches (
     shadow INTEGER NOT NULL DEFAULT 1 CHECK (shadow IN (0, 1)),
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     start_item_id INTEGER NOT NULL DEFAULT 0,
+    mention_ids TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     UNIQUE(source_id, guild_id, channel_id, user_id, interest)
 );
@@ -208,6 +211,49 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, id);
 """
 
 
+# Natural-language control of watches, in the same shape as reminders' <remind>: the model
+# appends a tag after its answer and the Bot performs it. Ids are never invented — the member's
+# own watches are listed in the prompt, exactly like pending reminders are.
+TRACK_TAG = re.compile(
+    r'<track\s+source="([^"]{1,500})"(?:\s+interest="([^"]{0,2000})")?'
+    r'(?:\s+who="([^"]{0,200})")?\s*/?>(?:\s*</track>)?'
+)
+TRACK_LIVE_TAG = re.compile(r'<track_live\s+id="([0-9]{1,9})"\s*/?>(?:\s*</track_live>)?')
+TRACK_SHADOW_TAG = re.compile(r'<track_shadow\s+id="([0-9]{1,9})"\s*/?>(?:\s*</track_shadow>)?')
+_MENTION = re.compile(r"<?@?!?([0-9]{17,20})>?")
+MAX_TRACK_TAGS = 3
+MAX_TRACK_MENTIONS = 5
+
+TrackAdd = tuple[str, str, tuple[int, ...]]
+
+
+def extract_track_tags(answer: str) -> tuple[str, list[TrackAdd], list[int], list[int]]:
+    """(answer without the tags, watches to add, ids to make live, ids to put back in shadow)."""
+    adds: list[TrackAdd] = [
+        (
+            source.strip(),
+            interest.strip(),
+            tuple(dict.fromkeys(int(i) for i in _MENTION.findall(who)))[:MAX_TRACK_MENTIONS],
+        )
+        for source, interest, who in TRACK_TAG.findall(answer)
+    ][:MAX_TRACK_TAGS]
+    lives = [int(i) for i in TRACK_LIVE_TAG.findall(answer)][:MAX_TRACK_TAGS]
+    shadows = [int(i) for i in TRACK_SHADOW_TAG.findall(answer)][:MAX_TRACK_TAGS]
+    clean = TRACK_SHADOW_TAG.sub("", TRACK_LIVE_TAG.sub("", TRACK_TAG.sub("", answer))).strip()
+    return clean, adds, lives, shadows
+
+
+def render_watches(watches: Sequence[Watch], labels: Mapping[int, str]) -> str:
+    """The member's watches as prompt lines (id, mode, source), so the model can act on one
+    without inventing an id — the same trick the pending-reminder section uses."""
+    return "\n".join(
+        f"#{watch.id} [{'shadow' if watch.shadow else '正式'}] "
+        f"{labels.get(watch.source_id, '?')}"
+        + (f"（另外 @ {len(watch.mention_ids)} 人）" if watch.mention_ids else "")
+        for watch in watches
+    )
+
+
 class TrackerStore:
     """Small synchronous SQLite store; each public operation is one crash-safe transaction."""
 
@@ -216,6 +262,14 @@ class TrackerStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            # SCHEMA is CREATE TABLE IF NOT EXISTS only, so a database created before a column
+            # existed never gains it: adding one to SCHEMA alone would make every query against
+            # the live file fail. New columns have to be added here as well.
+            existing = {row["name"] for row in connection.execute("PRAGMA table_info(watches)")}
+            if "mention_ids" not in existing:
+                connection.execute(
+                    "ALTER TABLE watches ADD COLUMN mention_ids TEXT NOT NULL DEFAULT ''"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
@@ -237,6 +291,7 @@ class TrackerStore:
         return Watch(
             row["id"], row["source_id"], row["guild_id"], row["channel_id"], row["user_id"],
             row["interest"], bool(row["shadow"]), bool(row["active"]), row["start_item_id"],
+            tuple(int(part) for part in str(row["mention_ids"] or "").split(",") if part),
         )
 
     @staticmethod
@@ -305,10 +360,13 @@ class TrackerStore:
         interest: str = INTEREST_POLICY,
         *,
         shadow: bool = True,
+        mention_ids: Sequence[int] = (),
     ) -> Watch:
         interest = interest.strip()
         if not interest:
             raise ValueError("interest must not be empty")
+        # The owner is always mentioned, so keeping them here too would double the ping.
+        extra = ",".join(str(int(i)) for i in dict.fromkeys(mention_ids) if int(i) != user_id)
         with self._connect() as connection:
             latest = connection.execute(
                 "SELECT COALESCE(MAX(id), 0) FROM items WHERE source_id=?", (source_id,)
@@ -317,10 +375,10 @@ class TrackerStore:
             connection.execute(
                 """INSERT INTO watches(
                      source_id, guild_id, channel_id, user_id, interest, shadow, start_item_id,
-                     created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     mention_ids, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(source_id, guild_id, channel_id, user_id, interest) DO UPDATE SET
-                     active=1, shadow=excluded.shadow""",
+                     active=1, shadow=excluded.shadow, mention_ids=excluded.mention_ids""",
                 (
                     source_id,
                     guild_id,
@@ -329,6 +387,7 @@ class TrackerStore:
                     interest,
                     int(shadow),
                     start_item_id,
+                    extra,
                     _utc_now(),
                 ),
             )

@@ -88,8 +88,10 @@ from .tracking import (
     TrackerStore,
     TwitchFetcher,
     YouTubeFetcher,
+    extract_track_tags,
     parse_twitch_locator,
     parse_youtube_locator,
+    render_watches,
     tracking_loop,
 )
 from .ui import AnswerButton, AnswerView, CancelView, recover_exchange
@@ -145,7 +147,9 @@ def tracking_message(message: OutboxMessage) -> str:
         mention = ""
     else:
         head = "🔔 **社群追蹤提醒**"
-        mention = f"<@{watch.user_id}> " if watch.user_id else ""
+        # The owner always; anyone else only because the member named them when asking.
+        targets = [uid for uid in (watch.user_id, *watch.mention_ids) if uid]
+        mention = " ".join(f"<@{uid}>" for uid in targets) + " " if targets else ""
     detail = f"\n分類：{category} · 信心 {decision.confidence:.0%}"
     if topics:
         detail += f" · 命中：{topics}"
@@ -480,11 +484,12 @@ class DiscordCodexClient(discord.Client):
         reason = self._access(message.watch.guild_id, channel, message.watch.channel_id)
         if channel_guild != message.watch.guild_id or reason:
             raise RuntimeError("tracking destination is outside the configured allowlist")
-        allowed_users = (
-            [discord.Object(id=message.watch.user_id)]
-            if message.watch.user_id and message.decision.status != "shadow"
-            else False
+        mentioned = (
+            [message.watch.user_id, *message.watch.mention_ids]
+            if message.decision.status != "shadow"
+            else []
         )
+        allowed_users = [discord.Object(id=uid) for uid in mentioned if uid] or False
         await channel.send(
             tracking_message(message),
             allowed_mentions=discord.AllowedMentions(
@@ -658,12 +663,14 @@ class DiscordCodexClient(discord.Client):
             files = "\n\n".join(documents)
             permanent = self.permanent.index_text()
             pending = render_pending(self.reminders.for_user(user_id))
+            tracked = self._tracked_lines(user_id)
             memory = "\n\n".join(
                 section
                 for section in (
                     f"[永久記憶索引]\n{permanent}" if permanent else "",
                     self.memory.render(guild_id, user_id),
                     f"[待辦提醒]\n{pending}" if pending else "",
+                    f"[社群追蹤]\n{tracked}" if tracked else "",
                 )
                 if section
             )
@@ -753,6 +760,7 @@ class DiscordCodexClient(discord.Client):
             for scope, name, fact in facts:
                 self.memory.add(scope, guild_id, user_id, name, fact)
             text = self._apply_reminder_tags(text, guild_id, channel_id, user_id)
+            text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id)
             await self.alerts.record_success(target.backend)
             generated_dir = result.generated_dir
             outgoing = tuple(result.images)  # not `images`: that list is cleaned up in finally
@@ -1121,6 +1129,115 @@ class DiscordCodexClient(discord.Client):
             )
         return f"{clean}\n\n" + "\n".join(notes)
 
+    async def _add_watch(
+        self,
+        locator: str,
+        interest: str,
+        mention_ids: Sequence[int],
+        guild_id: int | None,
+        channel_id: int | None,
+        user_id: int,
+    ) -> tuple[str, object | None]:
+        """Resolve one source and start a shadow watch on it. Returns (message, watch or None);
+        shared by the slash command and the <track> tag so both enforce the same limits."""
+        store = self.tracker
+        if store is None:
+            return "社群追蹤尚未啟用；管理者需設定 TRACKING_ENABLED=true 與 provider 憑證。", None
+        if guild_id is None or channel_id is None:
+            return "這裡沒辦法建立追蹤。", None
+        policy = interest.strip() or INTEREST_POLICY
+        if len(locator) > 500 or len(policy) > 4000:
+            return "網址或追蹤條件太長。", None
+        if len(store.watches(user_id=user_id, active_only=True)) >= (
+            self.config.tracking_max_per_user
+        ):
+            return f"每人最多 {self.config.tracking_max_per_user} 個追蹤。", None
+        try:
+            provider = tracking_provider(locator)
+        except ValueError as error:
+            return str(error), None
+        if provider == "youtube" and not self.config.youtube_api_key:
+            return "管理者尚未設定 YOUTUBE_API_KEY。", None
+        if provider == "twitch" and not (
+            self.config.twitch_client_id and self.config.twitch_client_secret
+        ):
+            return "管理者尚未設定 TWITCH_CLIENT_ID／TWITCH_CLIENT_SECRET。", None
+        resolver = self.youtube_tracker if provider == "youtube" else self.twitch_tracker
+        try:
+            external_id, state = await resolver.resolve(locator)
+            tracked = store.add_source(provider, external_id, locator, state)
+            watch = store.add_watch(
+                tracked.id, guild_id, channel_id, user_id, policy,
+                shadow=True, mention_ids=mention_ids,
+            )
+        except (ProviderError, aiohttp.ClientError, TimeoutError, ValueError) as error:
+            LOGGER.warning("Tracking source resolution failed (%s)", type(error).__name__)
+            return "無法讀取這個來源；請確認網址與 provider 憑證後再試。", None
+        label = str(state.get("title") or state.get("login") or external_id)
+        also = (
+            "，也會 @ " + "、".join(f"<@{uid}>" for uid in watch.mention_ids)
+            if watch.mention_ids
+            else ""
+        )
+        return (
+            f"已新增追蹤 #{watch.id}：{provider} · {label}{also}\n"
+            "目前是 shadow：第一輪會把近期內容的『會／不會提醒』判斷貼到此頻道，"
+            f"確認正常後說一聲切正式，或用 /{self.config.command_prefix}-track live:{watch.id}。",
+            watch,
+        )
+
+    async def _apply_tracking_tags(
+        self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
+    ) -> str:
+        """Create / promote / demote the watches the model asked for and append a confirmation.
+        Deleting is deliberately not a tag: it discards the watch's baseline, and rebuilding one
+        costs a whole classification pass, so it stays an explicit slash command."""
+        clean, adds, lives, shadows = extract_track_tags(text)
+        if not adds and not lives and not shadows:
+            return text
+        store = self.tracker
+        if store is None:
+            return f"{clean}\n\n（社群追蹤尚未啟用。）"
+        notes: list[str] = []
+        for locator, interest, who in adds:
+            note, _watch = await self._add_watch(
+                locator, interest, who, guild_id, channel_id, user_id
+            )
+            notes.append(note)
+        for watch_id in lives:
+            done = store.set_watch_shadow(watch_id, False, user_id)
+            notes.append(
+                f"🔔 追蹤 #{watch_id} 已切成正式提醒。"
+                if done
+                else f"（找不到你的追蹤 #{watch_id}）"
+            )
+        for watch_id in shadows:
+            done = store.set_watch_shadow(watch_id, True, user_id)
+            notes.append(
+                f"🧪 追蹤 #{watch_id} 已切回 shadow，之後不會 @ 人。"
+                if done
+                else f"（找不到你的追蹤 #{watch_id}）"
+            )
+        LOGGER.info(
+            "Tracking tags user=%s adds=%d live=%d shadow=%d",
+            user_id, len(adds), len(lives), len(shadows),
+        )
+        return f"{clean}\n\n" + "\n".join(notes)
+
+    def _tracked_lines(self, user_id: int) -> str:
+        """The member's watches for the prompt, so the model can act on one without guessing."""
+        if self.tracker is None:
+            return ""
+        watches = self.tracker.watches(user_id=user_id, active_only=True)
+        if not watches:
+            return ""
+        labels = {}
+        for watch in watches:
+            source = self.tracker.get_source(watch.source_id)
+            if source is not None:
+                labels[watch.source_id] = f"{source.provider} · {source.locator}"
+        return render_watches(watches, labels)
+
     async def _fire_reminder(self, item: dict) -> None:
         channel = self.get_channel(item["channel_id"]) or await self.fetch_channel(
             item["channel_id"]
@@ -1246,62 +1363,17 @@ class DiscordCodexClient(discord.Client):
             await interaction.response.send_message(truncate(text, 1900), ephemeral=True)
             return
 
-        locator = source.strip()
-        policy = interest.strip() if interest else INTEREST_POLICY
-        if len(locator) > 500 or len(policy) > 4000:
-            await interaction.response.send_message("網址或追蹤條件太長。", ephemeral=True)
-            return
-        if len(store.watches(user_id=interaction.user.id, active_only=True)) >= (
-            self.config.tracking_max_per_user
-        ):
-            await interaction.response.send_message(
-                f"每人最多 {self.config.tracking_max_per_user} 個追蹤。", ephemeral=True
-            )
-            return
-        try:
-            provider = tracking_provider(locator)
-        except ValueError as error:
-            await interaction.response.send_message(str(error), ephemeral=True)
-            return
-        if provider == "youtube" and not self.config.youtube_api_key:
-            await interaction.response.send_message(
-                "管理者尚未設定 YOUTUBE_API_KEY。", ephemeral=True
-            )
-            return
-        if provider == "twitch" and not (
-            self.config.twitch_client_id and self.config.twitch_client_secret
-        ):
-            await interaction.response.send_message(
-                "管理者尚未設定 TWITCH_CLIENT_ID／TWITCH_CLIENT_SECRET。", ephemeral=True
-            )
-            return
-
+        # Same path as the <track> tag, so both enforce the same limits and say the same things.
         await interaction.response.defer(ephemeral=True, thinking=True)
-        resolver = self.youtube_tracker if provider == "youtube" else self.twitch_tracker
-        try:
-            external_id, state = await resolver.resolve(locator)
-            tracked = store.add_source(provider, external_id, locator, state)
-            watch = store.add_watch(
-                tracked.id,
-                interaction.guild_id,
-                interaction.channel_id,
-                interaction.user.id,
-                policy,
-                shadow=True,
-            )
-        except (ProviderError, aiohttp.ClientError, TimeoutError, ValueError) as error:
-            LOGGER.warning("Tracking source resolution failed (%s)", type(error).__name__)
-            await interaction.followup.send(
-                "無法讀取這個來源；請確認網址與 provider 憑證後再試。", ephemeral=True
-            )
-            return
-        label = str(state.get("title") or state.get("login") or external_id)
-        await interaction.followup.send(
-            f"已新增追蹤 #{watch.id}：{provider} · {label}\n"
-            "目前是 shadow：第一輪會把近期內容的『會／不會提醒』判斷貼到此頻道，"
-            f"確認正常後用 /{self.config.command_prefix}-track live:{watch.id} 切成正式提醒。",
-            ephemeral=True,
+        text, _watch = await self._add_watch(
+            source.strip(),
+            interest or "",
+            (),  # extra mentions come from asking in words, not from a command option
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.user.id,
         )
+        await interaction.followup.send(text, ephemeral=True)
 
     async def export_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
