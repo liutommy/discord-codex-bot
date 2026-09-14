@@ -1275,7 +1275,13 @@ async def tracking_loop(
     pruned_at = 0.0
     while True:
         try:
-            await run_tracking_once(store, fetcher, classifier, deliverer)
+            stats = await run_tracking_once(store, fetcher, classifier, deliverer)
+            # A silent success is how a total provider outage went unnoticed for half a day:
+            # only failures were ever written down, so the only way to tell the pass had run
+            # was to read the database. Idle passes stay quiet; anything that actually happened
+            # — new items, decisions, deliveries, or a source that failed — leaves a line.
+            if any(value for key, value in stats.items() if key != "sources"):
+                LOGGER.info("Tracking pass: %s", stats)
             # Once a day is enough for housekeeping, and keeping the gate here leaves
             # run_tracking_once free of a clock.
             if keep_days > 0 and time.monotonic() - pruned_at >= 86_400:
