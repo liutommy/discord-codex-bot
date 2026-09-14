@@ -236,9 +236,11 @@ MAX_TRACK_TAGS = 3
 MAX_TRACK_MENTIONS = 5
 # The model writes the notification itself; this only stops a runaway one from filling a message.
 MAX_MESSAGE_CHARS = 600
-# How the Bot's page reader hands back a link: the absolute target is emitted where the anchor
-# opens, so the anchor's own text — the headline — follows it, not precedes it.
-WEB_LINK = re.compile(r"<(https?://[^>\s]+)>[ \t]*([^\n<>]{0,120})")
+# How the Bot's page reader hands back a link. Measured on a real index rather than assumed:
+# the URL sits alone on its own line and the headline is on the next one, so the gap between
+# them has to be allowed to cross a newline.
+#   ' 2026/09/14 CARD \n <https://…/news/qi6fbzww3/> \n Vジャンプ…公開！ \n'
+WEB_LINK = re.compile(r"<(https?://[^>\s]+)>\s{0,4}([^\n<>]{1,160})")
 
 # (source, interest, extra mentions, interval in minutes — 0 means "operator default")
 TrackAdd = tuple[str, str, tuple[int, ...], int]
@@ -1069,9 +1071,13 @@ class WebFetcher:
             # single article (measured on yu-gi-oh.jp: 20 items, all of them nav).
             if target.hostname != host or not target.path.startswith(root):
                 continue
-            if target.path.rstrip("/") == root.rstrip("/"):
+            tail = target.path[len(root):].strip("/")
+            # `` is the index itself; `page/2` is its pagination, whose label is the page
+            # number — both are navigation, and letting the label cross a newline lets them
+            # back in unless they are named here.
+            if not tail or tail.split("/")[0] == "page" or label.isdigit():
                 continue
-            if not label or label == link:
+            if label == link:
                 continue  # a bare logo or icon anchor carries no headline
             items.append(
                 ContentItem(None, source.id, link, link, label[:300], "", _utc_now(), "page")
