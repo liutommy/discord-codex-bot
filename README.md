@@ -155,7 +155,6 @@ Put the credentials only in the ignored `.env` file and enable the worker:
 TRACKING_ENABLED=true
 TRACKING_INTERVAL_MINUTES=15
 TRACKING_MIN_REMAINING_PERCENT=50
-TRACKING_AI_MAX_CALLS_PER_DAY=30
 TRACKING_REASONING_EFFORT=high
 YOUTUBE_API_KEY=<restricted YouTube API key>
 TWITCH_CLIENT_ID=<Twitch client id>
@@ -183,8 +182,10 @@ Classification always uses the operator-controlled Codex model and `high` effort
 Codex memories, history persistence, web search, apps, browser/computer use, image generation, and
 multi-agent features disabled. Before each classifier call the Bot reads
 `account/rateLimits/read`; if either the five-hour or weekly window has less than
-`TRACKING_MIN_REMAINING_PERCENT` remaining, or the daily cap is exhausted, it keeps the item
-pending for a later poll. Provider credentials are excluded from the Codex child environment.
+`TRACKING_MIN_REMAINING_PERCENT` remaining, it keeps the item pending for a later poll. That
+window gate is the only limit — classification is not capped per day, and it does not fall back
+to another backend, because the isolated Codex run is what makes reading untrusted social text
+safe. Provider credentials are excluded from the Codex child environment.
 Tracking state and its durable notification outbox live in `CODEX_HOME/tracking.sqlite3` and are
 included in the daily backup through SQLite's online backup API.
 
@@ -216,6 +217,16 @@ sign-in lives in the `<name>_agy_home` volume: run `agy` inside the container on
 + code loop). Threads never cross backends; switching models starts a new thread and harvests the
 old one. Google's content policy may reject prompts on the Gemini models that the Claude models
 accept. Release announcements (`announce/latest.md`) are posted only to `ANNOUNCE_CHANNEL_IDS`.
+
+When the ChatGPT subscription's quota runs out, Codex reports it *inside* its JSONL stream
+(`codex_error_info: usage_limit_exceeded`, with an empty stderr), so the exit code alone cannot
+tell quota apart from a crash. The Bot recognises that case and answers the rest of the request on
+`CODEX_FALLBACK_MODEL` (default `agy:gemini-3.8-flash|medium`, written like a member's stored
+model; empty disables it and the member gets the usual failure message). The reply says which
+model answered, and that thread is not remembered as resumable — a Codex thread id means nothing
+to another backend. The member's own model choice is untouched; the next request tries Codex
+again. Social-tracking classification deliberately has no such fallback: its safety comes from the
+isolated Codex run.
 
 Links are read by the Bot itself, so both backends see the same thing: every http(s) URL in a
 member's message (up to `LINK_MAX_URLS`) is fetched, converted to text (`LINK_MAX_CHARS` per page)

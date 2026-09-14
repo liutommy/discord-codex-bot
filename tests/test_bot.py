@@ -2,8 +2,6 @@ import asyncio
 import logging
 import logging.handlers
 from dataclasses import dataclass
-from datetime import UTC
-from datetime import datetime as _dt
 from pathlib import Path
 
 from discord_codex_bot.bot import (
@@ -97,7 +95,7 @@ import pytest  # noqa: E402
 
 from discord_codex_bot import bot as bot_module  # noqa: E402
 from discord_codex_bot.bot import FAILURE_MESSAGE, QUEUE_FULL_MESSAGE  # noqa: E402
-from discord_codex_bot.codex import CodexResult  # noqa: E402
+from discord_codex_bot.codex import CodexResult, CodexUsageLimit  # noqa: E402
 from discord_codex_bot.links import Preview  # noqa: E402
 from discord_codex_bot.queue import SerialQueue  # noqa: E402
 from discord_codex_bot.tracking import (  # noqa: E402
@@ -168,7 +166,6 @@ async def test_tracking_classifier_is_isolated_and_bounded(
         tracking_schema_path=tmp_path / "tracking-schema.json",
         tracking_reasoning_effort="high",
         tracking_min_remaining_percent=50,
-        tracking_ai_max_calls_per_day=1,
     )
     calls = []
 
@@ -185,8 +182,8 @@ async def test_tracking_classifier_is_isolated_and_bounded(
     kwargs = calls[0][2]
     assert kwargs["raw"] and kwargs["isolated"] and kwargs["effort"] == "high"
     assert kwargs["schema"] == client.config.tracking_schema_path
-    with pytest.raises(RuntimeError, match="daily tracking AI budget"):
-        await client._classify_tracking("again")
+    await client._classify_tracking("again")
+    assert len(calls) == 2  # the window gate is the only limit; there is no daily cap
 
 
 def test_pending_shadow_card_stays_non_mentioning_after_watch_goes_live() -> None:
@@ -200,19 +197,52 @@ def test_pending_shadow_card_stays_non_mentioning_after_watch_goes_live() -> Non
     assert f"<@{USER}>" not in text and "@everyone" not in text
 
 
-async def test_tracking_classifier_defers_before_spending_daily_budget(
+async def test_tracking_classifier_defers_before_calling_the_model(
     client, tmp_path, monkeypatch
 ) -> None:
     client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
     client.config = replace(client.config, tracking_min_remaining_percent=50)
+    calls = []
 
     async def limits(_config):
         return RateLimits(55, 10, "test")
 
+    async def codex(prompt, config, **kwargs):
+        calls.append(prompt)
+        return CodexResult("{}")
+
     monkeypatch.setattr(bot_module, "probe_rate_limits", limits)
+    monkeypatch.setattr(bot_module, "run_codex", codex)
     with pytest.raises(RuntimeError, match="below the tracking gate"):
         await client._classify_tracking("classify")
-    assert client.tracker.ai_calls(_dt.now(UTC).date().isoformat()) == 0
+    assert calls == []
+
+
+async def test_answer_falls_back_to_the_spare_backend_when_codex_quota_is_spent(
+    client, monkeypatch
+) -> None:
+    agy = FakeBackend("備援答案")
+
+    async def spent(*_args, **_kw):
+        raise CodexUsageLimit("You've hit your usage limit. Try again at 2:33 PM.")
+
+    monkeypatch.setattr(bot_module, "run_codex", spent)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    result = await client._answer("q", [], GUILD, USER, resume="t-old")
+    assert "備援答案" in result.text and "Codex 額度用完了" in result.text
+    assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)  # CODEX_FALLBACK_MODEL default
+    assert "resume" not in agy.calls[0][2]  # a Codex thread id means nothing to agy
+    assert result.thread_id == "" and not result.resumed  # nothing to resume back on Codex
+
+
+async def test_answer_without_a_spare_backend_reports_the_failure(client, monkeypatch) -> None:
+    async def spent(*_args, **_kw):
+        raise CodexUsageLimit("quota spent")
+
+    client.config = replace(client.config, codex_fallback_model="")
+    monkeypatch.setattr(bot_module, "run_codex", spent)
+    result = await client._answer("q", [], GUILD, USER)
+    assert "額度用完了" not in result.text  # the generic failure message, not a silent answer
 
 
 async def test_answer_dispatches_to_agy_from_the_stored_model(client, backends) -> None:

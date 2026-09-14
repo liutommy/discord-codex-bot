@@ -98,6 +98,7 @@ class Config:
     command_prefix: str
     codex_model: str
     codex_reasoning_effort: str
+    codex_fallback_model: str
     codex_home: Path
     codex_workspace: Path
     codex_workspace_plain: Path
@@ -174,7 +175,6 @@ class Config:
     tracking_db_path: Path
     tracking_interval_seconds: int
     tracking_min_remaining_percent: int
-    tracking_ai_max_calls_per_day: int
     tracking_max_per_user: int
     tracking_schema_path: Path
     tracking_reasoning_effort: str
@@ -200,6 +200,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         command_prefix=_command_prefix(values),
         codex_model=values.get("CODEX_MODEL", "").strip() or "gpt-5.6-luna",
         codex_reasoning_effort=_effort(values),
+        # Spare backend for when the operator's ChatGPT quota runs out, written like a member's
+        # stored model ("<backend>:<family>|<effort>"). Empty = report the failure instead.
+        codex_fallback_model=values.get(
+            "CODEX_FALLBACK_MODEL", "agy:gemini-3.8-flash|medium"
+        ).strip(),
         codex_home=Path(values.get("CODEX_HOME", "/var/lib/codex")),
         codex_workspace=Path(values.get("CODEX_WORKSPACE", "/workspace")),
         # Same rules without the operator persona; used when a member set a personal style.
@@ -334,9 +339,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         tracking_interval_seconds=_positive_int(values, "TRACKING_INTERVAL_MINUTES", 15) * 60,
         tracking_min_remaining_percent=_bounded_int(
             values, "TRACKING_MIN_REMAINING_PERCENT", 50, 0, 100
-        ),
-        tracking_ai_max_calls_per_day=_positive_int(
-            values, "TRACKING_AI_MAX_CALLS_PER_DAY", 30
         ),
         tracking_max_per_user=_positive_int(values, "TRACKING_MAX_PER_USER", 10),
         tracking_schema_path=Path(

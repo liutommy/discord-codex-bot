@@ -202,10 +202,6 @@ CREATE TABLE IF NOT EXISTS outbox (
     last_error TEXT NOT NULL DEFAULT '',
     delivered_at TEXT
 );
-CREATE TABLE IF NOT EXISTS ai_usage (
-    day TEXT PRIMARY KEY,
-    calls INTEGER NOT NULL DEFAULT 0 CHECK (calls >= 0)
-);
 CREATE INDEX IF NOT EXISTS idx_items_source ON items(source_id, id);
 CREATE INDEX IF NOT EXISTS idx_decisions_watch ON decisions(watch_id, item_id);
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, id);
@@ -381,31 +377,6 @@ class TrackerStore:
         with self._connect() as connection:
             changed = connection.execute(query, params).rowcount
         return bool(changed)
-
-    def consume_ai_call(self, day: str, max_calls: int) -> bool:
-        """Atomically reserve one daily classifier call; failed calls still consume budget."""
-        if max_calls <= 0:
-            return False
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT calls FROM ai_usage WHERE day=?", (day,)
-            ).fetchone()
-            calls = int(row["calls"]) if row else 0
-            if calls >= max_calls:
-                return False
-            connection.execute(
-                """INSERT INTO ai_usage(day, calls) VALUES (?, 1)
-                   ON CONFLICT(day) DO UPDATE SET calls=calls+1""",
-                (day,),
-            )
-        return True
-
-    def ai_calls(self, day: str) -> int:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT calls FROM ai_usage WHERE day=?", (day,)
-            ).fetchone()
-        return int(row["calls"]) if row else 0
 
     def ingest(self, source: Source, result: FetchResult) -> list[ContentItem]:
         baseline = not source.baseline_complete

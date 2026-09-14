@@ -185,19 +185,13 @@ async def test_unique_source_fetch_batching_and_zero_ai_without_new_content(tmp_
     assert len(ai_prompts) == 2
 
 
-def test_watch_mode_ownership_and_daily_ai_budget(tmp_path: Path) -> None:
+def test_watch_mode_is_only_changed_by_its_owner(tmp_path: Path) -> None:
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("youtube", "UC1", "@one")
     watch = store.add_watch(source.id, 1, 2, 3, shadow=True)
     assert not store.set_watch_shadow(watch.id, False, user_id=4)
     assert store.set_watch_shadow(watch.id, False, user_id=3)
     assert not store.watches(user_id=3)[0].shadow
-
-    assert store.consume_ai_call("2026-09-14", 2)
-    assert store.consume_ai_call("2026-09-14", 2)
-    assert not store.consume_ai_call("2026-09-14", 2)
-    assert store.ai_calls("2026-09-14") == 2
-    assert store.consume_ai_call("2026-09-15", 2)
 
 
 async def test_decision_is_persisted_before_delivery_and_retry_does_not_call_ai(

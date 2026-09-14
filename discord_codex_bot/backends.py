@@ -98,6 +98,18 @@ def parse_choice(value: str, codex_model: str) -> ModelChoice:
     return choices(codex_model)[0]
 
 
+def fallback_target(stored: str, codex_model: str, default_effort: str) -> Resolved | None:
+    """The spare backend to answer on while the operator's Codex quota is spent, written like a
+    member's stored model ("<backend>:<family>|<effort>"). Empty means no fallback; so does Codex
+    itself, which cannot stand in for its own outage."""
+    if not stored:
+        return None
+    choice = parse_choice(stored, codex_model)
+    if choice.backend == CODEX:
+        return None
+    return resolve(choice, split_stored(stored)[1] or default_effort)
+
+
 def resolve(choice: ModelChoice, effort: str) -> Resolved:
     """Map the shared effort option onto what this backend/family can actually run."""
     if choice.backend == CODEX:

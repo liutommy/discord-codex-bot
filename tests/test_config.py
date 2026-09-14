@@ -34,8 +34,8 @@ def test_loads_safe_operational_defaults() -> None:
     assert not config.tracking_enabled
     assert config.tracking_interval_seconds == 900
     assert config.tracking_min_remaining_percent == 50
-    assert config.tracking_ai_max_calls_per_day == 30
     assert config.tracking_reasoning_effort == "high"
+    assert config.codex_fallback_model == "agy:gemini-3.8-flash|medium"
 
 
 def test_tracking_config_validates_switch_and_usage_gate() -> None:

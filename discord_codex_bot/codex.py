@@ -65,6 +65,34 @@ def parse_thread_id(stdout: str) -> str:
     return ""
 
 
+class CodexUsageLimit(RuntimeError):
+    """The ChatGPT subscription's quota is spent. Carries Codex's own message, which names the
+    reset time. Not a malfunction: the caller answers on the spare backend instead of alerting."""
+
+
+def _error_payloads(node):
+    """Every dict carrying `codex_error_info`. The wrapper around it differs between the exec
+    stream and the rollout file, so walk the event instead of assuming a path."""
+    if isinstance(node, dict):
+        if "codex_error_info" in node:
+            yield node
+        for value in node.values():
+            yield from _error_payloads(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _error_payloads(value)
+
+
+def parse_usage_limit(stdout: str) -> str:
+    """Codex's usage-limit message when the run died of quota, else "". The failure is reported
+    *inside* the JSONL stream — stderr is empty — so the exit code alone cannot identify it."""
+    for event in _events(stdout):
+        for error in _error_payloads(event):
+            if error.get("codex_error_info") == "usage_limit_exceeded":
+                return str(error.get("message") or "Codex usage limit reached")
+    return ""
+
+
 def collect_generated_images(
     config: Config, thread_id: str
 ) -> tuple[Path | None, tuple[Path, ...]]:
@@ -311,6 +339,8 @@ async def run_codex(
     code, output, stderr = await _exec(
         prompt, config, images, effort, resume, schema, plain, isolated
     )
+    if spent := parse_usage_limit(output):
+        raise CodexUsageLimit(spent)  # before the resume retry: a retry would hit the same wall
     if code != 0 and resume:
         # The stored thread may have been rotated away or be unreadable; answer fresh instead.
         LOGGER.warning("Resume of thread %s failed (%s); starting a new thread", resume, code)

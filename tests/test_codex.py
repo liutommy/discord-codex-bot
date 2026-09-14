@@ -8,10 +8,12 @@ import pytest
 
 from discord_codex_bot import codex
 from discord_codex_bot.codex import (
+    CodexUsageLimit,
     _arguments,
     _communicate,
     _safe_environment,
     parse_codex_jsonl,
+    parse_usage_limit,
     run_codex,
 )
 from discord_codex_bot.config import Config
@@ -38,6 +40,36 @@ class FakeExec:
                  plain=plain, isolated=isolated)
         )
         return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+
+
+def test_usage_limit_is_read_from_the_stream_not_the_exit_code() -> None:
+    # Shape taken from a real rollout: the failure is inside the event, stderr is empty.
+    spent = json.dumps(
+        {
+            "type": "turn.complete",
+            "error": {
+                "message": "You've hit your usage limit. ... try again at 2:33 PM.",
+                "codex_error_info": "usage_limit_exceeded",
+            },
+        }
+    )
+    assert "2:33 PM" in parse_usage_limit(spent)
+    assert parse_usage_limit(_events("fine")) == ""
+    other = json.dumps({"error": {"message": "boom", "codex_error_info": "stream_error"}})
+    assert parse_usage_limit(other) == ""
+
+
+async def test_run_codex_raises_usage_limit_without_retrying_the_resume(
+    config: Config, monkeypatch
+) -> None:
+    spent = json.dumps(
+        {"error": {"message": "usage limit", "codex_error_info": "usage_limit_exceeded"}}
+    )
+    fake = FakeExec((1, spent, ""))
+    monkeypatch.setattr(codex, "_exec", fake)
+    with pytest.raises(CodexUsageLimit, match="usage limit"):
+        await run_codex("q", config, resume="t-old")
+    assert len(fake.calls) == 1  # retrying a spent quota only wastes the member's wait
 
 
 def test_child_environment_excludes_discord_secrets(config: Config, monkeypatch) -> None:

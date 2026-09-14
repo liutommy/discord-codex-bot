@@ -6,6 +6,7 @@ from discord_codex_bot.backends import (
     AGY_FAMILIES,
     CODEX,
     choices,
+    fallback_target,
     parse_choice,
     resolve,
 )
@@ -13,6 +14,20 @@ from discord_codex_bot.memory import MemoryLimits, MemoryStore
 from discord_codex_bot.threads import ThreadStore
 
 LIMITS = MemoryLimits(200, 25_000, 50_000_000, 200_000_000, 2000, 50_000, 50, 3)
+
+
+def test_fallback_target_refuses_codex_and_carries_its_own_effort() -> None:
+    spare = fallback_target("agy:gemini-3.8-flash|medium", "gpt-5.6-luna", "high")
+    assert spare.backend == AGY and spare.model == "gemini-3.8-flash-medium"
+    # No stored effort: the operator default applies.
+    assert fallback_target("agy:gemini-3.8-flash", "gpt-5.6-luna", "low").model == (
+        "gemini-3.8-flash-low"
+    )
+    assert fallback_target("", "gpt-5.6-luna", "high") is None
+    # Codex cannot stand in for its own outage — including via an unknown value, which
+    # parse_choice maps back onto Codex.
+    assert fallback_target("codex:gpt-5.6-luna", "gpt-5.6-luna", "high") is None
+    assert fallback_target("agy:no-such-model", "gpt-5.6-luna", "high") is None
 
 
 def test_choices_cover_codex_and_every_agy_slug() -> None:

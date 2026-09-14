@@ -9,7 +9,6 @@ import re
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC
 from datetime import datetime as _dt
 from pathlib import Path
 
@@ -36,13 +35,14 @@ from .backends import (
     ORCAROUTER,
     ROUTER_BACKENDS,
     choices,
+    fallback_target,
     parse_choice,
     resolve,
     router_choice,
     split_stored,
 )
 from .backup import backup_forever, export_memory_zip
-from .codex import CodexResult, codex_login_status, run_codex
+from .codex import CodexResult, CodexUsageLimit, codex_login_status, run_codex
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
@@ -458,9 +458,8 @@ class DiscordCodexClient(discord.Client):
             )
             if remaining < self.config.tracking_min_remaining_percent:
                 raise RuntimeError("Codex remaining quota is below the tracking gate")
-            day = _dt.now(UTC).date().isoformat()
-            if not self.tracker.consume_ai_call(day, self.config.tracking_ai_max_calls_per_day):
-                raise RuntimeError("daily tracking AI budget exhausted")
+            # No spare backend here on purpose: the classifier reads untrusted social text and
+            # depends on the isolated Codex run (memories/history/tools off) for that safety.
             result = await run_codex(
                 prompt,
                 self.config,
@@ -591,19 +590,41 @@ class DiscordCodexClient(discord.Client):
             choice, effort or split_stored(stored)[1] or self.config.codex_reasoning_effort
         )
 
-        async def turn(text: str, **kw) -> CodexResult:
-            kw.setdefault("on_delta", on_delta)
-            if target.backend == AGY:
+        spare = fallback_target(
+            self.config.codex_fallback_model,
+            self.config.codex_model,
+            self.config.codex_reasoning_effort,
+        )
+        fell_back = False
+
+        async def run_on(via, text: str, **kw) -> CodexResult:
+            if via.backend == AGY:
                 kw.pop("effort", None)
-                return await run_agy(text, self.config, target.model, **kw)
-            if target.backend in ROUTER_BACKENDS:
-                catalog = self.catalogs[target.backend]
+                return await run_agy(text, self.config, via.model, **kw)
+            if via.backend in ROUTER_BACKENDS:
+                catalog = self.catalogs[via.backend]
                 await catalog.free_models()  # image / effort capability lookup
                 return await run_router(
-                    ROUTERS[target.backend], text, self.config, target.model,
-                    effort=target.effort, catalog=catalog, **kw,
+                    ROUTERS[via.backend], text, self.config, via.model,
+                    effort=via.effort, catalog=catalog, **kw,
                 )
-            return await run_codex(text, self.config, effort=target.effort, **kw)
+            return await run_codex(text, self.config, effort=via.effort, **kw)
+
+        async def turn(text: str, **kw) -> CodexResult:
+            nonlocal target, fell_back
+            kw.setdefault("on_delta", on_delta)
+            try:
+                return await run_on(target, text, **kw)
+            except CodexUsageLimit as spent:
+                if spare is None:
+                    raise
+                # The subscription is spent. Answer on the spare backend for the rest of this
+                # request — switching mid-request keeps the recall loop's resume ids on one
+                # backend, since a Codex thread id means nothing to agy or a router.
+                LOGGER.warning("Codex quota spent (%s); answering with %s", spent, spare.model)
+                target, fell_back = spare, True
+                kw.pop("resume", None)
+                return await run_on(target, text, **kw)
 
         images: list[Path] = []
         self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
@@ -734,12 +755,19 @@ class DiscordCodexClient(discord.Client):
                         self._keep_for_member(path, generated_dir) for path in delivered
                     ]
                 outgoing += tuple(delivered)
+            if fell_back:
+                # Say which model actually answered: the persona and the answer both change.
+                # The thread id is dropped so nothing tries to resume it back on Codex.
+                text = (
+                    f"（Codex 額度用完了，這則改用 {target.model} 回答；"
+                    "額度恢復後會自動換回，這串不會續接。）\n\n" + text
+                )
             return CodexResult(
                 truncate(text, self.config.max_response_chars),
                 outgoing,
                 generated_dir,
-                result.thread_id,
-                result.resumed,
+                "" if fell_back else result.thread_id,
+                result.resumed and not fell_back,
             )
         except QueueFullError:
             return CodexResult(QUEUE_FULL_MESSAGE)
