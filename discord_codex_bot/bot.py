@@ -1248,7 +1248,9 @@ class DiscordCodexClient(discord.Client):
             # been parsed and nothing more, so a watch that was never created looked exactly
             # like one that was. Record the outcome, not just the intent.
             LOGGER.info(
-                "Tracking add user=%s source=%r -> %s",
+                "Tracking add guild=%s channel=%s user=%s source=%r -> %s",
+                guild_id,
+                channel_id,
                 user_id,
                 locator[:120],
                 f"#{getattr(watch, 'id', '?')}" if watch is not None else note[:100],
@@ -1262,7 +1264,8 @@ class DiscordCodexClient(discord.Client):
                 else f"（找不到你的追蹤 #{watch_id}）"
             )
         LOGGER.info(
-            "Tracking tags user=%s adds=%d every=%d", user_id, len(adds), len(intervals)
+            "Tracking tags guild=%s channel=%s user=%s adds=%d every=%d",
+            guild_id, channel_id, user_id, len(adds), len(intervals),
         )
         return f"{clean}\n\n" + "\n".join(notes)
 
@@ -1810,7 +1813,12 @@ class DiscordCodexClient(discord.Client):
         finally:
             remove_dir(result.generated_dir)
         self._remember(key, result.thread_id, sent_id, plain, model)
-        LOGGER.info("Completed slash guild=%s user=%s", interaction.guild_id, interaction.user.id)
+        # channel too: a watch is created in whichever channel the member spoke in, and without
+        # it a request cannot be traced back to where its side effects landed.
+        LOGGER.info(
+            "Completed slash guild=%s channel=%s user=%s",
+            interaction.guild_id, interaction.channel_id, interaction.user.id,
+        )
 
     # ----- @mention entry point --------------------------------------------------------------
 
@@ -1898,7 +1906,10 @@ class DiscordCodexClient(discord.Client):
         finally:
             remove_dir(result.generated_dir)
         self._remember(key, result.thread_id, sent_id, plain, model)
-        LOGGER.info("Completed @mention guild=%s user=%s", message.guild.id, message.author.id)
+        LOGGER.info(
+            "Completed @mention guild=%s channel=%s user=%s",
+            message.guild.id, message.channel.id, message.author.id,
+        )
 
 
 def configure_logging(config: Config) -> None:
