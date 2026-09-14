@@ -734,7 +734,7 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     assert "記憶：個人 0 條 / 0 KB（上限 50 MB） · 伺服器 0 條" in text
     assert "永久 0 主題" in text
     assert "Codex：ChatGPT 訂閱登入有效 · 額度 5h 12% / 7d 3%" in text
-    assert "備援：" not in text  # nothing has fallen back
+    assert "額度已達上限" not in text and "備援" not in text  # headroom, nothing fell back
     assert "OpenRouter 1 個免費模型 · OrcaRouter 1 個免費模型" in text
     assert "影片理解：開 · 讀連結：開" in text
 
@@ -783,7 +783,15 @@ async def test_status_shows_the_live_quota_and_the_last_fallback(client, monkeyp
     )
     text = await client._status_text(GUILD, 555, USER)
     assert "額度 5h 100% / 7d 40%" in text
-    assert "備援：2 分鐘前額度用完，改用 gemini-3.8-flash-medium 回答" in text
+    # "right now" comes from the probe alone, so a fresh process (no _last_fallback yet) and
+    # batch-only fallbacks still show it; the last-fallback line is the evidence trail.
+    assert "額度已達上限，現在的請求改用 gemini-3.8-flash-medium 回答" in text
+    assert "最近一次備援：2 分鐘前額度用完，改用 gemini-3.8-flash-medium 回答" in text
+    client._last_fallback = None
+    text = await client._status_text(GUILD, 555, USER)
+    assert "額度已達上限，現在的請求改用" in text and "最近一次備援" not in text
+    client.config = replace(client.config, codex_fallback_model="")
+    assert "額度已達上限，且沒有設定備援模型" in await client._status_text(GUILD, 555, USER)
 
 
 async def test_status_says_when_the_quota_is_unreadable(client, monkeypatch) -> None:

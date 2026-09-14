@@ -1591,18 +1591,32 @@ class DiscordCodexClient(discord.Client):
 
         codex = await codex_login_status(self.config)
         limits = await probe_rate_limits(self.config)
+        spare = fallback_target(
+            self.config.codex_fallback_model,
+            self.config.codex_model,
+            self.config.codex_reasoning_effort,
+        )
         if limits is not None:
             codex += (
                 f" · 額度 5h {limits.primary_used_percent:.0f}%"
                 f" / 7d {limits.secondary_used_percent:.0f}%"
             )
+            # "Falling back right now" needs no memory: a spent window means the next request
+            # goes to the spare. Derived from the live probe, so it survives a restart and covers
+            # requests this process has not seen (the batch jobs fall back the same way).
+            if max(limits.primary_used_percent, limits.secondary_used_percent) >= 100:
+                codex += (
+                    f"\n　└ 額度已達上限，現在的請求改用 {spare.model} 回答"
+                    if spare is not None
+                    else "\n　└ 額度已達上限，且沒有設定備援模型"
+                )
         else:
             codex += " · 額度讀不到"
         if self._last_fallback is not None:
             when, why, model = self._last_fallback
             mins = max(0, int((time.time() - when) // 60))
             label = _FALLBACK_LABEL.get(type(why), "服務異常")
-            codex += f"\n　└ 備援：{mins} 分鐘前{label}，改用 {model} 回答"
+            codex += f"\n　└ 最近一次備援：{mins} 分鐘前{label}，改用 {model} 回答"
         routers = []
         for backend, catalog in self.catalogs.items():
             if ROUTERS[backend].api_key(self.config):
