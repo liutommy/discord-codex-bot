@@ -2,9 +2,17 @@ import asyncio
 import logging
 import logging.handlers
 from dataclasses import dataclass
+from datetime import UTC
+from datetime import datetime as _dt
 from pathlib import Path
 
-from discord_codex_bot.bot import DiscordCodexClient, strip_mention, with_quoted_message
+from discord_codex_bot.bot import (
+    DiscordCodexClient,
+    strip_mention,
+    tracking_message,
+    tracking_provider,
+    with_quoted_message,
+)
 from discord_codex_bot.config import Config
 
 
@@ -33,9 +41,17 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
         "inmu-king-memory",
         "inmu-king-style",
         "inmu-king-model",
+        "inmu-king-track",
     }
     assert client.intents.guilds
     assert client.intents.message_content
+
+
+def test_tracking_provider_supports_only_youtube_and_twitch() -> None:
+    assert tracking_provider("https://www.youtube.com/@HoushouMarine") == "youtube"
+    assert tracking_provider("https://www.twitch.tv/chibidoki") == "twitch"
+    with pytest.raises(ValueError, match="只支援"):
+        tracking_provider("https://example.com/person")
 
 
 def test_strip_mention_removes_every_bot_mention_form() -> None:
@@ -84,6 +100,14 @@ from discord_codex_bot.bot import FAILURE_MESSAGE, QUEUE_FULL_MESSAGE  # noqa: E
 from discord_codex_bot.codex import CodexResult  # noqa: E402
 from discord_codex_bot.links import Preview  # noqa: E402
 from discord_codex_bot.queue import SerialQueue  # noqa: E402
+from discord_codex_bot.tracking import (  # noqa: E402
+    ContentItem,
+    Decision,
+    OutboxMessage,
+    TrackerStore,
+    Watch,
+)
+from discord_codex_bot.usage import RateLimits  # noqa: E402
 
 GUILD, USER = 111111111111111111, 5
 
@@ -133,6 +157,62 @@ async def test_answer_defaults_to_codex_with_stored_or_explicit_effort(client, b
     assert codex.calls[-1][2]["effort"] == "low"  # the member's stored level
     await client._answer("q", [], GUILD, USER, effort="max", resume="t-old")
     assert codex.calls[-1][2]["effort"] == "max" and codex.calls[-1][2]["resume"] == "t-old"
+
+
+async def test_tracking_classifier_is_isolated_and_bounded(
+    client, tmp_path, monkeypatch
+) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    client.config = replace(
+        client.config,
+        tracking_schema_path=tmp_path / "tracking-schema.json",
+        tracking_reasoning_effort="high",
+        tracking_min_remaining_percent=50,
+        tracking_ai_max_calls_per_day=1,
+    )
+    calls = []
+
+    async def limits(_config):
+        return RateLimits(10, 20, "test")
+
+    async def codex(prompt, config, **kwargs):
+        calls.append((prompt, config, kwargs))
+        return CodexResult('{"decisions":[]}')
+
+    monkeypatch.setattr(bot_module, "probe_rate_limits", limits)
+    monkeypatch.setattr(bot_module, "run_codex", codex)
+    assert await client._classify_tracking("classify") == '{"decisions":[]}'
+    kwargs = calls[0][2]
+    assert kwargs["raw"] and kwargs["isolated"] and kwargs["effort"] == "high"
+    assert kwargs["schema"] == client.config.tracking_schema_path
+    with pytest.raises(RuntimeError, match="daily tracking AI budget"):
+        await client._classify_tracking("again")
+
+
+def test_pending_shadow_card_stays_non_mentioning_after_watch_goes_live() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy", shadow=False)
+    item = ContentItem(
+        1, 1, "v1", "https://example.com/v1", "@everyone normal stream", "", "now", "video"
+    )
+    decision = Decision(1, 1, 1, False, 0.9, "日常", "@everyone 不符合", (), "shadow")
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0))
+    assert text.startswith("🧪 **追蹤測試：不提醒**")
+    assert f"<@{USER}>" not in text and "@everyone" not in text
+
+
+async def test_tracking_classifier_defers_before_spending_daily_budget(
+    client, tmp_path, monkeypatch
+) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    client.config = replace(client.config, tracking_min_remaining_percent=50)
+
+    async def limits(_config):
+        return RateLimits(55, 10, "test")
+
+    monkeypatch.setattr(bot_module, "probe_rate_limits", limits)
+    with pytest.raises(RuntimeError, match="below the tracking gate"):
+        await client._classify_tracking("classify")
+    assert client.tracker.ai_calls(_dt.now(UTC).date().isoformat()) == 0
 
 
 async def test_answer_dispatches_to_agy_from_the_stored_model(client, backends) -> None:

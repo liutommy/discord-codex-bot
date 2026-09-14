@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,16 +70,21 @@ def parse_app_server_rate_limits(response: dict) -> RateLimits:
         raise ValueError("account/rateLimits/read returned no rateLimits")
     windows = [snapshot.get("primary"), snapshot.get("secondary")]
 
-    def used(duration: int, fallback: int) -> float:
+    def used(duration: int) -> float:
         for window in windows:
             if isinstance(window, dict) and window.get("windowDurationMins") == duration:
-                return float(window.get("usedPercent", 0.0))
-        window = windows[fallback]
-        return float(window.get("usedPercent", 0.0)) if isinstance(window, dict) else 0.0
+                value = window.get("usedPercent")
+                if type(value) not in (int, float):
+                    break
+                percent = float(value)
+                if math.isfinite(percent) and 0 <= percent <= 100:
+                    return percent
+                break
+        raise ValueError(f"account/rateLimits/read returned no valid {duration}-minute window")
 
     return RateLimits(
-        primary_used_percent=used(300, 0),
-        secondary_used_percent=used(10_080, 1),
+        primary_used_percent=used(300),
+        secondary_used_percent=used(10_080),
         source="app-server account/rateLimits/read",
     )
 

@@ -9,6 +9,7 @@ import re
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC
 from datetime import datetime as _dt
 from pathlib import Path
 
@@ -79,7 +80,20 @@ from .reminders import (
 )
 from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
 from .threads import ThreadStore
+from .tracking import (
+    INTEREST_POLICY,
+    OutboxMessage,
+    ProviderError,
+    Source,
+    TrackerStore,
+    TwitchFetcher,
+    YouTubeFetcher,
+    parse_twitch_locator,
+    parse_youtube_locator,
+    tracking_loop,
+)
 from .ui import AnswerButton, AnswerView, CancelView, recover_exchange
+from .usage import probe_rate_limits
 
 LOGGER = logging.getLogger(__name__)
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
@@ -104,6 +118,38 @@ PROVIDER_CHOICES = [
     app_commands.Choice(name="OrcaRouter（免費模型）", value=ORCAROUTER),
 ]
 FREE_MODEL_NOTE = "免費模型可能隨時不穩或下架，失敗時請換一個。"
+
+
+def tracking_provider(locator: str) -> str:
+    """Return the provider for a supported locator without doing network I/O."""
+    for provider, parser in (("youtube", parse_youtube_locator), ("twitch", parse_twitch_locator)):
+        try:
+            parser(locator)
+        except ValueError:
+            continue
+        return provider
+    raise ValueError("目前只支援 YouTube 頻道與 Twitch 頻道網址。")
+
+
+def tracking_message(message: OutboxMessage) -> str:
+    """Render one bounded notification; social text is escaped before Discord sees it."""
+    item, decision, watch = message.item, message.decision, message.watch
+    title = discord.utils.escape_mentions(item.title.strip())[:300] or "（無標題）"
+    category = discord.utils.escape_mentions(decision.category.strip())[:100] or "未分類"
+    reason = discord.utils.escape_mentions(decision.reason.strip())[:500] or "未提供理由"
+    topics = "、".join(discord.utils.escape_mentions(v)[:80] for v in decision.matched_topics[:5])
+    if decision.status == "shadow":
+        verdict = "會提醒" if decision.notify else "不提醒"
+        baseline = " · 歷史基準" if item.baseline else ""
+        head = f"🧪 **追蹤測試：{verdict}**{baseline}"
+        mention = ""
+    else:
+        head = "🔔 **社群追蹤提醒**"
+        mention = f"<@{watch.user_id}> " if watch.user_id else ""
+    detail = f"\n分類：{category} · 信心 {decision.confidence:.0%}"
+    if topics:
+        detail += f" · 命中：{topics}"
+    return truncate(f"{mention}{head}\n**{title}**{detail}\n理由：{reason}\n{item.url}", 1900)
 
 
 def instructions_version(config: Config) -> str:
@@ -217,6 +263,9 @@ class DiscordCodexClient(discord.Client):
         self.openrouter = Catalog(config)
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
+        self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
+        self.youtube_tracker = YouTubeFetcher(config.youtube_api_key)
+        self.twitch_tracker = TwitchFetcher(config.twitch_client_id, config.twitch_client_secret)
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-remember",
@@ -308,6 +357,13 @@ class DiscordCodexClient(discord.Client):
                 callback=self.stop_command,
             )
         )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-track",
+                description="追蹤 YouTube／Twitch；留空列出，或用編號取消／切換正式提醒",
+                callback=self.track_command,
+            )
+        )
 
     async def setup_hook(self) -> None:
         self.add_dynamic_items(AnswerButton)  # answer buttons keep working across restarts
@@ -325,6 +381,8 @@ class DiscordCodexClient(discord.Client):
                 self.threads, self.memory, self.config, self.queue.run, self._harvest_wakeup
             )
         )
+        if self.tracker is not None:
+            self._tracking_loop = self.loop.create_task(self._tracking_forever())
         # A guild that has not invited the bot yet (e.g. production before rollout) must not take
         # the whole client down; the runtime access check still rejects it until it is synced.
         for guild_id in self.config.allowed_guild_ids:
@@ -366,6 +424,74 @@ class DiscordCodexClient(discord.Client):
             await announce_once(self, self.config)
         except Exception:
             LOGGER.exception("Announcement pass failed")
+
+    async def _tracking_forever(self) -> None:
+        await self.wait_until_ready()
+        if self.tracker is None:
+            return
+        await tracking_loop(
+            self.tracker,
+            self._fetch_tracking_source,
+            self._classify_tracking,
+            self._deliver_tracking,
+            self.config.tracking_interval_seconds,
+        )
+
+    async def _fetch_tracking_source(self, source: Source):
+        if source.provider == "youtube":
+            return await self.youtube_tracker.fetch(source)
+        if source.provider == "twitch":
+            return await self.twitch_tracker.fetch(source)
+        raise ProviderError(f"unsupported provider: {source.provider}")
+
+    async def _classify_tracking(self, prompt: str) -> str:
+        if self.tracker is None:
+            raise RuntimeError("tracking is disabled")
+
+        async def classify() -> str:
+            limits = await probe_rate_limits(self.config)
+            if limits is None:
+                raise RuntimeError("Codex usage is unknown; tracking classification deferred")
+            remaining = min(
+                100.0 - limits.primary_used_percent,
+                100.0 - limits.secondary_used_percent,
+            )
+            if remaining < self.config.tracking_min_remaining_percent:
+                raise RuntimeError("Codex remaining quota is below the tracking gate")
+            day = _dt.now(UTC).date().isoformat()
+            if not self.tracker.consume_ai_call(day, self.config.tracking_ai_max_calls_per_day):
+                raise RuntimeError("daily tracking AI budget exhausted")
+            result = await run_codex(
+                prompt,
+                self.config,
+                effort=self.config.tracking_reasoning_effort,
+                raw=True,
+                schema=self.config.tracking_schema_path,
+                isolated=True,
+            )
+            return result.text
+
+        return await self.queue.run(classify)
+
+    async def _deliver_tracking(self, message: OutboxMessage) -> None:
+        channel = self.get_channel(message.watch.channel_id) or await self.fetch_channel(
+            message.watch.channel_id
+        )
+        channel_guild = getattr(getattr(channel, "guild", None), "id", None)
+        reason = self._access(message.watch.guild_id, channel, message.watch.channel_id)
+        if channel_guild != message.watch.guild_id or reason:
+            raise RuntimeError("tracking destination is outside the configured allowlist")
+        allowed_users = (
+            [discord.Object(id=message.watch.user_id)]
+            if message.watch.user_id and message.decision.status != "shadow"
+            else False
+        )
+        await channel.send(
+            tracking_message(message),
+            allowed_mentions=discord.AllowedMentions(
+                users=allowed_users, everyone=False, roles=False, replied_user=False
+            ),
+        )
 
     # ----- shared pipeline -------------------------------------------------------------------
 
@@ -1016,6 +1142,129 @@ class DiscordCodexClient(discord.Client):
                 + f" — {i['text']}" for i in mine
             )
         await interaction.response.send_message(message, ephemeral=True)
+
+    @app_commands.describe(
+        source="YouTube 頻道或 Twitch 頻道網址；留空列出你的追蹤",
+        interest="選填：你特別想知道的內容；留空使用預設重大事件政策",
+        cancel="取消你的追蹤編號",
+        live="把你的 shadow 追蹤編號切成正式提醒",
+    )
+    async def track_command(
+        self,
+        interaction: discord.Interaction,
+        source: str | None = None,
+        interest: str | None = None,
+        cancel: int | None = None,
+        live: int | None = None,
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        store = self.tracker
+        if store is None:
+            await interaction.response.send_message(
+                "社群追蹤尚未啟用；管理者需設定 TRACKING_ENABLED=true 與 provider 憑證。",
+                ephemeral=True,
+            )
+            return
+        actions = (
+            int(bool(source and source.strip()))
+            + int(cancel is not None)
+            + int(live is not None)
+        )
+        if actions > 1 or (interest and not source):
+            await interaction.response.send_message(
+                "新增、取消、切換正式提醒一次只能做一件；interest 必須和 source 一起使用。",
+                ephemeral=True,
+            )
+            return
+        if cancel is not None:
+            deleted = store.delete_watch(cancel, interaction.user.id)
+            text = f"已取消追蹤 #{cancel}。" if deleted else f"找不到你的追蹤 #{cancel}。"
+            await interaction.response.send_message(text, ephemeral=True)
+            return
+        if live is not None:
+            changed = store.set_watch_shadow(live, False, interaction.user.id)
+            text = (
+                f"追蹤 #{live} 已切成正式提醒；之後只有符合政策的新內容會在頻道 @你。"
+                if changed
+                else f"找不到你的追蹤 #{live}。"
+            )
+            await interaction.response.send_message(text, ephemeral=True)
+            return
+        if not source or not source.strip():
+            watches = store.watches(user_id=interaction.user.id, active_only=True)
+            if not watches:
+                text = "你目前沒有社群追蹤。"
+            else:
+                lines = []
+                for watch in watches:
+                    tracked = store.get_source(watch.source_id)
+                    if tracked is None:
+                        continue
+                    mode = "shadow" if watch.shadow else "正式"
+                    lines.append(f"#{watch.id} [{mode}] {tracked.provider} · {tracked.locator}")
+                text = "你的社群追蹤：\n" + "\n".join(lines)
+            await interaction.response.send_message(truncate(text, 1900), ephemeral=True)
+            return
+
+        locator = source.strip()
+        policy = interest.strip() if interest else INTEREST_POLICY
+        if len(locator) > 500 or len(policy) > 4000:
+            await interaction.response.send_message("網址或追蹤條件太長。", ephemeral=True)
+            return
+        if len(store.watches(user_id=interaction.user.id, active_only=True)) >= (
+            self.config.tracking_max_per_user
+        ):
+            await interaction.response.send_message(
+                f"每人最多 {self.config.tracking_max_per_user} 個追蹤。", ephemeral=True
+            )
+            return
+        try:
+            provider = tracking_provider(locator)
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        if provider == "youtube" and not self.config.youtube_api_key:
+            await interaction.response.send_message(
+                "管理者尚未設定 YOUTUBE_API_KEY。", ephemeral=True
+            )
+            return
+        if provider == "twitch" and not (
+            self.config.twitch_client_id and self.config.twitch_client_secret
+        ):
+            await interaction.response.send_message(
+                "管理者尚未設定 TWITCH_CLIENT_ID／TWITCH_CLIENT_SECRET。", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        resolver = self.youtube_tracker if provider == "youtube" else self.twitch_tracker
+        try:
+            external_id, state = await resolver.resolve(locator)
+            tracked = store.add_source(provider, external_id, locator, state)
+            watch = store.add_watch(
+                tracked.id,
+                interaction.guild_id,
+                interaction.channel_id,
+                interaction.user.id,
+                policy,
+                shadow=True,
+            )
+        except (ProviderError, aiohttp.ClientError, TimeoutError, ValueError) as error:
+            LOGGER.warning("Tracking source resolution failed (%s)", type(error).__name__)
+            await interaction.followup.send(
+                "無法讀取這個來源；請確認網址與 provider 憑證後再試。", ephemeral=True
+            )
+            return
+        label = str(state.get("title") or state.get("login") or external_id)
+        await interaction.followup.send(
+            f"已新增追蹤 #{watch.id}：{provider} · {label}\n"
+            "目前是 shadow：第一輪會把近期內容的『會／不會提醒』判斷貼到此頻道，"
+            f"確認正常後用 /{self.config.command_prefix}-track live:{watch.id} 切成正式提醒。",
+            ephemeral=True,
+        )
 
     async def export_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)

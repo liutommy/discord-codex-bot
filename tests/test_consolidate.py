@@ -86,6 +86,25 @@ import pytest  # noqa: E402
 from discord_codex_bot.consolidate import _parse, consolidate_scope  # noqa: E402
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"result": {"rateLimits": {"primary": {"windowDurationMins": 300, "usedPercent": 10}}}},
+        {
+            "result": {
+                "rateLimits": {
+                    "primary": {"windowDurationMins": 300, "usedPercent": 10},
+                    "secondary": {"windowDurationMins": 10_080, "usedPercent": "unknown"},
+                }
+            }
+        },
+    ],
+)
+def test_parse_rate_limits_rejects_partial_or_invalid_windows(response) -> None:
+    with pytest.raises(ValueError, match="window"):
+        parse_app_server_rate_limits(response)
+
+
 def test_parse_drops_items_without_text_and_strips() -> None:
     answer = json.dumps(
         {

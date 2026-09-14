@@ -1,7 +1,7 @@
 # Discord Codex Bot
 
 Private Discord slash commands backed by Codex CLI authenticated with a ChatGPT subscription. The
-runtime is one always-restarting Docker container (`BOT_CONTAINER_NAME`, default `discord-codex-bot`).
+runtime is one always-restarting Docker container (`BOT_CONTAINER_NAME`, default `tommy_test`).
 
 ## Architecture
 
@@ -11,7 +11,8 @@ Discord guild allowlist
         v
 /codex slash command ─┐
                       ├─> discord.py -> validate -> serial queue -> codex exec (Luna, effort allowlist)
-@mention + images ────┘                                       |
+@mention + images ────┤                                       |
+YouTube/Twitch poll ──┘ -> SQLite -> quota gate -> isolated classifier -> Discord notification
                                                               v
                                             Docker volume: CODEX_HOME
                                             (ChatGPT login + local memories)
@@ -21,7 +22,7 @@ There is no inbound HTTP port. The bot opens outbound connections to the Discord
 OpenAI. `ALLOWED_GUILD_IDS` is enforced when commands are registered and again for every
 interaction. `ALLOWED_CHANNEL_IDS` is optional and intended for the initial test channel; it is one
 global list across all allowed guilds, so leave it empty once every channel in both servers may use
-the Bot (the current deployment).
+the Bot.
 
 The two allowed guilds share one Codex identity and one local memory store because this deployment
 represents one agent. Use separate containers and separate `CODEX_HOME` volumes if guild memories
@@ -67,7 +68,7 @@ Edit `.env` locally:
 DISCORD_TOKEN=<bot token>
 DISCORD_APPLICATION_ID=<application id>
 ALLOWED_GUILD_IDS=<test guild id>
-ALLOWED_CHANNEL_IDS=<test channel id>
+ALLOWED_CHANNEL_IDS=975467992370520074
 ```
 
 The `.env` file is ignored by Git and excluded from the Docker build context.
@@ -76,7 +77,7 @@ The `.env` file is ignored by Git and excluded from the Docker build context.
 
 ```bash
 docker compose up -d --build
-docker inspect -f '{{.Name}} restart={{.HostConfig.RestartPolicy.Name}}' discord-codex-bot
+docker inspect -f '{{.Name}} restart={{.HostConfig.RestartPolicy.Name}}' tommy_test
 docker compose ps
 ```
 
@@ -92,7 +93,7 @@ docker compose up -d --force-recreate
 Run device authentication inside the container:
 
 ```bash
-docker exec -it discord-codex-bot codex login --device-auth
+docker compose exec bot codex login --device-auth
 ```
 
 Open the displayed URL, enter the one-time code, and sign in with the ChatGPT account whose
@@ -102,7 +103,7 @@ subscription quota should be used. The login is stored only in the named volume
 Verify the authentication mode:
 
 ```bash
-docker exec discord-codex-bot codex login status
+docker compose exec bot codex login status
 ```
 
 The required result is:
@@ -132,8 +133,66 @@ Guild-scoped slash commands normally appear quickly. Run:
 ```
 
 Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>`,
-`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`. This README uses the
+`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`. This README uses the
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
+
+### Social tracking: YouTube and Twitch
+
+The first version polls official sources: YouTube's channel Atom feed plus Data API v3 metadata,
+and Twitch Helix streams/videos with an app access token. It does not scrape X, Instagram, or
+TikTok. A source is fetched once even when several members watch it; Codex runs only when a new
+item has no saved decision for that watch.
+
+For YouTube, create a Google Cloud project, enable **YouTube Data API v3**, create an API key, and
+restrict that key to the YouTube Data API. For Twitch, register an application in the Twitch
+Developer Console as a **confidential** client. This implementation uses the server-side
+`client_credentials` grant, so it never redirects a Discord user; if the console requires an
+HTTPS OAuth redirect URL, enter one to satisfy registration, but it is not called by this Bot.
+
+Put the credentials only in the ignored `.env` file and enable the worker:
+
+```dotenv
+TRACKING_ENABLED=true
+TRACKING_INTERVAL_MINUTES=15
+TRACKING_MIN_REMAINING_PERCENT=50
+TRACKING_AI_MAX_CALLS_PER_DAY=30
+TRACKING_REASONING_EFFORT=high
+YOUTUBE_API_KEY=<restricted YouTube API key>
+TWITCH_CLIENT_ID=<Twitch client id>
+TWITCH_CLIENT_SECRET=<Twitch client secret>
+```
+
+Recreate the Bot, then add the two test watches in Discord:
+
+```text
+/codex-track source:https://www.youtube.com/@HoushouMarine
+/codex-track source:https://www.twitch.tv/chibidoki
+/codex-track
+```
+
+New watches start in shadow mode. The first pass classifies the recent baseline and posts a card
+for every item, including `不提醒`, so the model can be evaluated. Shadow cards do not mention the
+member. After the decisions look right, promote each watch with `/codex-track live:<id>`; formal
+mode posts only matching new items and mentions that watch's owner. `/codex-track cancel:<id>`
+removes a watch. The default policy alerts on major announcements, new models/outfits/3D, music
+releases, concerts/events, anniversaries/milestones, hiatus/return/graduation, major collaborations,
+and rare charity/subathon/marathon streams. Routine streams, clips, repeated merchandise, and
+uncertain titles are ignored.
+
+Classification always uses the operator-controlled Codex model and `high` effort. It runs with
+Codex memories, history persistence, web search, apps, browser/computer use, image generation, and
+multi-agent features disabled. Before each classifier call the Bot reads
+`account/rateLimits/read`; if either the five-hour or weekly window has less than
+`TRACKING_MIN_REMAINING_PERCENT` remaining, or the daily cap is exhausted, it keeps the item
+pending for a later poll. Provider credentials are excluded from the Codex child environment.
+Tracking state and its durable notification outbox live in `CODEX_HOME/tracking.sqlite3` and are
+included in the daily backup through SQLite's online backup API.
+
+Social titles and descriptions remain untrusted even though they are JSON-encoded in the prompt:
+the output schema prevents structural escape, but it cannot guarantee that a model will never make
+a schema-valid false positive. Keep new watches in shadow until their decisions look acceptable.
+Notification delivery is intentionally at-least-once; a process crash after Discord accepts a
+message but before SQLite records delivery can produce one duplicate after restart.
 
 Four backends share that pipeline. Codex CLI is the default; Google's Antigravity CLI (`agy`) is
 the second; OpenRouter and OrcaRouter (free models only, one shared OpenAI-compatible router core
@@ -366,7 +425,7 @@ subscription quota. The serial queue limits concurrency but does not create addi
 ```bash
 # Status
 docker compose ps
-docker exec discord-codex-bot codex login status
+docker compose exec bot codex login status
 
 # Logs
 docker compose logs --tail=200 bot
@@ -393,6 +452,6 @@ UV_CACHE_DIR=.uv-cache uv sync
 UV_CACHE_DIR=.uv-cache uv run pytest
 docker compose build --pull
 docker compose up -d
-docker exec discord-codex-bot codex --version
-docker exec discord-codex-bot codex login status
+docker compose exec bot codex --version
+docker compose exec bot codex login status
 ```

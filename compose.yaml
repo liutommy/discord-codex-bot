@@ -1,6 +1,6 @@
 services:
   bot:
-    container_name: ${BOT_CONTAINER_NAME:-discord-codex-bot}
+    container_name: ${BOT_CONTAINER_NAME:-tommy_test}
     build:
       context: .
       args:
@@ -61,7 +61,7 @@ services:
   # reach it (http://searxng:8080 on the compose network), so it publishes nothing.
   searxng:
     image: searxng/searxng:latest
-    container_name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_searxng
+    container_name: ${BOT_CONTAINER_NAME:-tommy_test}_searxng
     restart: always
     environment:
       BASE_URL: http://searxng:8080/
@@ -89,7 +89,7 @@ services:
   sandbox:
     build: ./sandbox
     image: discord-codex-bot-sandbox:local
-    container_name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_sandbox
+    container_name: ${BOT_CONTAINER_NAME:-tommy_test}_sandbox
     restart: always
     init: true
     read_only: true
@@ -118,6 +118,6 @@ networks:
 
 volumes:
   codex-home:
-    name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_codex_home
+    name: ${BOT_CONTAINER_NAME:-tommy_test}_codex_home
   agy-home:
-    name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_agy_home
+    name: ${BOT_CONTAINER_NAME:-tommy_test}_agy_home

@@ -8,8 +8,10 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import sqlite3
 import sys
 import tarfile
+import tempfile
 import time
 import zipfile
 from datetime import datetime
@@ -23,6 +25,7 @@ LOGGER = logging.getLogger(__name__)
 BACKUP_MEMBERS = (
     "memory", "openrouter", "discord_threads.json", "reminders.json", "announced.json",
 )
+TRACKING_DB = "tracking.sqlite3"
 ARCHIVE_PREFIX = "discord-codex-bot-"
 
 
@@ -31,15 +34,23 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
     if not config.backup_dir:
         return None
     present = [name for name in BACKUP_MEMBERS if (config.codex_home / name).exists()]
-    if not present:
+    tracking = config.tracking_db_path
+    if not present and not tracking.exists():
         return None
     config.backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.fromtimestamp(now or time.time()).strftime("%Y%m%d-%H%M%S")
     target = config.backup_dir / f"{ARCHIVE_PREFIX}{stamp}.tar.gz"
     partial = target.with_suffix(".tmp")
-    with tarfile.open(partial, "w:gz") as tar:
-        for name in present:
-            tar.add(config.codex_home / name, arcname=name)
+    with tempfile.TemporaryDirectory(dir=config.backup_dir) as scratch:
+        snapshot = Path(scratch) / TRACKING_DB
+        if tracking.exists():
+            with sqlite3.connect(tracking) as source, sqlite3.connect(snapshot) as destination:
+                source.backup(destination)
+        with tarfile.open(partial, "w:gz") as tar:
+            for name in present:
+                tar.add(config.codex_home / name, arcname=name)
+            if snapshot.exists():
+                tar.add(snapshot, arcname=TRACKING_DB)
     partial.replace(target)
     return target
 

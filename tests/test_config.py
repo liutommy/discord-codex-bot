@@ -31,6 +31,32 @@ def test_loads_safe_operational_defaults() -> None:
     assert config.codex_model == "gpt-5.6-luna"
     assert config.codex_reasoning_effort == "medium"
     assert config.max_queued_jobs == 10
+    assert not config.tracking_enabled
+    assert config.tracking_interval_seconds == 900
+    assert config.tracking_min_remaining_percent == 50
+    assert config.tracking_ai_max_calls_per_day == 30
+    assert config.tracking_reasoning_effort == "high"
+
+
+def test_tracking_config_validates_switch_and_usage_gate() -> None:
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    config = load_config(
+        {
+            **base,
+            "TRACKING_ENABLED": "true",
+            "TRACKING_INTERVAL_MINUTES": "5",
+            "TRACKING_MIN_REMAINING_PERCENT": "65",
+        }
+    )
+    assert config.tracking_enabled
+    assert config.tracking_interval_seconds == 300
+    assert config.tracking_min_remaining_percent == 65
+    with pytest.raises(ValueError, match="TRACKING_ENABLED"):
+        load_config({**base, "TRACKING_ENABLED": "sometimes"})
 
 
 def test_effort_accepts_verified_values_and_rejects_unknown_ones() -> None:

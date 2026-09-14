@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 import tarfile
 import time
 import zipfile
@@ -24,22 +25,35 @@ def _home(tmp_path: Path) -> Path:
     (home / "openrouter").mkdir()
     (home / "openrouter" / "or-1.json").write_text("{}", "utf-8")
     (home / "discord_threads.json").write_text("{}", "utf-8")
+    with sqlite3.connect(home / "tracking.sqlite3") as connection:
+        connection.execute("CREATE TABLE watches(id INTEGER PRIMARY KEY)")
+        connection.execute("INSERT INTO watches VALUES (1)")
     (home / "auth.json").write_text("SECRET", "utf-8")  # Codex's own: must never be copied
     return home
 
 
 def test_make_backup_archives_the_bots_state_only(tmp_path: Path, config) -> None:
     home = _home(tmp_path)
-    cfg = replace(config, codex_home=home, backup_dir=tmp_path / "backups")
+    cfg = replace(
+        config,
+        codex_home=home,
+        backup_dir=tmp_path / "backups",
+        tracking_db_path=home / "tracking.sqlite3",
+    )
     target = make_backup(cfg, now=1_700_000_000)
     assert target is not None and target.name.startswith(ARCHIVE_PREFIX)
     with tarfile.open(target) as tar:
         names = sorted(tar.getnames())
     assert "memory/1/users/2/topics/x.md" in names and "openrouter/or-1.json" in names
     assert "discord_threads.json" in names and not any("auth" in n for n in names)
+    assert "tracking.sqlite3" in names
     assert not list((tmp_path / "backups").glob("*.tmp"))
     assert make_backup(replace(cfg, backup_dir=None)) is None
-    assert make_backup(replace(cfg, codex_home=tmp_path / "empty")) is None
+    empty = tmp_path / "empty"
+    empty_config = replace(
+        cfg, codex_home=empty, tracking_db_path=empty / "tracking.sqlite3"
+    )
+    assert make_backup(empty_config) is None
 
 
 def test_prune_keeps_recent_archives(tmp_path: Path, config) -> None:
@@ -61,7 +75,13 @@ def test_prune_keeps_recent_archives(tmp_path: Path, config) -> None:
 
 
 def test_run_backup_reports(tmp_path: Path, config) -> None:
-    cfg = replace(config, codex_home=_home(tmp_path), backup_dir=tmp_path / "b")
+    home = _home(tmp_path)
+    cfg = replace(
+        config,
+        codex_home=home,
+        backup_dir=tmp_path / "b",
+        tracking_db_path=home / "tracking.sqlite3",
+    )
     assert run_backup(cfg).startswith("backup written: ")
     assert "skipped" in run_backup(replace(cfg, backup_dir=None))
 

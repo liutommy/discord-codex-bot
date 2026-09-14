@@ -91,6 +91,18 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             "/{p}-remind cancel:3",
         ],
     ),
+    "-track": (
+        "追蹤 YouTube 或 Twitch 頻道。新增時預設為 shadow，會在目前頻道顯示每筆內容的"
+        "『會／不會提醒』判斷；確認後用 live 編號切成正式模式，之後只有符合條件的新內容會 @你。"
+        "留空列出你的追蹤，cancel 加編號取消。",
+        [
+            "/{p}-track source:https://www.youtube.com/@HoushouMarine",
+            "/{p}-track source:https://www.twitch.tv/chibidoki interest:重大公告或特別企劃",
+            "/{p}-track（留空：列出你的追蹤）",
+            "/{p}-track live:1",
+            "/{p}-track cancel:1",
+        ],
+    ),
     "-export": (
         "把你在這個伺服器的個人記憶（索引、archive、每一則內容）打包成 zip 私下給你，"
         "當作自己的備份或搬家用。伺服器記憶不在裡面。",
@@ -118,6 +130,8 @@ FEATURES: list[str] = [
     "**會寫程式算東西**：算數、資料整理、格式轉換、影片抽幀，Bot 會在隔離沙盒裡跑 Python／shell，"
     "產生的檔案直接附給你。",
     "**會查資料庫**：像英雄聯盟電競的賽程、比分、積分，Bot 會直接打官方資料 API，不靠新聞站。",
+    "**會定期追蹤社群**：YouTube／Twitch 的新內容先經用量閘門，再由隔離的 Codex 分類；"
+    "shadow 可先檢查判斷品質。",
     "**回答上的按鈕**：生成中 ❌ 取消；答完後 🔁 用同一題重答（新開對話）、"
     "👍 把這段問答記進個人記憶。只有發問的人能按。",
 ]

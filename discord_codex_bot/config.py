@@ -69,13 +69,24 @@ def _command_prefix(env: Mapping[str, str]) -> str:
     return value
 
 
-def _effort(env: Mapping[str, str]) -> str:
-    value = env.get("CODEX_REASONING_EFFORT", "").strip() or "medium"
+def _effort(
+    env: Mapping[str, str], name: str = "CODEX_REASONING_EFFORT", default: str = "medium"
+) -> str:
+    value = env.get(name, "").strip() or default
     if value not in REASONING_EFFORTS:
-        raise ValueError(
-            f"CODEX_REASONING_EFFORT must be one of {', '.join(REASONING_EFFORTS)}"
-        )
+        raise ValueError(f"{name} must be one of {', '.join(REASONING_EFFORTS)}")
     return value
+
+
+def _boolean(env: Mapping[str, str], name: str, default: bool = False) -> bool:
+    raw = env.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +170,17 @@ class Config:
     consolidate_min_remaining_percent: int
     consolidate_max_input_bytes: int
     consolidate_schema_path: Path
+    tracking_enabled: bool
+    tracking_db_path: Path
+    tracking_interval_seconds: int
+    tracking_min_remaining_percent: int
+    tracking_ai_max_calls_per_day: int
+    tracking_max_per_user: int
+    tracking_schema_path: Path
+    tracking_reasoning_effort: str
+    youtube_api_key: str
+    twitch_client_id: str
+    twitch_client_secret: str
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -302,4 +324,26 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         consolidate_schema_path=Path(
             values.get("CONSOLIDATE_SCHEMA_FILE", "/opt/discord-codex/consolidate-schema.json")
         ),
+        # Optional social-source tracking. Provider credentials stay in the Bot process; Codex
+        # child processes receive the allowlisted environment from codex._safe_environment.
+        tracking_enabled=_boolean(values, "TRACKING_ENABLED"),
+        tracking_db_path=Path(
+            values.get("TRACKING_DB_FILE", "").strip()
+            or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "tracking.sqlite3")
+        ),
+        tracking_interval_seconds=_positive_int(values, "TRACKING_INTERVAL_MINUTES", 15) * 60,
+        tracking_min_remaining_percent=_bounded_int(
+            values, "TRACKING_MIN_REMAINING_PERCENT", 50, 0, 100
+        ),
+        tracking_ai_max_calls_per_day=_positive_int(
+            values, "TRACKING_AI_MAX_CALLS_PER_DAY", 30
+        ),
+        tracking_max_per_user=_positive_int(values, "TRACKING_MAX_PER_USER", 10),
+        tracking_schema_path=Path(
+            values.get("TRACKING_SCHEMA_FILE", "/opt/discord-codex/tracking-schema.json")
+        ),
+        tracking_reasoning_effort=_effort(values, "TRACKING_REASONING_EFFORT", "high"),
+        youtube_api_key=values.get("YOUTUBE_API_KEY", "").strip(),
+        twitch_client_id=values.get("TWITCH_CLIENT_ID", "").strip(),
+        twitch_client_secret=values.get("TWITCH_CLIENT_SECRET", "").strip(),
     )
