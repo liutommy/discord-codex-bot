@@ -590,7 +590,18 @@ async def _render(url: str, config: Config, out_dir: Path | None) -> tuple[str, 
             except Exception:
                 pass
             title = await page.title()
-            text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            # innerText drops every <a>, so a rendered news index arrives as headlines with no
+            # way to reach them. Convert the rendered HTML with the same converter the plain
+            # path uses, and keep innerText as the guard: a page that shows its content through
+            # CSS rather than markup would otherwise come back much thinner than before.
+            plain = await page.evaluate("() => document.body ? document.body.innerText : ''")
+            text = plain
+            try:
+                _title, linked = html_to_text(await page.content(), page.url)
+            except Exception:  # a converter failure must not lose the page
+                linked = ""
+            if len(linked) >= len(plain or "") // 2:
+                text = linked or plain
             shot = None
             if out_dir is not None:
                 await asyncio.to_thread(out_dir.mkdir, parents=True, exist_ok=True)
