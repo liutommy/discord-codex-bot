@@ -265,6 +265,18 @@ async def _model_autocomplete(
     return await interaction.client.model_options(provider, current)
 
 
+async def _memory_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    client = interaction.client
+    if client._access(interaction.guild_id, interaction.channel, interaction.channel_id):
+        return []
+    scope = getattr(interaction.namespace, "scope", None)
+    if scope not in SCOPES:
+        return []
+    return client.memory_options(interaction.guild_id, interaction.user.id, scope, current)
+
+
 class DiscordCodexClient(discord.Client):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.none()
@@ -320,7 +332,7 @@ class DiscordCodexClient(discord.Client):
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-forget",
-                description=f"刪除一則記憶（用 /{prefix}-memory 看名稱）",
+                description="刪除一則記憶（從名稱選單選取；取消追蹤用 -track）",
                 callback=self.forget_command,
             )
         )
@@ -1662,8 +1674,40 @@ class DiscordCodexClient(discord.Client):
         line = self.memory.add(scope.value, interaction.guild_id, interaction.user.id, name, text)
         await interaction.response.send_message(f"已記住：{line}", ephemeral=True)
 
-    @app_commands.describe(scope="個人或伺服器", name="記憶名稱（用 -memory 指令查看）")
+    def memory_options(
+        self, guild_id: int | None, user_id: int, scope: str, current: str
+    ) -> list[app_commands.Choice[str]]:
+        needle = current.strip().casefold()
+        entries = self.memory.all_entries(scope, guild_id, user_id)
+        return [
+            app_commands.Choice(name=f"{e.name} · {e.file}"[:100], value=e.file)
+            for e in entries
+            if not needle or needle in f"{e.name} {e.file} {e.hook}".casefold()
+        ][:25]
+
+    def _forget_guidance(self, guild_id: int | None, user_id: int, name: str) -> str:
+        """Identify feature IDs without mutating either feature's independent store."""
+        ids = set(re.findall(r"(?<![0-9])[#＃]?([0-9]{1,9})(?![0-9])", name))
+        prefix = self.config.command_prefix
+        lines = []
+        watches = self.tracker.watches(user_id=user_id, active_only=True) if self.tracker else []
+        for watch in watches:
+            if watch.guild_id == guild_id and str(watch.id) in ids:
+                source = self.tracker.get_source(watch.source_id)
+                title = source.locator if source else ""
+                lines.append(f"追蹤 #{watch.id} {title}：`/{prefix}-track cancel:{watch.id}`")
+        for item in self.reminders.for_user(user_id):
+            if item.get("guild_id") == guild_id and str(item["id"]) in ids:
+                lines.append(
+                    f"提醒 #{item['id']} {item['text']}：`/{prefix}-remind cancel:{item['id']}`"
+                )
+        if not lines:
+            return ""
+        return "\n這些是追蹤／提醒編號，不是記憶編號；請選擇要取消的項目：\n" + "\n".join(lines)
+
+    @app_commands.describe(scope="個人或伺服器", name="從選單選記憶，或輸入完整名稱；不是追蹤編號")
     @app_commands.choices(scope=SCOPE_CHOICES)
+    @app_commands.autocomplete(name=_memory_autocomplete)
     async def forget_command(
         self, interaction: discord.Interaction, scope: app_commands.Choice[str], name: str
     ) -> None:
@@ -1671,19 +1715,63 @@ class DiscordCodexClient(discord.Client):
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
-        forgot = self.memory.forget(scope.value, interaction.guild_id, interaction.user.id, name)
-        await interaction.response.send_message(
-            f"已刪除「{name}」。" if forgot else f"找不到「{name}」。", ephemeral=True
+        name = name.strip()
+        entries = self.memory.all_entries(scope.value, interaction.guild_id, interaction.user.id)
+        matches = [e for e in entries if e.file == name] or [e for e in entries if e.name == name]
+        outcome = "not_found"
+        if len(matches) == 1:
+            entry = matches[0]
+            forgot = self.memory.forget(
+                scope.value, interaction.guild_id, interaction.user.id, entry.file, by_file=True
+            )
+            outcome = "deleted" if forgot else "not_found"
+            text = (
+                f"已刪除{SCOPES[scope.value]}記憶「{entry.name}」。"
+                if forgot
+                else "記憶已不存在，請重新選取。"
+            )
+        else:
+            if matches:
+                outcome = "ambiguous"
+                text = f"有多條同名記憶「{name}」，請從 name 選單選取個別項目。沒有刪除任何資料。"
+            else:
+                text = f"找不到{SCOPES[scope.value]}記憶「{name}」。沒有刪除任何資料。"
+                text += self._forget_guidance(interaction.guild_id, interaction.user.id, name)
+            choices = self.memory_options(
+                interaction.guild_id, interaction.user.id, scope.value, ""
+            )
+            if choices:
+                text += "\n可選記憶（最多列 25 條；輸入文字可篩選）：\n" + "\n".join(
+                    c.name for c in choices
+                )
+            text += f"\n記憶用名稱選取；完整清單：`/{self.config.command_prefix}-memory`。"
+        LOGGER.info(
+            "Memory forget guild=%s user=%s scope=%s target=%r outcome=%s",
+            interaction.guild_id,
+            interaction.user.id,
+            scope.value,
+            name[:100],
+            outcome,
         )
+        await interaction.response.send_message(truncate(text, 1900), ephemeral=True)
 
     def _memory_text(self, guild_id: int | None, user_id: int, scope: str = "") -> str:
-        """Index listing for one scope, or both; the archive is not listed (search finds it)."""
-        if scope:
-            owner = user_id if scope == "user" else None
-            text = self.memory.index_text(scope, guild_id, owner)
-            label = SCOPES[scope]
-            return f"[{label}記憶索引]\n{text}" if text else f"目前沒有{label}記憶。"
-        return self.memory.render(guild_id, user_id) or "目前沒有記憶。"
+        """List all removable notes, including archived notes, without positional IDs."""
+        sections = []
+        for kind in (scope,) if scope else SCOPES:
+            entries = self.memory.all_entries(kind, guild_id, user_id)
+            if entries:
+                lines = [f"- **{e.name}**（{e.file}）— {e.hook}" for e in entries]
+                sections.append(f"[{SCOPES[kind]}記憶索引]\n" + "\n".join(lines))
+        if not sections:
+            return f"目前沒有{SCOPES[scope] if scope else ''}記憶。"
+        prefix = self.config.command_prefix
+        sections.append(
+            f"刪除記憶：`/{prefix}-forget`，選 scope 後從 name 選單選取。\n"
+            f"追蹤／提醒另存，編號不適用於記憶；取消用 `/{prefix}-track cancel:編號`"
+            f" 或 `/{prefix}-remind cancel:編號`。刪除記憶不會清除既有對話脈絡。"
+        )
+        return "\n\n".join(sections)
 
     @app_commands.describe(scope="只看個人或伺服器；留空＝兩者都列")
     @app_commands.choices(scope=SCOPE_CHOICES)

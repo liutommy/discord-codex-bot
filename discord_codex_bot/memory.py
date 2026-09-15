@@ -221,12 +221,20 @@ class MemoryStore:
             entries.append(Entry(note.name, file, _hook(note.text)))
         self._write_index(directory, entries)
 
-    def forget(self, scope: str, guild_id: int | None, user_id: int | None, name: str) -> bool:
+    def forget(
+        self,
+        scope: str,
+        guild_id: int | None,
+        user_id: int | None,
+        name: str,
+        *,
+        by_file: bool = False,
+    ) -> bool:
         directory = self.scope_dir(scope, guild_id, user_id)
         removed = False
         for index_name in (INDEX_FILE, ARCHIVE_FILE):
             entries = self._read_index(directory / index_name)
-            keep = [e for e in entries if e.name != name and e.file != name]
+            keep = [e for e in entries if e.file != name and (by_file or e.name != name)]
             for entry in entries:
                 if entry not in keep:
                     (directory / TOPIC_DIR / entry.file).unlink(missing_ok=True)

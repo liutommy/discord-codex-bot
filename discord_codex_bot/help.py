@@ -58,11 +58,14 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "-forget": (
-        "刪除一則記憶。用 /{p}-memory 查名稱後，指定 scope 與 name。",
+        "刪除一則長期記憶：選 scope 後從 name 選單選取，可打字篩選。"
+        "追蹤與提醒另存，#編號不是記憶名稱；取消請用 /{p}-track cancel:編號"
+        " 或 /{p}-remind cancel:編號。刪除記憶不會清除舊對話脈絡"
+        "（重開對話用 /{p}-reset）。",
         ["/{p}-forget scope:個人 name:拉麵"],
     ),
     "-memory": (
-        "列出 Bot 記得的事的索引（個人＋伺服器）；scope 可只看其中一層。只有你看得到。",
+        "列出 Bot 記得的事（含封存，個人＋伺服器）；scope 可只看其中一層。只有你看得到。",
         ["/{p}-memory", "/{p}-memory scope:伺服器"],
     ),
     "-reset": (

@@ -1378,3 +1378,113 @@ async def test_recall_loop_does_not_re_send_an_identical_api_query(
     assert result.text == "來源被限流，稍後再問"
     assert calls == [("lp", "tables=ScoreboardGames")]  # asked once, not once per round
     assert "沿用當時的結果" in prompts[2]
+
+
+def memory_interaction(client, *, guild=GUILD, user=USER, scope="user"):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    return SimpleNamespace(
+        client=client,
+        guild_id=guild,
+        channel=None,
+        channel_id=222222222222222222,
+        user=SimpleNamespace(id=user),
+        namespace=SimpleNamespace(scope=scope),
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+
+async def test_memory_autocomplete_filters_scope_member_archive_and_access(client):
+    from discord_codex_bot.bot import _memory_autocomplete
+
+    client.memory._limits = replace(client.memory._limits, index_max_lines=1)
+    client.memory.add("user", GUILD, USER, "封存偏好", "old")
+    client.memory.add("user", GUILD, USER, "新偏好", "new")
+    client.memory.add("user", GUILD, 99, "他人秘密", "private")
+    client.memory.add("guild", GUILD, None, "共同規則", "shared")
+    choices = await _memory_autocomplete(memory_interaction(client), "")
+    assert {c.name.split(" · ")[0] for c in choices} == {"封存偏好", "新偏好"}
+    assert len(await _memory_autocomplete(memory_interaction(client), "old")) == 1
+    assert len(await _memory_autocomplete(memory_interaction(client, scope="guild"), "")) == 1
+    assert await _memory_autocomplete(memory_interaction(client, guild=999), "") == []
+    assert await _memory_autocomplete(memory_interaction(client, scope=None), "") == []
+    assert "封存偏好" in client._memory_text(GUILD, USER)
+    command = client.tree.get_command(f"{client.config.command_prefix}-forget")
+    assert next(p for p in command.parameters if p.name == "name").autocomplete
+
+
+async def test_forget_duplicate_titles_require_selection_and_delete_only_selected_file(
+    client, caplog
+):
+    from discord import app_commands
+
+    for text in ("first", "second"):
+        client.memory.add("user", GUILD, USER, "相同", text)
+    # A title can even equal another note's filename; selecting a file must not delete it.
+    client.memory.add("user", GUILD, USER, "相同-2.md", "keep")
+    interaction = memory_interaction(client)
+    scope = app_commands.Choice(name="個人", value="user")
+    with caplog.at_level(logging.INFO):
+        await client.forget_command(interaction, scope, "相同")
+        assert "同名" in interaction.response.send_message.call_args.args[0]
+        assert len(client.memory.all_entries("user", GUILD, USER)) == 3
+        await client.forget_command(interaction, scope, "相同-2.md")
+    remaining = client.memory.all_entries("user", GUILD, USER)
+    assert [e.name for e in remaining] == ["相同", "相同-2.md"]
+    assert "outcome=ambiguous" in caplog.text and "outcome=deleted" in caplog.text
+    assert interaction.response.send_message.call_args.kwargs["ephemeral"]
+
+
+async def test_forget_feature_numbers_explain_both_namespaces_without_deleting(client, tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from discord import app_commands
+
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = client.tracker.add_source("youtube", "UC1", "Suisei Channel")
+    watch = client.tracker.add_watch(source.id, GUILD, 555, USER)
+    second = client.tracker.add_watch(source.id, GUILD, 556, USER, "cards")
+    reminder = client.reminders.add(GUILD, 555, USER, datetime.now(UTC) + timedelta(days=1), "喝水")
+    client.memory.add("user", GUILD, USER, "喜好", "tea")
+    watches_before = client.tracker.watches()
+    reminders_before = client.reminders.for_user(USER)
+    i = memory_interaction(client)
+    await client.forget_command(
+        i, app_commands.Choice(name="個人", value="user"), f"取消 #{watch.id} #{second.id}"
+    )
+    text = i.response.send_message.call_args.args[0]
+    assert f"-track cancel:{watch.id}" in text and f"-track cancel:{second.id}" in text
+    assert f"-remind cancel:{reminder['id']}" in text and "沒有刪除" in text
+    assert client.tracker.watches() == watches_before
+    assert client.reminders.for_user(USER) == reminders_before
+    assert len(client.memory.all_entries("user", GUILD, USER)) == 1
+    assert client._forget_guidance(GUILD, 999, "#1 #2") == ""
+    assert client._forget_guidance(999, USER, "#1 #2") == ""
+
+
+async def test_forget_title_works_stale_selection_and_denied_access_do_not_delete(client):
+    from discord import app_commands
+
+    scope = app_commands.Choice(name="個人", value="user")
+    client.memory.add("user", GUILD, USER, "茶", "green")
+    client.memory.add("guild", GUILD, None, "茶", "shared")
+    i = memory_interaction(client, guild=999)
+    await client.forget_command(i, scope, "茶")
+    assert len(client.memory.all_entries("user", GUILD, USER)) == 1
+    i = memory_interaction(client)
+    await client.forget_command(i, scope, " 茶 ")
+    assert "已刪除個人記憶" in i.response.send_message.call_args.args[0]
+    await client.forget_command(i, scope, "茶.md")
+    assert "找不到" in i.response.send_message.call_args.args[0]
+    assert len(client.memory.all_entries("guild", GUILD, None)) == 1
+
+
+def test_memory_options_cap_and_search_beyond_first_page(client):
+    for number in range(30):
+        client.memory.add("user", GUILD, USER, f"note {number}", f"fact {number}")
+    assert len(client.memory_options(GUILD, USER, "user", "")) == 25
+    assert [c.value for c in client.memory_options(GUILD, USER, "user", "note 29")] == [
+        "note-29.md"
+    ]
+    assert "note 29" in client._memory_text(GUILD, USER)

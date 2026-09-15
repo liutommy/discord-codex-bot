@@ -354,7 +354,12 @@ lines with `MEMORY_SEARCH_CONTEXT_LINES` of context (up to `MEMORY_SEARCH_MAX_MA
 fed back into the same thread and bounded like pi's tool output (`MEMORY_READ_MAX_LINES` 2000 /
 `MEMORY_READ_MAX_BYTES` 50 KB per page, with the total line count in the header so the model can
 page on); at most `MEMORY_RECALL_ROUNDS` (10) rounds per request. `<recall name="list"/>` lists
-archived notes. `/memory` shows what is stored, `/forget` deletes a note. Capacity is capped per
+archived notes. `/memory` lists all stored notes, including archived notes. `/forget` offers
+a searchable name picker after selecting a scope, and deletes only the selected note. Duplicate
+titles require selecting a specific entry. Tracking and reminder IDs are separate: use `/track
+cancel:<id>` or `/remind cancel:<id>`; entering these IDs in `/forget` gives guidance without
+cancelling anything. Deleting a note does not erase existing conversation context; `/reset`
+starts a fresh conversation. Capacity is capped per
 scope (`MEMORY_USER_MAX_BYTES` 50 MB, `MEMORY_GUILD_MAX_BYTES` 200 MB); a full scope evicts its
 oldest notes.
 Codex's own background "memories" are not used for this: they consolidate only after 6 h idle in
