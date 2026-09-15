@@ -112,6 +112,20 @@ def cn_to_tw(*pairs: list[tuple[str, str]]) -> dict[str, str]:
     return out
 
 
+def _script_variants():
+    """name -> {name, its Traditional form, its Simplified form}. Members type the mainland
+    name in Traditional glyphs as often as not (亞索 for 亚索), and neither table has that
+    spelling. OpenCC is a dev dependency of this script only; without it, names pass through
+    unexpanded and the run says so."""
+    try:
+        from opencc import OpenCC
+    except ImportError:
+        print("opencc not installed: aliases carry one script only", file=sys.stderr)
+        return lambda name: {name}
+    s2t, t2s = OpenCC("s2t"), OpenCC("t2s")
+    return lambda name: {name, s2t.convert(name), t2s.convert(name)}
+
+
 def path_aliases(
     champions: list[list[str]], augments: list[list[str]], items: list[list[str]]
 ) -> dict[str, str]:
@@ -119,11 +133,13 @@ def path_aliases(
     for a hexdata page, resolved to the real path before the request goes out. Taiwan name,
     mainland name, epithet, nicknames and the bare id all work; first writer wins on a clash."""
     out: dict[str, str] = {}
+    variants = _script_variants()
 
     def add(kind: str, names: list[str], target: str) -> None:
         for name in names:
             if name and target:
-                out.setdefault(f"{kind}/{name}", target)
+                for spelling in variants(name):
+                    out.setdefault(f"{kind}/{spelling}", target)
 
     for key, tw, tw_title, cn, cn_title, slug, nicks in champions:
         if slug:  # a champion hexdata does not list yet must not resolve to "hero/"

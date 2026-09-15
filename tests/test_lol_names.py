@@ -115,6 +115,8 @@ def test_path_aliases_resolve_every_spelling_to_the_real_page() -> None:
     paths = path_aliases(champions, augments, items)
     for spelling in ("逆命", "崔斯特", "卡牌大师", "卡牌大師", "4", "TF"):
         assert paths[f"hero/{spelling}"] == "hero/4-twistedfate"
+    # the mainland name in Traditional glyphs is how Taiwan players usually type it
+    assert paths["hero/亞索"] == paths["hero/亚索"] == paths["hero/犽宿"] == "hero/157-yasuo"
     assert paths["augment/靈光一閃"] == paths["augment/尤里卡"] == "augment/1030-eureka"
     assert paths["item/無盡之刃"] == paths["item/无尽之刃"] == "item/3031"
     assert "hero/洛克" not in paths  # no hexdata page yet: nothing to resolve to
