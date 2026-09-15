@@ -138,7 +138,9 @@ def path_aliases(
     def add(kind: str, names: list[str], target: str) -> None:
         for name in names:
             if name and target:
-                for spelling in variants(name):
+                # sorted: a set's iteration order changes per process (hash randomization), and
+                # a JSON that differs on every run would make daily_rebuild.sh rebuild daily.
+                for spelling in sorted(variants(name)):
                     out.setdefault(f"{kind}/{spelling}", target)
 
     for key, tw, tw_title, cn, cn_title, slug, nicks in champions:
@@ -243,7 +245,8 @@ def main() -> int:
     # name the member used instead of translating and remembering Riot ids itself.
     paths = path_aliases(champions, augments, items)
     NAMES_JSON.write_text(
-        json.dumps({"names": names, "paths": paths}, ensure_ascii=False, indent=0) + "\n",
+        json.dumps({"names": names, "paths": paths}, ensure_ascii=False, indent=0, sort_keys=True)
+        + "\n",
         "utf-8",
     )
 
