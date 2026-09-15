@@ -178,6 +178,34 @@ async def test_call_api_logs_in_once_and_reuses_the_session(monkeypatch, config)
         apis._LOGGED_IN.discard("wiki")
 
 
+def test_localize_rewrites_longest_names_first_in_one_pass() -> None:
+    from discord_codex_bot.apis import localize
+
+    names = {"凯尔": "凱爾", "凯尔特": "凱爾特", "回响施放": "共鳴施放"}
+    out = localize("推荐 回响施放 给 凯尔 和 凯尔特", names)
+    assert out == "推荐 共鳴施放（回响施放） 给 凱爾（凯尔） 和 凱爾特（凯尔特）"
+    assert localize("nothing here", names) == "nothing here" and localize("x", {}) == "x"
+
+
+async def test_call_api_applies_the_names_map_from_next_to_the_registry(
+    tmp_path: Path, monkeypatch, config
+) -> None:
+    (tmp_path / "names.json").write_text(json.dumps({"回响施放": "共鳴施放", "同": "同"}), "utf-8")
+    spec = {"hx": {"base": "https://hx.example/", "names": "names.json"}}
+    (tmp_path / "apis.json").write_text(json.dumps(spec), "utf-8")
+    registry = load_registry(tmp_path / "apis.json")
+    assert registry["hx"].names == {"回响施放": "共鳴施放"}  # identical pairs dropped
+    page = "<html><body>推荐 回响施放 98.0</body></html>".encode()
+    monkeypatch.setattr(
+        apis.aiohttp, "ClientSession", lambda **kw: Session(Response(page, 200, "text/html"))
+    )
+    assert "共鳴施放（回响施放） 98.0" in await call_api("hx", "hero/4", registry, config)
+    # a missing map is a warning, not a broken API
+    spec["hx"]["names"] = "gone.json"
+    (tmp_path / "apis.json").write_text(json.dumps(spec), "utf-8")
+    assert load_registry(tmp_path / "apis.json")["hx"].names == {}
+
+
 async def test_call_api_hands_a_page_over_as_text_not_markup(monkeypatch, config) -> None:
     # hexdata's hero pages are plain HTML. Given the raw page (styles, JSON-LD, tags) the model
     # skipped it and web-searched another site for the same numbers; as text it reads it.

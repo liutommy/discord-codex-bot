@@ -42,6 +42,10 @@ class Api:
     # Optional MediaWiki bot-password login: {"api": ..., "user": ..., "password": ...}. An
     # anonymous Cargo query is throttled within a couple of calls; a logged-in one is not.
     login: dict[str, str] = field(default_factory=dict)
+    # Optional {foreign name: local name} applied to every reply as "local（foreign）", for a
+    # source that names things in another locale than the members use. Telling the model to
+    # look names up in a table did not work (it answered in the source's names 4 times of 4).
+    names: dict[str, str] = field(default_factory=dict)
 
 
 # One cookie jar per API for the life of the process, so the login survives between calls
@@ -73,9 +77,34 @@ def load_registry(path: Path | None) -> dict[str, Api]:
         if not (login.get("user") and login.get("password")):
             login = {}  # credentials not configured: stay anonymous rather than fail every call
         out[str(name)] = Api(
-            str(name), str(spec["base"]), headers, str(spec.get("doc") or ""), login
+            str(name),
+            str(spec["base"]),
+            headers,
+            str(spec.get("doc") or ""),
+            login,
+            _names(path.parent / str(spec["names"])) if spec.get("names") else {},
         )
     return out
+
+
+def _names(path: Path) -> dict[str, str]:
+    """A {foreign: local} name map next to apis.json; missing or malformed registers nothing
+    (logged), the API still works, just untranslated."""
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError) as error:
+        LOGGER.warning("names map %s unreadable: %s", path, type(error).__name__)
+        return {}
+    return {str(k): str(v) for k, v in data.items() if k and v and str(k) != str(v)}
+
+
+def localize(text: str, names: dict[str, str]) -> str:
+    """Rewrite every foreign name as local（foreign） in one pass. Longest names first inside a
+    single alternation, so 凯尔特 wins over 凯尔 and nothing is rewritten twice."""
+    if not names:
+        return text
+    pattern = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.sub(pattern, lambda m: f"{names[m.group()]}（{m.group()}）", text)
 
 
 def extract_api_calls(answer: str) -> list[tuple[str, str]]:
@@ -211,7 +240,7 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
             # the raw form the model went to a web search for the same numbers instead.
             title, text = html_to_text(body, url)
             body = f"{title}\n\n{text}" if title else text
-        body = body.strip() or "（空回應）"
+        body = localize(body.strip(), api.names) or "（空回應）"
         # Which source answered is otherwise invisible: the answer cites what it likes.
         LOGGER.info("api %s %s -> HTTP %s, %d chars", name, path, status, len(body))
         return _bounded(body, config.apis_max_chars)

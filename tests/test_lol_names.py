@@ -96,6 +96,16 @@ def test_render_is_one_table_row_per_entry_and_marks_a_missing_hexdata_path() ->
     assert text.count("\n| ") == 3  # header + 2 rows, nothing else in table form
 
 
+def test_cn_to_tw_skips_identical_and_single_character_names() -> None:
+    from scripts.build_lol_names import cn_to_tw
+
+    names = cn_to_tw(
+        [("崔斯特", "逆命"), ("易", "易大師"), ("凯尔", "凱爾")],
+        [("回响施放", "共鳴施放"), ("同名", "同名")],
+    )
+    assert names == {"崔斯特": "逆命", "凯尔": "凱爾", "回响施放": "共鳴施放"}
+
+
 def test_shipped_registry_loads_and_documents_hexdata() -> None:
     # The registry is plain JSON baked into the image; a typo there registers nothing and the
     # model silently loses every data API. This is the only test that reads the real file.
@@ -107,3 +117,6 @@ def test_shipped_registry_loads_and_documents_hexdata() -> None:
     assert "data/ai-summary.json" in hexdata.doc and "hero/" in hexdata.doc
     for table in ("英雄譯名對照", "海克斯譯名對照", "裝備譯名對照"):
         assert table in hexdata.doc  # the model is told where each TW/CN table lives
+    # the shipped map is the mechanical fallback for names the model would otherwise mistranslate
+    assert hexdata.names["崔斯特"] == "逆命" and hexdata.names["回响施放"] == "共鳴施放"
+    assert "易" not in hexdata.names and len(hexdata.names) > 300

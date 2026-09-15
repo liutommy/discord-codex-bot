@@ -31,6 +31,7 @@ DDRAGON = "https://ddragon.leagueoflegends.com"
 CDRAGON = "https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global"
 HEXDATA = "https://hexdata.com.cn"
 TOPICS = Path(__file__).resolve().parents[1] / "permanent" / "topics"
+NAMES_JSON = Path(__file__).resolve().parents[1] / "config" / "lol-names.json"
 USER_AGENT = "discord-codex-bot/1.0 (build_lol_names)"
 NOT_ON_HEXDATA = "（hexdata 尚無）"
 RARITY = {"kSilver": "銀", "kGold": "金", "kPrismatic": "棱彩", "kEventChoice": "活動"}
@@ -97,6 +98,18 @@ def item_rows(tw: dict, cn: dict, paths: dict[str, str]) -> list[list[str]]:
         [id_, tw[id_]["name"], cn[id_]["name"], path] for id_, path in paths.items() if id_ in tw
     ]
     return sorted(rows, key=lambda row: int(row[0]))
+
+
+def cn_to_tw(*pairs: list[tuple[str, str]]) -> dict[str, str]:
+    """{mainland name: Taiwan name} across every table, for rewriting hexdata's text before the
+    model sees it. Identical names need no entry; one-character names (易, 彗) are left out
+    because they would match inside unrelated words."""
+    out: dict[str, str] = {}
+    for table in pairs:
+        for cn, tw in table:
+            if cn != tw and len(cn) > 1 and tw:
+                out.setdefault(cn, tw)
+    return out
 
 
 def render(heading: str, intro: str, columns: list[str], rows: list[list[str]]) -> str:
@@ -178,6 +191,16 @@ def main() -> int:
         "utf-8",
     )
 
+    # The same tables the other way round, as a machine map: apis.json points hexdata at it and
+    # call_api rewrites 陸服名 to 台服名（陸服名） in every hexdata reply. The model was told to
+    # look names up in the tables and still answered with mainland names 4 times out of 4.
+    names = cn_to_tw(
+        [(row[3], row[1]) for row in champions],
+        [(row[2], row[1]) for row in augments],
+        [(row[2], row[1]) for row in items],
+    )
+    NAMES_JSON.write_text(json.dumps(names, ensure_ascii=False, indent=0) + "\n", "utf-8")
+
     no_champion = [row[1] for row in champions if not row[5]]
     no_augment = sorted(set(aug_paths) - {row[0] for row in augments}, key=int)
     no_item = sorted(set(item_paths) - {row[0] for row in items}, key=int)
@@ -188,7 +211,8 @@ def main() -> int:
         f" (hexdata ids missing in CDragon: {no_augment or 'none'}),"
         f" items {len(items)}/{len(item_paths)}"
         f" (hexdata ids missing in Data Dragon: {no_item or 'none'});"
-        f" Data Dragon {version}, hexdata Patch {patch} ({day})"
+        f" Data Dragon {version}, hexdata Patch {patch} ({day});"
+        f" {NAMES_JSON.name}: {len(names)} names"
     )
     return 0
 
