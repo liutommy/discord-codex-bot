@@ -8,6 +8,7 @@ strings, never hosts."""
 from __future__ import annotations
 
 import asyncio
+import difflib
 import html
 import json
 import logging
@@ -46,6 +47,9 @@ class Api:
     # source that names things in another locale than the members use. Telling the model to
     # look names up in a table did not work (it answered in the source's names 4 times of 4).
     names: dict[str, str] = field(default_factory=dict)
+    # Optional {alias path: real path}, e.g. {"hero/逆命": "hero/4-twistedfate"}: the model
+    # passes the member's own words and the Bot resolves them before the request goes out.
+    paths: dict[str, str] = field(default_factory=dict)
 
 
 # One cookie jar per API for the life of the process, so the login survives between calls
@@ -76,26 +80,45 @@ def load_registry(path: Path | None) -> dict[str, Api]:
         login = {str(k): _expand(str(v)) for k, v in (spec.get("login") or {}).items()}
         if not (login.get("user") and login.get("password")):
             login = {}  # credentials not configured: stay anonymous rather than fail every call
+        names, paths = _names(path.parent / str(spec["names"])) if spec.get("names") else ({}, {})
         out[str(name)] = Api(
-            str(name),
-            str(spec["base"]),
-            headers,
-            str(spec.get("doc") or ""),
-            login,
-            _names(path.parent / str(spec["names"])) if spec.get("names") else {},
+            str(name), str(spec["base"]), headers, str(spec.get("doc") or ""), login, names, paths
         )
     return out
 
 
-def _names(path: Path) -> dict[str, str]:
-    """A {foreign: local} name map next to apis.json; missing or malformed registers nothing
-    (logged), the API still works, just untranslated."""
+def _names(path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """({foreign: local}, {alias path: real path}) from the JSON next to apis.json; missing or
+    malformed registers nothing (logged) and the API still works, just untranslated."""
     try:
         data = json.loads(path.read_text("utf-8"))
     except (OSError, ValueError) as error:
         LOGGER.warning("names map %s unreadable: %s", path, type(error).__name__)
-        return {}
-    return {str(k): str(v) for k, v in data.items() if k and v and str(k) != str(v)}
+        return {}, {}
+    names = {str(k): str(v) for k, v in (data.get("names") or {}).items() if k and v and k != v}
+    paths = {str(k): str(v) for k, v in (data.get("paths") or {}).items() if k and v}
+    return names, paths
+
+
+def resolve_path(path: str, aliases: dict[str, str]) -> tuple[str, str]:
+    """(real path, note). An exact alias wins silently. Otherwise the name part is compared to
+    every alias of the same kind: a typo or a variant with one close match resolves and says so
+    in the note; several close matches (凱耳 -> 凱爾? 凱莎?) are returned as a question instead
+    of a guess, because next to a short name the nearest string is often another real thing.
+    Nothing close, or no aliases at all: the path goes out unchanged."""
+    key = path.strip("/ ")
+    if not aliases or key in aliases:
+        return aliases.get(key, path), ""
+    kind, _, name = key.partition("/")
+    if not name or "/" in name:
+        return path, ""
+    pool = {k.split("/", 1)[1]: v for k, v in aliases.items() if k.startswith(kind + "/")}
+    close = difflib.get_close_matches(name, list(pool), n=3, cutoff=0.5)
+    if not close:
+        return path, ""
+    if len({pool[c] for c in close}) == 1:
+        return pool[close[0]], f"（{name} 解讀為 {close[0]}）\n"
+    return "", f"（找不到 {key}；相近的有：{'、'.join(close)}。請確認是哪一個再查，不要猜。）"
 
 
 def localize(text: str, names: dict[str, str]) -> str:
@@ -197,6 +220,9 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     if api is None:
         return f"（沒有叫 {name} 的 API；可用：{'、'.join(registry) or '無'}）"
     path = html.unescape(path)  # models tend to write &amp; inside tag attributes
+    path, note = resolve_path(path, api.paths)  # hero/逆命 -> hero/4-twistedfate
+    if not path:
+        return note
     if "://" in path or path.startswith("//") or ".." in path:
         return "（path 只能是相對於該 API 的端點與查詢字串）"
     url = api.base + path.lstrip("/")
@@ -240,7 +266,7 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
             # the raw form the model went to a web search for the same numbers instead.
             title, text = html_to_text(body, url)
             body = f"{title}\n\n{text}" if title else text
-        body = localize(body.strip(), api.names) or "（空回應）"
+        body = note + (localize(body.strip(), api.names) or "（空回應）")
         # Which source answered is otherwise invisible: the answer cites what it likes.
         LOGGER.info("api %s %s -> HTTP %s, %d chars", name, path, status, len(body))
         return _bounded(body, config.apis_max_chars)

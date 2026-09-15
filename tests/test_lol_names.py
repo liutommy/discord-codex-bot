@@ -106,6 +106,20 @@ def test_cn_to_tw_skips_identical_and_single_character_names() -> None:
     assert names == {"崔斯特": "逆命", "凯尔": "凱爾", "回响施放": "共鳴施放"}
 
 
+def test_path_aliases_resolve_every_spelling_to_the_real_page() -> None:
+    from scripts.build_lol_names import path_aliases
+
+    champions = champion_rows(TW, CN, ALIASES)
+    augments = [["1030", "靈光一閃", "尤里卡", "棱彩", "augment/1030-eureka"]]
+    items = [["3031", "無盡之刃", "无尽之刃", "item/3031"]]
+    paths = path_aliases(champions, augments, items)
+    for spelling in ("逆命", "崔斯特", "卡牌大师", "卡牌大師", "4", "TF"):
+        assert paths[f"hero/{spelling}"] == "hero/4-twistedfate"
+    assert paths["augment/靈光一閃"] == paths["augment/尤里卡"] == "augment/1030-eureka"
+    assert paths["item/無盡之刃"] == paths["item/无尽之刃"] == "item/3031"
+    assert "hero/洛克" not in paths  # no hexdata page yet: nothing to resolve to
+
+
 def test_shipped_registry_loads_and_documents_hexdata() -> None:
     # The registry is plain JSON baked into the image; a typo there registers nothing and the
     # model silently loses every data API. This is the only test that reads the real file.
@@ -120,3 +134,6 @@ def test_shipped_registry_loads_and_documents_hexdata() -> None:
     # the shipped map is the mechanical fallback for names the model would otherwise mistranslate
     assert hexdata.names["崔斯特"] == "逆命" and hexdata.names["回响施放"] == "共鳴施放"
     assert "易" not in hexdata.names and len(hexdata.names) > 300
+    assert hexdata.paths["hero/逆命"] == hexdata.paths["hero/TF"] == "hero/4-twistedfate"
+    assert hexdata.paths["augment/靈光一閃"] == "augment/1030-eureka"
+    assert hexdata.paths["item/無盡之刃"] == "item/3031"

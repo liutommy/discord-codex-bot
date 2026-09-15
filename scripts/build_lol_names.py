@@ -112,6 +112,29 @@ def cn_to_tw(*pairs: list[tuple[str, str]]) -> dict[str, str]:
     return out
 
 
+def path_aliases(
+    champions: list[list[str]], augments: list[list[str]], items: list[list[str]]
+) -> dict[str, str]:
+    """{"hero/逆命": "hero/4-twistedfate", ...}: every name a member or the model might write
+    for a hexdata page, resolved to the real path before the request goes out. Taiwan name,
+    mainland name, epithet, nicknames and the bare id all work; first writer wins on a clash."""
+    out: dict[str, str] = {}
+
+    def add(kind: str, names: list[str], target: str) -> None:
+        for name in names:
+            if name and target:
+                out.setdefault(f"{kind}/{name}", target)
+
+    for key, tw, tw_title, cn, cn_title, slug, nicks in champions:
+        if slug:  # a champion hexdata does not list yet must not resolve to "hero/"
+            add("hero", [tw, cn, cn_title, tw_title, key, *nicks.split("、")], f"hero/{slug}")
+    for id_, tw, cn, _rarity, path in augments:
+        add("augment", [tw, cn, id_], path)
+    for _id, tw, cn, path in items:
+        add("item", [tw, cn], path)
+    return out
+
+
 def render(heading: str, intro: str, columns: list[str], rows: list[list[str]]) -> str:
     lines = [
         f"# {heading}",
@@ -196,10 +219,17 @@ def main() -> int:
     # look names up in the tables and still answered with mainland names 4 times out of 4.
     names = cn_to_tw(
         [(row[3], row[1]) for row in champions],
+        [(row[4], row[2]) for row in champions],  # epithets too: 卡牌大师 -> 卡牌大師
         [(row[2], row[1]) for row in augments],
         [(row[2], row[1]) for row in items],
     )
-    NAMES_JSON.write_text(json.dumps(names, ensure_ascii=False, indent=0) + "\n", "utf-8")
+    # ...and the same tables as a path resolver, so the model can ask for hero/逆命 in whatever
+    # name the member used instead of translating and remembering Riot ids itself.
+    paths = path_aliases(champions, augments, items)
+    NAMES_JSON.write_text(
+        json.dumps({"names": names, "paths": paths}, ensure_ascii=False, indent=0) + "\n",
+        "utf-8",
+    )
 
     no_champion = [row[1] for row in champions if not row[5]]
     no_augment = sorted(set(aug_paths) - {row[0] for row in augments}, key=int)
@@ -212,7 +242,7 @@ def main() -> int:
         f" items {len(items)}/{len(item_paths)}"
         f" (hexdata ids missing in Data Dragon: {no_item or 'none'});"
         f" Data Dragon {version}, hexdata Patch {patch} ({day});"
-        f" {NAMES_JSON.name}: {len(names)} names"
+        f" {NAMES_JSON.name}: {len(names)} names, {len(paths)} path aliases"
     )
     return 0
 
