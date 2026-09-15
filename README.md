@@ -511,3 +511,14 @@ docker compose up -d
 docker compose exec bot codex --version
 docker compose exec bot codex login status
 ```
+
+### Daily name tables
+
+The Taiwan/mainland name tables the hexdata API relies on (`config/lol-names.json` for the
+Bot, `permanent/topics/*譯名對照.md` for the model) are generated from Data Dragon,
+CommunityDragon and hexdata by `scripts/build_lol_names.py`. `scripts/daily_rebuild.sh` runs it
+from the operator's crontab at 05:00 (after the 02:00 memory consolidation) and rebuilds the
+image **only when a table changed** — a new champion, augment or item arrives with a patch,
+not every day. On a change it commits `config/lol-names.json` locally (never pushes). Log:
+`logs/daily-rebuild.log`. To run it by hand: `scripts/daily_rebuild.sh` (`DRY_RUN=1` to see
+what it would do without rebuilding).
