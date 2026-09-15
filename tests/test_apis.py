@@ -176,3 +176,21 @@ async def test_call_api_logs_in_once_and_reuses_the_session(monkeypatch, config)
         assert logins == ["wiki"]  # the cookie jar outlives the call; no login per query
     finally:
         apis._LOGGED_IN.discard("wiki")
+
+
+async def test_call_api_hands_a_page_over_as_text_not_markup(monkeypatch, config) -> None:
+    # hexdata's hero pages are plain HTML. Given the raw page (styles, JSON-LD, tags) the model
+    # skipped it and web-searched another site for the same numbers; as text it reads it.
+    registry = {"hx": Api("hx", "https://hx.example/", {}, "")}
+    page = (
+        b"<html><head><title>Yasuo - Hexdata</title><style>body{margin:0}</style></head>"
+        b"<body><h1>Patch 16.18</h1><table><tr><td>\xe8\x83\x9c\xe7\x8e\x87 57.5%</td></tr></table>"
+        b'<a href="/augment/1030-eureka">Eureka</a></body></html>'
+    )
+    monkeypatch.setattr(
+        apis.aiohttp, "ClientSession", lambda **kw: Session(Response(page, 200, "text/html"))
+    )
+    body = await call_api("hx", "hero/157-yasuo", registry, config)
+    assert body.startswith("Yasuo - Hexdata\n\n") and "胜率 57.5%" in body
+    assert "<style>" not in body and "margin:0" not in body and "<td>" not in body
+    assert "https://hx.example/augment/1030-eureka" in body  # links survive, absolute

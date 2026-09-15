@@ -19,7 +19,7 @@ from pathlib import Path
 import aiohttp
 
 from .config import Config
-from .links import _read_bounded
+from .links import _read_bounded, html_to_text
 
 LOGGER = logging.getLogger(__name__)
 API_TAG = re.compile(
@@ -205,7 +205,16 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
                 body = json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
             except ValueError:
                 pass
-        return _bounded(body.strip() or "（空回應）", config.apis_max_chars)
+        elif "html" in content_type:
+            # A page rather than an API: hand over the readable text (links kept inline), not
+            # markup and stylesheets. hexdata's hero pages are 10 KB raw and 3 KB as text; given
+            # the raw form the model went to a web search for the same numbers instead.
+            title, text = html_to_text(body, url)
+            body = f"{title}\n\n{text}" if title else text
+        body = body.strip() or "（空回應）"
+        # Which source answered is otherwise invisible: the answer cites what it likes.
+        LOGGER.info("api %s %s -> HTTP %s, %d chars", name, path, status, len(body))
+        return _bounded(body, config.apis_max_chars)
     return f"（{name} 被限流）"  # unreachable: both attempts return above
 
 
