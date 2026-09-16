@@ -73,7 +73,8 @@ PROXIES: tuple[Rule, ...] = (
     ),
     Rule(
         frozenset({"threads.com", "threads.net"}),
-        re.compile(r"^/@[^/]+/post/[A-Za-z0-9_-]+"),
+        # Post links and the app's /share/<code> links (which vxthreads resolves to the post).
+        re.compile(r"^/@[^/]+/post/[A-Za-z0-9_-]+|^/share/[A-Za-z0-9_-]+"),
         ("vxthreads.com",),
     ),
     Rule(frozenset({"pixiv.net"}), re.compile(r"^/(?:en/)?artworks/\d+"), ("phixiv.net",)),

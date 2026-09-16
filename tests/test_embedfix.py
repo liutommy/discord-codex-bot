@@ -38,6 +38,10 @@ from discord_codex_bot.embedfix import Fix, candidates, has_media, pick, rating
         ),
         ("https://www.threads.com/@mosseri", []),
         (
+            "https://www.threads.com/share/BAXXXUHcT6/",
+            ["https://vxthreads.com/share/BAXXXUHcT6/"],
+        ),
+        (
             "https://www.tumblr.com/staff/811651663989538816/title",
             ["https://tpmblr.com/staff/811651663989538816/title"],
         ),
