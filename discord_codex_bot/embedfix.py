@@ -35,7 +35,9 @@ LOGGER = logging.getLogger(__name__)
 CRAWLER_UA = "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
 CRAWLER_HEADERS = {"User-Agent": CRAWLER_UA}
 FETCH_TIMEOUT = 6
-MAX_BYTES = 256_000
+# Proxy pages are a few KB; Pixiv's illust JSON runs to several hundred KB and a truncated
+# body is unparseable, which read as "rating unknown" and blocked every Pixiv swap (2026-09-16).
+MAX_BYTES = 2_000_000
 # Pixiv's public illust endpoint answers logged-out with `xRestrict` (0 all ages, 1 R-18,
 # 2 R-18G) -- verified 2026-09-16 on eight works. Discord blurs a spoilered link's embed, so
 # an age-restricted work is delivered as ||link||; when the rating cannot be read the link is
