@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 import aiohttp
 from aiohttp.resolver import ThreadedResolver
 
-from . import gemini
+from . import clearurls, gemini
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
@@ -186,20 +186,26 @@ async def preview_blocks(
     return "\n".join(lines), images
 
 
-# Tracking params stripped from links: utm_* plus the per-network referrer ids.
-# Compared case-insensitively after percent-decoding. Anything else stays — the goal is the
-# same page without the campaign trail, not a shorter URL.
+# Tracking params stripped from links: utm_* plus the per-network referrer ids. This is the
+# floor -- always applied, even with no ClearURLs rules file. clearurls.py is the reach: 200+
+# site-scoped providers maintained upstream. Compared case-insensitively after
+# percent-decoding. Anything else stays — the goal is the same page without the campaign
+# trail, not a shorter URL.
 TRACKING_PARAMS = frozenset(
     {
         "fbclid",
         "gclid",
+        "gclsrc",
         "gbraid",
         "wbraid",
         "dclid",
         "msclkid",
         "yclid",
         "twclid",
+        "ttclid",
         "igshid",
+        "igsh",
+        "__tn__",
         "li_fat_id",
         "ref_src",
         "mkt_tok",
@@ -215,37 +221,61 @@ TRACKING_PARAMS = frozenset(
 )
 
 
+# Params that are tracking only on one site's hosts: the same name is a real parameter elsewhere.
+HOST_SCOPED_PARAMS = {
+    "youtube": (YOUTUBE_HOSTS, {"si", "feature"}),
+    "threads": ({"threads.com", "threads.net"}, {"xmt"}),
+}
+
+
 def _is_tracking_param(key: str) -> bool:
     key = unquote(key).lower()
-    return key.startswith("utm_") or key in TRACKING_PARAMS
+    return key.startswith(("utm_", "__cft__")) or key in TRACKING_PARAMS
 
 
 def strip_tracking(url: str) -> str:
-    """The link without its tracking query params. Segments are kept verbatim, so the result
-    is byte-identical to the input unless a tracking param was present — idempotent by
-    construction. Ambiguous application parameters and recognized signatures are preserved."""
+    """The link without its tracking params. Segments are kept verbatim, so the result is
+    byte-identical to the input unless a tracking param was present — idempotent by
+    construction. Ambiguous application parameters and recognized signatures are preserved.
+
+    Two layers, in order: the ClearURLs rules (site-scoped, maintained upstream, may also
+    unwrap a known redirector) and then this module's own blocklist, which is the floor that
+    holds even with no rules file."""
     try:
         parts = urlsplit(url)
     except ValueError:
         return url
     if parts.scheme not in ("http", "https") or not parts.netloc:
         return url
+    if _signed(parts.query):
+        return url
+    url = clearurls.clean(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
     if not parts.query:
         return url
+    host = (parts.hostname or "").removeprefix("www.")
+    scoped = {
+        name for hosts, names in HOST_SCOPED_PARAMS.values() if host in hosts for name in names
+    }
     segments = parts.query.split("&")
-    keys = {unquote(segment.split("=", 1)[0]).lower() for segment in segments}
-    if keys & {"signature", "sig", "x-amz-signature", "x-goog-signature"}:
-        return url
-    youtube = (parts.hostname or "").removeprefix("www.") in YOUTUBE_HOSTS
     kept = [
         segment
         for segment in segments
         if not _is_tracking_param(segment.split("=", 1)[0])
-        and not (youtube and unquote(segment.split("=", 1)[0]).lower() in {"si", "feature"})
+        and unquote(segment.split("=", 1)[0]).lower() not in scoped
     ]
     if len(kept) == len(segments):
         return url
     return urlunsplit(parts._replace(query="&".join(kept)))
+
+
+def _signed(query: str) -> bool:
+    """A signed URL is one page only as written; dropping any param would break it."""
+    keys = {unquote(segment.split("=", 1)[0]).lower() for segment in query.split("&")}
+    return bool(keys & {"signature", "sig", "x-amz-signature", "x-goog-signature"})
 
 
 def find_urls(text: str, limit: int, clean: bool = True) -> list[str]:

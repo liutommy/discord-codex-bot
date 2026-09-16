@@ -122,6 +122,20 @@ def test_find_urls_dedupes_strips_punctuation_and_caps() -> None:
 def test_strip_tracking_removes_utm_and_known_params_only() -> None:
     dirty = "https://a.example/p?utm_source=dlvr.it&utm_medium=social&id=42&v=1"
     assert strip_tracking(dirty) == "https://a.example/p?id=42&v=1"
+    # The floor: click ids the ClearURLs set lacks (ttclid, xmt, __cft__) still go.
+    assert (
+        strip_tracking("https://www.tiktok.com/@u/video/1?ttclid=abc&is_from_webapp=1")
+        == "https://www.tiktok.com/@u/video/1?is_from_webapp=1"
+    )
+    assert (
+        strip_tracking("https://www.threads.com/@u/post/A?xmt=tok")
+        == "https://www.threads.com/@u/post/A"
+    )
+    assert strip_tracking("https://a.example/?xmt=keep") == "https://a.example/?xmt=keep"
+    assert (
+        strip_tracking("https://www.facebook.com/u/posts/1?__cft__[0]=abc&__tn__=R&comment_id=2")
+        == "https://www.facebook.com/u/posts/1?comment_id=2"
+    )
     assert (
         strip_tracking("https://youtu.be/id?fbclid=xyz&si=abc&feature=share")
         == "https://youtu.be/id"

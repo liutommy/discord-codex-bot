@@ -487,8 +487,14 @@ subscription quota. The serial queue limits concurrency but does not create addi
 changes it immediately. It defaults to on. The server owner, Administrator, Manage Guild,
 or operators listed in `LINKCLEAN_ADMIN_IDS` may use this command.
 
-Known campaign parameters are removed; generic application parameters such as `ref` and
-`source` remain. YouTube `si`/`feature` are removed only on YouTube hosts. Recognized signed
+Two layers remove tracking parameters. The [ClearURLs](https://gitlab.com/ClearURLs/rules)
+rule set (LGPL-3.0, 200+ site-scoped providers, fetched daily by `scripts/fetch_clearurls.py`
+into `config/clearurls.json`) is applied first, including its known redirector unwrapping
+(for example `google.com/url?q=`); its affiliate-id (`referralMarketing`) and request-blocking
+(`completeProvider`) rules are not used. The Bot's own blocklist (`utm_*`, click ids such as
+`fbclid`, `gclid`, `ttclid`, `igsh`) is then applied as the floor, so cleaning still works
+with no rules file. Generic application parameters such as `ref` and `source` remain.
+YouTube `si`/`feature` and Threads `xmt` are removed only on those hosts. Recognized signed
 URLs are left intact. This cannot identify every site's custom signing or routing scheme.
 
 With Manage Messages in the channel, link-only messages are reposted with author attribution

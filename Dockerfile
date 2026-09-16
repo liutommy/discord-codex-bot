@@ -30,6 +30,7 @@ COPY --chown=1000:1000 config/harvest-schema.json /opt/discord-codex/harvest-sch
 COPY --chown=1000:1000 config/tracking-schema.json /opt/discord-codex/tracking-schema.json
 COPY --chown=1000:1000 config/apis.json /opt/discord-codex/apis.json
 COPY --chown=1000:1000 config/lol-names.json /opt/discord-codex/lol-names.json
+COPY --chown=1000:1000 config/clearurls.json /opt/discord-codex/clearurls.json
 COPY --chown=1000:1000 permanent /opt/discord-codex/permanent
 COPY --chown=1000:1000 persona /opt/discord-codex/persona
 COPY --chown=1000:1000 config/agy-settings.json /opt/discord-codex/agy-settings.json
