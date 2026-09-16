@@ -22,6 +22,7 @@ from discord_codex_bot.links import (
     html_to_text,
     link_blocks,
     render_link,
+    strip_tracking,
 )
 
 
@@ -116,6 +117,36 @@ def test_find_urls_dedupes_strips_punctuation_and_caps() -> None:
     assert find_urls(text, 3) == ["https://a.example/x", "https://b.example/y", "http://c.example/"]
     assert find_urls(text, 1) == ["https://a.example/x"]
     assert find_urls("no links", 3) == []
+
+
+def test_strip_tracking_removes_utm_and_known_params_only() -> None:
+    dirty = "https://a.example/p?utm_source=dlvr.it&utm_medium=social&id=42&v=1"
+    assert strip_tracking(dirty) == "https://a.example/p?id=42&v=1"
+    assert (
+        strip_tracking("https://b.example/?fbclid=xyz&si=abc&feature=share") == "https://b.example/"
+    )
+    # Case-insensitive, and percent-encoded keys count too (%75 == "u").
+    assert (
+        strip_tracking("https://c.example/?UTM_Campaign=x&%75tm_term=y&id=9")
+        == "https://c.example/?id=9"
+    )
+    # Non-tracking params, fragments and blank values keep their exact form.
+    assert (
+        strip_tracking("https://d.example/?flag&ref2=x#sec") == "https://d.example/?flag&ref2=x#sec"
+    )
+    assert strip_tracking("https://e.example/?keep=") == "https://e.example/?keep="
+    assert strip_tracking("https://f.example/plain") == "https://f.example/plain"
+    # Idempotent: a clean URL strips to itself, byte for byte.
+    assert strip_tracking(strip_tracking(dirty)) == strip_tracking(dirty)
+
+
+def test_find_urls_cleans_by_default_and_dedupes_after_stripping() -> None:
+    text = "https://a.example/x?utm_source=mail 與 https://a.example/x"
+    assert find_urls(text, 3) == ["https://a.example/x"]
+    assert find_urls(text, 3, clean=False) == [
+        "https://a.example/x?utm_source=mail",
+        "https://a.example/x",
+    ]
 
 
 def test_extract_fetch_tags_reads_render_attribute_and_merges_duplicates() -> None:

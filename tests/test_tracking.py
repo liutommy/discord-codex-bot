@@ -89,6 +89,90 @@ def test_store_schema_idempotency_crud_and_restart(tmp_path: Path) -> None:
     assert restarted.delete_watch(watch.id, user_id=3) is True
 
 
+def _item_links(path: Path) -> list[tuple[str, str]]:
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute("SELECT external_id, url FROM items ORDER BY id").fetchall()
+    connection.close()
+    return [(row["external_id"], row["url"]) for row in rows]
+
+
+def test_ingest_strips_tracking_params_and_dedupes_on_the_canonical_link(
+    tmp_path: Path,
+) -> None:
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("web", "https://example.test/", "example.test")
+    dirty = ContentItem(
+        None,
+        source.id,
+        "https://example.test/a?utm_source=mail&utm_campaign=x",
+        "https://example.test/a?utm_source=mail&utm_campaign=x",
+        "t",
+        "d",
+        "2026-09-14T00:00:00+00:00",
+        "video",
+    )
+    first = store.ingest(source, FetchResult((dirty,), "a"))
+    assert [item.external_id for item in first] == ["https://example.test/a"]
+    assert [item.url for item in first] == ["https://example.test/a"]
+    # The same post reached without its campaign params is the same item, not a new one.
+    again = store.ingest(source, FetchResult((content(source.id, "https://example.test/a"),), "a"))
+    assert again == []
+
+
+def test_startup_migration_cleans_items_ingested_before_stripping(tmp_path: Path) -> None:
+    path = tmp_path / "tracking.sqlite3"
+    store = TrackerStore(path)
+    source = store.add_source("web", "https://example.test/", "example.test")
+    # A row as a pre-DCB-46 Bot would have written it: campaign params still attached.
+    with store._connect() as connection:
+        connection.execute(
+            """INSERT INTO items(source_id, external_id, url, title, description,
+                                 published_at, kind, live_status, baseline, raw_json,
+                                 observed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', 0)""",
+            (
+                source.id,
+                "https://example.test/a?utm_source=mail",
+                "https://example.test/a?utm_source=mail&gclid=x",
+                "old",
+                "",
+                "",
+                "",
+                "",
+            ),
+        )
+    TrackerStore(path)
+    assert _item_links(path) == [("https://example.test/a", "https://example.test/a")]
+    # Idempotent: a second startup changes nothing.
+    TrackerStore(path)
+    assert _item_links(path) == [("https://example.test/a", "https://example.test/a")]
+
+
+def test_startup_migration_skips_a_colliding_row_instead_of_crashing(tmp_path: Path) -> None:
+    path = tmp_path / "tracking.sqlite3"
+    store = TrackerStore(path)
+    source = store.add_source("web", "https://example.test/", "example.test")
+    dirty = (
+        "https://example.test/a?utm_source=mail",
+        "https://example.test/a?utm_campaign=x",
+    )
+    with store._connect() as connection:
+        for external_id in dirty:
+            connection.execute(
+                """INSERT INTO items(source_id, external_id, url, title, description,
+                                     published_at, kind, live_status, baseline, raw_json,
+                                     observed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', 0)""",
+                (source.id, external_id, external_id, "old", "", "", "", ""),
+            )
+    TrackerStore(path)  # both clean to the same (source, external_id): one must be left as-is
+    assert _item_links(path) == [
+        ("https://example.test/a", "https://example.test/a"),
+        ("https://example.test/a?utm_campaign=x", "https://example.test/a?utm_campaign=x"),
+    ]
+
+
 def test_new_watch_starts_after_items_already_seen_by_shared_source(tmp_path: Path) -> None:
     store = TrackerStore(tmp_path / "tracking.sqlite3")
     source = store.add_source("youtube", "UC1", "@one")

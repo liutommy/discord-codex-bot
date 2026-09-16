@@ -9,7 +9,7 @@ import socket
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import parse_qs, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
 import aiohttp
 from aiohttp.resolver import ThreadedResolver
@@ -186,10 +186,72 @@ async def preview_blocks(
     return "\n".join(lines), images
 
 
-def find_urls(text: str, limit: int) -> list[str]:
+# Tracking params stripped from links (DCB-46): utm_* plus the per-network referrer ids.
+# Compared case-insensitively after percent-decoding. Anything else stays — the goal is the
+# same page without the campaign trail, not a shorter URL.
+TRACKING_PARAMS = frozenset(
+    {
+        "fbclid",
+        "gclid",
+        "gbraid",
+        "wbraid",
+        "dclid",
+        "msclkid",
+        "yclid",
+        "twclid",
+        "igshid",
+        "li_fat_id",
+        "si",
+        "feature",
+        "share_id",
+        "ref",
+        "ref_src",
+        "referrer",
+        "src",
+        "source",
+        "mkt_tok",
+        "_hsenc",
+        "_hsmi",
+        "mc_cid",
+        "mc_eid",
+        "spm",
+        "scm",
+        "wickedid",
+        "cmpid",
+        "network_id",
+        "adgroup_id",
+    }
+)
+
+
+def _is_tracking_param(key: str) -> bool:
+    key = unquote(key).lower()
+    return key.startswith("utm_") or key in TRACKING_PARAMS
+
+
+def strip_tracking(url: str) -> str:
+    """The link without its tracking query params. Segments are kept verbatim, so the result
+    is byte-identical to the input unless a tracking param was present — idempotent by
+    construction, and never a different page."""
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+    segments = parts.query.split("&")
+    kept = [segment for segment in segments if not _is_tracking_param(segment.split("=", 1)[0])]
+    if len(kept) == len(segments):
+        return url
+    return urlunsplit(parts._replace(query="&".join(kept)))
+
+
+def find_urls(text: str, limit: int, clean: bool = True) -> list[str]:
+    """The URLs in a message, in order. With clean (the default) tracking params are stripped so
+    the Bot fetches, previews and stores the canonical link; clean=False returns them as
+    written, for callers that must compare against the member's own text."""
     seen: list[str] = []
     for match in URL_RE.findall(text):
         url = match.rstrip(".,;:!?。，、」』）")
+        if clean:
+            url = strip_tracking(url)
         if url not in seen:
             seen.append(url)
         if len(seen) >= limit:

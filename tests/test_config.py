@@ -99,3 +99,16 @@ def test_command_prefix_defaults_and_validates() -> None:
     assert load_config({**base, "COMMAND_PREFIX": "inmu-king"}).command_prefix == "inmu-king"
     with pytest.raises(ValueError, match="COMMAND_PREFIX"):
         load_config({**base, "COMMAND_PREFIX": "Inmu King"})
+
+
+def test_linkclean_admin_ids_default_empty_and_validate() -> None:
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    assert load_config(base).linkclean_admin_ids == frozenset()
+    ids = load_config({**base, "LINKCLEAN_ADMIN_IDS": "152035364461084672"}).linkclean_admin_ids
+    assert ids == frozenset({152035364461084672})
+    with pytest.raises(ValueError, match="LINKCLEAN_ADMIN_IDS"):
+        load_config({**base, "LINKCLEAN_ADMIN_IDS": "not-an-id"})

@@ -111,6 +111,11 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             "/{p}-track cancel:1",
         ],
     ),
+    "-linkclean": (
+        "開關「連結洗參數」：預設開啟。on 開啟、off 關閉、status 查詢這個伺服器的設定。"
+        "只有伺服器主人、管理員或被特別列出的人能用。",
+        ["/{p}-linkclean status", "/{p}-linkclean off", "/{p}-linkclean on"],
+    ),
     "-export": (
         "把你在這個伺服器的個人記憶（索引、archive、每一則內容）打包成 zip 私下給你，"
         "當作自己的備份或搬家用。伺服器記憶不在裡面。",
@@ -129,6 +134,9 @@ FEATURES: list[str] = [
     "附的檔案（PDF／文字／程式碼）會讀內容。",
     "**回覆某則訊息**再 @Bot：接續那段對話，或讓 Bot 看那則訊息的文字與圖。",
     "**貼連結**會自動讀網頁（含 X／fixvx 貼文的全文與圖片；網站擋 Bot 時退回 Discord 預覽）。",
+    "**連結洗參數**：貼出的連結會自動去掉 utm 等追蹤參數。整則訊息只有連結時，Bot 會把原訊息換成"
+    "乾淨版並 @你；有其他文字的訊息則在下面補上乾淨連結。伺服器主人或管理員可用 "
+    "`/{p}-linkclean on／off／status` 開啟、關閉或查詢。",
     "**貼影片連結**會看影片再回答：YouTube 直接看（長片也行），X、TikTok、Instagram、Bilibili、"
     "Reddit、Streamable 等會抓下來看；長片會先回「🎬 處理中」再改成正式答案。",
     "**模型來源**：Codex（預設）、Antigravity（Gemini／Claude）、"
@@ -155,7 +163,9 @@ def render_guide(prefix: str, registered: Iterable[str]) -> str:
         lines = [f"**/{name}**", summary.replace("{p}", p)]
         lines += [f"　`{example.replace('{p}', p)}`" for example in examples]
         blocks.append("\n".join(lines))
-    blocks.append("**不用指令也能做的事**\n" + "\n".join(f"・{f}" for f in FEATURES))
+    blocks.append(
+        "**不用指令也能做的事**\n" + "\n".join(f"・{f.replace('{p}', p)}" for f in FEATURES)
+    )
     return "\n\n".join(blocks)
 
 
@@ -166,5 +176,7 @@ def render_sheet(prefix: str, commands: Iterable[tuple[str, str, list[str]]]) ->
     for name, description, params in commands:
         suffix = f"（參數：{'、'.join(params)}）" if params else ""
         lines.append(f"/{name} — {description}{suffix}")
-    lines.append("其他用法：" + " ".join(f.replace("**", "") for f in FEATURES))
+    lines.append(
+        "其他用法：" + " ".join(f.replace("{p}", prefix).replace("**", "") for f in FEATURES)
+    )
     return "\n".join(lines)

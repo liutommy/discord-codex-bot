@@ -101,4 +101,5 @@ def config() -> Config:
         youtube_api_key="test-youtube",
         twitch_client_id="test-twitch-id",
         twitch_client_secret="test-twitch-secret",
+        linkclean_admin_ids=frozenset(),
     )

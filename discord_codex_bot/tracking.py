@@ -19,6 +19,8 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import aiohttp
 
+from .links import strip_tracking
+
 LOGGER = logging.getLogger(__name__)
 MAX_RESPONSE_BYTES = 2_000_000
 DEFAULT_TIMEOUT_SECONDS = 20
@@ -316,6 +318,28 @@ class TrackerStore:
                 for column, definition in columns:
                     if column not in existing:
                         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            # DCB-46: rows ingested before stripping kept their tracking params. This pass is
+            # idempotent (a clean URL strips to itself), so it costs one scan per startup. A row
+            # whose cleaned id would collide with a sibling's is left as-is: the UNIQUE
+            # constraint is load-bearing (it is what stops old content looking new again), and
+            # startup must never die on a historical oddity.
+            for row in connection.execute(
+                "SELECT id, external_id, url FROM items ORDER BY id"
+            ).fetchall():
+                external_id = strip_tracking(row["external_id"])
+                url = strip_tracking(row["url"])
+                if external_id == row["external_id"] and url == row["url"]:
+                    continue
+                try:
+                    connection.execute(
+                        "UPDATE items SET external_id=?, url=? WHERE id=?",
+                        (external_id, url, row["id"]),
+                    )
+                except sqlite3.IntegrityError:
+                    LOGGER.warning(
+                        "tracking item %s left uncleaned: cleaned id collides with a sibling",
+                        row["id"],
+                    )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
@@ -528,15 +552,18 @@ class TrackerStore:
         inserted_ids: list[int] = []
         with self._connect() as connection:
             for item in result.items:
+                # Stripped here (not just in the fetchers) so the UNIQUE(source_id, external_id)
+                # dedupe keys on the canonical link: the same post reached with and without its
+                # campaign params is one item, not two.
                 cursor = connection.execute(
                     """INSERT OR IGNORE INTO items(
-                         source_id, external_id, url, title, description, published_at, kind,
-                         live_status, baseline, raw_json, observed_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                          source_id, external_id, url, title, description, published_at, kind,
+                          live_status, baseline, raw_json, observed_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         source.id,
-                        item.external_id,
-                        item.url,
+                        strip_tracking(item.external_id),
+                        strip_tracking(item.url),
                         item.title,
                         item.description,
                         item.published_at,

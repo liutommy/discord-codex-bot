@@ -2,8 +2,11 @@ import asyncio
 import logging
 import logging.handlers
 import time
+import types
 from dataclasses import dataclass
 from pathlib import Path
+
+import discord
 
 from discord_codex_bot.bot import (
     DiscordCodexClient,
@@ -22,10 +25,12 @@ class FakeAttachment:
     filename: str = "blob.bin"
 
 
-def test_registers_only_expected_slash_commands(config: Config) -> None:
+def test_registers_only_expected_slash_commands(config: Config, tmp_path) -> None:
     from dataclasses import replace
 
-    client = DiscordCodexClient(replace(config, command_prefix="inmu-king"))
+    client = DiscordCodexClient(
+        replace(config, command_prefix="inmu-king", codex_home=tmp_path / "codex")
+    )
     assert {command.name for command in client.tree.get_commands()} == {
         "inmu-king",
         "inmu-king-status",
@@ -41,9 +46,113 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
         "inmu-king-style",
         "inmu-king-model",
         "inmu-king-track",
+        "inmu-king-linkclean",
     }
     assert client.intents.guilds
     assert client.intents.message_content
+
+
+class _FakeChannel:
+    def __init__(self, manage_messages: bool) -> None:
+        self.id = 222222222222222222
+        self.parent_id = None
+        self._manage = manage_messages
+        self.sent: list[str] = []
+
+    def permissions_for(self, user: object) -> types.SimpleNamespace:
+        return types.SimpleNamespace(manage_messages=self._manage)
+
+    async def send(self, text: str, **kwargs: object) -> None:
+        self.sent.append(text)
+
+
+def _fake_message(
+    content: str, channel: _FakeChannel, guild_id: int | None = None
+) -> types.SimpleNamespace:
+    message = types.SimpleNamespace(
+        content=content,
+        channel=channel,
+        author=types.SimpleNamespace(id=USER),
+        deleted=0,
+    )
+
+    async def delete() -> None:
+        message.deleted += 1
+
+    message.delete = delete
+    message.guild = types.SimpleNamespace(id=guild_id if guild_id is not None else GUILD)
+    return message
+
+
+async def test_linkclean_replaces_links_only_messages_when_it_can_delete(client) -> None:
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("🔥 https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [f"<@{USER}>\nhttps://a.example/x"]
+
+
+async def test_linkclean_degrades_to_append_when_it_cannot_delete(client) -> None:
+    channel = _FakeChannel(manage_messages=False)
+    message = _fake_message("🔥 https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(message)
+    assert message.deleted == 0
+    assert channel.sent == ["https://a.example/x"]
+
+
+async def test_linkclean_appends_only_the_changed_links_of_a_text_message(client) -> None:
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message(
+        "看這個 https://a.example/x?utm_source=mail 還有 https://b.example/y", channel
+    )
+    await client._linkclean(message)
+    assert message.deleted == 0
+    assert channel.sent == ["https://a.example/x"]
+
+
+async def test_linkclean_stays_quiet_when_clean_disabled_or_not_our_guild(client) -> None:
+    clean = _fake_message("https://a.example/x?keep=1", _FakeChannel(True))
+    await client._linkclean(clean)
+    assert clean.channel.sent == []
+    client.linkclean.set(GUILD, False)
+    off = _fake_message("https://a.example/x?utm_source=mail", _FakeChannel(True))
+    await client._linkclean(off)
+    assert off.channel.sent == []
+    client.linkclean.set(GUILD, True)
+    foreign = _fake_message("https://a.example/x?utm_source=mail", _FakeChannel(True), guild_id=999)
+    await client._linkclean(foreign)
+    assert foreign.channel.sent == []
+
+
+class _Member(discord.Member):
+    def __init__(self, administrator: bool, manage_guild: bool, user_id: int = 555) -> None:
+        self._user = types.SimpleNamespace(id=user_id)  # Member.id is attrgetter("_user.id")
+        self._perms = types.SimpleNamespace(administrator=administrator, manage_guild=manage_guild)
+
+    @property
+    def guild_permissions(self) -> types.SimpleNamespace:
+        return self._perms
+
+
+def _interaction(user_id: int, owner_id: int, user: object | None = None) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        user=user if user is not None else types.SimpleNamespace(id=user_id),
+        guild=types.SimpleNamespace(owner_id=owner_id),
+    )
+
+
+def test_linkclean_gate_allows_owner_guild_admins_and_listed_ids(client) -> None:
+    plain = types.SimpleNamespace(id=555)
+    assert client._can_linkclean_admin(_interaction(555, owner_id=555)) is True
+    assert client._can_linkclean_admin(_interaction(555, owner_id=777, user=plain)) is False
+    client.config = replace(client.config, linkclean_admin_ids=frozenset({555}))
+    assert client._can_linkclean_admin(_interaction(555, owner_id=777, user=plain)) is True
+    assert client._can_linkclean_admin(_interaction(666, 777, _Member(True, False, 666))) is True
+    assert client._can_linkclean_admin(_interaction(666, 777, _Member(False, True, 666))) is True
+    assert (
+        client._can_linkclean_admin(_interaction(666, 777, _Member(False, False, user_id=666)))
+        is False
+    )
 
 
 def test_tracking_provider_prefers_the_specific_source_over_a_plain_page() -> None:
@@ -61,8 +170,8 @@ def test_strip_mention_removes_every_bot_mention_form() -> None:
     assert strip_mention("<@999> 不是我", 123) == "<@999> 不是我"
 
 
-def test_validate_rejects_too_many_or_non_image_attachments(config: Config) -> None:
-    client = DiscordCodexClient(config)
+def test_validate_rejects_too_many_or_non_image_attachments(config: Config, tmp_path) -> None:
+    client = DiscordCodexClient(replace(config, codex_home=tmp_path / "codex"))
     images = [FakeAttachment("image/png", 10)] * config.max_attachments
     assert client._validate("q", images) == ""
     assert "最多" in client._validate("q", images + [FakeAttachment("image/png", 10)])
@@ -71,10 +180,10 @@ def test_validate_rejects_too_many_or_non_image_attachments(config: Config) -> N
     assert client._validate("", []) != ""
 
 
-def test_codex_command_offers_every_verified_effort(config: Config) -> None:
+def test_codex_command_offers_every_verified_effort(config: Config, tmp_path) -> None:
     from discord_codex_bot.config import REASONING_EFFORTS
 
-    client = DiscordCodexClient(config)
+    client = DiscordCodexClient(replace(config, codex_home=tmp_path / "codex"))
     command = next(c for c in client.tree.get_commands() if c.name == "codex")
     effort = next(p for p in command.parameters if p.name == "effort")
     assert {choice.value: choice.name for choice in effort.choices} == REASONING_EFFORTS

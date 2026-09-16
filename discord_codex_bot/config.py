@@ -184,6 +184,10 @@ class Config:
     youtube_api_key: str
     twitch_client_id: str
     twitch_client_secret: str
+    # Member-visible link cleaning (DCB-47): extra user ids that may flip the per-guild switch,
+    # on top of the server owner and guild admins (covers a delegated owner who does not hold
+    # the Discord account that owns the server). The switch itself lives in SQLite, not here.
+    linkclean_admin_ids: frozenset[int]
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -365,4 +369,5 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         youtube_api_key=values.get("YOUTUBE_API_KEY", "").strip(),
         twitch_client_id=values.get("TWITCH_CLIENT_ID", "").strip(),
         twitch_client_secret=values.get("TWITCH_CLIENT_SECRET", "").strip(),
+        linkclean_admin_ids=parse_id_set(values.get("LINKCLEAN_ADMIN_IDS"), "LINKCLEAN_ADMIN_IDS"),
     )

@@ -56,6 +56,7 @@ from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
 from .help import render_guide, render_sheet
+from .linkclean import MAX_URLS, SwitchStore, plan
 from .links import (
     FETCH_TAG,
     Preview,
@@ -319,6 +320,7 @@ class DiscordCodexClient(discord.Client):
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
+        self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
         self.youtube_tracker = YouTubeFetcher(config.youtube_api_key)
         self.twitch_tracker = TwitchFetcher(config.twitch_client_id, config.twitch_client_secret)
         self.web_tracker = WebFetcher(self._read_page)
@@ -418,6 +420,13 @@ class DiscordCodexClient(discord.Client):
                 name=f"{prefix}-track",
                 description="追蹤 YouTube／Twitch；留空列出，或用編號取消／切換正式提醒",
                 callback=self.track_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-linkclean",
+                description="本伺服器的連結洗參數開關：on／off／status（只有伺服器的管理層）",
+                callback=self.linkclean_command,
             )
         )
 
@@ -893,6 +902,48 @@ class DiscordCodexClient(discord.Client):
         if kind == "search":
             return self.memory.search(scope, guild_id, user_id, target)
         return self.memory.recall(scope, guild_id, user_id, target, offset, lines)
+
+    async def _linkclean(self, message: discord.Message) -> None:
+        """Strip tracking params from the links a member just shared (DCB-47). A links-only
+        message is replaced: the original is deleted and the clean links reposted with the
+        author @'d. Anything else keeps its text; only the changed links are appended below.
+        A links-only message in a guild where the Bot cannot delete degrades to the append.
+        Must never raise into the main flow: a failure here logs and the message is processed
+        as if the feature were off."""
+        guild = message.guild
+        if guild is None:
+            return
+        # Same access rules as every other surface, checked directly (not via _access) because
+        # _access logs a refusal per message and this one runs on all of them.
+        if not check_access(
+            guild_id=guild.id,
+            channel_id=message.channel.id,
+            parent_channel_id=getattr(message.channel, "parent_id", None),
+            config=self.config,
+        ).allowed:
+            return
+        if not self.linkclean.enabled(guild.id):
+            return
+        raw = find_urls(message.content, MAX_URLS, clean=False)
+        outcome = plan(message.content, raw)
+        if outcome is None:
+            return
+        clean, changed, links_only = outcome
+        try:
+            if links_only and message.channel.permissions_for(self.user).manage_messages:
+                await message.delete()
+                await message.channel.send(
+                    f"<@{message.author.id}>\n" + "\n".join(clean),
+                    allowed_mentions=discord.AllowedMentions(users=[message.author.id]),
+                )
+            else:
+                await message.channel.send("\n".join(changed))
+        except discord.HTTPException:
+            LOGGER.warning(
+                "linkclean failed guild=%s channel=%s; message left as posted",
+                guild.id,
+                message.channel.id,
+            )
 
     async def _previews(
         self, message: discord.Message, quoted: discord.Message | None
@@ -1532,6 +1583,50 @@ class DiscordCodexClient(discord.Client):
             text = "你在這個頻道沒有進行中的請求。"
         await interaction.response.send_message(text, ephemeral=True)
 
+    @app_commands.describe(action="on 開啟、off 關閉、status 查詢")
+    async def linkclean_command(self, interaction: discord.Interaction, action: str) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
+            return
+        if not self._can_linkclean_admin(interaction):
+            await interaction.response.send_message(
+                "只有伺服器主人、管理員（Administrator／Manage Guild）或指定管理員可以切換。",
+                ephemeral=True,
+            )
+            return
+        action = action.strip().lower()
+        if action == "status":
+            state = "開" if self.linkclean.enabled(interaction.guild.id) else "關"
+            await interaction.response.send_message(f"連結洗參數：{state}", ephemeral=True)
+        elif action in ("on", "off"):
+            self.linkclean.set(interaction.guild.id, action == "on")
+            await interaction.response.send_message(
+                f"連結洗參數已{'開啟' if action == 'on' else '關閉'}。", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "action 請用 on、off 或 status。", ephemeral=True
+            )
+
+    def _can_linkclean_admin(self, interaction: discord.Interaction) -> bool:
+        """Who may flip the guild switch: the server owner, a guild admin, or an id the
+        operator listed in LINKCLEAN_ADMIN_IDS (covers a delegated owner who is not the
+        Discord account that owns the server)."""
+        user_id = interaction.user.id
+        guild = interaction.guild
+        if guild is not None and guild.owner_id == user_id:
+            return True
+        member = interaction.user
+        if isinstance(member, discord.Member) and (
+            member.guild_permissions.administrator or member.guild_permissions.manage_guild
+        ):
+            return True
+        return user_id in self.config.linkclean_admin_ids
+
     async def help_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
         if reason:
@@ -2017,7 +2112,12 @@ class DiscordCodexClient(discord.Client):
     # ----- @mention entry point --------------------------------------------------------------
 
     async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot or self.user is None or self.user not in message.mentions:
+        if message.author.bot or self.user is None:
+            return
+        # Member-visible link cleaning runs on every message in an allowed channel, not just on
+        # @mentions — a link nobody asks about is exactly the one whose params should go.
+        await self._linkclean(message)
+        if self.user not in message.mentions:
             return
         guild_id = message.guild.id if message.guild else None
         reason = self._access(guild_id, message.channel, message.channel.id)
