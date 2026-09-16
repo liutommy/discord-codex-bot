@@ -1786,8 +1786,28 @@ async def test_reply_ping_to_a_repost_is_not_a_question_but_a_typed_mention_is(
     # A reply-ping to something that is not a repost keeps the old behaviour.
     reply.content = "接著問"
     reply.reference = types.SimpleNamespace(message_id=1, resolved=None)
+    answer = types.SimpleNamespace(id=1, author=bot, content="這是我的回答 https://a.example/")
+    monkeypatch.setattr(client, "_referenced", _resolving(answer))
     await client.on_message(reply)
     assert accessed == ["called", "called"]
+    # A repost from before the table existed is recognised by its shape.
+    old = types.SimpleNamespace(
+        id=2, author=bot, content=f"<@{USER}>\n||https://fixupx.com/u/status/1||"
+    )
+    reply.reference = types.SimpleNamespace(message_id=2, resolved=None)
+    monkeypatch.setattr(client, "_referenced", _resolving(old))
+    await client.on_message(reply)
+    assert accessed == ["called", "called"]  # not a question
+    reply.content = "<@123> 這是什麼"
+    await client.on_message(reply)
+    assert accessed == ["called", "called", "called"]
+
+
+def _resolving(quoted):
+    async def referenced(message):
+        return quoted
+
+    return referenced
 
 
 async def test_linkclean_command_checks_access_before_changing_state(client) -> None:

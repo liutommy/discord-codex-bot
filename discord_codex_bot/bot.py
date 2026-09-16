@@ -56,7 +56,7 @@ from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
 from .help import render_guide, render_sheet
-from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, plan, spoilered
+from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, is_link_only, plan, spoilered
 from .links import (
     FETCH_TAG,
     Preview,
@@ -1005,6 +1005,22 @@ class DiscordCodexClient(discord.Client):
         message_id = getattr(posted, "id", None)
         if isinstance(message_id, int):
             self.linkclean.remember_repost(message_id)
+
+    async def _replies_to_repost(self, message: discord.Message) -> bool:
+        """Whether `message` replies to one of the Bot's cleaned-link reposts: by id for those
+        posted since the table existed, else by shape (the Bot's own message that is nothing
+        but an optional leading @author line and links) for the ones posted before."""
+        replied_to = message.reference.message_id if message.reference else None
+        if replied_to is None:
+            return False
+        if self.linkclean.is_repost(replied_to):
+            return True
+        quoted = await self._referenced(message)
+        if quoted is None or quoted.author != self.user:
+            return False
+        body = re.sub(r"^<@!?\d+>\n", "", quoted.content or "")
+        urls = find_urls(body, MAX_URLS, clean=False)
+        return bool(urls) and is_link_only(body, urls)
 
     async def _embedfix(self, urls: list[str]) -> tuple[list[str], list[bool]]:
         """Each link in its embed-fixer proxy form when a proxy page verifiably carries
@@ -2234,9 +2250,8 @@ class DiscordCodexClient(discord.Client):
             )
         if self.user not in message.mentions:
             return
-        replied_to = message.reference.message_id if message.reference else None
-        if self.linkclean.is_repost(replied_to) and not mentions_explicitly(
-            message.content, self.user.id
+        if not mentions_explicitly(message.content, self.user.id) and await self._replies_to_repost(
+            message
         ):
             return  # a reply to a cleaned-link repost pings the Bot; only a typed @ is a question
         guild_id = message.guild.id if message.guild else None
@@ -2250,7 +2265,7 @@ class DiscordCodexClient(discord.Client):
         # at it: its text and images are folded into this request.
         quoted = await self._referenced(message)
         if quoted is not None and (
-            quoted.author != self.user or self.linkclean.is_repost(quoted.id)
+            quoted.author != self.user or await self._replies_to_repost(message)
         ):
             usable = [
                 a
