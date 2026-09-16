@@ -1,4 +1,4 @@
-"""Member-visible link cleaning (DCB-47): the tracking params out of links members share.
+"""Member-visible link cleaning: the tracking params out of links members share.
 
 The internal side — prompt and tracking ingest — is strip_tracking in links.py. This module is
 the member side: what counts as a "links-only" message (the shape B mode may delete) and the

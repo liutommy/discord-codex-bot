@@ -123,7 +123,8 @@ def test_strip_tracking_removes_utm_and_known_params_only() -> None:
     dirty = "https://a.example/p?utm_source=dlvr.it&utm_medium=social&id=42&v=1"
     assert strip_tracking(dirty) == "https://a.example/p?id=42&v=1"
     assert (
-        strip_tracking("https://b.example/?fbclid=xyz&si=abc&feature=share") == "https://b.example/"
+        strip_tracking("https://youtu.be/id?fbclid=xyz&si=abc&feature=share")
+        == "https://youtu.be/id"
     )
     # Case-insensitive, and percent-encoded keys count too (%75 == "u").
     assert (
@@ -695,3 +696,17 @@ async def test_render_link_gives_up_at_once_on_an_interactive_turnstile(
     text, shot = await render_link("https://www.dcard.tw/f/x/p/1", config, None)
     assert text == "（https://www.dcard.tw/f/x/p/1：機器人驗證沒過，打不開）" and shot is None
     assert browser.closed
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://[invalid/?utm_source=x",
+        "opaque?utm_source=x",
+        "https://a.example/?source=article&ref=revision&src=image&feature=preview&si=id",
+        "https://a.example/?utm_source=x&X-Amz-Signature=signed",
+        "https://a.example/?utm_source=x&sig=signed",
+    ],
+)
+def test_strip_tracking_preserves_application_ids_signatures_and_bad_input(url):
+    assert strip_tracking(url) == url

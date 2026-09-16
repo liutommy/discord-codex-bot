@@ -481,6 +481,22 @@ filter exists; every member who can see and invoke the command in those guilds m
 This is a private personal deployment. Anyone in either allowed guild can spend the same ChatGPT
 subscription quota. The serial queue limits concurrency but does not create additional quota.
 
+### Shared-link cleaning
+
+`/<prefix>-linkclean` (or `action:status`) reports the per-server switch; `action:on/off`
+changes it immediately. It defaults to on. The server owner, Administrator, Manage Guild,
+or operators listed in `LINKCLEAN_ADMIN_IDS` may use this command.
+
+Known campaign parameters are removed; generic application parameters such as `ref` and
+`source` remain. YouTube `si`/`feature` are removed only on YouTube hosts. Recognized signed
+URLs are left intact. This cannot identify every site's custom signing or routing scheme.
+
+With Manage Messages in the channel, link-only messages are reposted with author attribution
+before deleting the original. Emoji and punctuation are preserved. Attachments, stickers,
+replies, thread starters and oversized replacements keep the original; clean links are
+appended instead. Without Manage Messages, clean links are always appended. If deletion fails,
+both messages may remain. The switch controls visible reposts; internal link cleanup stays on.
+
 ## Operations
 
 ```bash

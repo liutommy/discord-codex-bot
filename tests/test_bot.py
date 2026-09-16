@@ -60,9 +60,13 @@ class _FakeChannel:
         self.sent: list[str] = []
 
     def permissions_for(self, user: object) -> types.SimpleNamespace:
+        assert isinstance(user, discord.Member)
         return types.SimpleNamespace(manage_messages=self._manage)
 
     async def send(self, text: str, **kwargs: object) -> None:
+        assert len(text) <= 2000
+        mentions = kwargs["allowed_mentions"].to_dict()
+        assert "everyone" not in mentions["parse"] and "roles" not in mentions["parse"]
         self.sent.append(text)
 
 
@@ -74,13 +78,20 @@ def _fake_message(
         channel=channel,
         author=types.SimpleNamespace(id=USER),
         deleted=0,
+        attachments=[],
+        stickers=[],
+        reference=None,
+        thread=None,
     )
 
     async def delete() -> None:
+        assert channel.sent, "must deliver before deleting"
         message.deleted += 1
 
     message.delete = delete
-    message.guild = types.SimpleNamespace(id=guild_id if guild_id is not None else GUILD)
+    message.guild = types.SimpleNamespace(
+        id=guild_id if guild_id is not None else GUILD, me=_Member(False, False)
+    )
     return message
 
 
@@ -89,7 +100,7 @@ async def test_linkclean_replaces_links_only_messages_when_it_can_delete(client)
     message = _fake_message("🔥 https://a.example/x?utm_source=mail", channel)
     await client._linkclean(message)
     assert message.deleted == 1
-    assert channel.sent == [f"<@{USER}>\nhttps://a.example/x"]
+    assert channel.sent == [f"<@{USER}>\n🔥 https://a.example/x"]
 
 
 async def test_linkclean_degrades_to_append_when_it_cannot_delete(client) -> None:
@@ -1597,3 +1608,73 @@ def test_memory_options_cap_and_search_beyond_first_page(client):
         "note-29.md"
     ]
     assert "note 29" in client._memory_text(GUILD, USER)
+
+
+async def test_linkclean_preserves_nontext_content_and_oversized_messages(client) -> None:
+    for attribute, value in (
+        ("attachments", [object()]),
+        ("stickers", [object()]),
+        ("reference", object()),
+        ("thread", object()),
+    ):
+        channel = _FakeChannel(True)
+        message = _fake_message("https://a.example/?utm_source=x", channel)
+        setattr(message, attribute, value)
+        await client._linkclean(message)
+        assert message.deleted == 0
+        assert channel.sent == ["https://a.example/"]
+    message = _fake_message("https://a.example/" + "x" * 1970 + "?utm_source=x", _FakeChannel(True))
+    message.author.id = 123456789012345678
+    await client._linkclean(message)
+    assert message.deleted == 0
+
+
+async def test_linkclean_failed_send_never_deletes(client) -> None:
+    message = _fake_message("https://a.example/?utm_source=x", _FakeChannel(True))
+
+    async def failed(*args, **kwargs):
+        raise discord.HTTPException(types.SimpleNamespace(status=403, reason="Forbidden"), "denied")
+
+    message.channel.send = failed
+    with pytest.raises(discord.HTTPException):
+        await client._linkclean(message)
+    assert message.deleted == 0
+
+
+async def test_linkclean_failure_does_not_block_mention_entry(client, monkeypatch) -> None:
+    # With no mention the handler must still return normally after any cleanup exception.
+    client._connection.user = types.SimpleNamespace(id=123)
+    message = _fake_message("https://a.example/", _FakeChannel(True))
+    message.author.bot = False
+    message.mentions = []
+
+    async def failed(message):
+        raise ValueError("bad input")
+
+    monkeypatch.setattr(client, "_linkclean", failed)
+    await client.on_message(message)
+
+
+async def test_linkclean_command_checks_access_before_changing_state(client) -> None:
+    responses = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    interaction = _interaction(555, 777)
+    interaction.guild.id = GUILD
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send)
+    await client.linkclean_command(interaction, "off")
+    assert client.linkclean.enabled(GUILD)
+    client.config = replace(client.config, linkclean_admin_ids=frozenset({555}))
+    interaction.guild_id = 999
+    await client.linkclean_command(interaction, "off")
+    assert client.linkclean.enabled(GUILD)
+    interaction.guild_id = GUILD
+    await client.linkclean_command(interaction, "off")
+    assert not client.linkclean.enabled(GUILD)
+    await client.linkclean_command(interaction)
+    assert responses[-1] == "連結洗參數：關"

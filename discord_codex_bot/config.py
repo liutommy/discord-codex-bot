@@ -184,7 +184,7 @@ class Config:
     youtube_api_key: str
     twitch_client_id: str
     twitch_client_secret: str
-    # Member-visible link cleaning (DCB-47): extra user ids that may flip the per-guild switch,
+    # Member-visible link cleaning: extra user ids that may flip the per-guild switch,
     # on top of the server owner and guild admins (covers a delegated owner who does not hold
     # the Discord account that owns the server). The switch itself lives in SQLite, not here.
     linkclean_admin_ids: frozenset[int]

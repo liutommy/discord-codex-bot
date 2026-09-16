@@ -318,7 +318,7 @@ class TrackerStore:
                 for column, definition in columns:
                     if column not in existing:
                         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-            # DCB-46: rows ingested before stripping kept their tracking params. This pass is
+            # Migration: rows ingested before stripping kept their tracking params. This pass is
             # idempotent (a clean URL strips to itself), so it costs one scan per startup. A row
             # whose cleaned id would collide with a sibling's is left as-is: the UNIQUE
             # constraint is load-bearing (it is what stops old content looking new again), and

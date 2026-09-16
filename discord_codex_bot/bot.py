@@ -904,12 +904,11 @@ class DiscordCodexClient(discord.Client):
         return self.memory.recall(scope, guild_id, user_id, target, offset, lines)
 
     async def _linkclean(self, message: discord.Message) -> None:
-        """Strip tracking params from the links a member just shared (DCB-47). A links-only
+        """Strip tracking params from the links a member just shared. A links-only
         message is replaced: the original is deleted and the clean links reposted with the
         author @'d. Anything else keeps its text; only the changed links are appended below.
         A links-only message in a guild where the Bot cannot delete degrades to the append.
-        Must never raise into the main flow: a failure here logs and the message is processed
-        as if the feature were off."""
+        The caller contains failures so mention handling continues."""
         guild = message.guild
         if guild is None:
             return
@@ -929,21 +928,36 @@ class DiscordCodexClient(discord.Client):
         if outcome is None:
             return
         clean, changed, links_only = outcome
-        try:
-            if links_only and message.channel.permissions_for(self.user).manage_messages:
-                await message.delete()
-                await message.channel.send(
-                    f"<@{message.author.id}>\n" + "\n".join(clean),
-                    allowed_mentions=discord.AllowedMentions(users=[message.author.id]),
-                )
-            else:
-                await message.channel.send("\n".join(changed))
-        except discord.HTTPException:
-            LOGGER.warning(
-                "linkclean failed guild=%s channel=%s; message left as posted",
-                guild.id,
-                message.channel.id,
+        member = guild.me
+        replacement = message.content
+        for original, cleaned in zip(raw, clean, strict=True):
+            replacement = replacement.replace(original, cleaned)
+        replacement = f"<@{message.author.id}>\n{replacement}"
+        can_replace = (
+            links_only
+            and member is not None
+            and message.channel.permissions_for(member).manage_messages
+            and not message.attachments
+            and not message.stickers
+            and message.reference is None
+            and message.thread is None
+            and len(replacement) <= 2000
+        )
+        if can_replace:
+            # Never remove the only copy: delivery must succeed before deletion.
+            await message.channel.send(
+                replacement,
+                allowed_mentions=discord.AllowedMentions(
+                    users=[message.author], everyone=False, roles=False, replied_user=False
+                ),
             )
+            await message.delete()
+        else:
+            # Individual URLs keep each send within Discord's limit. Oversized URLs remain
+            # in the untouched original instead of being truncated into broken links.
+            for url in changed:
+                if len(url) <= 2000:
+                    await message.channel.send(url, allowed_mentions=discord.AllowedMentions.none())
 
     async def _previews(
         self, message: discord.Message, quoted: discord.Message | None
@@ -1584,7 +1598,9 @@ class DiscordCodexClient(discord.Client):
         await interaction.response.send_message(text, ephemeral=True)
 
     @app_commands.describe(action="on 開啟、off 關閉、status 查詢")
-    async def linkclean_command(self, interaction: discord.Interaction, action: str) -> None:
+    async def linkclean_command(
+        self, interaction: discord.Interaction, action: str = "status"
+    ) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
@@ -2116,7 +2132,12 @@ class DiscordCodexClient(discord.Client):
             return
         # Member-visible link cleaning runs on every message in an allowed channel, not just on
         # @mentions — a link nobody asks about is exactly the one whose params should go.
-        await self._linkclean(message)
+        try:
+            await self._linkclean(message)
+        except Exception:
+            LOGGER.exception(
+                "linkclean failed channel=%s; continuing mention handling", message.channel.id
+            )
         if self.user not in message.mentions:
             return
         guild_id = message.guild.id if message.guild else None
