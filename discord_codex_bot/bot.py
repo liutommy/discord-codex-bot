@@ -223,6 +223,12 @@ def strip_mention(content: str, bot_id: int) -> str:
     return re.sub(rf"<@!?{bot_id}>", "", content).strip()
 
 
+def mentions_explicitly(content: str, bot_id: int) -> bool:
+    """An @ typed into the text -- as opposed to the ping Discord adds to a reply, which also
+    lands in `message.mentions` but says nothing about who the member is talking to."""
+    return re.search(rf"<@!?{bot_id}>", content) is not None
+
+
 def with_quoted_message(prompt: str, author: str, content: str, image_count: int) -> str:
     """Fold a replied-to member message into the prompt so the model sees what was pointed at."""
     quoted = " ".join(content.split())
@@ -972,12 +978,13 @@ class DiscordCodexClient(discord.Client):
         )
         if can_replace:
             # Never remove the only copy: delivery must succeed before deletion.
-            await message.channel.send(
+            posted = await message.channel.send(
                 replacement,
                 allowed_mentions=discord.AllowedMentions(
                     users=[message.author], everyone=False, roles=False, replied_user=False
                 ),
             )
+            self._remember_repost(posted)
             await message.delete()
         elif mode == "links":
             return  # nothing to replace means nothing to do: this mode never appends
@@ -989,9 +996,15 @@ class DiscordCodexClient(discord.Client):
                     continue
                 text = deliver(cleaned, spoiler or spoilered(message.content, original))
                 if len(text) <= 2000:
-                    await message.channel.send(
+                    posted = await message.channel.send(
                         text, allowed_mentions=discord.AllowedMentions.none()
                     )
+                    self._remember_repost(posted)
+
+    def _remember_repost(self, posted: object) -> None:
+        message_id = getattr(posted, "id", None)
+        if isinstance(message_id, int):
+            self.linkclean.remember_repost(message_id)
 
     async def _embedfix(self, urls: list[str]) -> tuple[list[str], list[bool]]:
         """Each link in its embed-fixer proxy form when a proxy page verifiably carries
@@ -2221,6 +2234,11 @@ class DiscordCodexClient(discord.Client):
             )
         if self.user not in message.mentions:
             return
+        replied_to = message.reference.message_id if message.reference else None
+        if self.linkclean.is_repost(replied_to) and not mentions_explicitly(
+            message.content, self.user.id
+        ):
+            return  # a reply to a cleaned-link repost pings the Bot; only a typed @ is a question
         guild_id = message.guild.id if message.guild else None
         reason = self._access(guild_id, message.channel, message.channel.id)
         if reason:
@@ -2231,7 +2249,9 @@ class DiscordCodexClient(discord.Client):
         # Replying to another member's message (e.g. one that carries a picture) points the Bot
         # at it: its text and images are folded into this request.
         quoted = await self._referenced(message)
-        if quoted is not None and quoted.author != self.user:
+        if quoted is not None and (
+            quoted.author != self.user or self.linkclean.is_repost(quoted.id)
+        ):
             usable = [
                 a
                 for a in quoted.attachments
@@ -2252,7 +2272,6 @@ class DiscordCodexClient(discord.Client):
         # most recent thread in this channel (within the TTL) is continued.
         key = ThreadStore.key(guild_id, message.channel.id, message.author.id)
         plain = bool(self.memory.get_style(guild_id, message.author.id))
-        replied_to = message.reference.message_id if message.reference else None
         model = self._model(guild_id, message.author.id)
         resume = self.threads.by_message(
             replied_to, plain=plain, model=model

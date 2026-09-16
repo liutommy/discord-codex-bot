@@ -510,7 +510,9 @@ Pixiv's public illust endpoint first: R-18 / R-18G links are delivered as `||spo
 Discord blurs the preview, and a work whose rating cannot be read is not swapped at all. X posts
 are rated the same way through the vxtwitter API's `possibly_sensitive` flag. A link
 the member already spoilered stays spoilered in every copy the Bot posts, and a message that
-is only a spoilered link still counts as links-only. Delivery follows the linkclean mode above. Instagram, Reddit and Bluesky are not proxied: no live proxy that redirects humans
+is only a spoilered link still counts as links-only. Replying to one of these reposts does not
+wake the Bot by itself (Discord's reply ping lands in `mentions`); a typed `@Bot` in the reply
+does, and the repost's links are then folded into the question. Delivery follows the linkclean mode above. Instagram, Reddit and Bluesky are not proxied: no live proxy that redirects humans
 and beats the native preview was found (verified 2026-09-16).
 
 With Manage Messages in the channel, link-only messages are reposted with author attribution

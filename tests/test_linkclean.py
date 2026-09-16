@@ -52,6 +52,15 @@ def test_switch_migrates_the_earlier_tables_once(tmp_path: Path) -> None:
     assert SwitchStore(path).mode(1) == "off"  # a second start finds nothing to migrate
 
 
+def test_reposts_are_remembered_across_restarts(tmp_path: Path) -> None:
+    path = tmp_path / "s.sqlite3"
+    store = SwitchStore(path)
+    assert store.is_repost(None) is False and store.is_repost(1) is False
+    store.remember_repost(1)
+    store.remember_repost(1)
+    assert SwitchStore(path).is_repost(1) is True and store.is_repost(2) is False
+
+
 def test_embedfix_switch_defaults_on_and_is_independent_of_the_mode(tmp_path: Path) -> None:
     store = SwitchStore(tmp_path / "s.sqlite3")
     assert store.embedfix(1) is True

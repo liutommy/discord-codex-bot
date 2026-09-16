@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     value TEXT NOT NULL,
     PRIMARY KEY (guild_id, key)
 );
+CREATE TABLE IF NOT EXISTS reposts (
+    message_id INTEGER PRIMARY KEY
+);
 """
 # Earlier shapes, carried over once each: a boolean `linkclean(guild_id, enabled)` table,
 # then a `linkclean_mode(guild_id, mode)` table. Both collapse into the key/value rows.
@@ -107,6 +110,26 @@ class SwitchStore:
 
     def set_embedfix(self, guild_id: int, enabled: bool) -> None:
         self._put(guild_id, "embedfix", "on" if enabled else "off")
+
+    def remember_repost(self, message_id: int) -> None:
+        """A message the Bot posted while cleaning links. Discord's "reply" pings the author,
+        which puts the Bot in `mentions` exactly like an @; these ids let on_message tell a
+        reply-ping to a link repost from a real question (only an explicit @ counts there)."""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO reposts (message_id) VALUES (?)", (message_id,)
+            )
+
+    def is_repost(self, message_id: int | None) -> bool:
+        if message_id is None:
+            return False
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM reposts WHERE message_id=?", (message_id,)
+                ).fetchone()
+                is not None
+            )
 
 
 def spoilered(content: str, url: str) -> bool:

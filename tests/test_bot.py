@@ -65,11 +65,12 @@ class _FakeChannel:
         assert isinstance(user, discord.Member)
         return types.SimpleNamespace(manage_messages=self._manage)
 
-    async def send(self, text: str, **kwargs: object) -> None:
+    async def send(self, text: str, **kwargs: object) -> types.SimpleNamespace:
         assert len(text) <= 2000
         mentions = kwargs["allowed_mentions"].to_dict()
         assert "everyone" not in mentions["parse"] and "roles" not in mentions["parse"]
         self.sent.append(text)
+        return types.SimpleNamespace(id=900_000 + len(self.sent))
 
 
 def _fake_message(
@@ -1750,6 +1751,43 @@ async def test_linkclean_failure_does_not_block_mention_entry(client, monkeypatc
 
     monkeypatch.setattr(client, "_linkclean", failed)
     await client.on_message(message)
+
+
+async def test_reply_ping_to_a_repost_is_not_a_question_but_a_typed_mention_is(
+    client, monkeypatch
+) -> None:
+    bot = types.SimpleNamespace(id=123)
+    client._connection.user = bot
+    channel = _FakeChannel(manage_messages=True)
+    original = _fake_message("https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(original)
+    assert channel.sent and client.linkclean.is_repost(900_001)
+    accessed: list[str] = []
+
+    def access(*args):
+        accessed.append("called")
+        return "擋下"  # any refusal text ends on_message right after the gate
+
+    monkeypatch.setattr(client, "_access", access)
+    reply = _fake_message("這是什麼", channel)
+    reply.author.bot = False
+    reply.mentions = [bot]  # Discord's reply ping
+    reply.reference = types.SimpleNamespace(message_id=900_001, resolved=None)
+
+    async def replied(text, **kwargs):
+        pass
+
+    reply.reply = replied
+    await client.on_message(reply)
+    assert accessed == []  # not a question
+    reply.content = "<@123> 這是什麼"
+    await client.on_message(reply)
+    assert accessed == ["called"]  # a typed @ is
+    # A reply-ping to something that is not a repost keeps the old behaviour.
+    reply.content = "接著問"
+    reply.reference = types.SimpleNamespace(message_id=1, resolved=None)
+    await client.on_message(reply)
+    assert accessed == ["called", "called"]
 
 
 async def test_linkclean_command_checks_access_before_changing_state(client) -> None:
