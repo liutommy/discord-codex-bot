@@ -2,8 +2,13 @@
 
 The internal side — prompt and tracking ingest — is strip_tracking in links.py. This module is
 the member side: what counts as a "links-only" message (the shape B mode may delete) and the
-per-guild switch that turns the whole thing off. The switch lives in SQLite, not .env: an
-operator who sees a bad rewrite kills it from a slash command without a rebuild.
+per-guild mode. The mode lives in SQLite, not .env: an operator who sees a bad rewrite changes
+it from a slash command without a rebuild.
+
+Modes: ``all`` (default) replaces links-only messages and appends clean links under text
+messages; ``links`` only replaces links-only messages and never appends, so a message with
+text is left exactly as posted; ``off`` does nothing member-visible. Internal cleanup (prompt,
+tracking ingest) is not a mode: it always runs.
 """
 
 from __future__ import annotations
@@ -19,23 +24,37 @@ from .links import strip_tracking
 MAX_URLS = 10
 _WORD = re.compile(r"\w")
 
+MODES = {"all": "全部清洗", "links": "只清洗純連結", "off": "全關"}
+DEFAULT_MODE = "all"
+
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS linkclean (
+CREATE TABLE IF NOT EXISTS linkclean_mode (
     guild_id INTEGER PRIMARY KEY,
-    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
+    mode TEXT NOT NULL CHECK (mode IN ('off', 'links', 'all'))
 );
+"""
+# The first shape was a boolean `linkclean(guild_id, enabled)` table; carry its rows over once.
+MIGRATE = """
+INSERT OR IGNORE INTO linkclean_mode (guild_id, mode)
+    SELECT guild_id, CASE enabled WHEN 0 THEN 'off' ELSE 'all' END FROM linkclean;
+DROP TABLE linkclean;
 """
 
 
 class SwitchStore:
-    """The per-guild switch. A row is an explicit choice; no row means enabled, so a fresh
-    deployment cleans by default and the kill switch is opt-in, not opt-out."""
+    """The per-guild mode. A row is an explicit choice; no row means `all`, so a fresh
+    deployment cleans by default and turning it down is opt-in, not opt-out."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            legacy = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='linkclean'"
+            ).fetchone()
+            if legacy:
+                connection.executescript(MIGRATE)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
@@ -44,19 +63,21 @@ class SwitchStore:
         connection.execute("PRAGMA busy_timeout = 10000")
         return connection
 
-    def enabled(self, guild_id: int) -> bool:
+    def mode(self, guild_id: int) -> str:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT enabled FROM linkclean WHERE guild_id=?", (guild_id,)
+                "SELECT mode FROM linkclean_mode WHERE guild_id=?", (guild_id,)
             ).fetchone()
-        return True if row is None else bool(row["enabled"])
+        return DEFAULT_MODE if row is None else str(row["mode"])
 
-    def set(self, guild_id: int, enabled: bool) -> None:
+    def set(self, guild_id: int, mode: str) -> None:
+        if mode not in MODES:
+            raise ValueError(f"unknown linkclean mode {mode!r}")
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO linkclean (guild_id, enabled) VALUES (?, ?) "
-                "ON CONFLICT (guild_id) DO UPDATE SET enabled=excluded.enabled",
-                (guild_id, int(enabled)),
+                "INSERT INTO linkclean_mode (guild_id, mode) VALUES (?, ?) "
+                "ON CONFLICT (guild_id) DO UPDATE SET mode=excluded.mode",
+                (guild_id, mode),
             )
 
 

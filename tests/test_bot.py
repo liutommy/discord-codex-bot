@@ -125,14 +125,33 @@ async def test_linkclean_stays_quiet_when_clean_disabled_or_not_our_guild(client
     clean = _fake_message("https://a.example/x?keep=1", _FakeChannel(True))
     await client._linkclean(clean)
     assert clean.channel.sent == []
-    client.linkclean.set(GUILD, False)
+    client.linkclean.set(GUILD, "off")
     off = _fake_message("https://a.example/x?utm_source=mail", _FakeChannel(True))
     await client._linkclean(off)
     assert off.channel.sent == []
-    client.linkclean.set(GUILD, True)
+    client.linkclean.set(GUILD, "all")
     foreign = _fake_message("https://a.example/x?utm_source=mail", _FakeChannel(True), guild_id=999)
     await client._linkclean(foreign)
     assert foreign.channel.sent == []
+
+
+async def test_linkclean_links_mode_replaces_only_and_never_appends(client) -> None:
+    client.linkclean.set(GUILD, "links")
+    channel = _FakeChannel(manage_messages=True)
+    pure = _fake_message("🔥 https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(pure)
+    assert pure.deleted == 1 and channel.sent == [f"<@{USER}>\n🔥 https://a.example/x"]
+    # Text around the link: left exactly as posted, no clean link appended.
+    channel = _FakeChannel(manage_messages=True)
+    text = _fake_message("看這個 https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(text)
+    assert text.deleted == 0 and channel.sent == []
+    # Links-only but the Bot cannot delete: nothing, rather than the append `all` would do.
+    channel = _FakeChannel(manage_messages=False)
+    stuck = _fake_message("https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(stuck)
+    assert stuck.deleted == 0 and channel.sent == []
+    client.linkclean.set(GUILD, "all")
 
 
 class _Member(discord.Member):
@@ -1668,13 +1687,17 @@ async def test_linkclean_command_checks_access_before_changing_state(client) -> 
     interaction.channel_id = interaction.channel.id
     interaction.response = types.SimpleNamespace(send_message=send)
     await client.linkclean_command(interaction, "off")
-    assert client.linkclean.enabled(GUILD)
+    assert client.linkclean.mode(GUILD) == "all"
     client.config = replace(client.config, linkclean_admin_ids=frozenset({555}))
     interaction.guild_id = 999
     await client.linkclean_command(interaction, "off")
-    assert client.linkclean.enabled(GUILD)
+    assert client.linkclean.mode(GUILD) == "all"
     interaction.guild_id = GUILD
-    await client.linkclean_command(interaction, "off")
-    assert not client.linkclean.enabled(GUILD)
+    await client.linkclean_command(interaction, "links")
+    assert client.linkclean.mode(GUILD) == "links"
     await client.linkclean_command(interaction)
-    assert responses[-1] == "連結洗參數：關"
+    assert responses[-1] == "連結洗參數：只清洗純連結"
+    await client.linkclean_command(interaction, "off")
+    assert client.linkclean.mode(GUILD) == "off"
+    await client.linkclean_command(interaction)
+    assert responses[-1] == "連結洗參數：全關"

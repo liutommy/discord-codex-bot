@@ -56,7 +56,7 @@ from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
 from .help import render_guide, render_sheet
-from .linkclean import MAX_URLS, SwitchStore, plan
+from .linkclean import MAX_URLS, MODES, SwitchStore, plan
 from .links import (
     FETCH_TAG,
     Preview,
@@ -117,9 +117,8 @@ FAILURE_MESSAGE = (
 
 
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
-LINKCLEAN_CHOICES = [
-    app_commands.Choice(name=label, value=value)
-    for value, label in (("status", "查詢"), ("on", "開啟"), ("off", "關閉"))
+LINKCLEAN_CHOICES = [app_commands.Choice(name="查詢", value="status")] + [
+    app_commands.Choice(name=label, value=value) for value, label in MODES.items()
 ]
 # Discord allows 25 choices per option; Codex + 14 agy slugs = 15. Built with the default
 # Codex model name, which is also what load_config() falls back to.
@@ -908,11 +907,13 @@ class DiscordCodexClient(discord.Client):
         return self.memory.recall(scope, guild_id, user_id, target, offset, lines)
 
     async def _linkclean(self, message: discord.Message) -> None:
-        """Strip tracking params from the links a member just shared. A links-only
-        message is replaced: the original is deleted and the clean links reposted with the
-        author @'d. Anything else keeps its text; only the changed links are appended below.
-        A links-only message in a guild where the Bot cannot delete degrades to the append.
-        The caller contains failures so mention handling continues."""
+        """Strip tracking params from the links a member just shared, per the guild mode.
+        `all`: a links-only message is replaced (original deleted, clean links reposted with
+        the author @'d); anything else keeps its text and only the changed links are appended
+        below; a links-only message the Bot cannot delete degrades to the append. `links`:
+        only the replacement, never an append -- a message with text, or one the Bot cannot
+        replace, is left exactly as posted. `off`: nothing. The caller contains failures so
+        mention handling continues."""
         guild = message.guild
         if guild is None:
             return
@@ -925,13 +926,16 @@ class DiscordCodexClient(discord.Client):
             config=self.config,
         ).allowed:
             return
-        if not self.linkclean.enabled(guild.id):
+        mode = self.linkclean.mode(guild.id)
+        if mode == "off":
             return
         raw = find_urls(message.content, MAX_URLS, clean=False)
         outcome = plan(message.content, raw)
         if outcome is None:
             return
         clean, changed, links_only = outcome
+        if mode == "links" and not links_only:
+            return
         member = guild.me
         replacement = message.content
         for original, cleaned in zip(raw, clean, strict=True):
@@ -956,6 +960,8 @@ class DiscordCodexClient(discord.Client):
                 ),
             )
             await message.delete()
+        elif mode == "links":
+            return  # nothing to replace means nothing to do: this mode never appends
         else:
             # Individual URLs keep each send within Discord's limit. Oversized URLs remain
             # in the untouched original instead of being truncated into broken links.
@@ -1601,7 +1607,7 @@ class DiscordCodexClient(discord.Client):
             text = "你在這個頻道沒有進行中的請求。"
         await interaction.response.send_message(text, ephemeral=True)
 
-    @app_commands.describe(action="查詢、開啟或關閉")
+    @app_commands.describe(action="查詢，或設為全部清洗／只清洗純連結／全關")
     @app_commands.choices(action=LINKCLEAN_CHOICES)
     async def linkclean_command(
         self, interaction: discord.Interaction, action: str = "status"
@@ -1621,16 +1627,16 @@ class DiscordCodexClient(discord.Client):
             return
         action = action.strip().lower()
         if action == "status":
-            state = "開" if self.linkclean.enabled(interaction.guild.id) else "關"
-            await interaction.response.send_message(f"連結洗參數：{state}", ephemeral=True)
-        elif action in ("on", "off"):
-            self.linkclean.set(interaction.guild.id, action == "on")
+            label = MODES[self.linkclean.mode(interaction.guild.id)]
+            await interaction.response.send_message(f"連結洗參數：{label}", ephemeral=True)
+        elif action in MODES:
+            self.linkclean.set(interaction.guild.id, action)
             await interaction.response.send_message(
-                f"連結洗參數已{'開啟' if action == 'on' else '關閉'}。", ephemeral=True
+                f"連結洗參數已設為「{MODES[action]}」。", ephemeral=True
             )
         else:
             await interaction.response.send_message(
-                "action 請用 on、off 或 status。", ephemeral=True
+                "action 請用 status、all、links 或 off。", ephemeral=True
             )
 
     def _can_linkclean_admin(self, interaction: discord.Interaction) -> bool:

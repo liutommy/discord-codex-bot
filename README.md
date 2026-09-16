@@ -483,9 +483,12 @@ subscription quota. The serial queue limits concurrency but does not create addi
 
 ### Shared-link cleaning
 
-`/<prefix>-linkclean` (or `action:status`) reports the per-server switch; `action:on/off`
-changes it immediately. It defaults to on. The server owner, Administrator, Manage Guild,
-or operators listed in `LINKCLEAN_ADMIN_IDS` may use this command.
+`/<prefix>-linkclean` sets the per-server mode from a menu: `all` (default) replaces
+links-only messages and appends clean links under messages that also carry text; `links`
+only replaces links-only messages and never appends, so a message with text is left exactly as
+posted (and with no Manage Messages nothing happens); `off` disables the member-visible part.
+`status` reports the current mode. The server owner, Administrator, Manage Guild, or
+operators listed in `LINKCLEAN_ADMIN_IDS` may use this command.
 
 Two layers remove tracking parameters. The [ClearURLs](https://gitlab.com/ClearURLs/rules)
 rule set (LGPL-3.0, 200+ site-scoped providers, fetched daily by `scripts/fetch_clearurls.py`

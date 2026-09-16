@@ -1,23 +1,41 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from discord_codex_bot.linkclean import MAX_URLS, SwitchStore, is_link_only, plan
 from discord_codex_bot.links import find_urls
 
 
-def test_switch_defaults_to_enabled_and_persists_explicit_choices(tmp_path: Path) -> None:
+def test_switch_defaults_to_all_and_persists_explicit_choices(tmp_path: Path) -> None:
     path = tmp_path / "linkclean.sqlite3"
     store = SwitchStore(path)
-    assert store.enabled(1) is True  # no row yet: default on
-    store.set(1, False)
-    assert store.enabled(1) is False
-    assert store.enabled(2) is True  # other guilds are untouched
-    store.set(1, True)
-    assert SwitchStore(path).enabled(1) is True  # survives a restart
-    store.set(2, False)
-    store.set(2, False)
-    assert SwitchStore(path).enabled(2) is False
+    assert store.mode(1) == "all"  # no row yet: default on
+    store.set(1, "off")
+    assert store.mode(1) == "off"
+    assert store.mode(2) == "all"  # other guilds are untouched
+    store.set(1, "links")
+    assert SwitchStore(path).mode(1) == "links"  # survives a restart
+    store.set(2, "off")
+    store.set(2, "off")
+    assert SwitchStore(path).mode(2) == "off"
+    with pytest.raises(ValueError):
+        store.set(2, "sometimes")
+
+
+def test_switch_migrates_the_boolean_table_once(tmp_path: Path) -> None:
+    path = tmp_path / "linkclean.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE linkclean (guild_id INTEGER PRIMARY KEY, enabled INTEGER)")
+        connection.executemany("INSERT INTO linkclean VALUES (?, ?)", [(1, 0), (2, 1)])
+    store = SwitchStore(path)
+    assert (store.mode(1), store.mode(2), store.mode(3)) == ("off", "all", "all")
+    with sqlite3.connect(path) as connection:
+        tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master")}
+    assert "linkclean" not in tables and "linkclean_mode" in tables
+    assert SwitchStore(path).mode(1) == "off"  # a second start finds nothing to migrate
 
 
 def test_is_link_only_covers_emoji_punctuation_and_wrapping() -> None:

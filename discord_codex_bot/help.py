@@ -112,9 +112,10 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "-linkclean": (
-        "開關「連結洗參數」：預設開啟。on 開啟、off 關閉、status 查詢這個伺服器的設定。"
-        "只有伺服器主人、管理員或被特別列出的人能用。",
-        ["/{p}-linkclean status", "/{p}-linkclean off", "/{p}-linkclean on"],
+        "設定「連結洗參數」：全部清洗（預設；純連結訊息整則換成乾淨版、帶文字的在下面補乾淨連結）、"
+        "只清洗純連結（只換純連結訊息，帶文字的不動也不補連結；Bot 沒有刪訊息權限時就什麼都不做）、"
+        "全關。查詢會顯示目前設定。只有伺服器主人、管理員或被特別列出的人能用。",
+        ["/{p}-linkclean 查詢", "/{p}-linkclean 只清洗純連結", "/{p}-linkclean 全關"],
     ),
     "-export": (
         "把你在這個伺服器的個人記憶（索引、archive、每一則內容）打包成 zip 私下給你，"
@@ -136,7 +137,7 @@ FEATURES: list[str] = [
     "**貼連結**會自動讀網頁（含 X／fixvx 貼文的全文與圖片；網站擋 Bot 時退回 Discord 預覽）。",
     "**連結洗參數**：貼出的連結會自動去掉 utm 等追蹤參數。整則訊息只有連結時，Bot 會把原訊息換成"
     "乾淨版並 @你；有其他文字的訊息則在下面補上乾淨連結。伺服器主人或管理員可用 "
-    "`/{p}-linkclean on／off／status` 開啟、關閉或查詢。",
+    "`/{p}-linkclean` 設為全部清洗、只清洗純連結或全關。",
     "**貼影片連結**會看影片再回答：YouTube 直接看（長片也行），X、TikTok、Instagram、Bilibili、"
     "Reddit、Streamable 等會抓下來看；長片會先回「🎬 處理中」再改成正式答案。",
     "**模型來源**：Codex（預設）、Antigravity（Gemini／Claude）、"
