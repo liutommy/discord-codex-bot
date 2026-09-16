@@ -441,7 +441,7 @@ class DiscordCodexClient(discord.Client):
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-embedfix",
-                description="本伺服器的預覽修正開關：X／TikTok／Pixiv／Tumblr 貼文換成能預覽的版本",
+                description="本伺服器的預覽修正開關：社群貼文連結換成 Discord 能預覽的版本",
                 callback=self.embedfix_command,
             )
         )

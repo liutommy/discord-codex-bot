@@ -118,8 +118,9 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         ["/{p}-linkclean 查詢", "/{p}-linkclean 只清洗純連結", "/{p}-linkclean 全關"],
     ),
     "-embedfix": (
-        "開關「預覽修正」：預設開啟。貼 X、TikTok、Pixiv、Tumblr 的貼文連結時，Bot 會換成能讓 "
-        "Discord 直接預覽影片和圖片的版本（fixupx、tnktok、phixiv、tpmblr），點進去仍會回到原站；"
+        "開關「預覽修正」：預設開啟。貼 X、Threads、TikTok、Pixiv、Tumblr 的貼文連結時，Bot 會換成"
+        "能讓 Discord 直接預覽影片和圖片的版本（fixupx、vxthreads、tnktok、phixiv、tpmblr），點進去"
+        "仍會回到原站；"
         "換之前會先確認那個版本真的有影片或圖片，沒有就維持原連結；Pixiv 的 R-18 作品和 X 標為"
         "敏感的貼文會用 ||暴雷|| 包住讓預覽打碼。投遞方式跟著「連結洗參數」走。"
         "只有伺服器主人、管理員或被特別列出的人能用。",
@@ -146,7 +147,8 @@ FEATURES: list[str] = [
     "**連結洗參數**：貼出的連結會自動去掉 utm 等追蹤參數。整則訊息只有連結時，Bot 會把原訊息換成"
     "乾淨版並 @你；有其他文字的訊息則在下面補上乾淨連結。伺服器主人或管理員可用 "
     "`/{p}-linkclean` 設為全部清洗、只清洗純連結或全關。",
-    "**預覽修正**：X、TikTok、Pixiv、Tumblr 的貼文連結會換成 Discord 能直接播影片、看圖的版本"
+    "**預覽修正**：X、Threads、TikTok、Pixiv、Tumblr 的貼文連結會換成 Discord 能直接播影片、"
+    "看圖的版本"
     "（點進去仍回原站），確認過真的有內容才換；Pixiv R-18 與 X 敏感貼文會自動加 ||暴雷||。"
     "伺服器主人或管理員可用 `/{p}-embedfix` 開關。",
     "**貼影片連結**會看影片再回答：YouTube 直接看（長片也行），X、TikTok、Instagram、Bilibili、"

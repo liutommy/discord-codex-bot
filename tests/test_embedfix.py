@@ -29,6 +29,15 @@ from discord_codex_bot.embedfix import Fix, candidates, has_media, pick, rating
             ["https://phixiv.net/en/artworks/149667269"],
         ),
         (
+            "https://www.threads.com/@mosseri/post/DDupwppSjcp",
+            ["https://vxthreads.com/@mosseri/post/DDupwppSjcp"],
+        ),
+        (
+            "https://www.threads.net/@mosseri/post/DDupwppSjcp",
+            ["https://vxthreads.com/@mosseri/post/DDupwppSjcp"],
+        ),
+        ("https://www.threads.com/@mosseri", []),
+        (
             "https://www.tumblr.com/staff/811651663989538816/title",
             ["https://tpmblr.com/staff/811651663989538816/title"],
         ),

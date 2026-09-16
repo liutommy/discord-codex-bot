@@ -14,9 +14,9 @@ per-guild switch (``/<prefix>-embedfix``) turns the whole thing off without a re
 
 PROXIES was verified live on 2026-09-16 (crawler UA vs. human UA, one real post each).
 Sites without a working, redirecting proxy that beats the native preview are deliberately
-absent: Threads (fixthreads / vxthreads dead; viewthreads keeps humans on its own page),
-Instagram (ddinstagram / kkinstagram dead; instagramez sends humans to an ad domain),
-Reddit (proxies add nothing over the native card), Bluesky (native already carries video).
+absent: Instagram (ddinstagram / kkinstagram dead; instagramez sends humans to an ad
+domain), Reddit (proxies add nothing over the native card), Bluesky (native already carries
+video). Threads is vxthreads.com -- the .net domain from older lists refuses connections.
 """
 
 from __future__ import annotations
@@ -70,6 +70,11 @@ PROXIES: tuple[Rule, ...] = (
         frozenset({"tiktok.com"}),
         re.compile(r"^/@[^/]+/video/\d+|^/t/[A-Za-z0-9]+"),
         ("tnktok.com", "tiktxk.com"),
+    ),
+    Rule(
+        frozenset({"threads.com", "threads.net"}),
+        re.compile(r"^/@[^/]+/post/[A-Za-z0-9_-]+"),
+        ("vxthreads.com",),
     ),
     Rule(frozenset({"pixiv.net"}), re.compile(r"^/(?:en/)?artworks/\d+"), ("phixiv.net",)),
     Rule(frozenset({"tumblr.com"}), re.compile(r"^/[A-Za-z0-9_-]+/\d{6,}"), ("tpmblr.com",)),

@@ -500,9 +500,9 @@ with no rules file. Generic application parameters such as `ref` and `source` re
 YouTube `si`/`feature` and Threads `xmt` are removed only on those hosts. Recognized signed
 URLs are left intact. This cannot identify every site's custom signing or routing scheme.
 
-`/<prefix>-embedfix` (default on) additionally swaps post links on X, TikTok, Pixiv and Tumblr
-to embed-fixer proxies (`fixupx.com` / `vxtwitter.com`, `tnktok.com` / `tiktxk.com`,
-`phixiv.net`, `tpmblr.com`) so Discord previews the video or image; a human who clicks is
+`/<prefix>-embedfix` (default on) additionally swaps post links on X, Threads, TikTok, Pixiv
+and Tumblr to embed-fixer proxies (`fixupx.com` / `vxtwitter.com`, `vxthreads.com`,
+`tnktok.com` / `tiktxk.com`, `phixiv.net`, `tpmblr.com`) so Discord previews the video or image; a human who clicks is
 sent back to the original site. Before swapping, the Bot fetches the proxy page as Discord's
 crawler would and keeps the original link unless that page carries a video or image tag, so
 a proxy that is down or blocked never replaces a working link. Pixiv works are rated through
@@ -510,8 +510,8 @@ Pixiv's public illust endpoint first: R-18 / R-18G links are delivered as `||spo
 Discord blurs the preview, and a work whose rating cannot be read is not swapped at all. X posts
 are rated the same way through the vxtwitter API's `possibly_sensitive` flag. A link
 the member already spoilered stays spoilered in every copy the Bot posts, and a message that
-is only a spoilered link still counts as links-only. Delivery follows the linkclean mode above. Threads, Instagram, Reddit and Bluesky are not proxied: no live proxy that
-redirects humans and beats the native preview was found (verified 2026-09-16).
+is only a spoilered link still counts as links-only. Delivery follows the linkclean mode above. Instagram, Reddit and Bluesky are not proxied: no live proxy that redirects humans
+and beats the native preview was found (verified 2026-09-16).
 
 With Manage Messages in the channel, link-only messages are reposted with author attribution
 before deleting the original. Emoji and punctuation are preserved. Attachments, stickers,
