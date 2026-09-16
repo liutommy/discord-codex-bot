@@ -2288,6 +2288,7 @@ class DiscordCodexClient(discord.Client):
         key = ThreadStore.key(guild_id, message.channel.id, message.author.id)
         plain = bool(self.memory.get_style(guild_id, message.author.id))
         model = self._model(guild_id, message.author.id)
+        replied_to = message.reference.message_id if message.reference else None
         resume = self.threads.by_message(
             replied_to, plain=plain, model=model
         ) or self.threads.current(key, plain=plain, model=model)

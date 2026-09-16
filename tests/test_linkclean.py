@@ -6,11 +6,14 @@ from pathlib import Path
 import pytest
 
 from discord_codex_bot.linkclean import (
+    DISCORD_EPOCH_MS,
     MAX_URLS,
+    REPOST_RETENTION_DAYS,
     SwitchStore,
     deliver,
     is_link_only,
     plan,
+    snowflake_before,
     spoilered,
 )
 from discord_codex_bot.links import find_urls
@@ -52,13 +55,20 @@ def test_switch_migrates_the_earlier_tables_once(tmp_path: Path) -> None:
     assert SwitchStore(path).mode(1) == "off"  # a second start finds nothing to migrate
 
 
-def test_reposts_are_remembered_across_restarts(tmp_path: Path) -> None:
+def test_reposts_are_remembered_across_restarts_and_old_ids_are_pruned(tmp_path: Path) -> None:
     path = tmp_path / "s.sqlite3"
     store = SwitchStore(path)
-    assert store.is_repost(None) is False and store.is_repost(1) is False
-    store.remember_repost(1)
-    store.remember_repost(1)
-    assert SwitchStore(path).is_repost(1) is True and store.is_repost(2) is False
+    fresh = snowflake_before(0) + 1  # an id minted just now
+    stale = snowflake_before(REPOST_RETENTION_DAYS + 1)  # from before the retention window
+    assert store.is_repost(None) is False and store.is_repost(fresh) is False
+    store.remember_repost(stale)
+    assert store.is_repost(stale) is False  # pruned by the very write that stored it
+    store.remember_repost(fresh)
+    store.remember_repost(fresh)
+    assert SwitchStore(path).is_repost(fresh) is True and store.is_repost(stale) is False
+    # The Discord epoch and anything earlier collapse to 0, never negative.
+    assert snowflake_before(0, now=DISCORD_EPOCH_MS / 1000) == 0
+    assert snowflake_before(365 * 20) == 0
 
 
 def test_embedfix_switch_defaults_on_and_is_independent_of_the_mode(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import time
 from pathlib import Path
 
 from .links import strip_tracking
@@ -26,6 +27,18 @@ from .links import strip_tracking
 # A Discord message is 2000 characters; ten URLs is far past anything a member will paste. This
 # is a loop bound, not a behaviour limit.
 MAX_URLS = 10
+# Repost ids are kept this long; older reposts are still recognised by shape (bot.py
+# _replies_to_repost), so the table only has to be exact for recent ones and never grows.
+REPOST_RETENTION_DAYS = 30
+DISCORD_EPOCH_MS = 1_420_070_400_000
+
+
+def snowflake_before(days: float, now: float | None = None) -> int:
+    """The smallest Discord id created `days` ago: ids carry ms since the Discord epoch."""
+    at_ms = int(((now if now is not None else time.time()) - days * 86400) * 1000)
+    return max(at_ms - DISCORD_EPOCH_MS, 0) << 22
+
+
 _WORD = re.compile(r"\w")
 
 MODES = {"all": "全部清洗", "links": "只清洗純連結", "off": "全關"}
@@ -118,6 +131,10 @@ class SwitchStore:
         with self._connect() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO reposts (message_id) VALUES (?)", (message_id,)
+            )
+            connection.execute(
+                "DELETE FROM reposts WHERE message_id < ?",
+                (snowflake_before(REPOST_RETENTION_DAYS),),
             )
 
     def is_repost(self, message_id: int | None) -> bool:

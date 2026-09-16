@@ -17,6 +17,7 @@ from discord_codex_bot.bot import (
     with_quoted_message,
 )
 from discord_codex_bot.config import Config
+from discord_codex_bot.linkclean import snowflake_before
 
 
 @dataclass
@@ -60,6 +61,7 @@ class _FakeChannel:
         self.parent_id = None
         self._manage = manage_messages
         self.sent: list[str] = []
+        self.ids: list[int] = []
 
     def permissions_for(self, user: object) -> types.SimpleNamespace:
         assert isinstance(user, discord.Member)
@@ -70,7 +72,9 @@ class _FakeChannel:
         mentions = kwargs["allowed_mentions"].to_dict()
         assert "everyone" not in mentions["parse"] and "roles" not in mentions["parse"]
         self.sent.append(text)
-        return types.SimpleNamespace(id=900_000 + len(self.sent))
+        # A real-looking snowflake: the repost table prunes ids older than its retention.
+        self.ids.append(snowflake_before(0) + len(self.sent))
+        return types.SimpleNamespace(id=self.ids[-1])
 
 
 def _fake_message(
@@ -1761,7 +1765,8 @@ async def test_reply_ping_to_a_repost_is_not_a_question_but_a_typed_mention_is(
     channel = _FakeChannel(manage_messages=True)
     original = _fake_message("https://a.example/x?utm_source=mail", channel)
     await client._linkclean(original)
-    assert channel.sent and client.linkclean.is_repost(900_001)
+    repost_id = channel.ids[-1]
+    assert channel.sent and client.linkclean.is_repost(repost_id)
     accessed: list[str] = []
 
     def access(*args):
@@ -1772,7 +1777,7 @@ async def test_reply_ping_to_a_repost_is_not_a_question_but_a_typed_mention_is(
     reply = _fake_message("這是什麼", channel)
     reply.author.bot = False
     reply.mentions = [bot]  # Discord's reply ping
-    reply.reference = types.SimpleNamespace(message_id=900_001, resolved=None)
+    reply.reference = types.SimpleNamespace(message_id=repost_id, resolved=None)
 
     async def replied(text, **kwargs):
         pass
