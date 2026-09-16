@@ -120,8 +120,8 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
     "-embedfix": (
         "開關「預覽修正」：預設開啟。貼 X、TikTok、Pixiv、Tumblr 的貼文連結時，Bot 會換成能讓 "
         "Discord 直接預覽影片和圖片的版本（fixupx、tnktok、phixiv、tpmblr），點進去仍會回到原站；"
-        "換之前會先確認那個版本真的有影片或圖片，沒有就維持原連結；Pixiv 的 R-18 作品和 X 標為敏感的貼文會用 "
-        "||暴雷|| 包住讓預覽打碼。投遞方式跟著「連結洗參數」走。"
+        "換之前會先確認那個版本真的有影片或圖片，沒有就維持原連結；Pixiv 的 R-18 作品和 X 標為"
+        "敏感的貼文會用 ||暴雷|| 包住讓預覽打碼。投遞方式跟著「連結洗參數」走。"
         "只有伺服器主人、管理員或被特別列出的人能用。",
         ["/{p}-embedfix 查詢", "/{p}-embedfix 關閉", "/{p}-embedfix 開啟"],
     ),

@@ -47,7 +47,8 @@ PIXIV_AJAX = "https://www.pixiv.net/ajax/illust/{id}"
 PIXIV_HEADERS = {"Referer": "https://www.pixiv.net/"}
 _PIXIV_ID = re.compile(r"^/(?:en/)?artworks/(\d+)")
 # X marks a post's media as sensitive; the vxtwitter API exposes that as `possibly_sensitive`
-# (the fxtwitter API has no such field -- checked 2026-09-16).
+# (the fxtwitter API has no such field -- checked 2026-09-16). Its Cloudflare front answers a
+# generic User-Agent with 403 and the crawler's with 200, hence CRAWLER_HEADERS on that call.
 X_API = "https://api.vxtwitter.com{path}"
 _X_STATUS = re.compile(r"^/[A-Za-z0-9_]{1,20}/status/\d+")
 
@@ -139,7 +140,7 @@ async def rating(url: str, fetch: Fetch) -> bool | None:
         value = _json_path(text, "body", "xRestrict")
         restricted = None if value is None else int(value) >= 1
     elif host in ("x.com", "twitter.com") and (match := _X_STATUS.match(path)):
-        text = await fetch(X_API.format(path=match.group(0)), {})
+        text = await fetch(X_API.format(path=match.group(0)), CRAWLER_HEADERS)
         value = _json_path(text, "possibly_sensitive")
         restricted = None if value is None else bool(value)
     else:
