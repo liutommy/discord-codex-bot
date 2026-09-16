@@ -2250,10 +2250,10 @@ class DiscordCodexClient(discord.Client):
             )
         if self.user not in message.mentions:
             return
-        if not mentions_explicitly(message.content, self.user.id) and await self._replies_to_repost(
-            message
-        ):
-            return  # a reply to a cleaned-link repost pings the Bot; only a typed @ is a question
+        # A reply to a cleaned-link repost pings the Bot too; only a typed @ is a question.
+        typed = mentions_explicitly(message.content, self.user.id)
+        if not typed and await self._replies_to_repost(message):
+            return
         guild_id = message.guild.id if message.guild else None
         reason = self._access(guild_id, message.channel, message.channel.id)
         if reason:
