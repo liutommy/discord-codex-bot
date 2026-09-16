@@ -21,6 +21,7 @@ Reddit (proxies add nothing over the native card), Bluesky (native already carri
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -32,8 +33,16 @@ import aiohttp
 LOGGER = logging.getLogger(__name__)
 
 CRAWLER_UA = "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
+CRAWLER_HEADERS = {"User-Agent": CRAWLER_UA}
 FETCH_TIMEOUT = 6
 MAX_BYTES = 256_000
+# Pixiv's public illust endpoint answers logged-out with `xRestrict` (0 all ages, 1 R-18,
+# 2 R-18G) -- verified 2026-09-16 on eight works. Discord blurs a spoilered link's embed, so
+# an age-restricted work is delivered as ||link||; when the rating cannot be read the link is
+# left alone (no preview beats an unblurred one).
+PIXIV_AJAX = "https://www.pixiv.net/ajax/illust/{id}"
+PIXIV_HEADERS = {"Referer": "https://www.pixiv.net/"}
+_PIXIV_ID = re.compile(r"^/(?:en/)?artworks/(\d+)")
 
 
 @dataclass(frozen=True)
@@ -105,27 +114,56 @@ def has_media(html: str) -> bool:
     return False
 
 
-Fetch = Callable[[str], Awaitable[str | None]]
+Fetch = Callable[[str, dict[str, str]], Awaitable[str | None]]
 
 
-async def pick(url: str, fetch: Fetch) -> str | None:
-    """The first candidate proxy whose page (as the crawler sees it) carries media, or None
-    -- in which case the caller keeps the original link."""
+@dataclass(frozen=True)
+class Fix:
+    url: str
+    spoiler: bool  # deliver as ||url|| so Discord blurs the preview
+
+
+async def rating(url: str, fetch: Fetch) -> bool | None:
+    """Whether the work behind `url` is age-restricted: False for sites without a rating,
+    None when the site has one but it could not be read."""
+    host, path = _host(url)
+    match = _PIXIV_ID.match(path) if host == "pixiv.net" else None
+    if not match:
+        return False
+    text = await fetch(PIXIV_AJAX.format(id=match.group(1)), PIXIV_HEADERS)
+    try:
+        body = json.loads(text or "")
+        restrict = int(body["body"]["xRestrict"])
+    except (ValueError, TypeError, KeyError):
+        LOGGER.info("embedfix: pixiv rating for %s unreadable; link left alone", url)
+        return None
+    return restrict >= 1
+
+
+async def pick(url: str, fetch: Fetch) -> Fix | None:
+    """The first candidate proxy whose page (as the crawler sees it) carries media, with
+    the spoiler flag from the site's rating; None when the caller should keep the link."""
     for candidate in candidates(url):
-        html = await fetch(candidate)
-        if html and has_media(html):
-            return candidate
-        LOGGER.info("embedfix: %s has no media for the crawler; not used", candidate)
+        html = await fetch(candidate, CRAWLER_HEADERS)
+        if not html or not has_media(html):
+            LOGGER.info("embedfix: %s has no media for the crawler; not used", candidate)
+            continue
+        restricted = await rating(url, fetch)
+        if restricted is None:
+            return None
+        return Fix(candidate, restricted)
     return None
 
 
-async def fetch_crawler(session: aiohttp.ClientSession, url: str) -> str | None:
-    """The page as Discord's crawler would receive it. Any failure is None: a proxy that
-    cannot be read is a proxy that must not replace a working link."""
+async def fetch_text(
+    session: aiohttp.ClientSession, url: str, headers: dict[str, str]
+) -> str | None:
+    """The page body (crawler headers: as Discord's crawler would receive it). Any failure
+    is None: a proxy that cannot be read is a proxy that must not replace a working link."""
     try:
         async with session.get(
             url,
-            headers={"User-Agent": CRAWLER_UA},
+            headers=headers,
             timeout=aiohttp.ClientTimeout(total=FETCH_TIMEOUT),
             allow_redirects=True,
         ) as response:

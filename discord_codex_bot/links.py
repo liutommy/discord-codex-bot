@@ -284,7 +284,7 @@ def find_urls(text: str, limit: int, clean: bool = True) -> list[str]:
     written, for callers that must compare against the member's own text."""
     seen: list[str] = []
     for match in URL_RE.findall(text):
-        url = match.rstrip(".,;:!?。，、」』）")
+        url = match.rstrip(".,;:!?|。，、」』）")  # `|`: a ||spoilered|| link
         if clean:
             url = strip_tracking(url)
         if url not in seen:

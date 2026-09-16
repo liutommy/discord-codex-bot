@@ -56,7 +56,7 @@ from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
 from .help import render_guide, render_sheet
-from .linkclean import MAX_URLS, MODES, SwitchStore, plan
+from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, plan, spoilered
 from .links import (
     FETCH_TAG,
     Preview,
@@ -441,7 +441,7 @@ class DiscordCodexClient(discord.Client):
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-embedfix",
-                description="本伺服器的預覽修正開關：X／TikTok／Pixiv／Tumblr 連結換成能預覽影片的版本",
+                description="本伺服器的預覽修正開關：X／TikTok／Pixiv／Tumblr 貼文換成能預覽的版本",
                 callback=self.embedfix_command,
             )
         )
@@ -944,18 +944,21 @@ class DiscordCodexClient(discord.Client):
             return
         raw = find_urls(message.content, MAX_URLS, clean=False)
         clean = [strip_tracking(url) for url in raw]
+        spoil = [False] * len(raw)
         if self.linkclean.embedfix(guild.id):
-            clean = await self._embedfix(clean)
+            clean, spoil = await self._embedfix(clean)
         outcome = plan(message.content, raw, clean)
         if outcome is None:
             return
-        clean, changed, links_only = outcome
+        _, _, links_only = outcome
         if mode == "links" and not links_only:
             return
         member = guild.me
         replacement = message.content
-        for original, cleaned in zip(raw, clean, strict=True):
-            replacement = replacement.replace(original, cleaned)
+        for original, cleaned, spoiler in zip(raw, clean, spoil, strict=True):
+            # The member's own ||bars|| stay in the text; a rating-forced spoiler adds them.
+            wrapped = deliver(cleaned, spoiler and not spoilered(message.content, original))
+            replacement = replacement.replace(original, wrapped)
         replacement = f"<@{message.author.id}>\n{replacement}"
         can_replace = (
             links_only
@@ -981,21 +984,31 @@ class DiscordCodexClient(discord.Client):
         else:
             # Individual URLs keep each send within Discord's limit. Oversized URLs remain
             # in the untouched original instead of being truncated into broken links.
-            for url in changed:
-                if len(url) <= 2000:
-                    await message.channel.send(url, allowed_mentions=discord.AllowedMentions.none())
+            for original, cleaned, spoiler in zip(raw, clean, spoil, strict=True):
+                if cleaned == original:
+                    continue
+                text = deliver(cleaned, spoiler or spoilered(message.content, original))
+                if len(text) <= 2000:
+                    await message.channel.send(
+                        text, allowed_mentions=discord.AllowedMentions.none()
+                    )
 
-    async def _embedfix(self, urls: list[str]) -> list[str]:
+    async def _embedfix(self, urls: list[str]) -> tuple[list[str], list[bool]]:
         """Each link in its embed-fixer proxy form when a proxy page verifiably carries
-        media for Discord's crawler (embedfix.pick); otherwise the link as given."""
+        media for Discord's crawler (embedfix.pick), else as given; plus, per link, whether
+        it must be delivered spoilered (an age-restricted work)."""
         if not any(embedfix.candidates(url) for url in urls):
-            return urls
+            return urls, [False] * len(urls)
         async with _guarded_session(self.config) as session:
 
-            async def fetch(url: str) -> str | None:
-                return await embedfix.fetch_crawler(session, url)
+            async def fetch(url: str, headers: dict[str, str]) -> str | None:
+                return await embedfix.fetch_text(session, url, headers)
 
-            return [await embedfix.pick(url, fetch) or url for url in urls]
+            fixes = [await embedfix.pick(url, fetch) for url in urls]
+        return (
+            [fix.url if fix else url for fix, url in zip(fixes, urls, strict=True)],
+            [bool(fix and fix.spoiler) for fix in fixes],
+        )
 
     async def _previews(
         self, message: discord.Message, quoted: discord.Message | None

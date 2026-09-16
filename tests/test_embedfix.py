@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from discord_codex_bot import embedfix
-from discord_codex_bot.embedfix import candidates, has_media, pick
+from discord_codex_bot.embedfix import Fix, candidates, has_media, pick, rating
 
 
 @pytest.mark.parametrize(
@@ -48,10 +48,12 @@ def test_has_media_reads_either_attribute_order_and_ignores_empty_tags():
     assert has_media('<meta content="https://i.example/a.jpg" property="twitter:image" />')
     assert has_media('<meta name="twitter:player:stream" content="https://v.example/a.mp4">')
     assert not has_media('<meta property="og:image" content="" />')
-    assert not has_media(
-        '<meta property="og:title" content="Notice" /><meta property="og:description" content="no longer available" />'
-    )
+    notice = '<meta property="og:title" content="Notice" />'
+    assert not has_media(notice + '<meta property="og:description" content="gone" />')
     assert not has_media("")
+
+
+MEDIA = '<meta property="og:image" content="https://i/a.jpg">'
 
 
 async def test_pick_returns_the_first_candidate_with_media_or_none():
@@ -61,15 +63,44 @@ async def test_pick_returns_the_first_candidate_with_media_or_none():
     }
     seen: list[str] = []
 
-    async def fetch(url: str) -> str | None:
+    async def fetch(url: str, headers: dict[str, str]) -> str | None:
         seen.append(url)
+        assert headers.get("User-Agent", "").startswith("Mozilla/5.0 (compatible; Discordbot")
         return pages.get(url)
 
-    assert await pick("https://x.com/u/status/1", fetch) == "https://vxtwitter.com/u/status/1"
+    assert await pick("https://x.com/u/status/1", fetch) == Fix(
+        "https://vxtwitter.com/u/status/1", spoiler=False
+    )
     assert seen == list(pages)
     assert await pick("https://x.com/u/status/2", fetch) is None  # both unreachable
     assert await pick("https://x.com/u", fetch) is None  # not a post: nothing fetched
     assert seen[-2:] == ["https://fixupx.com/u/status/2", "https://vxtwitter.com/u/status/2"]
+
+
+async def test_pixiv_rating_drives_the_spoiler_and_an_unreadable_rating_blocks_the_swap():
+    answers = {
+        "https://www.pixiv.net/ajax/illust/1": '{"error": false, "body": {"xRestrict": 1}}',
+        "https://www.pixiv.net/ajax/illust/2": '{"error": false, "body": {"xRestrict": 0}}',
+        "https://www.pixiv.net/ajax/illust/3": "<html>login wall</html>",
+    }
+
+    async def fetch(url: str, headers: dict[str, str]) -> str | None:
+        if "phixiv.net" in url:
+            return MEDIA
+        assert headers == {"Referer": "https://www.pixiv.net/"}
+        return answers.get(url)
+
+    assert await rating("https://www.pixiv.net/artworks/1", fetch) is True
+    assert await rating("https://www.pixiv.net/en/artworks/2", fetch) is False
+    assert await rating("https://www.pixiv.net/artworks/3", fetch) is None
+    assert await rating("https://x.com/u/status/1", fetch) is False  # no rating on X
+    assert await pick("https://www.pixiv.net/artworks/1", fetch) == Fix(
+        "https://phixiv.net/artworks/1", spoiler=True
+    )
+    assert await pick("https://www.pixiv.net/artworks/2", fetch) == Fix(
+        "https://phixiv.net/artworks/2", spoiler=False
+    )
+    assert await pick("https://www.pixiv.net/artworks/3", fetch) is None
 
 
 def test_every_proxy_host_is_excluded_from_rewriting():

@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from discord_codex_bot.linkclean import MAX_URLS, SwitchStore, is_link_only, plan
+from discord_codex_bot.linkclean import (
+    MAX_URLS,
+    SwitchStore,
+    deliver,
+    is_link_only,
+    plan,
+    spoilered,
+)
 from discord_codex_bot.links import find_urls
 
 
@@ -54,6 +61,19 @@ def test_embedfix_switch_defaults_on_and_is_independent_of_the_mode(tmp_path: Pa
     assert store.embedfix(1) is False
     store.set_embedfix(1, True)
     assert store.embedfix(1) is True and store.mode(1) == "off"
+
+
+def test_spoilered_links_are_links_only_and_stay_spoilered() -> None:
+    content = "||https://a.example/x?utm_source=m||"
+    raw = find_urls(content, MAX_URLS, clean=False)
+    assert raw == ["https://a.example/x?utm_source=m"]  # the bars are not part of the URL
+    assert is_link_only(content, raw)
+    assert spoilered(content, raw[0]) and spoilered(
+        "|| https://a.example/x?utm_source=m ||", raw[0]
+    )
+    assert not spoilered("https://a.example/x?utm_source=m ||後面||", raw[0])
+    assert deliver("https://a.example/x", True) == "||https://a.example/x||"
+    assert deliver("https://a.example/x", False) == "https://a.example/x"
 
 
 def test_is_link_only_covers_emoji_punctuation_and_wrapping() -> None:

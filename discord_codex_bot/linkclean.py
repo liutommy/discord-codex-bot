@@ -109,6 +109,15 @@ class SwitchStore:
         self._put(guild_id, "embedfix", "on" if enabled else "off")
 
 
+def spoilered(content: str, url: str) -> bool:
+    """True when the member wrapped `url` in ||spoiler bars||; a clean copy must keep them."""
+    return re.search(r"\|\|\s*" + re.escape(url) + r"\s*\|\|", content) is not None
+
+
+def deliver(url: str, spoiler: bool) -> str:
+    return f"||{url}||" if spoiler else url
+
+
 def is_link_only(content: str, urls: list[str]) -> bool:
     """True when nothing but links, whitespace, punctuation and emoji remains — the message
     whose whole content is the link, and the only shape B mode may delete. `urls` must be the

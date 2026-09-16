@@ -139,7 +139,9 @@ async def test_linkclean_stays_quiet_when_clean_disabled_or_not_our_guild(client
 
 async def test_embedfix_swaps_verified_post_links_and_keeps_the_rest(client, monkeypatch) -> None:
     async def fake_pick(url, fetch):
-        return "https://fixupx.com/u/status/1" if url == "https://x.com/u/status/1" else None
+        if url == "https://x.com/u/status/1":
+            return embedfix.Fix("https://fixupx.com/u/status/1", spoiler=False)
+        return None
 
     monkeypatch.setattr(embedfix, "pick", fake_pick)
     channel = _FakeChannel(manage_messages=True)
@@ -155,6 +157,38 @@ async def test_embedfix_swaps_verified_post_links_and_keeps_the_rest(client, mon
     await client._linkclean(message)
     assert channel.sent == [] and message.deleted == 0
     client.linkclean.set_embedfix(GUILD, True)
+
+
+async def test_embedfix_spoilers_rated_works_and_keeps_member_spoilers(client, monkeypatch) -> None:
+    async def fake_pick(url, fetch):
+        if url.startswith("https://www.pixiv.net/artworks/"):
+            return embedfix.Fix(url.replace("www.pixiv.net", "phixiv.net"), spoiler=True)
+        if url.startswith("https://x.com/"):
+            return embedfix.Fix(url.replace("x.com", "fixupx.com"), spoiler=False)
+        return None
+
+    monkeypatch.setattr(embedfix, "pick", fake_pick)
+    # R-18: the replacement gets the bars the member did not write.
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("https://www.pixiv.net/artworks/1", channel)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [f"<@{USER}>\n||https://phixiv.net/artworks/1||"]
+    # ...and so does an appended copy under a text message.
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("看 https://www.pixiv.net/artworks/1 這張", channel)
+    await client._linkclean(message)
+    assert channel.sent == ["||https://phixiv.net/artworks/1||"]
+    # The member's own spoiler: still links-only, bars kept once, and kept on the append.
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("||https://www.pixiv.net/artworks/1||", channel)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [f"<@{USER}>\n||https://phixiv.net/artworks/1||"]
+    channel = _FakeChannel(manage_messages=False)
+    message = _fake_message("看 ||https://x.com/u/status/1|| 這則", channel)
+    await client._linkclean(message)
+    assert channel.sent == ["||https://fixupx.com/u/status/1||"]
 
 
 async def test_embedfix_command_toggles_and_reports(client) -> None:
