@@ -64,6 +64,8 @@ async def test_pick_returns_the_first_candidate_with_media_or_none():
     seen: list[str] = []
 
     async def fetch(url: str, headers: dict[str, str]) -> str | None:
+        if url.startswith("https://api.vxtwitter.com/"):
+            return '{"possibly_sensitive": false}'
         seen.append(url)
         assert headers.get("User-Agent", "").startswith("Mozilla/5.0 (compatible; Discordbot")
         return pages.get(url)
@@ -75,6 +77,26 @@ async def test_pick_returns_the_first_candidate_with_media_or_none():
     assert await pick("https://x.com/u/status/2", fetch) is None  # both unreachable
     assert await pick("https://x.com/u", fetch) is None  # not a post: nothing fetched
     assert seen[-2:] == ["https://fixupx.com/u/status/2", "https://vxtwitter.com/u/status/2"]
+
+
+async def test_x_sensitive_flag_comes_from_the_vxtwitter_api():
+    answers = {
+        "https://api.vxtwitter.com/u/status/1": '{"possibly_sensitive": true}',
+        "https://api.vxtwitter.com/u/status/2": '{"possibly_sensitive": false}',
+    }
+
+    async def fetch(url: str, headers: dict[str, str]) -> str | None:
+        if url.startswith("https://fixupx.com/"):
+            return MEDIA
+        return answers.get(url)
+
+    assert await rating("https://x.com/u/status/1?s=20", fetch) is True
+    assert await rating("https://twitter.com/u/status/2", fetch) is False
+    assert await rating("https://x.com/u/status/3", fetch) is None  # API down: no swap
+    assert await pick("https://x.com/u/status/1", fetch) == Fix(
+        "https://fixupx.com/u/status/1", spoiler=True
+    )
+    assert await pick("https://x.com/u/status/3", fetch) is None
 
 
 async def test_pixiv_rating_drives_the_spoiler_and_an_unreadable_rating_blocks_the_swap():
@@ -93,7 +115,7 @@ async def test_pixiv_rating_drives_the_spoiler_and_an_unreadable_rating_blocks_t
     assert await rating("https://www.pixiv.net/artworks/1", fetch) is True
     assert await rating("https://www.pixiv.net/en/artworks/2", fetch) is False
     assert await rating("https://www.pixiv.net/artworks/3", fetch) is None
-    assert await rating("https://x.com/u/status/1", fetch) is False  # no rating on X
+    assert await rating("https://www.tiktok.com/@u/video/1", fetch) is False  # no rating
     assert await pick("https://www.pixiv.net/artworks/1", fetch) == Fix(
         "https://phixiv.net/artworks/1", spoiler=True
     )

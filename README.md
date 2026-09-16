@@ -507,7 +507,8 @@ sent back to the original site. Before swapping, the Bot fetches the proxy page 
 crawler would and keeps the original link unless that page carries a video or image tag, so
 a proxy that is down or blocked never replaces a working link. Pixiv works are rated through
 Pixiv's public illust endpoint first: R-18 / R-18G links are delivered as `||spoilers||` so
-Discord blurs the preview, and a work whose rating cannot be read is not swapped at all. A link
+Discord blurs the preview, and a work whose rating cannot be read is not swapped at all. X posts
+are rated the same way through the vxtwitter API's `possibly_sensitive` flag. A link
 the member already spoilered stays spoilered in every copy the Bot posts, and a message that
 is only a spoilered link still counts as links-only. Delivery follows the linkclean mode above. Threads, Instagram, Reddit and Bluesky are not proxied: no live proxy that
 redirects humans and beats the native preview was found (verified 2026-09-16).

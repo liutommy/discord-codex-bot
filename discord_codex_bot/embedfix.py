@@ -35,8 +35,9 @@ LOGGER = logging.getLogger(__name__)
 CRAWLER_UA = "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
 CRAWLER_HEADERS = {"User-Agent": CRAWLER_UA}
 FETCH_TIMEOUT = 6
-# Proxy pages are a few KB; Pixiv's illust JSON runs to several hundred KB and a truncated
-# body is unparseable, which read as "rating unknown" and blocked every Pixiv swap (2026-09-16).
+# Proxy pages are a few KB; Pixiv's illust JSON runs to several hundred KB. The body is read
+# to EOF in chunks: `StreamReader.read(n)` returns *up to* n bytes and can stop early, which
+# truncated the JSON mid-string and blocked every Pixiv swap as "rating unknown" (2026-09-16).
 MAX_BYTES = 2_000_000
 # Pixiv's public illust endpoint answers logged-out with `xRestrict` (0 all ages, 1 R-18,
 # 2 R-18G) -- verified 2026-09-16 on eight works. Discord blurs a spoilered link's embed, so
@@ -45,6 +46,10 @@ MAX_BYTES = 2_000_000
 PIXIV_AJAX = "https://www.pixiv.net/ajax/illust/{id}"
 PIXIV_HEADERS = {"Referer": "https://www.pixiv.net/"}
 _PIXIV_ID = re.compile(r"^/(?:en/)?artworks/(\d+)")
+# X marks a post's media as sensitive; the vxtwitter API exposes that as `possibly_sensitive`
+# (the fxtwitter API has no such field -- checked 2026-09-16).
+X_API = "https://api.vxtwitter.com{path}"
+_X_STATUS = re.compile(r"^/[A-Za-z0-9_]{1,20}/status/\d+")
 
 
 @dataclass(frozen=True)
@@ -129,17 +134,29 @@ async def rating(url: str, fetch: Fetch) -> bool | None:
     """Whether the work behind `url` is age-restricted: False for sites without a rating,
     None when the site has one but it could not be read."""
     host, path = _host(url)
-    match = _PIXIV_ID.match(path) if host == "pixiv.net" else None
-    if not match:
+    if host == "pixiv.net" and (match := _PIXIV_ID.match(path)):
+        text = await fetch(PIXIV_AJAX.format(id=match.group(1)), PIXIV_HEADERS)
+        value = _json_path(text, "body", "xRestrict")
+        restricted = None if value is None else int(value) >= 1
+    elif host in ("x.com", "twitter.com") and (match := _X_STATUS.match(path)):
+        text = await fetch(X_API.format(path=match.group(0)), {})
+        value = _json_path(text, "possibly_sensitive")
+        restricted = None if value is None else bool(value)
+    else:
         return False
-    text = await fetch(PIXIV_AJAX.format(id=match.group(1)), PIXIV_HEADERS)
+    if restricted is None:
+        LOGGER.info("embedfix: rating for %s unreadable; link left alone", url)
+    return restricted
+
+
+def _json_path(text: str | None, *keys: str):
     try:
-        body = json.loads(text or "")
-        restrict = int(body["body"]["xRestrict"])
+        node = json.loads(text or "")
+        for key in keys:
+            node = node[key]
+        return node
     except (ValueError, TypeError, KeyError):
-        LOGGER.info("embedfix: pixiv rating for %s unreadable; link left alone", url)
         return None
-    return restrict >= 1
 
 
 async def pick(url: str, fetch: Fetch) -> Fix | None:
@@ -171,7 +188,11 @@ async def fetch_text(
         ) as response:
             if response.status != 200:
                 return None
-            body = await response.content.read(MAX_BYTES)
+            body = bytearray()
+            async for chunk in response.content.iter_chunked(65_536):
+                body += chunk
+                if len(body) > MAX_BYTES:
+                    return None  # not a proxy page or a rating answer; do not guess
             return body.decode(response.charset or "utf-8", errors="replace")
     except (aiohttp.ClientError, TimeoutError, UnicodeError, OSError) as exc:
         LOGGER.info("embedfix: %s unreachable (%s)", url, type(exc).__name__)
