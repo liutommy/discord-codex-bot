@@ -8,6 +8,7 @@ from pathlib import Path
 
 import discord
 
+from discord_codex_bot import embedfix
 from discord_codex_bot.bot import (
     DiscordCodexClient,
     strip_mention,
@@ -47,6 +48,7 @@ def test_registers_only_expected_slash_commands(config: Config, tmp_path) -> Non
         "inmu-king-model",
         "inmu-king-track",
         "inmu-king-linkclean",
+        "inmu-king-embedfix",
     }
     assert client.intents.guilds
     assert client.intents.message_content
@@ -133,6 +135,48 @@ async def test_linkclean_stays_quiet_when_clean_disabled_or_not_our_guild(client
     foreign = _fake_message("https://a.example/x?utm_source=mail", _FakeChannel(True), guild_id=999)
     await client._linkclean(foreign)
     assert foreign.channel.sent == []
+
+
+async def test_embedfix_swaps_verified_post_links_and_keeps_the_rest(client, monkeypatch) -> None:
+    async def fake_pick(url, fetch):
+        return "https://fixupx.com/u/status/1" if url == "https://x.com/u/status/1" else None
+
+    monkeypatch.setattr(embedfix, "pick", fake_pick)
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("看 https://x.com/u/status/1?s=20 和 https://x.com/u/status/2", channel)
+    await client._linkclean(message)
+    assert message.deleted == 0
+    # status/1 is embed-fixed (its tracking param was stripped first); status/2 had no
+    # verified proxy page and stays as posted, so nothing is appended for it.
+    assert channel.sent == ["https://fixupx.com/u/status/1"]
+    client.linkclean.set_embedfix(GUILD, False)
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("https://x.com/u/status/1", channel)
+    await client._linkclean(message)
+    assert channel.sent == [] and message.deleted == 0
+    client.linkclean.set_embedfix(GUILD, True)
+
+
+async def test_embedfix_command_toggles_and_reports(client) -> None:
+    responses = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    interaction = _interaction(555, 555)  # the guild owner
+    interaction.guild.id = GUILD
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send)
+    await client.embedfix_command(interaction)
+    assert responses[-1] == "預覽修正：開"
+    await client.embedfix_command(interaction, "off")
+    assert responses[-1] == "預覽修正：關" and client.linkclean.embedfix(GUILD) is False
+    client.linkclean.set(GUILD, "off")
+    await client.embedfix_command(interaction, "on")
+    assert responses[-1] == "預覽修正：開（連結洗參數為全關時不會投遞）"
+    client.linkclean.set(GUILD, "all")
 
 
 async def test_linkclean_links_mode_replaces_only_and_never_appends(client) -> None:

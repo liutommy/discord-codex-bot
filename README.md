@@ -500,6 +500,15 @@ with no rules file. Generic application parameters such as `ref` and `source` re
 YouTube `si`/`feature` and Threads `xmt` are removed only on those hosts. Recognized signed
 URLs are left intact. This cannot identify every site's custom signing or routing scheme.
 
+`/<prefix>-embedfix` (default on) additionally swaps post links on X, TikTok, Pixiv and Tumblr
+to embed-fixer proxies (`fixupx.com` / `vxtwitter.com`, `tnktok.com` / `tiktxk.com`,
+`phixiv.net`, `tpmblr.com`) so Discord previews the video or image; a human who clicks is
+sent back to the original site. Before swapping, the Bot fetches the proxy page as Discord's
+crawler would and keeps the original link unless that page carries a video or image tag, so
+a proxy that is down or blocked never replaces a working link. Delivery follows the linkclean
+mode above. Threads, Instagram, Reddit and Bluesky are not proxied: no live proxy that
+redirects humans and beats the native preview was found (verified 2026-09-16).
+
 With Manage Messages in the channel, link-only messages are reposted with author attribution
 before deleting the original. Emoji and punctuation are preserved. Attachments, stickers,
 replies, thread starters and oversized replacements keep the original; clean links are

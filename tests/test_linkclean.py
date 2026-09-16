@@ -25,17 +25,35 @@ def test_switch_defaults_to_all_and_persists_explicit_choices(tmp_path: Path) ->
         store.set(2, "sometimes")
 
 
-def test_switch_migrates_the_boolean_table_once(tmp_path: Path) -> None:
+def test_switch_migrates_the_earlier_tables_once(tmp_path: Path) -> None:
     path = tmp_path / "linkclean.sqlite3"
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE linkclean (guild_id INTEGER PRIMARY KEY, enabled INTEGER)")
         connection.executemany("INSERT INTO linkclean VALUES (?, ?)", [(1, 0), (2, 1)])
+        connection.execute("CREATE TABLE linkclean_mode (guild_id INTEGER PRIMARY KEY, mode TEXT)")
+        connection.executemany("INSERT INTO linkclean_mode VALUES (?, ?)", [(3, "links")])
     store = SwitchStore(path)
-    assert (store.mode(1), store.mode(2), store.mode(3)) == ("off", "all", "all")
+    assert (store.mode(1), store.mode(2), store.mode(3), store.mode(4)) == (
+        "off",
+        "all",
+        "links",
+        "all",
+    )
     with sqlite3.connect(path) as connection:
         tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master")}
-    assert "linkclean" not in tables and "linkclean_mode" in tables
+    assert tables & {"linkclean", "linkclean_mode"} == set() and "guild_settings" in tables
     assert SwitchStore(path).mode(1) == "off"  # a second start finds nothing to migrate
+
+
+def test_embedfix_switch_defaults_on_and_is_independent_of_the_mode(tmp_path: Path) -> None:
+    store = SwitchStore(tmp_path / "s.sqlite3")
+    assert store.embedfix(1) is True
+    store.set_embedfix(1, False)
+    assert store.embedfix(1) is False and store.mode(1) == "all"
+    store.set(1, "off")
+    assert store.embedfix(1) is False
+    store.set_embedfix(1, True)
+    assert store.embedfix(1) is True and store.mode(1) == "off"
 
 
 def test_is_link_only_covers_emoji_punctuation_and_wrapping() -> None:
@@ -69,3 +87,9 @@ def test_plan_splits_repost_from_append_and_is_none_when_clean() -> None:
     clean_only = "https://a.example/x"
     assert plan(clean_only, find_urls(clean_only, MAX_URLS, clean=False)) is None
     assert plan("no links here", []) is None
+    # A caller-supplied delivered form (embed-fixed) counts as a change too.
+    assert plan(clean_only, [clean_only], ["https://fixed.example/x"]) == (
+        ["https://fixed.example/x"],
+        ["https://fixed.example/x"],
+        True,
+    )

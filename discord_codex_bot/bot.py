@@ -16,7 +16,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from . import apis, gemini, sandbox, search
+from . import apis, embedfix, gemini, sandbox, search
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
@@ -60,11 +60,13 @@ from .linkclean import MAX_URLS, MODES, SwitchStore, plan
 from .links import (
     FETCH_TAG,
     Preview,
+    _guarded_session,
     extract_fetch_tags,
     fetch_or_render,
     find_urls,
     has_video,
     link_blocks,
+    strip_tracking,
     understand_video,
 )
 from .memory import (
@@ -119,6 +121,10 @@ FAILURE_MESSAGE = (
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
 LINKCLEAN_CHOICES = [app_commands.Choice(name="查詢", value="status")] + [
     app_commands.Choice(name=label, value=value) for value, label in MODES.items()
+]
+EMBEDFIX_CHOICES = [
+    app_commands.Choice(name=label, value=value)
+    for value, label in (("status", "查詢"), ("on", "開啟"), ("off", "關閉"))
 ]
 # Discord allows 25 choices per option; Codex + 14 agy slugs = 15. Built with the default
 # Codex model name, which is also what load_config() falls back to.
@@ -430,6 +436,13 @@ class DiscordCodexClient(discord.Client):
                 name=f"{prefix}-linkclean",
                 description="本伺服器的連結洗參數開關（只有伺服器的管理層）",
                 callback=self.linkclean_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-embedfix",
+                description="本伺服器的預覽修正開關：X／TikTok／Pixiv／Tumblr 連結換成能預覽影片的版本",
+                callback=self.embedfix_command,
             )
         )
 
@@ -930,7 +943,10 @@ class DiscordCodexClient(discord.Client):
         if mode == "off":
             return
         raw = find_urls(message.content, MAX_URLS, clean=False)
-        outcome = plan(message.content, raw)
+        clean = [strip_tracking(url) for url in raw]
+        if self.linkclean.embedfix(guild.id):
+            clean = await self._embedfix(clean)
+        outcome = plan(message.content, raw, clean)
         if outcome is None:
             return
         clean, changed, links_only = outcome
@@ -968,6 +984,18 @@ class DiscordCodexClient(discord.Client):
             for url in changed:
                 if len(url) <= 2000:
                     await message.channel.send(url, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _embedfix(self, urls: list[str]) -> list[str]:
+        """Each link in its embed-fixer proxy form when a proxy page verifiably carries
+        media for Discord's crawler (embedfix.pick); otherwise the link as given."""
+        if not any(embedfix.candidates(url) for url in urls):
+            return urls
+        async with _guarded_session(self.config) as session:
+
+            async def fetch(url: str) -> str | None:
+                return await embedfix.fetch_crawler(session, url)
+
+            return [await embedfix.pick(url, fetch) or url for url in urls]
 
     async def _previews(
         self, message: discord.Message, quoted: discord.Message | None
@@ -1638,6 +1666,35 @@ class DiscordCodexClient(discord.Client):
             await interaction.response.send_message(
                 "action 請用 status、all、links 或 off。", ephemeral=True
             )
+
+    @app_commands.describe(action="查詢、開啟或關閉")
+    @app_commands.choices(action=EMBEDFIX_CHOICES)
+    async def embedfix_command(
+        self, interaction: discord.Interaction, action: str = "status"
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
+            return
+        if not self._can_linkclean_admin(interaction):
+            await interaction.response.send_message(
+                "只有伺服器主人、管理員（Administrator／Manage Guild）或指定管理員可以切換。",
+                ephemeral=True,
+            )
+            return
+        action = action.strip().lower()
+        if action in ("on", "off"):
+            self.linkclean.set_embedfix(interaction.guild.id, action == "on")
+        state = "開" if self.linkclean.embedfix(interaction.guild.id) else "關"
+        note = (
+            ""
+            if self.linkclean.mode(interaction.guild.id) != "off"
+            else "（連結洗參數為全關時不會投遞）"
+        )
+        await interaction.response.send_message(f"預覽修正：{state}{note}", ephemeral=True)
 
     def _can_linkclean_admin(self, interaction: discord.Interaction) -> bool:
         """Who may flip the guild switch: the server owner, a guild admin, or an id the
