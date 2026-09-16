@@ -117,6 +117,10 @@ FAILURE_MESSAGE = (
 
 
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
+LINKCLEAN_CHOICES = [
+    app_commands.Choice(name=label, value=value)
+    for value, label in (("status", "查詢"), ("on", "開啟"), ("off", "關閉"))
+]
 # Discord allows 25 choices per option; Codex + 14 agy slugs = 15. Built with the default
 # Codex model name, which is also what load_config() falls back to.
 EFFORT_CHOICES = [app_commands.Choice(name=v, value=k) for k, v in REASONING_EFFORTS.items()]
@@ -425,7 +429,7 @@ class DiscordCodexClient(discord.Client):
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-linkclean",
-                description="本伺服器的連結洗參數開關：on／off／status（只有伺服器的管理層）",
+                description="本伺服器的連結洗參數開關（只有伺服器的管理層）",
                 callback=self.linkclean_command,
             )
         )
@@ -1597,7 +1601,8 @@ class DiscordCodexClient(discord.Client):
             text = "你在這個頻道沒有進行中的請求。"
         await interaction.response.send_message(text, ephemeral=True)
 
-    @app_commands.describe(action="on 開啟、off 關閉、status 查詢")
+    @app_commands.describe(action="查詢、開啟或關閉")
+    @app_commands.choices(action=LINKCLEAN_CHOICES)
     async def linkclean_command(
         self, interaction: discord.Interaction, action: str = "status"
     ) -> None:
