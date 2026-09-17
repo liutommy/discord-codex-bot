@@ -153,9 +153,35 @@ def reset(config: Config, kind: str) -> tuple[bool, Path | None]:
     return True, kept
 
 
+def _chmod(path: Path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except OSError:
+        LOGGER.warning("could not set mode %o on %s", mode, path)
+
+
+def _publish(target: Path, body: str) -> None:
+    """Write one working directory and leave it read-only.
+
+    These directories are Codex's cwd. They used to sit on the image's read-only filesystem, so
+    the kernel refused writes there no matter what the agent asked for; moving them into the
+    volume to make the persona replaceable would have dropped that guard and left only Codex's
+    own sandbox settings. The directory bit is checked for the owner too, so 0555/0444 puts the
+    same refusal back: the Bot unlocks it for the moment it rewrites the file, and the agent —
+    which has no shell and cannot chmod — cannot create or modify anything inside it.
+    """
+    directory = target.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    _chmod(directory, 0o755)
+    _chmod(target, 0o644)
+    _write(target, body)
+    _chmod(target, 0o444)
+    _chmod(directory, 0o555)
+
+
 def compose_workspaces(config: Config) -> bool:
     """Write both Codex working directories from the shipped rules plus the persona in force.
-    `/workspace-plain` is the rules alone — what a member gets after turning the persona off."""
+    The plain one is the rules alone — what a member gets after turning the persona off."""
     try:
         rules = config.codex_rules_path.read_text("utf-8").strip()
     except OSError:
@@ -166,9 +192,9 @@ def compose_workspaces(config: Config) -> bool:
         return False
     persona = persona_text(config)
     try:
-        _write(config.codex_workspace_plain / "AGENTS.md", rules + "\n")
+        _publish(config.codex_workspace_plain / "AGENTS.md", rules + "\n")
         body = f"{rules}\n\n\n{persona}\n" if persona else rules + "\n"
-        _write(config.codex_workspace / "AGENTS.md", body)
+        _publish(config.codex_workspace / "AGENTS.md", body)
     except OSError:
         LOGGER.error("could not write the Codex working directories under %s", config.codex_home)
         return False

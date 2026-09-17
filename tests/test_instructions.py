@@ -125,3 +125,29 @@ def test_two_backups_in_the_same_second_do_not_overwrite_each_other(
     assert first is not None and second is not None and first != second
     assert first.read_text("utf-8").strip() == "原本的人設"
     assert second.read_text("utf-8").strip() == "替換的人設"
+
+
+def test_the_working_directories_are_left_read_only(config: Config, tmp_path: Path) -> None:
+    import os
+    import stat
+
+    cfg = _config(config, tmp_path)
+    (cfg.persona_dir / "AGENTS.md").write_text("前輩\n", "utf-8")
+    assert instructions.compose_workspaces(cfg) is True
+    for folder in (cfg.codex_workspace, cfg.codex_workspace_plain):
+        agents = folder / "AGENTS.md"
+        assert stat.S_IMODE(folder.stat().st_mode) == 0o555
+        assert stat.S_IMODE(agents.stat().st_mode) == 0o444
+        if os.geteuid() != 0:  # root ignores the mode; nobody in the container runs as root
+            with pytest.raises(PermissionError):
+                (folder / "pwned.txt").write_text("x", "utf-8")
+            with pytest.raises(PermissionError):
+                agents.write_text("tampered", "utf-8")
+
+    # and the Bot can still replace them: a second composition must not need a hand
+    instructions.save(cfg, instructions.PERSONA, "新人設")
+    assert instructions.compose_workspaces(cfg) is True
+    assert (cfg.codex_workspace / "AGENTS.md").read_text("utf-8") == "RULES\n\n\n新人設\n"
+    for folder in (cfg.codex_workspace, cfg.codex_workspace_plain):
+        folder.chmod(0o755)  # so pytest can clean its tmp dir up afterwards
+        (folder / "AGENTS.md").chmod(0o644)
