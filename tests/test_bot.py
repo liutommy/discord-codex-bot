@@ -36,6 +36,7 @@ def test_registers_only_expected_slash_commands(config: Config, tmp_path) -> Non
     assert {command.name for command in client.tree.get_commands()} == {
         "inmu-king",
         "inmu-king-status",
+        "inmu-king-persona",
         "inmu-king-help",
         "inmu-king-reset",
         "inmu-king-stop",
@@ -256,15 +257,14 @@ def _interaction(user_id: int, owner_id: int, user: object | None = None) -> typ
 
 def test_linkclean_gate_allows_owner_guild_admins_and_listed_ids(client) -> None:
     plain = types.SimpleNamespace(id=555)
-    assert client._can_linkclean_admin(_interaction(555, owner_id=555)) is True
-    assert client._can_linkclean_admin(_interaction(555, owner_id=777, user=plain)) is False
+    assert client._is_guild_admin(_interaction(555, owner_id=555)) is True
+    assert client._is_guild_admin(_interaction(555, owner_id=777, user=plain)) is False
     client.config = replace(client.config, linkclean_admin_ids=frozenset({555}))
-    assert client._can_linkclean_admin(_interaction(555, owner_id=777, user=plain)) is True
-    assert client._can_linkclean_admin(_interaction(666, 777, _Member(True, False, 666))) is True
-    assert client._can_linkclean_admin(_interaction(666, 777, _Member(False, True, 666))) is True
+    assert client._is_guild_admin(_interaction(555, owner_id=777, user=plain)) is True
+    assert client._is_guild_admin(_interaction(666, 777, _Member(True, False, 666))) is True
+    assert client._is_guild_admin(_interaction(666, 777, _Member(False, True, 666))) is True
     assert (
-        client._can_linkclean_admin(_interaction(666, 777, _Member(False, False, user_id=666)))
-        is False
+        client._is_guild_admin(_interaction(666, 777, _Member(False, False, user_id=666))) is False
     )
 
 
@@ -1884,3 +1884,96 @@ async def test_style_command_keeps_persona_separate_and_offers_the_file_route(cl
     assert len(modals) == 1 and isinstance(modals[0], StyleModal)
     await client.style_command(interaction, upload=True, text="短")
     assert len(modals) == 1 and "一次做一件事" in responses[-1]
+
+
+def _operator_client(config: Config, tmp_path) -> DiscordCodexClient:
+    """A client whose instruction files are all writable, shaped like the container's layout."""
+    image = tmp_path / "image"
+    (image / "persona").mkdir(parents=True)
+    (image / "rules").mkdir(parents=True)
+    (image / "rules" / "AGENTS.md").write_text("RULES\n", "utf-8")
+    (image / "persona" / "AGENTS.md").write_text("image persona\n", "utf-8")
+    (image / "output-style.md").write_text("image style\n", "utf-8")
+    cfg = replace(
+        config,
+        command_prefix="inmu-king",
+        codex_home=tmp_path / "vol",
+        codex_workspace=tmp_path / "vol" / "workspace",
+        codex_workspace_plain=tmp_path / "vol" / "workspace-plain",
+        codex_rules_path=image / "rules" / "AGENTS.md",
+        persona_dir=image / "persona",
+        output_style_path=image / "output-style.md",
+        backup_dir=tmp_path / "backups",
+        permanent_memory_dir=tmp_path / "perm",
+    )
+    bot_module.instructions.compose_workspaces(cfg)
+    return DiscordCodexClient(cfg)
+
+
+def _operator_interaction(user_id: int, owner_id: int, user=None):
+    responses: list[str] = []
+    modals: list[object] = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    async def send_modal(modal):
+        modals.append(modal)
+
+    hit = _interaction(user_id, owner_id, user)
+    hit.guild.id = GUILD
+    hit.guild_id = GUILD
+    hit.channel = _FakeChannel(True)
+    hit.channel_id = hit.channel.id
+    hit.response = types.SimpleNamespace(send_message=send, send_modal=send_modal)
+    return hit, responses, modals
+
+
+async def test_persona_command_is_admin_only_and_reports_which_copy_is_live(
+    config: Config, tmp_path
+) -> None:
+    from discord_codex_bot.ui import InstructionsModal
+
+    client = _operator_client(config, tmp_path)
+    stranger, said, modals = _operator_interaction(
+        555, owner_id=777, user=types.SimpleNamespace(id=555)
+    )
+    await client.persona_command(stranger, "upload")
+    assert modals == [] and "只有伺服器主人" in said[-1]
+
+    admin, said, modals = _operator_interaction(555, owner_id=555)
+    await client.persona_command(admin)
+    assert "人設：image 預設" in said[-1] and "預設輸出風格：image 預設" in said[-1]
+
+    await client.persona_command(admin, "reset_persona")
+    assert "本來就是 image 預設" in said[-1]
+
+    await client.persona_command(admin, "upload")
+    assert len(modals) == 1 and isinstance(modals[0], InstructionsModal)
+
+
+async def test_uploading_a_persona_retires_every_live_thread_and_keeps_the_old_one(
+    config: Config, tmp_path
+) -> None:
+    from discord_codex_bot.threads import ThreadStore
+
+    client = _operator_client(config, tmp_path)
+    key = ThreadStore.key(GUILD, 555, USER)
+    model = "codex:gpt-5.6-luna"
+    client.threads.remember(key, "t-old", None, plain=False, model=model)
+    assert client.threads.current(key, plain=False, model=model) == "t-old"
+
+    report = await client._save_instructions({bot_module.instructions.PERSONA: "新人設"}, USER)
+    # Codex reads AGENTS.md once per thread, so a live thread would keep the old persona forever
+    assert client.threads.current(key, plain=False, model=model) == ""
+    assert (client.config.codex_workspace / "AGENTS.md").read_text("utf-8") == "RULES\n\n\n新人設\n"
+    assert "人設：上傳版" in report and "備份：" in report
+    kept = sorted((client.config.backup_dir / "instructions").glob("persona-*.md"))
+    assert len(kept) == 1 and kept[0].read_text("utf-8").strip() == "image persona"
+
+    admin, said, _ = _operator_interaction(555, owner_id=555)
+    await client.persona_command(admin, "reset_persona")
+    assert "已還原成 image 預設" in said[-1]
+    assert (client.config.codex_workspace / "AGENTS.md").read_text(
+        "utf-8"
+    ) == "RULES\n\n\nimage persona\n"

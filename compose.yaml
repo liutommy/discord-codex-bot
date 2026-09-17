@@ -13,7 +13,9 @@ services:
       - .env
     environment:
       CODEX_HOME: /var/lib/codex
-      CODEX_WORKSPACE: /workspace
+      # CODEX_WORKSPACE / CODEX_WORKSPACE_PLAIN / CODEX_RULES stay at the image defaults: the
+      # working directories are composed into the volume at start-up, because the persona they
+      # are built from can be replaced while the Bot runs and the image filesystem is read-only.
       PYTHONUNBUFFERED: "1"
       TZ: ${TZ:-Asia/Taipei}  # logs, backup names and note dates in the members' local time
     volumes:

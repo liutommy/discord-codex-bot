@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import discord
 
+from . import instructions
 from .memory import STYLE_MAX_UPLOAD_BYTES, parse_style_upload
 
 NOT_YOURS = "這不是你的回答，按鈕只有發問的人能用。"
@@ -136,6 +137,67 @@ class StyleModal(discord.ui.Modal, title="上傳個人風格"):
             f"已用 {attachment.filename} 設定個人風格（{len(text)} 字）。人設不受影響，"
             "要不帶角色的版本請用 persona:關閉人設。",
             ephemeral=True,
+        )
+
+
+class InstructionsModal(discord.ui.Modal, title="上傳人設／預設輸出風格"):
+    """Two optional Markdown files. Both are operator settings shared by every guild this Bot
+    serves, so the command that opens this modal is gated; nothing is written unless both files
+    pass, because a half-applied pair would leave the Bot in a state nobody chose."""
+
+    def __init__(self, save: Callable[[dict[str, str], int], Awaitable[str]], limit: int) -> None:
+        super().__init__(timeout=STYLE_MODAL_TIMEOUT)
+        self.save = save
+        self.limit = limit
+        self.persona = discord.ui.FileUpload(custom_id="persona-file", max_values=1, required=False)
+        self.style = discord.ui.FileUpload(custom_id="style-file", max_values=1, required=False)
+        self.add_item(
+            discord.ui.Label(
+                text=f"人設（.md，最多 {limit} 字）",
+                description="留空＝不改人設。整份檔案取代現行人設。",
+                component=self.persona,
+            )
+        )
+        self.add_item(
+            discord.ui.Label(
+                text=f"預設輸出風格（.md，最多 {limit} 字）",
+                description="留空＝不改風格。",
+                component=self.style,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        pairs = (
+            (instructions.PERSONA, self.persona),
+            (instructions.OUTPUT_STYLE, self.style),
+        )
+        chosen = [(kind, item.values[0]) for kind, item in pairs if item.values]
+        if not chosen:
+            await interaction.response.send_message("兩個都留空，沒有東西要改。", ephemeral=True)
+            return
+        uploads: dict[str, str] = {}
+        for kind, attachment in chosen:
+            label = instructions.LABELS[kind]
+            if attachment.size > instructions.MAX_UPLOAD_BYTES:
+                await interaction.response.send_message(
+                    f"{label}：檔案太大（{attachment.size} bytes），最多 {self.limit} 字。",
+                    ephemeral=True,
+                )
+                return
+            try:
+                body = await attachment.read()
+            except discord.HTTPException:
+                await interaction.response.send_message(
+                    f"{label}：讀不到那個檔案，再試一次。", ephemeral=True
+                )
+                return
+            try:
+                uploads[kind] = instructions.parse_upload(attachment.filename, body, self.limit)
+            except ValueError as bad:
+                await interaction.response.send_message(f"{label}：{bad}", ephemeral=True)
+                return
+        await interaction.response.send_message(
+            await self.save(uploads, interaction.user.id), ephemeral=True
         )
 
 

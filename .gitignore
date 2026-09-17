@@ -10,6 +10,10 @@ permanent/*
 !permanent/README.md
 persona/*
 !persona/README.md
+!persona/AGENTS.example.md
+# The operator's own default style, like the persona, stays out of a repo meant to be published;
+# config/output-style.example.md is what a clone copies and edits.
+config/output-style.md
 announce/*
 !announce/README.md
 backups/

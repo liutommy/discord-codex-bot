@@ -16,7 +16,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from . import apis, embedfix, gemini, sandbox, search
+from . import apis, embedfix, gemini, instructions, sandbox, search
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
@@ -109,7 +109,14 @@ from .tracking import (
     render_watches,
     tracking_loop,
 )
-from .ui import AnswerButton, AnswerView, CancelView, StyleModal, recover_exchange
+from .ui import (
+    AnswerButton,
+    AnswerView,
+    CancelView,
+    InstructionsModal,
+    StyleModal,
+    recover_exchange,
+)
 from .usage import probe_rate_limits
 
 LOGGER = logging.getLogger(__name__)
@@ -122,6 +129,15 @@ FAILURE_MESSAGE = (
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
 LINKCLEAN_CHOICES = [app_commands.Choice(name="查詢", value="status")] + [
     app_commands.Choice(name=label, value=value) for value, label in MODES.items()
+]
+INSTRUCTION_CHOICES = [
+    app_commands.Choice(name=label, value=value)
+    for value, label in (
+        ("status", "查詢"),
+        ("upload", "上傳"),
+        ("reset_persona", "還原人設為預設"),
+        ("reset_style", "還原輸出風格為預設"),
+    )
 ]
 PERSONA_CHOICES = [
     app_commands.Choice(name=label, value=value)
@@ -213,7 +229,7 @@ def instructions_version(config: Config) -> str:
     for path in (
         config.codex_workspace / "AGENTS.md",
         config.codex_workspace_plain / "AGENTS.md",
-        config.output_style_path,
+        instructions.style_path(config),
     ):
         try:
             digest.update(path.read_bytes())
@@ -391,6 +407,13 @@ class DiscordCodexClient(discord.Client):
                 name=f"{prefix}-help",
                 description="所有指令的說明與範例用法",
                 callback=self.help_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-persona",
+                description="管理員：查詢／上傳／還原全伺服器共用的人設與預設輸出風格",
+                callback=self.persona_command,
             )
         )
         self.tree.add_command(
@@ -1697,7 +1720,7 @@ class DiscordCodexClient(discord.Client):
         if interaction.guild is None:
             await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
             return
-        if not self._can_linkclean_admin(interaction):
+        if not self._is_guild_admin(interaction):
             await interaction.response.send_message(
                 "只有伺服器主人、管理員（Administrator／Manage Guild）或指定管理員可以切換。",
                 ephemeral=True,
@@ -1729,7 +1752,7 @@ class DiscordCodexClient(discord.Client):
         if interaction.guild is None:
             await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
             return
-        if not self._can_linkclean_admin(interaction):
+        if not self._is_guild_admin(interaction):
             await interaction.response.send_message(
                 "只有伺服器主人、管理員（Administrator／Manage Guild）或指定管理員可以切換。",
                 ephemeral=True,
@@ -1746,10 +1769,95 @@ class DiscordCodexClient(discord.Client):
         )
         await interaction.response.send_message(f"預覽修正：{state}{note}", ephemeral=True)
 
-    def _can_linkclean_admin(self, interaction: discord.Interaction) -> bool:
-        """Who may flip the guild switch: the server owner, a guild admin, or an id the
+    def _instructions_status(self) -> str:
+        persona = instructions.persona_text(self.config)
+        style = instructions.style_text(self.config)
+        lines = []
+        for kind, text in ((instructions.PERSONA, persona), (instructions.OUTPUT_STYLE, style)):
+            where = "上傳版" if instructions.is_uploaded(self.config, kind) else "image 預設"
+            size = f"{len(text)} 字" if text else "空的"
+            lines.append(f"{instructions.LABELS[kind]}：{where}，{size}")
+        return "\n".join(lines)
+
+    async def _apply_instructions(self) -> None:
+        """Rebuild the Codex working directories and retire every live thread. Codex reads
+        AGENTS.md once when a thread starts and never again on resume, so without this the old
+        persona would answer in every conversation that is still inside its TTL."""
+        await asyncio.to_thread(instructions.compose_workspaces, self.config)
+        self.threads.set_version(instructions_version(self.config))
+
+    @app_commands.describe(action="查詢、上傳，或把人設／輸出風格還原成 image 內的預設")
+    @app_commands.choices(action=INSTRUCTION_CHOICES)
+    async def persona_command(
+        self, interaction: discord.Interaction, action: str = "status"
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
+            return
+        if not self._is_guild_admin(interaction):
+            await interaction.response.send_message(
+                "只有伺服器主人、管理員（Administrator／Manage Guild）或指定管理員可以修改。",
+                ephemeral=True,
+            )
+            return
+        action = action.strip().lower()
+        if action == "upload":
+            await interaction.response.send_modal(
+                InstructionsModal(self._save_instructions, instructions.MAX_CHARS)
+            )
+            return
+        if action in ("reset_persona", "reset_style"):
+            kind = instructions.PERSONA if action == "reset_persona" else instructions.OUTPUT_STYLE
+            removed, kept = await asyncio.to_thread(instructions.reset, self.config, kind)
+            if removed:
+                await self._apply_instructions()
+            label = instructions.LABELS[kind]
+            head = (
+                f"{label}已還原成 image 預設，所有對話串重新開始。"
+                if removed
+                else f"{label}本來就是 image 預設，沒有東西要還原。"
+            )
+            LOGGER.info(
+                "instructions reset kind=%s removed=%s by=%s",
+                kind,
+                removed,
+                interaction.user.id,
+            )
+            await interaction.response.send_message(
+                self._with_backup(f"{head}\n{self._instructions_status()}", kept), ephemeral=True
+            )
+            return
+        await interaction.response.send_message(self._instructions_status(), ephemeral=True)
+
+    @staticmethod
+    def _with_backup(text: str, kept: Path | None) -> str:
+        return f"{text}\n備份：{kept.name}" if kept else text
+
+    async def _save_instructions(self, uploads: dict[str, str], who: int) -> str:
+        """Store one or both uploaded files, keep what they replaced, then rebuild and retire."""
+        kept: list[Path] = []
+        for kind, text in uploads.items():
+            backup = await asyncio.to_thread(instructions.save, self.config, kind, text)
+            if backup is not None:
+                kept.append(backup)
+            LOGGER.info("instructions uploaded kind=%s chars=%d by=%s", kind, len(text), who)
+        await self._apply_instructions()
+        names = "、".join(instructions.LABELS[kind] for kind in uploads)
+        lines = [f"已更新 {names}，所有對話串重新開始。", self._instructions_status()]
+        if kept:
+            lines.append("備份：" + "、".join(path.name for path in kept))
+        return "\n".join(lines)
+
+    def _is_guild_admin(self, interaction: discord.Interaction) -> bool:
+        """Who may change operator settings: the server owner, a guild admin, or an id the
         operator listed in LINKCLEAN_ADMIN_IDS (covers a delegated owner who is not the
-        Discord account that owns the server)."""
+        Discord account that owns the server). Note this is a per-guild test applied to the
+        persona, which is global: an admin of any allowed guild changes it for all of them.
+        Owner's ruling, 2026-09-17."""
         user_id = interaction.user.id
         guild = interaction.guild
         if guild is not None and guild.owner_id == user_id:
@@ -2422,5 +2530,7 @@ def configure_logging(config: Config) -> None:
 def main() -> None:
     config = load_config()
     configure_logging(config)
+    # Before the client, which fingerprints these files to decide which threads may resume.
+    instructions.compose_workspaces(config)
     client = DiscordCodexClient(config)
     client.run(config.discord_token, log_handler=None)

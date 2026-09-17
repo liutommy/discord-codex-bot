@@ -102,6 +102,7 @@ class Config:
     codex_home: Path
     codex_workspace: Path
     codex_workspace_plain: Path
+    codex_rules_path: Path
     codex_timeout_seconds: int
     max_prompt_chars: int
     max_response_chars: int
@@ -123,6 +124,7 @@ class Config:
     memory_recall_rounds: int
     output_style_path: Path
     permanent_memory_dir: Path
+    persona_dir: Path
     agy_home: Path
     agy_probe_model: str
     agy_settings_path: Path
@@ -214,6 +216,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         codex_workspace=Path(values.get("CODEX_WORKSPACE", "/workspace")),
         # Same rules without the operator persona; used when a member set a personal style.
         codex_workspace_plain=Path(values.get("CODEX_WORKSPACE_PLAIN", "/workspace-plain")),
+        # The runtime rules half of AGENTS.md. The Bot composes the working directories from it
+        # plus the persona at start-up, so the persona can change without rebuilding the image.
+        codex_rules_path=Path(values.get("CODEX_RULES", "/opt/discord-codex/rules/AGENTS.md")),
         codex_timeout_seconds=_positive_int(values, "CODEX_TIMEOUT_SECONDS", 600),
         max_prompt_chars=_positive_int(values, "MAX_PROMPT_CHARS", 6_000),
         max_response_chars=_positive_int(values, "MAX_RESPONSE_CHARS", 12_000),
@@ -244,6 +249,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         permanent_memory_dir=Path(
             values.get("PERMANENT_MEMORY_DIR", "/opt/discord-codex/permanent")
         ),
+        # Operator persona shipped in the image; an upload overrides it without touching this.
+        persona_dir=Path(values.get("PERSONA_DIR", "/opt/discord-codex/persona")),
         # Antigravity CLI backend (second backend; members pick it per user with /<prefix>-model).
         agy_home=Path(values.get("AGY_HOME", "/home/node")),
         agy_probe_model=values.get("AGY_PROBE_MODEL", "").strip() or "gemini-3.8-flash-low",

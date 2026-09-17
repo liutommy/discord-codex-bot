@@ -9,6 +9,7 @@ from discord_codex_bot.ui import (
     AnswerButton,
     AnswerView,
     CancelView,
+    InstructionsModal,
     StyleModal,
     recover_exchange,
 )
@@ -127,3 +128,43 @@ async def test_style_modal_refuses_an_oversized_file_without_downloading_it() ->
     hit = interaction(1)
     await modal.on_submit(hit)
     assert saved == [] and "太大" in hit.response.sent[-1][0]
+
+
+def _instructions_modal(persona=None, style=None):
+    saved: list[dict] = []
+
+    async def save(uploads, who):
+        saved.append(uploads)
+        return f"已更新 {len(uploads)} 份（by {who}）"
+
+    modal = InstructionsModal(save, 20000)
+    modal.persona._values = [persona] if persona else []
+    modal.style._values = [style] if style else []
+    return modal, saved
+
+
+async def test_instructions_modal_takes_either_file_or_both() -> None:
+    modal, saved = _instructions_modal(persona=_Upload("p.md", "新人設".encode()))
+    hit = interaction(1)
+    await modal.on_submit(hit)
+    assert saved == [{"persona": "新人設"}] and "已更新 1 份" in hit.response.sent[-1][0]
+
+    modal, saved = _instructions_modal(
+        persona=_Upload("p.md", "人設".encode()), style=_Upload("s.md", "風格".encode())
+    )
+    await modal.on_submit(interaction(1))
+    assert saved == [{"persona": "人設", "output-style": "風格"}]
+
+
+async def test_instructions_modal_writes_nothing_when_either_file_is_bad() -> None:
+    for persona, style, reason in (
+        (None, None, "沒有東西要改"),
+        (_Upload("p.txt", b"x"), None, "只收"),
+        (_Upload("p.md", b"ok"), _Upload("s.md", b"   "), "空的"),
+        (None, _Upload("s.md", None, size=10_000_000), "太大"),
+    ):
+        modal, saved = _instructions_modal(persona, style)
+        hit = interaction(1)
+        await modal.on_submit(hit)
+        # all-or-nothing: a bad second file must not leave the first one applied
+        assert saved == [] and reason in hit.response.sent[-1][0]

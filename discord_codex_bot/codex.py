@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import instructions
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
@@ -208,10 +209,8 @@ def collect_generated_images(
 
 
 def output_style(config: Config) -> str:
-    try:
-        return config.output_style_path.read_text("utf-8").strip()
-    except OSError:
-        return ""
+    """The operator default, from wherever it is in force: an uploaded copy wins over the image."""
+    return instructions.style_text(config)
 
 
 def _prompt(

@@ -400,13 +400,32 @@ merged, contradictions resolved newest-wins, nothing invented. Input is fed in b
 run, and a failed scope is left untouched. Codex's own background memory consolidation is not used
 (it needs 6 h of idle time in a long-lived process and has no member dimension).
 
-The persona is a fourth operator-only layer: `persona/*.md` (gitignored except its README) is
-appended to `/workspace/AGENTS.md` at build time, so Codex loads it as project instructions on
-every request — the place with the most weight this deployment can give it. A member who wants
-the plain assistant turns it off with `/style persona:關閉人設`, which serves them from
-`/workspace-plain` (rules only); a thread keeps the workspace it started in. Setting a personal
-style no longer does this by itself: style and persona are separate settings, so asking for
+The persona is a fourth operator-only layer: `persona/*.md` (gitignored except its README and
+the sample) is appended to the runtime rules to make the `AGENTS.md` Codex loads as project
+instructions on every request — the place with the most weight this deployment can give it. A
+member who wants the plain assistant turns it off with `/style persona:關閉人設`, which serves
+them from the persona-free working directory; a thread keeps the one it started in. Setting a
+personal style does not do this by itself: style and persona are separate settings, so asking for
 shorter answers does not also discard the character.
+
+That composition happens when the Bot starts, not when the image is built, so the persona and the
+default output style can be replaced while it runs: `/<prefix>-persona action:上傳` opens a modal
+taking one `.md` for each (either alone is fine, UTF-8, 20000 characters). An uploaded file lives
+in the Codex volume and wins over the image copy until `action:還原…` deletes it, so a rebuild no
+longer discards it — and editing the repo then rebuilding has no visible effect while an upload is
+in force, which is what the status action is for. Whatever the upload replaced is written to
+`BACKUP_DIR/instructions/<kind>-<timestamp>.md` first. The command is gated like the other
+operator switches (server owner, Administrator/Manage Guild, or `LINKCLEAN_ADMIN_IDS`); note that
+the persona is shared by every allowed guild, so an admin of one changes it for all of them.
+
+Codex reads `AGENTS.md` once when a thread starts and never re-reads it on resume, so every change
+here retires all live threads: the instruction fingerprint moves and no existing thread resumes.
+Members see the next message start a new conversation, and the retired threads are harvested into
+personal memory as usual.
+
+Both files are the operator's own, so neither is in git: copy `persona/AGENTS.example.md` to
+`persona/AGENTS.md` and `config/output-style.example.md` to `config/output-style.md`, or upload
+them at runtime. A clone with neither runs with no persona and no default style.
 
 Output style has two layers. `config/output-style.md` is the operator's default; when it has
 content it is injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
