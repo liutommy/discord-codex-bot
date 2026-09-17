@@ -188,7 +188,6 @@ async def run_agy(
     model to open them with view_file; agy has no attach-image flag in print mode.
     """
     # Same rule as run_codex: a member with a personal style gets the persona-free workspace.
-    plain = plain or bool(personal_style)
     workspace = config.codex_workspace_plain if plain else config.codex_workspace
     project = await ensure_project(config, workspace)
     prompt = (

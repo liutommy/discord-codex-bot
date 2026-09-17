@@ -402,16 +402,20 @@ run, and a failed scope is left untouched. Codex's own background memory consoli
 
 The persona is a fourth operator-only layer: `persona/*.md` (gitignored except its README) is
 appended to `/workspace/AGENTS.md` at build time, so Codex loads it as project instructions on
-every request — the place with the most weight this deployment can give it. A member who sets a
-personal style is served from `/workspace-plain` (rules only), so the personal style replaces the
-persona instead of competing with it; a thread keeps the workspace it started in.
+every request — the place with the most weight this deployment can give it. A member who wants
+the plain assistant turns it off with `/style persona:關閉人設`, which serves them from
+`/workspace-plain` (rules only); a thread keeps the workspace it started in. Setting a personal
+style no longer does this by itself: style and persona are separate settings, so asking for
+shorter answers does not also discard the character.
 
 Output style has two layers. `config/output-style.md` is the operator's default; when it has
 content it is injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
-Each member can set their own with `/style text:…` (stored as
-`memory/<guild>/users/<member>/style.md` and injected as `<PERSONAL_STYLE>`, which wins over the
-default where they conflict), inspect it with `/style`, and return to the default with
-`/style clear:True`.
+Each member can set their own with `/style text:…` for a one-liner, or `/style upload:True` to
+send one Markdown file — a slash-command option is a single line, so anything longer belongs in a
+file. The upload is UTF-8 `.md` bounded by 4000 characters, the same ceiling Discord puts on a
+modal paragraph. Either way it is stored as `memory/<guild>/users/<member>/style.md` and injected
+as `<PERSONAL_STYLE>`, which wins over the default where they conflict. Inspect it with `/style`
+and return to the default with `/style clear:True`.
 
 Codex can also generate images (`image_generation = true`). The built-in tool writes them to
 `CODEX_HOME/generated_images/<thread_id>/`; the Bot attaches them to the reply (up to 10) and

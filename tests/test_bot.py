@@ -952,7 +952,7 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     # defaults: nothing set, no thread
     text = await client._status_text(GUILD, 555, USER)
     assert "模型：Codex · gpt-5.6-luna · 強度 High（預設）" in text
-    assert "風格：無（用預設）" in text and "續接：無，下一句會新開對話" in text
+    assert "風格：無（用預設）；人設：保留" in text and "續接：無，下一句會新開對話" in text
     assert "記憶：個人 0 條 / 0 KB（上限 50 MB） · 伺服器 0 條" in text
     assert "永久 0 主題" in text
     assert "Codex：ChatGPT 訂閱登入有效 · 額度 5h 12% / 7d 3%" in text
@@ -965,10 +965,11 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     client.memory.set_style(GUILD, USER, "條列、少於 50 字")
     client.memory.add("user", GUILD, USER, "拉麵", "小明喜歡拉麵")
     key = ThreadStore.key(GUILD, 555, USER)
+    client.memory.set_persona_off(GUILD, USER, True)
     client.threads.remember(key, "oc-abc", None, plain=True, model="orcarouter:tencent/hy3-free")
     text = await client._status_text(GUILD, 555, USER)
     assert "模型：OrcaRouter · tencent/hy3-free · 強度 無（你設定） · 看不到圖" in text
-    assert "風格：條列、少於 50 字" in text
+    assert "風格：條列、少於 50 字；人設：關閉" in text
     assert "續接：會接續 0 分鐘前的對話（OrcaRouter · tencent/hy3-free）" in text
     assert "個人 1 條" in text
 
@@ -1842,3 +1843,44 @@ async def test_linkclean_command_checks_access_before_changing_state(client) -> 
     assert client.linkclean.mode(GUILD) == "off"
     await client.linkclean_command(interaction)
     assert responses[-1] == "連結洗參數：全關"
+
+
+async def test_style_command_keeps_persona_separate_and_offers_the_file_route(client) -> None:
+    from discord_codex_bot.ui import StyleModal
+
+    responses: list[str] = []
+    modals: list[object] = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    async def send_modal(modal):
+        modals.append(modal)
+
+    interaction = _interaction(USER, 777)
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send, send_modal=send_modal)
+
+    await client.style_command(interaction, text="條列、少於 50 字")
+    assert client.memory.get_style(GUILD, USER) == "條列、少於 50 字"
+    assert client.memory.get_persona_off(GUILD, USER) is False  # the character survives a style
+    assert "人設：保留" in responses[-1]
+
+    await client.style_command(interaction, persona="off")
+    assert client.memory.get_persona_off(GUILD, USER) is True
+    assert client.memory.get_style(GUILD, USER) == "條列、少於 50 字"  # the style survives it too
+    assert "人設：關閉" in responses[-1]
+
+    await client.style_command(interaction, clear=True)
+    assert client.memory.get_style(GUILD, USER) == ""
+    assert client.memory.get_persona_off(GUILD, USER) is True  # clearing a style is not a reset
+
+    await client.style_command(interaction, persona="keep")
+    assert client.memory.get_persona_off(GUILD, USER) is False
+
+    await client.style_command(interaction, upload=True)
+    assert len(modals) == 1 and isinstance(modals[0], StyleModal)
+    await client.style_command(interaction, upload=True, text="短")
+    assert len(modals) == 1 and "一次做一件事" in responses[-1]

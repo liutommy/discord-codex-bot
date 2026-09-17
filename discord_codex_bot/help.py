@@ -41,11 +41,15 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "-style": (
-        "設定你個人的回覆風格，會覆蓋伺服器預設（人設也會換成不帶角色的版本）。"
+        "設定你個人的回覆風格，會覆蓋伺服器預設。風格與人設是兩個獨立設定："
+        "設風格不會換掉角色，要不帶角色的版本請用 persona:關閉人設。"
+        "長一點的風格用 upload:True 傳一個 .md 檔（UTF-8、上限 4000 字）。"
         "留空＝查看；clear 清除回到預設。",
         [
             "/{p}-style text:條列、少於 100 字、用英文",
-            "/{p}-style（留空：看目前風格）",
+            "/{p}-style upload:True（開視窗上傳 .md）",
+            "/{p}-style persona:關閉人設",
+            "/{p}-style（留空：看目前風格與人設）",
             "/{p}-style clear:True",
         ],
     ),

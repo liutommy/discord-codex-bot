@@ -253,7 +253,6 @@ async def run_router(
     conversation lives in a Bot-kept transcript (thread id `<prefix>…`); `resume` replays it,
     bounded by OPENROUTER_HISTORY_CHARS. Images go inline (base64) when the catalog says the
     model reads them; effort is sent only when the catalog says the model takes it."""
-    plain = plain or bool(personal_style)
     info = catalog.get(model) if catalog else None
     prompt = (
         user_prompt

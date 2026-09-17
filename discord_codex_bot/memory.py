@@ -11,7 +11,13 @@ INDEX_FILE = "MEMORY.md"
 ARCHIVE_FILE = "MEMORY-archive.md"
 TOPIC_DIR = "topics"
 STYLE_FILE = "style.md"
+PERSONA_OFF_FILE = "persona-off"
 MODEL_FILE = "model.txt"
+# Discord caps a modal paragraph at 4000 characters; the file route keeps the same bar so the
+# two ways of setting a style accept the same thing.
+STYLE_MAX_CHARS = 4000
+STYLE_MAX_UPLOAD_BYTES = STYLE_MAX_CHARS * 4 + 1024  # worst-case UTF-8 for that many characters
+STYLE_SUFFIXES = (".md", ".markdown")
 LIST_NAME = "list"
 _SLUG = re.compile(r"[^\w-]+", re.UNICODE)
 _INDEX_LINE = re.compile(r"^- \[(?P<name>[^\]]+)\]\((?P<file>[^)]+)\) — (?P<hook>.*)$")
@@ -69,6 +75,22 @@ def _hook(text: str) -> str:
 def slugify(name: str) -> str:
     slug = _SLUG.sub("-", name.strip()).strip("-").lower()[:40]
     return slug or "memory"
+
+
+def parse_style_upload(filename: str, data: bytes, limit: int = STYLE_MAX_CHARS) -> str:
+    """The text of an uploaded personal-style file. Raises ValueError carrying the sentence the
+    member should see: every rejection here is something they can fix and re-upload."""
+    if not filename.lower().endswith(STYLE_SUFFIXES):
+        raise ValueError("只收 .md 檔。")
+    try:
+        text = data.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise ValueError("檔案不是 UTF-8 文字，存成 UTF-8 再上傳。") from None
+    if not text:
+        raise ValueError("檔案是空的。")
+    if len(text) > limit:
+        raise ValueError(f"檔案 {len(text)} 字，超過上限 {limit} 字。")
+    return text
 
 
 class MemoryStore:
@@ -311,6 +333,24 @@ class MemoryStore:
         existed = path.exists()
         path.unlink(missing_ok=True)
         return existed
+
+    # ----- persona opt-out ---------------------------------------------------------------------
+
+    def persona_off_path(self, guild_id: int | None, user_id: int) -> Path:
+        return self.scope_dir("user", guild_id, user_id) / PERSONA_OFF_FILE
+
+    def get_persona_off(self, guild_id: int | None, user_id: int) -> bool:
+        """Whether this member asked for the plain assistant. Deliberately independent of the
+        personal style: wanting shorter answers is not wanting a different character."""
+        return self.persona_off_path(guild_id, user_id).exists()
+
+    def set_persona_off(self, guild_id: int | None, user_id: int, off: bool) -> None:
+        path = self.persona_off_path(guild_id, user_id)
+        if off:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("1\n", "utf-8")
+        else:
+            path.unlink(missing_ok=True)
 
     # ----- personal model choice -------------------------------------------------------------
 

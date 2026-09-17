@@ -312,7 +312,9 @@ def _prompt(
             " operation, remember only that explicit preference, not the operation.",
             "OUTPUT_STYLE, when present, is the operator's default formatting and voice for every"
             " answer. PERSONAL_STYLE, when present, is this member's own preference and wins over"
-            " OUTPUT_STYLE wherever they conflict. Follow them unless the member asks otherwise.",
+            " OUTPUT_STYLE wherever they conflict. Follow them unless the member asks otherwise."
+            " Both govern formatting, length and tone only: keep the character your project"
+            " instructions give you; a member switches that off separately when they want it gone.",
             "HELP, when present, lists this Bot's slash commands and abilities. When the member"
             " asks what you can do or how a command works, answer from HELP in your own words;"
             " never invent commands, options or abilities that are not listed there.",
@@ -465,6 +467,7 @@ async def run_codex(
     help: str = "",
     files: str = "",
     on_delta=None,
+    plain: bool = False,
     isolated: bool = False,
 ) -> CodexResult:
     """Run one turn. `raw` sends `user_prompt` verbatim (used to feed recalled notes back).
@@ -475,7 +478,7 @@ async def run_codex(
         if raw
         else _prompt(user_prompt, memory, output_style(config), personal_style, links, help, files)
     )
-    plain = isolated or bool(personal_style)
+    plain = isolated or plain
     code, output, stderr = await _exec(
         prompt, config, images, effort, resume, schema, plain, isolated
     )

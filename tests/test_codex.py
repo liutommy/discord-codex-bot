@@ -400,7 +400,7 @@ async def test_run_codex_raises_on_failure_or_missing_message(config: Config, mo
     assert len(fake.calls) == 1
 
 
-async def test_run_codex_wraps_prompt_unless_raw_and_plain_follows_style(
+async def test_run_codex_wraps_prompt_unless_raw_and_style_keeps_the_persona(
     config: Config, tmp_path, monkeypatch
 ) -> None:
     style = tmp_path / "style.md"
@@ -410,7 +410,8 @@ async def test_run_codex_wraps_prompt_unless_raw_and_plain_follows_style(
     monkeypatch.setattr(codex, "_exec", fake)
     await run_codex("問題", config, memory="- [a](a.md) — x", personal_style="短")
     sent = fake.calls[-1]
-    assert sent["plain"] is True and sent["effort"] == ""
+    # a personal style is a formatting preference: it must not move the member off the persona
+    assert sent["plain"] is False and sent["effort"] == ""
     assert "<USER_MESSAGE>\n問題\n</USER_MESSAGE>" in sent["prompt"]
     assert "<OUTPUT_STYLE>\n條列" in sent["prompt"] and "<PERSONAL_STYLE>\n短" in sent["prompt"]
     assert "<MEMORY>\n- [a](a.md) — x" in sent["prompt"]
@@ -418,6 +419,10 @@ async def test_run_codex_wraps_prompt_unless_raw_and_plain_follows_style(
     sent = fake.calls[-1]
     assert sent["prompt"] == "verbatim" and sent["plain"] is False
     assert sent["effort"] == "low" and sent["schema"] == Path("/s.json")
+    await run_codex("問題", config, personal_style="短", plain=True)
+    assert fake.calls[-1]["plain"] is True  # only the explicit opt-out drops the persona
+    await run_codex("問題", config, isolated=True)
+    assert fake.calls[-1]["plain"] is True  # isolated runs never carry the persona
 
 
 def test_prompt_carries_the_help_sheet_and_the_no_invention_rule() -> None:

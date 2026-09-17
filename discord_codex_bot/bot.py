@@ -73,6 +73,7 @@ from .memory import (
     RECALL_TAG,
     SCOPES,
     SEARCH_TAG,
+    STYLE_MAX_CHARS,
     MemoryLimits,
     MemoryStore,
     PermanentMemory,
@@ -108,7 +109,7 @@ from .tracking import (
     render_watches,
     tracking_loop,
 )
-from .ui import AnswerButton, AnswerView, CancelView, recover_exchange
+from .ui import AnswerButton, AnswerView, CancelView, StyleModal, recover_exchange
 from .usage import probe_rate_limits
 
 LOGGER = logging.getLogger(__name__)
@@ -121,6 +122,10 @@ FAILURE_MESSAGE = (
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
 LINKCLEAN_CHOICES = [app_commands.Choice(name="查詢", value="status")] + [
     app_commands.Choice(name=label, value=value) for value, label in MODES.items()
+]
+PERSONA_CHOICES = [
+    app_commands.Choice(name=label, value=value)
+    for value, label in (("keep", "保留人設"), ("off", "關閉人設"))
 ]
 EMBEDFIX_CHOICES = [
     app_commands.Choice(name=label, value=value)
@@ -791,6 +796,7 @@ class DiscordCodexClient(discord.Client):
                 if section
             )
             style = self.memory.get_style(guild_id, user_id)
+            persona_off = self.memory.get_persona_off(guild_id, user_id)
             found = find_urls(prompt, self.config.link_max_urls)
             links, shots = await link_blocks(found, self.config, link_dir, previews)
             images.extend(shots)
@@ -803,6 +809,7 @@ class DiscordCodexClient(discord.Client):
                     resume=resume,
                     memory=memory,
                     personal_style=style,
+                    plain=persona_off,
                     links=links,
                     help=self.help_sheet(),
                     files=files,
@@ -868,6 +875,7 @@ class DiscordCodexClient(discord.Client):
                         resume=thread,
                         raw=True,
                         personal_style=style,
+                        plain=persona_off,
                     )
                 )
             text, facts = extract_memory_tags(result.text)
@@ -1198,7 +1206,7 @@ class DiscordCodexClient(discord.Client):
         # The answer's own message id is the link; if that thread is no longer resumable (TTL,
         # style or model change) fall back to the member's current thread here, then to none.
         key = ThreadStore.key(interaction.guild_id, interaction.channel_id, user_id)
-        plain = bool(self.memory.get_style(interaction.guild_id, user_id))
+        plain = self.memory.get_persona_off(interaction.guild_id, user_id)
         model = self._model(interaction.guild_id, user_id)
         resume = self.threads.by_message(
             getattr(interaction.message, "id", None), plain=plain, model=model
@@ -1790,7 +1798,9 @@ class DiscordCodexClient(discord.Client):
             if info is not None and not info.image:
                 model_line += " · 看不到圖"
         style = self.memory.get_style(guild_id, user_id)
+        persona_off = self.memory.get_persona_off(guild_id, user_id)
         style_line = f"風格：{style[:60]}" if style else "風格：無（用預設）"
+        style_line += "；人設：關閉" if persona_off else "；人設：保留"
 
         key = ThreadStore.key(guild_id, channel_id, user_id)
         entry = self.threads.live_entry(key)
@@ -1799,7 +1809,7 @@ class DiscordCodexClient(discord.Client):
         else:
             minutes = max(0, int((time.time() - float(entry["at"])) // 60))
             previous = parse_choice(str(entry.get("model", "")), self.config.codex_model).label
-            if self.threads.current(key, plain=bool(style), model=chosen.value):
+            if self.threads.current(key, plain=persona_off, model=chosen.value):
                 thread_line = (
                     f"續接：會接續 {minutes} 分鐘前的對話（{previous}）"
                     f"；/{self.config.command_prefix} 的 new 可重來"
@@ -2091,30 +2101,58 @@ class DiscordCodexClient(discord.Client):
             message = f"目前：{self._describe(*split_stored(stored))}"
         await interaction.response.send_message(message, ephemeral=True)
 
+    def _style_status(self, guild_id: int | None, user_id: int) -> str:
+        """Style and persona are two independent settings, so both are reported every time: the
+        pair is what decides how an answer comes out, and one of them used to move on its own."""
+        style = self.memory.get_style(guild_id, user_id)
+        persona = "關閉（不帶角色）" if self.memory.get_persona_off(guild_id, user_id) else "保留"
+        return f"風格：{style or '無（用預設）'}\n人設：{persona}"
+
     @app_commands.describe(
         text="你的回覆風格（例如：條列、少於 100 字、用英文）；留空＝查看目前設定",
         clear="設為 True 清除個人風格，回到預設",
+        upload=f"設為 True 開啟上傳視窗，用一個 .md 檔當個人風格（上限 {STYLE_MAX_CHARS} 字）",
+        persona="要不要保留伺服器人設；不選＝維持現狀",
     )
+    @app_commands.choices(persona=PERSONA_CHOICES)
     async def style_command(
         self,
         interaction: discord.Interaction,
         text: str | None = None,
         clear: bool = False,
+        upload: bool = False,
+        persona: str | None = None,
     ) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
         guild_id, user_id = interaction.guild_id, interaction.user.id
+        if upload and (clear or (text and text.strip())):
+            await interaction.response.send_message(
+                "上傳檔案時不要同時給 text 或 clear，一次做一件事。", ephemeral=True
+            )
+            return
+        if upload:
+            # A modal must be the first response to the interaction, so nothing else happens here.
+            await interaction.response.send_modal(
+                StyleModal(
+                    lambda body: self.memory.set_style(guild_id, user_id, body), STYLE_MAX_CHARS
+                )
+            )
+            return
+        changed = False
+        if persona is not None:
+            self.memory.set_persona_off(guild_id, user_id, persona == "off")
+            changed = True
         if clear:
-            cleared = self.memory.clear_style(guild_id, user_id)
-            message = "已清除個人風格，回到預設。" if cleared else "你沒有設定個人風格。"
+            self.memory.clear_style(guild_id, user_id)
+            changed = True
         elif text and text.strip():
             self.memory.set_style(guild_id, user_id, text)
-            message = f"已設定個人風格：\n{text.strip()}"
-        else:
-            current = self.memory.get_style(guild_id, user_id)
-            message = f"目前個人風格：\n{current}" if current else "目前使用預設風格。"
+            changed = True
+        head = "已更新。" if changed else "目前設定："
+        message = f"{head}\n{self._style_status(guild_id, user_id)}"
         await interaction.response.send_message(split_discord_message(message)[0], ephemeral=True)
 
     async def reset_command(self, interaction: discord.Interaction) -> None:
@@ -2160,7 +2198,7 @@ class DiscordCodexClient(discord.Client):
             return
 
         key = ThreadStore.key(interaction.guild_id, interaction.channel_id, interaction.user.id)
-        plain = bool(self.memory.get_style(interaction.guild_id, interaction.user.id))
+        plain = self.memory.get_persona_off(interaction.guild_id, interaction.user.id)
         model = self._model(interaction.guild_id, interaction.user.id)
         resume = "" if new else self.threads.current(key, plain=plain, model=model)
         await interaction.response.defer(thinking=True)
@@ -2286,7 +2324,7 @@ class DiscordCodexClient(discord.Client):
         # Replying to one of the Bot's answers continues that exact thread; otherwise the member's
         # most recent thread in this channel (within the TTL) is continued.
         key = ThreadStore.key(guild_id, message.channel.id, message.author.id)
-        plain = bool(self.memory.get_style(guild_id, message.author.id))
+        plain = self.memory.get_persona_off(guild_id, message.author.id)
         model = self._model(guild_id, message.author.id)
         replied_to = message.reference.message_id if message.reference else None
         resume = self.threads.by_message(

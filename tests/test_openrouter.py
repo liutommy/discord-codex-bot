@@ -201,9 +201,9 @@ async def test_run_openrouter_resumes_and_respects_model_capabilities(
     )
     assert two.text == "二" and two.resumed and two.thread_id == one.thread_id
     body = second.calls[0][2]
-    assert body["messages"][0]["role"] != "system"  # personal style ⇒ persona-free workspace
-    assert [m["role"] for m in body["messages"]] == ["user", "assistant", "user"]
-    assert body["messages"][1]["content"] == "一"
+    assert body["messages"][0]["role"] == "system"  # a personal style keeps the persona
+    assert [m["role"] for m in body["messages"]] == ["system", "user", "assistant", "user"]
+    assert body["messages"][2]["content"] == "一"  # system, q1, answer, q2
     assert isinstance(body["messages"][-1]["content"], str)  # no image parts for a text model
     assert "這個模型看不到圖片" in body["messages"][-1]["content"]
     assert [m["role"] for m in load_transcript(cfg, one.thread_id)] == [

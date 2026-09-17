@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
 from typing import Any
 
 import discord
 
+from .memory import STYLE_MAX_UPLOAD_BYTES, parse_style_upload
+
 NOT_YOURS = "這不是你的回答，按鈕只有發問的人能用。"
 CANCEL_TIMEOUT_SECONDS = 900
+STYLE_MODAL_TIMEOUT = 600
 _ACTIONS = {"redo": ("重答", "🔁"), "remember": ("記住", "👍")}
 
 
@@ -84,6 +88,55 @@ class AnswerView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(AnswerButton("redo", user_id))
         self.add_item(AnswerButton("remember", user_id, remember_emoji))
+
+
+class StyleModal(discord.ui.Modal, title="上傳個人風格"):
+    """One Markdown file becomes the member's personal style. It exists because a slash-command
+    option is a single line — fine for "條列、少於 100 字", useless for anything longer — so the
+    text option stays for one-liners and everything else arrives as a file."""
+
+    def __init__(self, save: Callable[[str], None], limit: int) -> None:
+        super().__init__(timeout=STYLE_MODAL_TIMEOUT)
+        self.save = save
+        self.limit = limit
+        self.upload = discord.ui.FileUpload(custom_id="style-file", max_values=1)
+        self.add_item(
+            discord.ui.Label(
+                text=f"風格檔（.md，UTF-8，最多 {limit} 字）",
+                description="整份檔案會取代你目前的個人風格。",
+                component=self.upload,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not self.upload.values:
+            await interaction.response.send_message("沒有收到檔案。", ephemeral=True)
+            return
+        attachment = self.upload.values[0]
+        if attachment.size > STYLE_MAX_UPLOAD_BYTES:
+            # Checked before downloading: the character limit is the real bound, this only keeps
+            # an oversized file from being pulled in to find that out.
+            await interaction.response.send_message(
+                f"檔案太大（{attachment.size} bytes），個人風格最多 {self.limit} 字。",
+                ephemeral=True,
+            )
+            return
+        try:
+            body = await attachment.read()
+        except discord.HTTPException:
+            await interaction.response.send_message("讀不到那個檔案，再試一次。", ephemeral=True)
+            return
+        try:
+            text = parse_style_upload(attachment.filename, body, self.limit)
+        except ValueError as bad:
+            await interaction.response.send_message(str(bad), ephemeral=True)
+            return
+        self.save(text)
+        await interaction.response.send_message(
+            f"已用 {attachment.filename} 設定個人風格（{len(text)} 字）。人設不受影響，"
+            "要不帶角色的版本請用 persona:關閉人設。",
+            ephemeral=True,
+        )
 
 
 def recover_exchange(content: str) -> tuple[str, str]:
