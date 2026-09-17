@@ -111,3 +111,17 @@ def test_parse_upload_accepts_markdown_and_names_every_rejection() -> None:
         instructions.parse_upload("persona.md", over.encode())
     # the operator limit has to clear the shipped persona, which is far past a member's 4000
     assert instructions.MAX_CHARS > 4000
+
+
+def test_two_backups_in_the_same_second_do_not_overwrite_each_other(
+    config: Config, tmp_path: Path
+) -> None:
+    cfg = _config(config, tmp_path)
+    (cfg.persona_dir / "AGENTS.md").write_text("原本的人設\n", "utf-8")
+    frozen = 1_758_000_000.0  # same second for both calls, which is what an upload+reset does
+    first = instructions.backup(cfg, instructions.PERSONA, now=frozen)
+    instructions.save(cfg, instructions.PERSONA, "替換的人設")
+    second = instructions.backup(cfg, instructions.PERSONA, now=frozen)
+    assert first is not None and second is not None and first != second
+    assert first.read_text("utf-8").strip() == "原本的人設"
+    assert second.read_text("utf-8").strip() == "替換的人設"

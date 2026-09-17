@@ -119,9 +119,16 @@ def backup(config: Config, kind: str, now: float | None = None) -> Path | None:
     if not text:
         return None
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now if now else time.time()))
-    target = config.backup_dir / "instructions" / f"{kind}-{stamp}.md"
+    folder = config.backup_dir / "instructions"
+    target = folder / f"{kind}-{stamp}.md"
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        folder.mkdir(parents=True, exist_ok=True)
+        # Upload-then-reset inside one second would otherwise land on the same name and the
+        # second backup would destroy the first — which is the one holding the older text.
+        serial = 1
+        while target.exists():
+            target = folder / f"{kind}-{stamp}-{serial}.md"
+            serial += 1
         target.write_text(text + "\n", "utf-8")
     except OSError:
         LOGGER.error("could not back up %s to %s", kind, target)
