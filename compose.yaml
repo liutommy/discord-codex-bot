@@ -59,12 +59,19 @@ services:
       - default
       - sandbox_net
 
-  # Self-hosted web search for the Bot's <web> tool. No host port: only the bot container can
-  # reach it (http://searxng:8080 on the compose network), so it publishes nothing.
+  # Self-hosted web search. The Bot's <web> tool reaches it by name on the compose network
+  # (http://searxng:8080); other agents on this host reach it through the loopback port below.
+  #
+  # Loopback only, and deliberately so: the service has no authentication, so the published
+  # port is what decides who can query it. Binding 127.0.0.1 keeps that set to "processes on
+  # this host" -- the same trust boundary the agents already sit inside -- while 0.0.0.0 would
+  # hand an open search proxy to both of this machine's networks.
   searxng:
     image: searxng/searxng:latest
     container_name: ${BOT_CONTAINER_NAME:-tommy_test}_searxng
     restart: always
+    ports:
+      - "127.0.0.1:${SEARXNG_HOST_PORT:-17970}:8080"
     environment:
       BASE_URL: http://searxng:8080/
       SEARXNG_SETTINGS_PATH: /etc/searxng/settings.yml
