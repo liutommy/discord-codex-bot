@@ -272,6 +272,28 @@ def request_only(answer: str) -> bool:
     return bool(answer.strip()) and not rest.strip()
 
 
+# A control tag the model made up. Every real one is handled and stripped before this runs, so
+# whatever is still here is an operation the Bot cannot perform — and the sentence above it has
+# already told the member it was performed. The underscore is what makes this safe to match on:
+# the Bot's own vocabulary uses it (track_every, cancel_reminder, cancel_track) and no HTML or
+# XML element a member might be shown does, so quoted markup is never mistaken for an order.
+INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{0,200}")*\s*/?>')
+
+
+def strip_invented_tags(text: str) -> tuple[str, list[str]]:
+    """(text with the leftover tags removed, the names that were in it).
+
+    2026-09-19: asked in the channel to stop a watch, the model wrote "星街的追蹤取消了" and
+    `<cancel_track id="1"/>`. Cancelling was slash-only, so nothing happened, the raw tag was
+    posted, and the watch kept notifying. `<cancel_track>` is real now, but the next invented
+    tag is a matter of time; what must not survive is a claim the Bot never carried out.
+    Stripping alone would make that worse — the visible tag is the only reason this was caught
+    at all — so the member gets told, and the log gets the name to fix next.
+    """
+    names = list(dict.fromkeys(INVENTED_TAG.findall(text)))
+    return (INVENTED_TAG.sub("", text).strip(), names) if names else (text, [])
+
+
 def _for_other(item: dict) -> bool:
     """A reminder set for someone other than the member who set it."""
     return item.get("target_id", item["user_id"]) != item["user_id"]
@@ -926,6 +948,19 @@ class DiscordCodexClient(discord.Client):
                 self.memory.add(scope, guild_id, user_id, name, fact)
             text = self._apply_reminder_tags(text, guild_id, channel_id, user_id)
             text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id)
+            text, invented = strip_invented_tags(text)
+            if invented:
+                LOGGER.warning(
+                    "Invented tags guild=%s channel=%s user=%s tags=%s",
+                    guild_id,
+                    channel_id,
+                    user_id,
+                    ",".join(invented),
+                )
+                text += (
+                    "\n\n（⚠️ 上面說的操作其實沒有執行——我用了不存在的指令。"
+                    "請直接用斜線指令，或再說一次。）"
+                )
             await self.alerts.record_success(target.backend)
             generated_dir = result.generated_dir
             outgoing = tuple(result.images)  # not `images`: that list is cleaned up in finally
@@ -1491,11 +1526,9 @@ class DiscordCodexClient(discord.Client):
     async def _apply_tracking_tags(
         self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
     ) -> str:
-        """Create / promote / demote the watches the model asked for and append a confirmation.
-        Deleting is deliberately not a tag: it discards the watch's baseline, and rebuilding one
-        costs a whole classification pass, so it stays an explicit slash command."""
-        clean, adds, intervals = extract_track_tags(text)
-        if not adds and not intervals:
+        """Create / retime / cancel the watches the model asked for and append a confirmation."""
+        clean, adds, intervals, cancels = extract_track_tags(text)
+        if not adds and not intervals and not cancels:
             return text
         store = self.tracker
         if store is None:
@@ -1524,13 +1557,29 @@ class DiscordCodexClient(discord.Client):
                 if done
                 else f"（找不到你的追蹤 #{watch_id}）"
             )
+        for watch_id in cancels:
+            # Scoped to the asking member, exactly like the slash command: one member can never
+            # talk the Bot into dropping someone else's watch.
+            done = store.delete_watch(watch_id, user_id)
+            LOGGER.info(
+                "Tracking cancel guild=%s channel=%s user=%s watch=%s -> %s",
+                guild_id,
+                channel_id,
+                user_id,
+                watch_id,
+                "deleted" if done else "not found",
+            )
+            notes.append(
+                f"⛔ 已取消追蹤 #{watch_id}。" if done else f"（找不到你的追蹤 #{watch_id}）"
+            )
         LOGGER.info(
-            "Tracking tags guild=%s channel=%s user=%s adds=%d every=%d",
+            "Tracking tags guild=%s channel=%s user=%s adds=%d every=%d cancels=%d",
             guild_id,
             channel_id,
             user_id,
             len(adds),
             len(intervals),
+            len(cancels),
         )
         return f"{clean}\n\n" + "\n".join(notes)
 

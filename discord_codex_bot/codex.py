@@ -292,8 +292,9 @@ def _prompt(
             " use the default policy. A watch is live from the moment it is made: it notifies"
             " about content published after that, never about what is already there, and only"
             " when the content matches. The judgement history is a slash command the member"
-            " runs themselves — never offer to post it into the channel. Deleting a"
-            " watch is a slash command, not a tag."
+            " runs themselves — never offer to post it into the channel. When they ask to stop"
+            ' one, append <cancel_track id="N"/> using an id from that section; never invent'
+            " ids, and never claim a watch was cancelled without emitting the tag."
             ' Add every="60" to <track> when the member asks how often it should be judged, and'
             ' <track_every id="N" minutes="120"/> to change an existing one. Attribute order'
             " does not matter. The source is always checked on the Bot's own schedule; this only"

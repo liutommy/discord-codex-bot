@@ -252,7 +252,7 @@ def test_track_tags_are_parsed_like_reminder_tags() -> None:
         '<track source="https://www.youtube.com/@HoushouMarine" interest="重大公告"'
         ' who="<@111111111111111111> <@222222222222222222>"/>'
     )
-    clean, adds, intervals = extract_track_tags(answer)
+    clean, adds, intervals, cancels = extract_track_tags(answer)
     assert clean == "好，幫你追起來。"
     assert adds == [
         (
@@ -263,10 +263,13 @@ def test_track_tags_are_parsed_like_reminder_tags() -> None:
         )
     ]
     assert intervals == []
+    assert cancels == []
     # interest and who are optional: the default policy applies and only the owner is pinged.
-    _clean, bare, _every = extract_track_tags('<track source="https://www.twitch.tv/chibidoki"/>')
+    _clean, bare, _every, _cancels = extract_track_tags(
+        '<track source="https://www.twitch.tv/chibidoki"/>'
+    )
     assert bare == [("https://www.twitch.tv/chibidoki", "", (), 0)]
-    assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [])
+    assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [], [])
 
 
 def test_a_decision_without_wording_is_rejected(tmp_path: Path) -> None:
@@ -295,14 +298,17 @@ def test_a_decision_without_wording_is_rejected(tmp_path: Path) -> None:
 
 def test_track_tag_attributes_are_read_by_name_not_by_order() -> None:
     # A model that writes the attributes in another order must not lose the later ones.
-    _clean, adds, _every = extract_track_tags(
+    _clean, adds, _every, _cancels = extract_track_tags(
         '<track every="30" who="<@111111111111111111>" source="https://www.twitch.tv/x"/>'
     )
     assert adds == [("https://www.twitch.tv/x", "", (111111111111111111,), 30)]
     # A <track> with no source is not an instruction we can carry out.
     assert extract_track_tags('<track interest="whatever"/>')[1] == []
-    _clean, _adds, intervals = extract_track_tags('<track_every id="7" minutes="120"/>')
+    _clean, _adds, intervals, _cancels = extract_track_tags('<track_every id="7" minutes="120"/>')
     assert intervals == [(7, 120)]
+    # Cancelling by tag: the member's own ids are in the prompt, so none has to be invented.
+    clean, _adds, _every, cancels = extract_track_tags('好，取消了。\n<cancel_track id="1"/>')
+    assert clean == "好，取消了。" and cancels == [1]
 
 
 def test_a_watch_is_only_classified_once_per_its_own_interval(tmp_path: Path) -> None:

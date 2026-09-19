@@ -232,6 +232,15 @@ TRACK_TAG = re.compile(r'<track((?:\s+[a-z_]{1,10}="[^"]{0,2000}")+)\s*/?>(?:\s*
 TRACK_EVERY_TAG = re.compile(
     r'<track_every\s+id="([0-9]{1,9})"\s+minutes="([0-9]{1,5})"\s*/?>(?:\s*</track_every>)?'
 )
+# Cancelling used to be slash-only, on the grounds that dropping a watch throws away its
+# baseline and rebuilding one costs a classification pass. That cost is the member's to spend —
+# the slash command already lets them spend it — and the asymmetry had a price of its own:
+# 2026-09-19 a member asked in the channel, the model generalised from <cancel_reminder>,
+# emitted <cancel_track id="1"/>, and the Bot dropped it on the floor. The member was told the
+# watch was cancelled, the raw tag went out in the message, and the watch kept notifying.
+# Telling the model "deleting is a slash command, not a tag" was already in the prompt and did
+# not hold; a vocabulary that matches the operations one-for-one is what holds.
+CANCEL_TRACK_TAG = re.compile(r'<cancel_track\s+id="([0-9]{1,9})"\s*/?>(?:\s*</cancel_track>)?')
 _ATTR = re.compile(r'([a-z_]{1,10})="([^"]{0,2000})"')
 _MENTION = re.compile(r"<?@?!?([0-9]{17,20})>?")
 MAX_TRACK_TAGS = 3
@@ -250,9 +259,9 @@ TrackAdd = tuple[str, str, tuple[int, ...], int]
 
 def extract_track_tags(
     answer: str,
-) -> tuple[str, list[TrackAdd], list[tuple[int, int]]]:
-    """(answer without the tags, watches to add, (id, minutes) interval changes). A watch is
-    live from the moment it is made, so there is no mode to switch."""
+) -> tuple[str, list[TrackAdd], list[tuple[int, int]], list[int]]:
+    """(answer without the tags, watches to add, (id, minutes) interval changes, ids to cancel).
+    A watch is live from the moment it is made, so there is no mode to switch."""
     adds: list[TrackAdd] = []
     for body in TRACK_TAG.findall(answer):
         attrs = dict(_ATTR.findall(body))
@@ -273,10 +282,11 @@ def extract_track_tags(
     every_changes = [
         (int(watch_id), int(minutes)) for watch_id, minutes in TRACK_EVERY_TAG.findall(answer)
     ][:MAX_TRACK_TAGS]
+    cancels = [int(watch_id) for watch_id in CANCEL_TRACK_TAG.findall(answer)][:MAX_TRACK_TAGS]
     clean = answer
-    for pattern in (TRACK_EVERY_TAG, TRACK_TAG):
+    for pattern in (CANCEL_TRACK_TAG, TRACK_EVERY_TAG, TRACK_TAG):
         clean = pattern.sub("", clean)
-    return clean.strip(), adds[:MAX_TRACK_TAGS], every_changes
+    return clean.strip(), adds[:MAX_TRACK_TAGS], every_changes, cancels
 
 
 def render_watches(watches: Sequence[Watch], labels: Mapping[int, str]) -> str:

@@ -204,14 +204,20 @@ quota. Each watch stores its own interval, an attempt stamps its clock (failures
 broken source cannot burn quota every pass), and a member can change theirs by asking.
 
 Watches can also be managed by asking in words, the way reminders can: the model appends
-`<track source="…" interest="…" who="…" every="60"/>` or `<track_every id="N" minutes="120"/>`
+`<track source="…" interest="…" who="…" every="60"/>`, `<track_every id="N" minutes="120"/>` or
+`<cancel_track id="N"/>`
 after its answer and the Bot performs it, reporting what it did. Attributes are read by name, not
 by position. There is no mode to switch and no way to ask for the judgement log in words — that
 is a slash command the member runs for themselves. A watch pings its owner; other
 people are added only when the member names them in the request, exactly like `<remind who=…>`.
 The member's own watches are listed in the prompt, so an id is never guessed — the store also
-refuses to change a watch that belongs to someone else. Cancelling stays a slash command: it
-discards the watch's baseline, and rebuilding one costs a whole classification pass.
+refuses to change a watch that belongs to someone else — cancelling included.
+
+A tag the Bot does not implement is stripped before the answer is sent and the member is told the
+operation did not happen. The model generalises from the tags it has: when cancelling was
+slash-only it invented `<cancel_track/>`, told a member the watch was cancelled, and the watch
+kept notifying. The vocabulary now matches the operations one-for-one, and anything left over is
+reported rather than posted as if it had worked.
 
 Classification always uses the operator-controlled Codex model and `high` effort. It runs with
 Codex memories, history persistence, web search, apps, browser/computer use, image generation, and

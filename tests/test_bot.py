@@ -448,6 +448,27 @@ async def test_tracking_tags_add_a_watch_and_switch_its_mode(client, tmp_path, m
     assert "找不到你的追蹤" in await client._apply_tracking_tags(
         f'<track_every id="{watch.id}" minutes="5"/>', GUILD, 555, 999
     )
+    # Cancelling is scoped to the asker the same way, so one member cannot talk the Bot into
+    # dropping someone else's watch.
+    assert "找不到你的追蹤" in await client._apply_tracking_tags(
+        f'<cancel_track id="{watch.id}"/>', GUILD, 555, 999
+    )
+    assert client.tracker.watches(user_id=USER)
+    stopped = await client._apply_tracking_tags(
+        f'好，取消了。\n<cancel_track id="{watch.id}"/>', GUILD, 555, USER
+    )
+    assert f"已取消追蹤 #{watch.id}" in stopped and "<cancel_track" not in stopped
+    assert client.tracker.watches(user_id=USER) == []
+
+
+def test_a_tag_the_bot_cannot_perform_never_goes_out_as_a_confirmation() -> None:
+    # 2026-09-19: the model answered "星街的追蹤取消了" and emitted <cancel_track id="1"/> when
+    # no such tag existed. The claim went out, the raw tag went out, the watch kept notifying.
+    text, invented = bot_module.strip_invented_tags('好，取消了。\n<cancel_track id="1"/>')
+    assert text == "好，取消了。" and invented == ["cancel_track"]
+    # Only the Bot's own shape of tag; prose and markup a member might be shown are left alone.
+    for untouched in ("<br/>", '<img src="a.png"/>', "2 < 3 and 4 > 1", "<https://example.com>"):
+        assert bot_module.strip_invented_tags(untouched) == (untouched, [])
 
 
 def test_notification_uses_the_wording_the_model_wrote() -> None:
