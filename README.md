@@ -524,7 +524,7 @@ YouTube `si`/`feature` and Threads `xmt` are removed only on those hosts. Recogn
 URLs are left intact. This cannot identify every site's custom signing or routing scheme.
 
 `/<prefix>-embedfix` (default on) additionally swaps post links on X, Threads, TikTok, Pixiv
-and Tumblr to embed-fixer proxies (`fixupx.com` / `vxtwitter.com`, `vxthreads.com`,
+and Tumblr to embed-fixer proxies (`vxtwitter.com` / `fixupx.com`, `vxthreads.com`,
 `tnktok.com` / `tiktxk.com`, `phixiv.net`, `tpmblr.com`) so Discord previews the video or image; a human who clicks is
 sent back to the original site. Before swapping, the Bot fetches the proxy page as Discord's
 crawler would and keeps the original link unless that page carries a card, so

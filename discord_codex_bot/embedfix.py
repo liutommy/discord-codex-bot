@@ -73,7 +73,11 @@ PROXIES: tuple[Rule, ...] = (
     Rule(
         frozenset({"x.com", "twitter.com"}),
         re.compile(r"^/[A-Za-z0-9_]{1,20}/status/\d+"),
-        ("fixupx.com", "vxtwitter.com"),
+        # vxtwitter leads since 2026-09-19: measured against six real posts, fixupx answered
+        # the crawler with no media tag at all on five of them while vxtwitter carried one
+        # every time. fixupx stays as the fallback -- it was the better of the two in
+        # 2026-09-16's measurement, so this is a swap of order, not a removal.
+        ("vxtwitter.com", "fixupx.com"),
     ),
     Rule(
         frozenset({"tiktok.com"}),

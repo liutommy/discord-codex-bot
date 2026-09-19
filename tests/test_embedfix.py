@@ -19,11 +19,14 @@ from discord_codex_bot.embedfix import (
     [
         (
             "https://x.com/jack/status/20?s=20",
-            ["https://fixupx.com/jack/status/20?s=20", "https://vxtwitter.com/jack/status/20?s=20"],
+            [
+                "https://vxtwitter.com/jack/status/20?s=20",
+                "https://fixupx.com/jack/status/20?s=20",
+            ],
         ),
         (
             "https://mobile.twitter.com/jack/status/20",
-            ["https://fixupx.com/jack/status/20", "https://vxtwitter.com/jack/status/20"],
+            ["https://vxtwitter.com/jack/status/20", "https://fixupx.com/jack/status/20"],
         ),
         (
             "https://www.tiktok.com/@u/video/7654036719242726670",
@@ -113,8 +116,8 @@ MEDIA = '<meta property="og:image" content="https://i/a.jpg">'
 
 async def test_pick_returns_the_first_candidate_with_media_or_none():
     pages = {
-        "https://fixupx.com/u/status/1": '<meta property="og:title" content="x">',
-        "https://vxtwitter.com/u/status/1": '<meta property="og:video" content="https://v/a.mp4">',
+        "https://vxtwitter.com/u/status/1": '<meta property="og:title" content="x">',
+        "https://fixupx.com/u/status/1": '<meta property="og:video" content="https://v/a.mp4">',
     }
     seen: list[str] = []
 
@@ -126,12 +129,12 @@ async def test_pick_returns_the_first_candidate_with_media_or_none():
         return pages.get(url)
 
     assert await pick("https://x.com/u/status/1", fetch) == Fix(
-        "https://vxtwitter.com/u/status/1", spoiler=False
+        "https://fixupx.com/u/status/1", spoiler=False
     )
-    assert seen == list(pages)
+    assert seen == list(pages)  # the preferred proxy first, the fallback only after it fails
     assert await pick("https://x.com/u/status/2", fetch) is None  # both unreachable
     assert await pick("https://x.com/u", fetch) is None  # not a post: nothing fetched
-    assert seen[-2:] == ["https://fixupx.com/u/status/2", "https://vxtwitter.com/u/status/2"]
+    assert seen[-2:] == ["https://vxtwitter.com/u/status/2", "https://fixupx.com/u/status/2"]
 
 
 async def test_x_sensitive_flag_comes_from_the_vxtwitter_api():
@@ -141,7 +144,7 @@ async def test_x_sensitive_flag_comes_from_the_vxtwitter_api():
     }
 
     async def fetch(url: str, headers: dict[str, str]) -> str | None:
-        if url.startswith("https://fixupx.com/"):
+        if url.startswith("https://vxtwitter.com/"):  # the page, not the API host
             return MEDIA
         return answers.get(url)
 
@@ -149,7 +152,7 @@ async def test_x_sensitive_flag_comes_from_the_vxtwitter_api():
     assert await rating("https://twitter.com/u/status/2", fetch) is False
     assert await rating("https://x.com/u/status/3", fetch) is None  # API down: no swap
     assert await pick("https://x.com/u/status/1", fetch) == Fix(
-        "https://fixupx.com/u/status/1", spoiler=True
+        "https://vxtwitter.com/u/status/1", spoiler=True
     )
     assert await pick("https://x.com/u/status/3", fetch) is None
 
