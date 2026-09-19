@@ -222,9 +222,17 @@ TRACKING_PARAMS = frozenset(
 
 
 # Params that are tracking only on one site's hosts: the same name is a real parameter elsewhere.
+# A host matches a name or any subdomain of it, so a site that spreads its sections across
+# subdomains (sports./star./health.ettoday.net) is one entry rather than a list to keep current.
+# `from` is the reason this table exists and cannot be a global rule: on plenty of sites it
+# carries the return path of a login or redirect, so dropping it changes where the member lands.
+# ETtoday is not one of them — the page declares `rel=canonical` without it (measured
+# 2026-09-19: same article, same title, 3 bytes apart). ClearURLs upstream reaches the same
+# verdict from the other side, listing `from` under five individual providers and never globally.
 HOST_SCOPED_PARAMS = {
     "youtube": (YOUTUBE_HOSTS, {"si", "feature"}),
     "threads": ({"threads.com", "threads.net"}, {"xmt"}),
+    "ettoday": ({"ettoday.net"}, {"from"}),
 }
 
 
@@ -258,7 +266,10 @@ def strip_tracking(url: str) -> str:
         return url
     host = (parts.hostname or "").removeprefix("www.")
     scoped = {
-        name for hosts, names in HOST_SCOPED_PARAMS.values() if host in hosts for name in names
+        name
+        for hosts, names in HOST_SCOPED_PARAMS.values()
+        if any(host == scope or host.endswith(f".{scope}") for scope in hosts)
+        for name in names
     }
     segments = parts.query.split("&")
     kept = [

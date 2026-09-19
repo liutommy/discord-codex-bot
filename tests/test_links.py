@@ -140,6 +140,22 @@ def test_strip_tracking_removes_utm_and_known_params_only() -> None:
         strip_tracking("https://youtu.be/id?fbclid=xyz&si=abc&feature=share")
         == "https://youtu.be/id"
     )
+    # A host-scoped param covers subdomains too: ETtoday puts each section on its own.
+    assert (
+        strip_tracking("https://sports.ettoday.net/news/3240217?from=fb_et_sports")
+        == "https://sports.ettoday.net/news/3240217"
+    )
+    assert strip_tracking("https://www.ettoday.net/n/1?from=x&id=2") == (
+        "https://www.ettoday.net/n/1?id=2"
+    )
+    # ...and nowhere else. On most sites `from` carries the return path of a login or redirect,
+    # so stripping it globally would change where the member lands.
+    assert strip_tracking("https://a.example/login?from=/deep/page") == (
+        "https://a.example/login?from=/deep/page"
+    )
+    assert (
+        strip_tracking("https://notettoday.net/n/1?from=x") == "https://notettoday.net/n/1?from=x"
+    )
     # Case-insensitive, and percent-encoded keys count too (%75 == "u").
     assert (
         strip_tracking("https://c.example/?UTM_Campaign=x&%75tm_term=y&id=9")
