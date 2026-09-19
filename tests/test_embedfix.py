@@ -3,7 +3,15 @@ from __future__ import annotations
 import pytest
 
 from discord_codex_bot import embedfix
-from discord_codex_bot.embedfix import Fix, candidates, has_media, pick, rating
+from discord_codex_bot.embedfix import (
+    PROXIES,
+    Fix,
+    candidates,
+    has_card,
+    has_media,
+    pick,
+    rating,
+)
 
 
 @pytest.mark.parametrize(
@@ -64,6 +72,40 @@ def test_has_media_reads_either_attribute_order_and_ignores_empty_tags():
     notice = '<meta property="og:title" content="Notice" />'
     assert not has_media(notice + '<meta property="og:description" content="gone" />')
     assert not has_media("")
+
+
+def test_a_text_post_is_a_card_only_where_the_rule_says_so_and_never_the_placeholder():
+    # vxthreads answers 200 with a generic card for a share code it cannot resolve, so the
+    # status code cannot tell a real text post from a dead link -- only the description can.
+    threads = next(rule for rule in PROXIES if "threads.com" in rule.hosts)
+    x = next(rule for rule in PROXIES if "x.com" in rule.hosts)
+    text = '<meta property="og:description" content="post body" />'
+    placeholder = '<meta property="og:description" content="View this post on Threads." />'
+    assert has_card(text, threads)
+    assert not has_card(placeholder, threads)
+    assert not has_card('<meta property="og:description" content="  " />', threads)
+    assert not has_card("", threads)
+    # Sites whose rule does not opt in keep the stricter media test.
+    assert not has_card(text, x)
+    assert has_card('<meta property="og:image" content="https://i/a.jpg">', x)
+
+
+async def test_pick_swaps_a_threads_text_post_but_not_an_unresolved_share_code():
+    pages = {
+        "https://vxthreads.com/share/REAL/": '<meta property="og:description" content="body" />',
+        "https://vxthreads.com/share/DEAD/": (
+            '<meta property="og:title" content="Threads (@threads)" />'
+            '<meta property="og:description" content="View this post on Threads." />'
+        ),
+    }
+
+    async def fetch(url: str, headers: dict[str, str]) -> str | None:
+        return pages.get(url)
+
+    assert await pick("https://threads.com/share/REAL/", fetch) == Fix(
+        "https://vxthreads.com/share/REAL/", spoiler=False
+    )
+    assert await pick("https://threads.com/share/DEAD/", fetch) is None
 
 
 MEDIA = '<meta property="og:image" content="https://i/a.jpg">'

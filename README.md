@@ -527,8 +527,12 @@ URLs are left intact. This cannot identify every site's custom signing or routin
 and Tumblr to embed-fixer proxies (`fixupx.com` / `vxtwitter.com`, `vxthreads.com`,
 `tnktok.com` / `tiktxk.com`, `phixiv.net`, `tpmblr.com`) so Discord previews the video or image; a human who clicks is
 sent back to the original site. Before swapping, the Bot fetches the proxy page as Discord's
-crawler would and keeps the original link unless that page carries a video or image tag, so
-a proxy that is down or blocked never replaces a working link. Pixiv works are rated through
+crawler would and keeps the original link unless that page carries a card, so
+a proxy that is down or blocked never replaces a working link. A card means a video or image
+tag; for Threads it may instead be the post's own text, because a text post has no picture and
+is exactly the post whose native preview is worth replacing. That relaxation is guarded: a
+share code the proxy cannot resolve still answers 200 with a card, so the generic placeholder
+description it serves there is refused. Pixiv works are rated through
 Pixiv's public illust endpoint first: R-18 / R-18G links are delivered as `||spoilers||` so
 Discord blurs the preview, and a work whose rating cannot be read is not swapped at all. X posts
 are rated the same way through the vxtwitter API's `possibly_sensitive` flag. A link
@@ -539,9 +543,10 @@ does, and the repost's links are then folded into the question. Delivery follows
 and beats the native preview was found (verified 2026-09-16).
 
 With Manage Messages in the channel, link-only messages are reposted with author attribution
-before deleting the original. Emoji and punctuation are preserved. Attachments, stickers,
-replies, thread starters and oversized replacements keep the original; clean links are
-appended instead. Without Manage Messages, clean links are always appended. If deletion fails,
+before deleting the original. Emoji and punctuation are preserved. A link-only reply is
+reposted as a reply to the same message, so it stays in its conversation. Attachments,
+stickers, forwards, thread starters and oversized replacements keep the original; clean links
+are appended instead. Without Manage Messages, clean links are always appended. If deletion fails,
 both messages may remain. The switch controls visible reposts; internal link cleanup stays on.
 
 ## Operations

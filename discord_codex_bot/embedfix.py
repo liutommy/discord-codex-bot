@@ -8,8 +8,9 @@ the crawler with real tags built from the site's API and sends a human straight 
 the original site (302 or meta refresh), so nobody stays on the proxy.
 
 Every rewrite is guarded live: the proxy page is fetched with the crawler's User-Agent and
-the link is swapped only when that page actually carries a video or image tag. A proxy
-that is down, blocked or serving an error page never replaces a working link; the
+the link is swapped only when that page actually carries a card -- a video or image tag,
+or, where the rule allows it, the post's own text instead of the proxy's placeholder. A
+proxy that is down, blocked or serving an error page never replaces a working link; the
 per-guild switch (``/<prefix>-embedfix``) turns the whole thing off without a rebuild.
 
 PROXIES was verified live on 2026-09-16 (crawler UA vs. human UA, one real post each).
@@ -57,7 +58,15 @@ _X_STATUS = re.compile(r"^/[A-Za-z0-9_]{1,20}/status/\d+")
 class Rule:
     hosts: frozenset[str]  # without www. / mobile.
     path: re.Pattern[str]
-    proxies: tuple[str, ...]  # tried in order; the first whose page carries media wins
+    proxies: tuple[str, ...]  # tried in order; the first whose page carries a card wins
+    # A text-only post has no picture to check, and on a site whose native link previews
+    # badly that is exactly the post worth swapping. `text_ok` accepts the post's own text
+    # in og:description as the card. It needs `placeholders` to stay honest: an unknown or
+    # dead post still answers 200 with a card, so the status code cannot tell the two
+    # apart -- only the generic description can (vxthreads writes "View this post on
+    # Threads." for a share code it cannot resolve; verified 2026-09-19 against a bogus code).
+    text_ok: bool = False
+    placeholders: frozenset[str] = frozenset()
 
 
 PROXIES: tuple[Rule, ...] = (
@@ -76,6 +85,8 @@ PROXIES: tuple[Rule, ...] = (
         # Post links and the app's /share/<code> links (which vxthreads resolves to the post).
         re.compile(r"^/@[^/]+/post/[A-Za-z0-9_-]+|^/share/[A-Za-z0-9_-]+"),
         ("vxthreads.com",),
+        text_ok=True,
+        placeholders=frozenset({"View this post on Threads."}),
     ),
     Rule(frozenset({"pixiv.net"}), re.compile(r"^/(?:en/)?artworks/\d+"), ("phixiv.net",)),
     Rule(frozenset({"tumblr.com"}), re.compile(r"^/[A-Za-z0-9_-]+/\d{6,}"), ("tpmblr.com",)),
@@ -104,28 +115,55 @@ def _host(url: str) -> tuple[str, str]:
     return host, parts.path
 
 
+def _rule(url: str) -> Rule | None:
+    """The rule covering `url`, or None when it is not a post on a supported site or is
+    already a proxy link."""
+    host, path = _host(url)
+    if not host or host in PROXY_HOSTS:
+        return None
+    for rule in PROXIES:
+        if host in rule.hosts and rule.path.match(path):
+            return rule
+    return None
+
+
 def candidates(url: str) -> list[str]:
     """The proxy forms of `url`, in preference order; empty when the link is not a post on
     a supported site or is already a proxy link."""
-    host, path = _host(url)
-    if not host or host in PROXY_HOSTS:
+    rule = _rule(url)
+    if rule is None:
         return []
     parts = urlsplit(url)
-    for rule in PROXIES:
-        if host in rule.hosts and rule.path.match(path):
-            return [urlunsplit(parts._replace(netloc=proxy)) for proxy in rule.proxies]
-    return []
+    return [urlunsplit(parts._replace(netloc=proxy)) for proxy in rule.proxies]
 
 
-def has_media(html: str) -> bool:
-    """True when the page carries an OpenGraph / Twitter-card video or image -- attribute
-    order is not fixed (vxtwitter writes content= before property=), so each tag is parsed."""
+def _meta(html: str) -> dict[str, str]:
+    """Every og:/twitter: tag as name -> content. Attribute order is not fixed (vxtwitter
+    writes content= before property=), so each tag is parsed rather than matched whole."""
+    tags: dict[str, str] = {}
     for tag in _META.findall(html):
         attrs = {k.lower(): v for k, v in _ATTR.findall(tag)}
         name = (attrs.get("property") or attrs.get("name") or "").lower()
-        if name in MEDIA_TAGS and len(attrs.get("content", "")) >= 5:
-            return True
-    return False
+        if name:
+            tags.setdefault(name, attrs.get("content", ""))
+    return tags
+
+
+def has_media(html: str) -> bool:
+    """True when the page carries an OpenGraph / Twitter-card video or image."""
+    tags = _meta(html)
+    return any(len(tags.get(name, "")) >= 5 for name in MEDIA_TAGS)
+
+
+def has_card(html: str, rule: Rule) -> bool:
+    """True when the proxy page is a preview worth swapping in: media, or -- where the rule
+    allows a text post -- the post's own text rather than the proxy's generic placeholder."""
+    if has_media(html):
+        return True
+    if not rule.text_ok:
+        return False
+    description = _meta(html).get("og:description", "").strip()
+    return bool(description) and description not in rule.placeholders
 
 
 Fetch = Callable[[str, dict[str, str]], Awaitable[str | None]]
@@ -167,12 +205,15 @@ def _json_path(text: str | None, *keys: str):
 
 
 async def pick(url: str, fetch: Fetch) -> Fix | None:
-    """The first candidate proxy whose page (as the crawler sees it) carries media, with
+    """The first candidate proxy whose page (as the crawler sees it) carries a card, with
     the spoiler flag from the site's rating; None when the caller should keep the link."""
+    rule = _rule(url)
+    if rule is None:
+        return None
     for candidate in candidates(url):
         html = await fetch(candidate, CRAWLER_HEADERS)
-        if not html or not has_media(html):
-            LOGGER.info("embedfix: %s has no media for the crawler; not used", candidate)
+        if not html or not has_card(html, rule):
+            LOGGER.info("embedfix: %s has no card for the crawler; not used", candidate)
             continue
         restricted = await rating(url, fetch)
         if restricted is None:

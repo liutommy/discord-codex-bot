@@ -63,6 +63,7 @@ class _FakeChannel:
         self._manage = manage_messages
         self.sent: list[str] = []
         self.ids: list[int] = []
+        self.references: list[object] = []
 
     def permissions_for(self, user: object) -> types.SimpleNamespace:
         assert isinstance(user, discord.Member)
@@ -73,6 +74,7 @@ class _FakeChannel:
         mentions = kwargs["allowed_mentions"].to_dict()
         assert "everyone" not in mentions["parse"] and "roles" not in mentions["parse"]
         self.sent.append(text)
+        self.references.append(kwargs.get("reference"))
         # A real-looking snowflake: the repost table prunes ids older than its retention.
         self.ids.append(snowflake_before(0) + len(self.sent))
         return types.SimpleNamespace(id=self.ids[-1])
@@ -1714,10 +1716,13 @@ def test_memory_options_cap_and_search_beyond_first_page(client):
 
 
 async def test_linkclean_preserves_nontext_content_and_oversized_messages(client) -> None:
+    forward = discord.MessageReference(
+        message_id=999, channel_id=222222222222222222, type=discord.MessageReferenceType.forward
+    )
     for attribute, value in (
         ("attachments", [object()]),
         ("stickers", [object()]),
-        ("reference", object()),
+        ("reference", forward),
         ("thread", object()),
     ):
         channel = _FakeChannel(True)
@@ -1730,6 +1735,21 @@ async def test_linkclean_preserves_nontext_content_and_oversized_messages(client
     message.author.id = 123456789012345678
     await client._linkclean(message)
     assert message.deleted == 0
+
+
+async def test_linkclean_replaces_a_link_only_reply_and_keeps_the_reply_arrow(client) -> None:
+    # A reply used to be left untouched: replacing it would have dropped it out of its
+    # conversation. The repost carries the same reference instead, so it stays in place.
+    channel = _FakeChannel(True)
+    message = _fake_message("https://a.example/?utm_source=x", channel)
+    message.reference = discord.MessageReference(message_id=999, channel_id=channel.id)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [f"<@{USER}>\nhttps://a.example/"]
+    reference = channel.references[-1]
+    assert reference.message_id == 999
+    # The replied-to message may be gone by now; that costs the arrow, not the repost.
+    assert reference.fail_if_not_exists is False
 
 
 async def test_linkclean_failed_send_never_deletes(client) -> None:

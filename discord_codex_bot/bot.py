@@ -277,6 +277,26 @@ def _for_other(item: dict) -> bool:
     return item.get("target_id", item["user_id"]) != item["user_id"]
 
 
+def _reply_reference(message: discord.Message) -> discord.MessageReference | None:
+    """The reference a repost of `message` must carry to stay a reply to the same message.
+    Replacing a link-only reply would otherwise drop it out of its conversation, which is why
+    replies used to be left alone entirely. A forward is not a reply and carries content the
+    repost cannot reproduce, so those still are. `fail_if_not_exists=False`: a replied-to
+    message deleted in the meantime costs the reply arrow, not the repost."""
+    reference = message.reference
+    if reference is None or reference.message_id is None:
+        return None
+    kind = getattr(reference, "type", None)
+    if kind is not None and kind != discord.MessageReferenceType.default:
+        return None
+    return discord.MessageReference(
+        message_id=reference.message_id,
+        channel_id=reference.channel_id,
+        guild_id=reference.guild_id,
+        fail_if_not_exists=False,
+    )
+
+
 def previews_from(messages) -> dict[str, Preview]:
     """Discord link embeds of `messages` as previews keyed by the embedded URL."""
     out: dict[str, Preview] = {}
@@ -997,13 +1017,14 @@ class DiscordCodexClient(discord.Client):
             wrapped = deliver(cleaned, spoiler and not spoilered(message.content, original))
             replacement = replacement.replace(original, wrapped)
         replacement = f"<@{message.author.id}>\n{replacement}"
+        reply_to = _reply_reference(message)
         can_replace = (
             links_only
             and member is not None
             and message.channel.permissions_for(member).manage_messages
             and not message.attachments
             and not message.stickers
-            and message.reference is None
+            and (message.reference is None or reply_to is not None)
             and message.thread is None
             and len(replacement) <= 2000
         )
@@ -1012,8 +1033,9 @@ class DiscordCodexClient(discord.Client):
             posted = await message.channel.send(
                 replacement,
                 allowed_mentions=discord.AllowedMentions(
-                    users=[message.author], everyone=False, roles=False, replied_user=False
+                    users=[message.author], everyone=False, roles=False, replied_user=True
                 ),
+                **({"reference": reply_to} if reply_to is not None else {}),
             )
             self._remember_repost(posted)
             await message.delete()
