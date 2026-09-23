@@ -165,7 +165,7 @@ def parse_fallback_error(
     """Return a typed remote failure that may use the spare backend, if one is present.
 
     `codex exec --json` reports a failed turn as `error` / `turn.failed` events that carry the
-    message only (codex-cli 0.153.4 against a real spent quota, 2026-09-14; upstream
+    message only (codex-cli 0.153.4 and 0.156.1 against a real spent quota; upstream
     `exec_events.rs` has no code field either). The structured `codex_error_info` lives in the
     rollout Codex writes under CODEX_HOME for the thread the stream announced first -- or, on a
     resumed turn that announces nothing, the `thread_id` the caller already knows. Three sources

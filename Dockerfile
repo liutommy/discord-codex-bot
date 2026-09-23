@@ -4,7 +4,7 @@ FROM node:22-bookworm-slim AS node-runtime
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-runtime
 FROM python:3.12-slim-bookworm
 
-ARG CODEX_VERSION=0.153.4
+ARG CODEX_VERSION=0.156.1
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 COPY --from=uv-runtime /uv /uvx /bin/

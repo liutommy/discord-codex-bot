@@ -28,7 +28,7 @@ def test_loads_safe_operational_defaults() -> None:
             "ALLOWED_GUILD_IDS": "111111111111111111",
         }
     )
-    assert config.codex_model == "gpt-5.6-luna"
+    assert config.codex_model == "gpt-6-luna"
     assert config.codex_reasoning_effort == "medium"
     assert config.max_queued_jobs == 10
     assert not config.tracking_enabled

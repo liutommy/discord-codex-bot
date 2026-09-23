@@ -314,13 +314,13 @@ member's message while mentioning the Bot points it at that message: its text is
 request and its images are attached, so "@Bot what is this?" as a reply to a picture works.
 Messages that do not mention the Bot are discarded without processing.
 
-`/codex-status` must report `ChatGPT 訂閱登入有效`, model `gpt-5.6-luna`, and the default reasoning
+`/codex-status` must report `ChatGPT 訂閱登入有效`, model `gpt-6-luna`, and the default reasoning
 effort (`Medium`). A command in another server or outside the configured test channel must not execute.
 
 The Bot serializes Codex work to one request at a time and caps the queue, prompt, response, and
 runtime. `/codex` has an optional `effort` choice — Low, Medium (default), High, Extra high, Max —
 that overrides the member's stored default for one request; on Codex these map to the CLI values
-`low/medium/high/xhigh/max` verified against `codex debug models` for `gpt-5.6-luna` (the CLI
+`low/medium/high/xhigh/max` verified against `codex debug models` for `gpt-6-luna` (the CLI
 forwards any string verbatim, so the Bot only offers this allowlist). `@mention` requests use the
 member's stored effort, else `CODEX_REASONING_EFFORT`.
 

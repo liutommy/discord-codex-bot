@@ -9,7 +9,7 @@ from pathlib import Path
 DISCORD_ID = re.compile(r"^\d{17,20}$")
 # Discord command names: lowercase, digits, hyphen; the prefix leaves room for "-remember" etc.
 COMMAND_PREFIX = re.compile(r"^[a-z0-9][a-z0-9-]{0,19}$")
-# Codex CLI value -> Codex UI label. Verified against `codex debug models` for gpt-5.6-luna
+# Codex CLI value -> Codex UI label. Verified against `codex debug models` for gpt-6-luna
 # (supported_reasoning_levels) and the request payload each value produces; re-verify on upgrade.
 REASONING_EFFORTS = {
     "low": "Low",
@@ -205,7 +205,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         ),
         allowed_channel_ids=parse_id_set(values.get("ALLOWED_CHANNEL_IDS"), "ALLOWED_CHANNEL_IDS"),
         command_prefix=_command_prefix(values),
-        codex_model=values.get("CODEX_MODEL", "").strip() or "gpt-5.6-luna",
+        codex_model=values.get("CODEX_MODEL", "").strip() or "gpt-6-luna",
         codex_reasoning_effort=_effort(values),
         # Spare backend for spent ChatGPT quota or temporary Codex model capacity, written like a
         # stored model ("<backend>:<family>|<effort>"). Empty = report the failure instead.

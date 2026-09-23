@@ -4,7 +4,7 @@ services:
     build:
       context: .
       args:
-        CODEX_VERSION: ${CODEX_VERSION:-0.153.4}
+        CODEX_VERSION: ${CODEX_VERSION:-0.156.1}
         UV_VERSION: ${UV_VERSION:-0.10.0}
     image: discord-codex-bot:local
     restart: always
