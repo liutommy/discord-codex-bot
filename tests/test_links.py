@@ -148,6 +148,17 @@ def test_strip_tracking_removes_utm_and_known_params_only() -> None:
     assert strip_tracking("https://www.ettoday.net/n/1?from=x&id=2") == (
         "https://www.ettoday.net/n/1?id=2"
     )
+    # Yahoo: ClearURLs files these under sister sites only, so the scope table carries them.
+    assert (
+        strip_tracking(
+            "https://tw.news.yahoo.com/a-032657573.html?link_source=ta_first_comment"
+            "&taid=6ab4&guccounter=1&guce_referrer=aHR0&guce_referrer_sig=AQAA"
+        )
+        == "https://tw.news.yahoo.com/a-032657573.html"
+    )
+    assert strip_tracking("https://a.example/p?taid=1&guccounter=1") == (
+        "https://a.example/p?taid=1&guccounter=1"
+    )
     # ...and nowhere else. On most sites `from` carries the return path of a login or redirect,
     # so stripping it globally would change where the member lands.
     assert strip_tracking("https://a.example/login?from=/deep/page") == (

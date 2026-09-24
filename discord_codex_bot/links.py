@@ -229,10 +229,17 @@ TRACKING_PARAMS = frozenset(
 # ETtoday is not one of them — the page declares `rel=canonical` without it (measured
 # 2026-09-19: same article, same title, 3 bytes apart). ClearURLs upstream reaches the same
 # verdict from the other side, listing `from` under five individual providers and never globally.
+# Yahoo has no ClearURLs provider: upstream files its consent-redirect params (guccounter,
+# guce_*) under techcrunch and `taid` under reuters, so tw.news.yahoo.com links kept all five.
+# The article declares `rel=canonical` without them (measured 2026-09-24: same title, 200 both).
 HOST_SCOPED_PARAMS = {
     "youtube": (YOUTUBE_HOSTS, {"si", "feature"}),
     "threads": ({"threads.com", "threads.net"}, {"xmt"}),
     "ettoday": ({"ettoday.net"}, {"from"}),
+    "yahoo": (
+        {"yahoo.com"},
+        {"guccounter", "guce_referrer", "guce_referrer_sig", "link_source", "taid"},
+    ),
 }
 
 
