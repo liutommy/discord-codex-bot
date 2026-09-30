@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import socket
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -382,6 +383,9 @@ def html_to_text(html: str, base_url: str = "") -> tuple[str, str]:
     return parser.title.strip(), text
 
 
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
 def _public_address(ip: str, allow: Sequence[IPNetwork] = ()) -> bool:
     """`allow` is LINK_ALLOW_NETS: a proxy range the host's DNS answers with (198.18.0.0/15 counts
     as private here), never a LAN — config refuses those."""
@@ -389,7 +393,8 @@ def _public_address(ip: str, allow: Sequence[IPNetwork] = ()) -> bool:
     if any(address in net for net in allow):
         return True
     return not (
-        address.is_private
+        address in _CGNAT
+        or address.is_private
         or address.is_loopback
         or address.is_link_local
         or address.is_multicast
@@ -398,10 +403,15 @@ def _public_address(ip: str, allow: Sequence[IPNetwork] = ()) -> bool:
     )
 
 
+_DOTS = str.maketrans("。．｡", "...")
+
+
 def _literal_address(host: str) -> str:
     """The IP `host` spells out, in any notation a resolver accepts without asking DNS
     (`127.1`, `0x7f.1` and `2130706433` are all 127.0.0.1), or "" when it is a name."""
-    host = host.strip("[]")
+    # Fullwidth digits and ideographic dots are folded the way IDNA would; a trailing dot is the
+    # DNS root label, still the same address.
+    host = unicodedata.normalize("NFKC", host).translate(_DOTS).strip("[]").rstrip(".")
     try:
         return str(ipaddress.ip_address(host))
     except ValueError:
@@ -526,8 +536,13 @@ def _refuse_literal_hops() -> aiohttp.TraceConfig:
 
     async def on_redirect(session, context, params) -> None:
         location = params.response.headers.get("Location") or params.response.headers.get("URI")
-        if location:
-            _refuse_literal(params.url.join(URL(location)))
+        if not location:
+            return
+        try:
+            target = params.url.join(URL(location))
+        except ValueError:
+            return  # malformed: aiohttp raises its own ClientError for it next
+        _refuse_literal(target)
 
     trace = aiohttp.TraceConfig()
     trace.on_request_start.append(on_start)

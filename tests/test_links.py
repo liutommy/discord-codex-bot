@@ -248,6 +248,7 @@ def test_html_to_text_keeps_article_links_when_given_a_base() -> None:
         ("0.0.0.0", False),
         ("224.0.0.1", False),
         ("198.18.0.1", False),  # proxy fake-IP range: refused unless LINK_ALLOW_NETS opens it
+        ("100.64.0.1", False),  # CGNAT
     ],
 )
 def test_public_address_guard(ip: str, public: bool) -> None:
@@ -565,8 +566,17 @@ async def _noop(*_args) -> None:
 
 # 198.18.0.1 in the notations inet_aton accepts: not "an IP" to ipaddress, so they reach the
 # resolver like a name would — and must not collect the allow-list on the way.
-PROXY_SPELLINGS = ("198.18.0.1", "198.19.0.7", "3323068417", "0xc6.0x12.0.1", "198.18.1")
-LOOPBACK_SPELLINGS = ("127.0.0.1", "2130706433", "0x7f.1", "0177.0.0.1", "127.1")
+PROXY_SPELLINGS = (
+    "198.18.0.1",
+    "198.19.0.7",
+    "3323068417",
+    "0xc6.0x12.0.1",
+    "198.18.1",
+    "198.18.0.1.",
+    "１９８.１８.０.１",
+    "198。18。0。1",
+)
+LOOPBACK_SPELLINGS = ("127.0.0.1", "2130706433", "0x7f.1", "0177.0.0.1", "127.1", "127.0.0.1.")
 MAPPED = ("::ffff:127.0.0.1", "::ffff:10.0.0.2", "::ffff:198.18.0.1")
 
 
@@ -579,7 +589,7 @@ async def test_allow_nets_never_cover_an_address_written_into_the_url(host: str)
         links._refuse_literal(URL(f"http://[{host}]/" if ":" in host else f"http://{host}/"))
 
 
-@pytest.mark.parametrize("host", PROXY_SPELLINGS[2:] + LOOPBACK_SPELLINGS[1:])
+@pytest.mark.parametrize("host", PROXY_SPELLINGS[2:5] + LOOPBACK_SPELLINGS[1:5])
 async def test_public_resolver_gives_numeric_spellings_no_allow_list(host: str) -> None:
     # Real resolution, no DNS involved: getaddrinfo parses these itself.
     with pytest.raises(socket.gaierror):
@@ -606,8 +616,19 @@ async def test_guarded_session_refuses_literal_private_ips_asked_for_or_redirect
         hits.append("secret")
         return web.Response(text="INTERNAL")
 
+    location = {"value": ""}
+
+    async def malformed(request: web.Request) -> web.Response:
+        return web.Response(status=302, headers={"Location": location["value"]})
+
     app = web.Application()
-    app.add_routes([web.get("/redirect", redirect), web.get("/secret", secret)])
+    app.add_routes(
+        [
+            web.get("/redirect", redirect),
+            web.get("/secret", secret),
+            web.get("/malformed", malformed),
+        ]
+    )
     async with TestServer(app) as server:
 
         async def to_test_server(self, host, port=0, family=socket.AF_INET):
@@ -634,6 +655,12 @@ async def test_guarded_session_refuses_literal_private_ips_asked_for_or_redirect
                     await session.get(f"http://{host}:{server.port}/secret")
         monkeypatch.setattr(links, "_resolve_public", _resolve_ok)  # first hop: a public name
         text = await fetch_link(f"http://public.example:{server.port}/redirect", config)
+        # A Location that does not parse stays an ordinary fetch failure, not a crash.
+        for bad in ("http://[::1/secret", "http://127.0.0.1\\@public.example/"):
+            location["value"] = bad
+            assert "抓取失敗" in await fetch_link(
+                f"http://public.example:{server.port}/malformed", config
+            )
     assert hits == ["redirect", "redirect"]  # the redirect was served; /secret never reached
     assert "抓取失敗" in text and "INTERNAL" not in text
 

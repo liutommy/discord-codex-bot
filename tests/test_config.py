@@ -130,9 +130,16 @@ def test_link_allow_nets_default_empty_and_never_open_a_lan() -> None:
         "0.0.0.0/0",
         "169.254.169.254",
         "100.64.0.0/10",
-        "::/0",
+        "192.168.0.0/16",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        "255.255.255.255",
     ):
         with pytest.raises(ValueError, match="may not include"):
+            load_config({**base, "LINK_ALLOW_NETS": bad})
+    # IPv6 nets could carry any of the above back in as mapped / NAT64 addresses.
+    for bad in ("::/0", "::1", "fc00::/7", "::ffff:10.0.0.0/104", "64:ff9b::/96", "2002::/16"):
+        with pytest.raises(ValueError, match="IPv4 networks only"):
             load_config({**base, "LINK_ALLOW_NETS": bad})
     with pytest.raises(ValueError, match="invalid network"):
         load_config({**base, "LINK_ALLOW_NETS": "not-a-net"})

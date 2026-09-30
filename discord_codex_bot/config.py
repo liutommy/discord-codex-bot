@@ -37,9 +37,11 @@ def parse_id_set(value: str | None, name: str, *, required: bool = False) -> fro
     return frozenset(int(item) for item in raw_ids)
 
 
-IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+IPNetwork = ipaddress.IPv4Network
 # Ranges LINK_ALLOW_NETS may never open to the link fetcher: the host itself, LANs (the compose
-# and sandbox networks live in 172.16/12), link-local (cloud metadata) and multicast.
+# and sandbox networks live in 172.16/12), CGNAT, link-local (cloud metadata), multicast and
+# class E. IPv4 only: a proxy's fake-IP range is IPv4, and an IPv6 net could smuggle any of
+# these back in as a mapped or NAT64 address.
 _NEVER_FETCH = tuple(
     ipaddress.ip_network(net)
     for net in (
@@ -51,11 +53,7 @@ _NEVER_FETCH = tuple(
         "172.16.0.0/12",
         "192.0.0.0/24",
         "192.168.0.0/16",
-        "224.0.0.0/4",
-        "::/127",
-        "fc00::/7",
-        "fe80::/10",
-        "ff00::/8",
+        "224.0.0.0/3",
     )
 )
 
@@ -69,7 +67,9 @@ def parse_allow_nets(value: str | None, name: str) -> tuple[IPNetwork, ...]:
             net = ipaddress.ip_network(part.strip())
         except ValueError:
             raise ValueError(f"{name} contains an invalid network: {part.strip()}") from None
-        if any(net.version == never.version and net.overlaps(never) for never in _NEVER_FETCH):
+        if not isinstance(net, ipaddress.IPv4Network):
+            raise ValueError(f"{name} takes IPv4 networks only: {net}")
+        if any(net.overlaps(never) for never in _NEVER_FETCH):
             raise ValueError(f"{name} may not include loopback, LAN or link-local ranges: {net}")
         nets.append(net)
     return tuple(nets)
