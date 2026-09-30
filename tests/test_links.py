@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from yarl import URL
 
 from discord_codex_bot import links
 from discord_codex_bot.config import Config
@@ -562,11 +563,34 @@ async def _noop(*_args) -> None:
     return None
 
 
-async def test_allow_nets_never_cover_an_address_written_into_the_url() -> None:
+# 198.18.0.1 in the notations inet_aton accepts: not "an IP" to ipaddress, so they reach the
+# resolver like a name would — and must not collect the allow-list on the way.
+PROXY_SPELLINGS = ("198.18.0.1", "198.19.0.7", "3323068417", "0xc6.0x12.0.1", "198.18.1")
+LOOPBACK_SPELLINGS = ("127.0.0.1", "2130706433", "0x7f.1", "0177.0.0.1", "127.1")
+MAPPED = ("::ffff:127.0.0.1", "::ffff:10.0.0.2", "::ffff:198.18.0.1")
+
+
+@pytest.mark.parametrize("host", PROXY_SPELLINGS + LOOPBACK_SPELLINGS + MAPPED)
+async def test_allow_nets_never_cover_an_address_written_into_the_url(host: str) -> None:
     # The proxy range is reachable through the names DNS maps into it, not as a destination.
-    for host in ("198.18.0.1", "198.19.0.7"):
-        with pytest.raises(ValueError):
-            await links._resolve_public(host, PROXY_NETS)
+    with pytest.raises(ValueError):
+        await links._resolve_public(host, PROXY_NETS)
+    with pytest.raises(links.RefusedAddress):
+        links._refuse_literal(URL(f"http://[{host}]/" if ":" in host else f"http://{host}/"))
+
+
+@pytest.mark.parametrize("host", PROXY_SPELLINGS[2:] + LOOPBACK_SPELLINGS[1:])
+async def test_public_resolver_gives_numeric_spellings_no_allow_list(host: str) -> None:
+    # Real resolution, no DNS involved: getaddrinfo parses these itself.
+    with pytest.raises(socket.gaierror):
+        await links._PublicResolver(PROXY_NETS).resolve(host, 80)
+
+
+def test_literal_address_leaves_names_alone() -> None:
+    assert links._literal_address("example.com") == ""
+    assert links._literal_address("198.18.0.1.nip.io") == ""
+    assert links._literal_address("[::1]") == "::1"
+    assert links._literal_address("0x7f.1") == "127.0.0.1"
 
 
 async def test_guarded_session_refuses_literal_private_ips_asked_for_or_redirected_to(
@@ -605,8 +629,9 @@ async def test_guarded_session_refuses_literal_private_ips_asked_for_or_redirect
                 await session.get(f"http://public.example:{server.port}/redirect")
             with pytest.raises(links.RefusedAddress):
                 await session.get(f"http://127.0.0.1:{server.port}/secret")
-            with pytest.raises(links.RefusedAddress):
-                await session.get(f"http://[::1]:{server.port}/secret")
+            for host in ("[::1]", "[::ffff:127.0.0.1]", "2130706433", "0x7f.1"):
+                with pytest.raises(links.RefusedAddress):
+                    await session.get(f"http://{host}:{server.port}/secret")
         monkeypatch.setattr(links, "_resolve_public", _resolve_ok)  # first hop: a public name
         text = await fetch_link(f"http://public.example:{server.port}/redirect", config)
     assert hits == ["redirect", "redirect"]  # the redirect was served; /secret never reached

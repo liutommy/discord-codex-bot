@@ -398,12 +398,18 @@ def _public_address(ip: str, allow: Sequence[IPNetwork] = ()) -> bool:
     )
 
 
-def _literal_ip(host: str) -> bool:
+def _literal_address(host: str) -> str:
+    """The IP `host` spells out, in any notation a resolver accepts without asking DNS
+    (`127.1`, `0x7f.1` and `2130706433` are all 127.0.0.1), or "" when it is a name."""
+    host = host.strip("[]")
     try:
-        ipaddress.ip_address(host.strip("[]"))
+        return str(ipaddress.ip_address(host))
     except ValueError:
-        return False
-    return True
+        pass
+    try:
+        return socket.inet_ntoa(socket.inet_aton(host))
+    except OSError:
+        return ""
 
 
 class _PublicResolver(ThreadedResolver):
@@ -418,9 +424,8 @@ class _PublicResolver(ThreadedResolver):
 
     async def resolve(self, host, port=0, family=socket.AF_INET):
         results = await super().resolve(host, port, family)
-        if not results or not all(
-            _public_address(result["host"], self._allow) for result in results
-        ):
+        allow = () if _literal_address(host) else self._allow
+        if not results or not all(_public_address(result["host"], allow) for result in results):
             raise socket.gaierror(f"{host} resolves to a private or reserved address")
         return results
 
@@ -429,7 +434,7 @@ async def _resolve_public(host: str, allow: Sequence[IPNetwork] = ()) -> str:
     """Resolve `host` and return one address only if every answer is a public IP. `allow` covers
     what DNS answers for a name, never an address written into the URL: the proxy range is
     reachable through the sites the host's DNS maps into it, not as a destination of its own."""
-    if _literal_ip(host):
+    if _literal_address(host):
         allow = ()
     infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
     addresses = {info[4][0] for info in infos}
@@ -506,9 +511,9 @@ class RefusedAddress(aiohttp.ClientError):
 
 
 def _refuse_literal(url) -> None:
-    host = url.host or ""
-    if _literal_ip(host) and not _public_address(host.strip("[]")):
-        raise RefusedAddress(f"{host} is a private or reserved address")
+    address = _literal_address(url.host or "")
+    if address and not _public_address(address):
+        raise RefusedAddress(f"{url.host} is a private or reserved address")
 
 
 def _refuse_literal_hops() -> aiohttp.TraceConfig:
