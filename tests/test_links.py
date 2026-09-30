@@ -584,7 +584,9 @@ MAPPED = ("::ffff:127.0.0.1", "::ffff:10.0.0.2", "::ffff:198.18.0.1")
 @pytest.mark.parametrize("host", PROXY_SPELLINGS + LOOPBACK_SPELLINGS + MAPPED)
 async def test_allow_nets_never_cover_an_address_written_into_the_url(host: str) -> None:
     # The proxy range is reachable through the names DNS maps into it, not as a destination.
-    with pytest.raises(ValueError):
+    # Either outcome refuses it: some resolvers (GitHub's runners) will not resolve a literal
+    # with a trailing dot at all, and every caller treats gaierror as "cannot connect".
+    with pytest.raises((ValueError, socket.gaierror)):
         await links._resolve_public(host, PROXY_NETS)
     with pytest.raises(links.RefusedAddress):
         links._refuse_literal(URL(f"http://[{host}]/" if ":" in host else f"http://{host}/"))
