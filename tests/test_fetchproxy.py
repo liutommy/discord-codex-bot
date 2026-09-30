@@ -79,6 +79,54 @@ async def test_http_request_is_forwarded_in_origin_form_and_closed(origin) -> No
     assert "proxy-connection" not in request and "proxy-authorization" not in request
 
 
+async def test_http_connection_carries_exactly_one_request() -> None:
+    received = bytearray()
+
+    async def raw_origin(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # An origin that ignores "Connection: close" and keeps reading: everything the proxy
+        # lets through on this connection ends up in `received`.
+        head = await reader.readuntil(b"\r\n\r\n")
+        received.extend(head)
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        await writer.drain()
+        try:
+            received.extend(await asyncio.wait_for(reader.read(65536), 1.5))
+        except TimeoutError:
+            pass
+        writer.close()
+
+    server = await asyncio.start_server(raw_origin, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    async with server, FilterProxy(_resolve) as proxy:
+        reply = await _ask(
+            proxy,
+            f"POST http://ok.example:{port}/first HTTP/1.1\r\nHost: ok.example\r\n"
+            "Content-Length: 4\r\n\r\nbody"
+            # ...and a second request pipelined behind it, for a name that was never checked.
+            "GET http://lan.example/second HTTP/1.1\r\nHost: lan.example\r\n\r\n".encode(),
+        )
+    assert reply.endswith(b"ok")
+    assert received.startswith(b"POST /first HTTP/1.1") and received.endswith(b"\r\n\r\nbody")
+    assert b"second" not in received and b"lan.example" not in received
+
+
+@pytest.mark.parametrize(
+    "framing",
+    [
+        "Transfer-Encoding: chunked",
+        "Content-Length: 4\r\nContent-Length: 40",
+        "Content-Length: 4, 40",
+        "Content-Length: -1",
+    ],
+)
+async def test_http_requests_with_ambiguous_framing_are_refused(framing: str) -> None:
+    async with FilterProxy(_resolve) as proxy:
+        reply = await _ask(
+            proxy, f"POST http://ok.example:1/x HTTP/1.1\r\n{framing}\r\n\r\nbody".encode()
+        )
+    assert reply.startswith(b"HTTP/1.1 400")
+
+
 async def test_connect_tunnels_to_the_checked_address(origin) -> None:
     async with FilterProxy(_resolve) as proxy:
         reply = await _ask(

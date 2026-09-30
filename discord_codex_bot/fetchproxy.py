@@ -83,6 +83,9 @@ class FilterProxy:
             return await _reply(writer, 400, "Bad Request")
         if not host or (not tunnel and parts.scheme != "http"):
             return await _reply(writer, 400, "Bad Request")
+        body = 0 if tunnel else _body_length(rest)
+        if body is None:
+            return await _reply(writer, 400, "Bad Request")
         try:
             address = await self._resolve(host)
         except (ValueError, socket.gaierror):
@@ -110,7 +113,13 @@ class FilterProxy:
                 upstream.write(f"{method} {path} {version}\r\n".encode("latin-1"))
                 upstream.write(_origin_headers(rest))
                 await upstream.drain()
-            await _relay(reader, writer, upstream_reader, upstream)
+            if tunnel:
+                await _relay(reader, writer, upstream_reader, upstream)
+            else:
+                # Exactly one request: its body, then only the response. Anything else the
+                # client sends on this connection was never checked and is not forwarded.
+                await _copy(reader, upstream, body)
+                await _pipe(upstream_reader, writer)
         finally:
             upstream.close()
 
@@ -128,6 +137,34 @@ def _origin_headers(block: bytes) -> bytes:
         if line and line.split(b":", 1)[0].strip().lower() not in _HOP_HEADERS
     ]
     return b"\r\n".join([*lines, b"Connection: close"]) + b"\r\n\r\n"
+
+
+def _body_length(block: bytes) -> int | None:
+    """Content-Length of the one request this connection carries; None when its framing is
+    anything a second request could hide behind (chunked, repeated or non-numeric lengths)."""
+    lengths = []
+    for line in block.split(b"\r\n"):
+        name, _, value = line.partition(b":")
+        name = name.strip().lower()
+        if name == b"transfer-encoding":
+            return None
+        if name == b"content-length":
+            lengths.append(value.strip())
+    if not lengths:
+        return 0
+    if len(lengths) > 1 or not lengths[0].isdigit():
+        return None
+    return int(lengths[0])
+
+
+async def _copy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, count: int) -> None:
+    while count > 0:
+        chunk = await reader.read(min(count, 65536))
+        if not chunk:
+            return
+        writer.write(chunk)
+        await writer.drain()
+        count -= len(chunk)
 
 
 async def _reply(writer: asyncio.StreamWriter, status: int, reason: str) -> None:
