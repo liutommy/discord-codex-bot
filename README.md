@@ -281,7 +281,14 @@ and injected as untrusted `<LINK>` blocks; the model can also ask for a page wit
 `<fetch url="…"/>` during its read loop (a reply that is *only* tags; a tag quoted inside prose is
 just text). Only public addresses are fetched — LAN, loopback and reserved ranges are refused at
 connect time, on every redirect hop and on every request a rendered page makes — with size, time
-and redirect bounds. When the
+and redirect bounds. A private address written into a URL, or into a redirect's `Location`, is
+refused as well (the HTTP client connects to a literal IP without resolving it, so that case has
+its own check). On a host whose DNS hands out fake IPs from a proxy range (some sandboxes answer
+`198.18.0.1` for selected sites — one address for all of them, the egress proxy tells them apart
+by SNI/Host), those sites are refused as reserved; `LINK_ALLOW_NETS=198.18.0.0/15` lets through
+what DNS answers from that range and nothing else: an address typed into the URL never
+qualifies, and loopback, LAN and link-local ranges are rejected at start-up, so the setting
+cannot be used to reach the host or the compose networks. When the
 plain fetch is blocked (bot challenge, 403/429/503, no readable text) or the model asks with
 `<fetch url="…" render="1"/>` because the member wants to know what a page *looks* like, the Bot
 falls back to headless Chromium (Playwright, installed in the image): it waits out the challenge,

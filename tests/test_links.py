@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import socket
 import sys
 import types
@@ -8,6 +9,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from discord_codex_bot import links
 from discord_codex_bot.config import Config
@@ -26,7 +29,7 @@ from discord_codex_bot.links import (
 )
 
 
-async def _resolve_ok(host: str) -> str:
+async def _resolve_ok(host: str, allow=()) -> str:
     return "93.184.216.34"
 
 
@@ -243,6 +246,7 @@ def test_html_to_text_keeps_article_links_when_given_a_base() -> None:
         ("2606:4700::1", True),
         ("0.0.0.0", False),
         ("224.0.0.1", False),
+        ("198.18.0.1", False),  # proxy fake-IP range: refused unless LINK_ALLOW_NETS opens it
     ],
 )
 def test_public_address_guard(ip: str, public: bool) -> None:
@@ -253,7 +257,7 @@ def test_public_address_guard(ip: str, public: bool) -> None:
 async def test_fetch_link_refuses_private_hosts_and_bad_schemes(
     monkeypatch, config: Config
 ) -> None:
-    async def resolve_private(host: str) -> str:
+    async def resolve_private(host: str, allow=()) -> str:
         raise ValueError("host resolves to a private or reserved address")
 
     monkeypatch.setattr(links, "_resolve_public", resolve_private)
@@ -261,7 +265,7 @@ async def test_fetch_link_refuses_private_hosts_and_bad_schemes(
     assert "只支援 http/https" in await fetch_link("ftp://a.example/", config)
     assert "只支援 http/https" in (await render_link("file:///etc/passwd", config, None))[0]
 
-    async def resolve_fail(host: str) -> str:
+    async def resolve_fail(host: str, allow=()) -> str:
         raise socket.gaierror("no such host")
 
     monkeypatch.setattr(links, "_resolve_public", resolve_fail)
@@ -362,7 +366,7 @@ async def test_fetch_link_clips_text_and_reports_bot_challenge(monkeypatch, conf
         async def __aexit__(self, *args):
             return False
 
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     monkeypatch.setattr(links, "_resolve_public", resolve_ok)
@@ -439,7 +443,7 @@ class FakeRoute:
 async def test_guard_route_allows_public_hosts_only_and_caches_per_host(monkeypatch) -> None:
     seen: list[str] = []
 
-    async def resolve(host: str) -> str:
+    async def resolve(host: str, allow=()) -> str:
         seen.append(host)
         if host.startswith("lan"):
             raise ValueError("private")
@@ -482,8 +486,135 @@ async def test_public_resolver_refuses_private_answers_at_connect_time(monkeypat
         await resolver.resolve("rebind.example", 80)
 
 
+PROXY_NETS = (ipaddress.ip_network("198.18.0.0/15"),)
+
+
+@pytest.mark.parametrize(
+    ("ip", "public"),
+    [
+        ("198.18.0.1", True),
+        ("198.19.255.254", True),
+        ("198.20.0.1", True),  # ordinary public address, outside the range
+        ("127.0.0.1", False),
+        ("10.0.0.2", False),
+        ("172.19.0.3", False),
+        ("192.168.1.1", False),
+        ("169.254.169.254", False),
+        ("::1", False),
+    ],
+)
+def test_allow_nets_open_only_the_listed_range(ip: str, public: bool) -> None:
+    assert _public_address(ip, PROXY_NETS) is public
+
+
+async def test_public_resolver_with_allow_nets_still_refuses_lan_answers(monkeypatch) -> None:
+    answers = {
+        "proxied.example": ["198.18.0.1"],
+        "redirect-target.example": ["10.0.0.2"],  # every redirect hop resolves through here
+        "mixed.example": ["198.18.0.1", "172.19.0.3"],
+    }
+
+    async def fake_super(self, host, port=0, family=socket.AF_INET):
+        return [
+            {"hostname": host, "host": ip, "port": port, "family": family, "proto": 6, "flags": 0}
+            for ip in answers[host]
+        ]
+
+    monkeypatch.setattr(links.ThreadedResolver, "resolve", fake_super)
+    with pytest.raises(socket.gaierror):
+        await links._PublicResolver().resolve("proxied.example", 443)  # default: refused
+    resolver = links._PublicResolver(PROXY_NETS)
+    assert (await resolver.resolve("proxied.example", 443))[0]["host"] == "198.18.0.1"
+    for host in ("redirect-target.example", "mixed.example"):
+        with pytest.raises(socket.gaierror):
+            await resolver.resolve(host, 443)
+
+
+async def test_fetch_and_render_hand_the_allow_nets_to_every_guard(
+    monkeypatch, config: Config
+) -> None:
+    config = replace(config, link_allow_nets=PROXY_NETS)
+    seen: list[tuple[str, object]] = []
+
+    async def refuse(host: str, allow=()) -> str:
+        seen.append((host, allow))
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(links, "_resolve_public", refuse)
+    await fetch_link("https://a.example/", config)
+    await render_link("https://b.example/", config, None)
+    route = types.SimpleNamespace(abort=_noop, continue_=_noop)
+    request = types.SimpleNamespace(url="https://c.example/x.js")
+    await links._guard_route(route, request, {}, config.link_allow_nets)
+    assert seen == [
+        ("a.example", PROXY_NETS),
+        ("b.example", PROXY_NETS),
+        ("c.example", PROXY_NETS),
+    ]
+    session = links._guarded_session(config)
+    try:
+        assert session.connector._resolver._allow == PROXY_NETS
+    finally:
+        await session.close()
+
+
+async def _noop(*_args) -> None:
+    return None
+
+
+async def test_allow_nets_never_cover_an_address_written_into_the_url() -> None:
+    # The proxy range is reachable through the names DNS maps into it, not as a destination.
+    for host in ("198.18.0.1", "198.19.0.7"):
+        with pytest.raises(ValueError):
+            await links._resolve_public(host, PROXY_NETS)
+
+
+async def test_guarded_session_refuses_literal_private_ips_asked_for_or_redirected_to(
+    monkeypatch, config: Config
+) -> None:
+    hits: list[str] = []
+
+    async def redirect(request: web.Request) -> web.Response:
+        hits.append("redirect")
+        raise web.HTTPFound(f"http://127.0.0.1:{request.url.port}/secret")
+
+    async def secret(request: web.Request) -> web.Response:
+        hits.append("secret")
+        return web.Response(text="INTERNAL")
+
+    app = web.Application()
+    app.add_routes([web.get("/redirect", redirect), web.get("/secret", secret)])
+    async with TestServer(app) as server:
+
+        async def to_test_server(self, host, port=0, family=socket.AF_INET):
+            return [
+                {
+                    "hostname": host,
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "family": family,
+                    "proto": 6,
+                    "flags": 0,
+                }
+            ]
+
+        # Let the *name* through so the request reaches the redirect: the hop is what is tested.
+        monkeypatch.setattr(links._PublicResolver, "resolve", to_test_server)
+        async with links._guarded_session(config) as session:
+            with pytest.raises(links.RefusedAddress):
+                await session.get(f"http://public.example:{server.port}/redirect")
+            with pytest.raises(links.RefusedAddress):
+                await session.get(f"http://127.0.0.1:{server.port}/secret")
+            with pytest.raises(links.RefusedAddress):
+                await session.get(f"http://[::1]:{server.port}/secret")
+        monkeypatch.setattr(links, "_resolve_public", _resolve_ok)  # first hop: a public name
+        text = await fetch_link(f"http://public.example:{server.port}/redirect", config)
+    assert hits == ["redirect", "redirect"]  # the redirect was served; /secret never reached
+    assert "抓取失敗" in text and "INTERNAL" not in text
+
+
 async def test_render_link_is_bounded_by_the_render_timeout(monkeypatch, config: Config) -> None:
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     async def hang(url, cfg, out_dir):
@@ -504,7 +635,7 @@ async def test_render_link_is_bounded_by_the_render_timeout(monkeypatch, config:
 async def test_render_link_uses_the_browser_version_without_the_headless_token(
     monkeypatch, config: Config
 ) -> None:
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     monkeypatch.setattr(links, "_resolve_public", resolve_ok)
@@ -557,7 +688,7 @@ async def test_fetch_link_treats_a_redirect_shell_as_blocked(monkeypatch, config
         async def __aexit__(self, *args):
             return False
 
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     monkeypatch.setattr(links, "_resolve_public", resolve_ok)
@@ -723,7 +854,7 @@ async def test_fetch_or_render_uses_the_discord_preview_only_when_the_site_is_un
 async def test_render_link_gives_up_at_once_on_an_interactive_turnstile(
     monkeypatch, config: Config
 ) -> None:
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     async def no_sleep(seconds):

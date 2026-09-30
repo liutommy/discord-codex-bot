@@ -112,3 +112,27 @@ def test_linkclean_admin_ids_default_empty_and_validate() -> None:
     assert ids == frozenset({152035364461084672})
     with pytest.raises(ValueError, match="LINKCLEAN_ADMIN_IDS"):
         load_config({**base, "LINKCLEAN_ADMIN_IDS": "not-an-id"})
+
+
+def test_link_allow_nets_default_empty_and_never_open_a_lan() -> None:
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    assert load_config(base).link_allow_nets == ()
+    config = load_config({**base, "LINK_ALLOW_NETS": " 198.18.0.0/15 , "})
+    assert [str(net) for net in config.link_allow_nets] == ["198.18.0.0/15"]
+    for bad in (
+        "10.0.0.0/8",
+        "172.19.0.0/16",
+        "127.0.0.1/32",
+        "0.0.0.0/0",
+        "169.254.169.254",
+        "100.64.0.0/10",
+        "::/0",
+    ):
+        with pytest.raises(ValueError, match="may not include"):
+            load_config({**base, "LINK_ALLOW_NETS": bad})
+    with pytest.raises(ValueError, match="invalid network"):
+        load_config({**base, "LINK_ALLOW_NETS": "not-a-net"})

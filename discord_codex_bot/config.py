@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from collections.abc import Mapping
@@ -34,6 +35,44 @@ def parse_id_set(value: str | None, name: str, *, required: bool = False) -> fro
     if any(not DISCORD_ID.fullmatch(item) for item in raw_ids):
         raise ValueError(f"{name} contains an invalid Discord ID")
     return frozenset(int(item) for item in raw_ids)
+
+
+IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+# Ranges LINK_ALLOW_NETS may never open to the link fetcher: the host itself, LANs (the compose
+# and sandbox networks live in 172.16/12), link-local (cloud metadata) and multicast.
+_NEVER_FETCH = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.168.0.0/16",
+        "224.0.0.0/4",
+        "::/127",
+        "fc00::/7",
+        "fe80::/10",
+        "ff00::/8",
+    )
+)
+
+
+def parse_allow_nets(value: str | None, name: str) -> tuple[IPNetwork, ...]:
+    nets: list[IPNetwork] = []
+    for part in (value or "").split(","):
+        if not part.strip():
+            continue
+        try:
+            net = ipaddress.ip_network(part.strip())
+        except ValueError:
+            raise ValueError(f"{name} contains an invalid network: {part.strip()}") from None
+        if any(net.version == never.version and net.overlaps(never) for never in _NEVER_FETCH):
+            raise ValueError(f"{name} may not include loopback, LAN or link-local ranges: {net}")
+        nets.append(net)
+    return tuple(nets)
 
 
 def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -158,6 +197,7 @@ class Config:
     link_max_bytes: int
     link_max_chars: int
     link_timeout_seconds: int
+    link_allow_nets: tuple[IPNetwork, ...]
     link_render_timeout_seconds: int
     link_screenshot_max_height: int
     link_preview_wait_seconds: float
@@ -312,6 +352,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         link_max_bytes=_positive_int(values, "LINK_MAX_BYTES", 2_000_000),
         link_max_chars=_positive_int(values, "LINK_MAX_CHARS", 20_000),
         link_timeout_seconds=_positive_int(values, "LINK_TIMEOUT_SECONDS", 15),
+        # Extra networks the public-address guard lets through, for a host whose DNS answers
+        # with fake IPs from a proxy range (198.18.0.0/15). Empty = public addresses only.
+        link_allow_nets=parse_allow_nets(values.get("LINK_ALLOW_NETS"), "LINK_ALLOW_NETS"),
         # Chromium fallback (bot-challenge / client-rendered pages) and on-demand page screenshots.
         link_render_timeout_seconds=_positive_int(values, "LINK_RENDER_TIMEOUT_SECONDS", 40),
         link_screenshot_max_height=_positive_int(values, "LINK_SCREENSHOT_MAX_HEIGHT", 4000),

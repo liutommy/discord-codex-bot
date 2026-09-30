@@ -75,6 +75,7 @@ def config() -> Config:
         link_max_bytes=2_000_000,
         link_max_chars=20_000,
         link_timeout_seconds=15,
+        link_allow_nets=(),
         link_render_timeout_seconds=40,
         link_screenshot_max_height=4000,
         link_preview_wait_seconds=2,

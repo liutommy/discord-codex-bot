@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import socket
+from collections.abc import Sequence
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -13,9 +14,10 @@ from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
 import aiohttp
 from aiohttp.resolver import ThreadedResolver
+from yarl import URL
 
 from . import clearurls, gemini
-from .config import Config
+from .config import Config, IPNetwork
 
 LOGGER = logging.getLogger(__name__)
 # Anchors kept per page. 60 was measured to be binding on two of three real indexes, which is
@@ -380,8 +382,12 @@ def html_to_text(html: str, base_url: str = "") -> tuple[str, str]:
     return parser.title.strip(), text
 
 
-def _public_address(ip: str) -> bool:
+def _public_address(ip: str, allow: Sequence[IPNetwork] = ()) -> bool:
+    """`allow` is LINK_ALLOW_NETS: a proxy range the host's DNS answers with (198.18.0.0/15 counts
+    as private here), never a LAN — config refuses those."""
     address = ipaddress.ip_address(ip)
+    if any(address in net for net in allow):
+        return True
     return not (
         address.is_private
         or address.is_loopback
@@ -392,23 +398,42 @@ def _public_address(ip: str) -> bool:
     )
 
 
+def _literal_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
 class _PublicResolver(ThreadedResolver):
     """aiohttp resolver that refuses non-public answers at connect time. Every redirect hop and
-    every re-resolution goes through it, so a redirect to a LAN host or a DNS answer that changes
-    between check and connect (rebinding) is refused where it would otherwise be used."""
+    every re-resolution of a *name* goes through it, so a redirect to a LAN host or a DNS answer
+    that changes between check and connect (rebinding) is refused where it would otherwise be
+    used. aiohttp never asks a resolver about a literal IP; `_refuse_literal_hops` covers those."""
+
+    def __init__(self, allow: Sequence[IPNetwork] = ()) -> None:
+        super().__init__()
+        self._allow = allow
 
     async def resolve(self, host, port=0, family=socket.AF_INET):
         results = await super().resolve(host, port, family)
-        if not results or not all(_public_address(result["host"]) for result in results):
+        if not results or not all(
+            _public_address(result["host"], self._allow) for result in results
+        ):
             raise socket.gaierror(f"{host} resolves to a private or reserved address")
         return results
 
 
-async def _resolve_public(host: str) -> str:
-    """Resolve `host` and return one address only if every answer is a public IP."""
+async def _resolve_public(host: str, allow: Sequence[IPNetwork] = ()) -> str:
+    """Resolve `host` and return one address only if every answer is a public IP. `allow` covers
+    what DNS answers for a name, never an address written into the URL: the proxy range is
+    reachable through the sites the host's DNS maps into it, not as a destination of its own."""
+    if _literal_ip(host):
+        allow = ()
     infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
     addresses = {info[4][0] for info in infos}
-    if not addresses or not all(_public_address(ip) for ip in addresses):
+    if not addresses or not all(_public_address(ip, allow) for ip in addresses):
         raise ValueError("host resolves to a private or reserved address")
     return sorted(addresses)[0]
 
@@ -435,7 +460,7 @@ async def fetch_link(url: str, config: Config) -> str:
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return f"（{url}：只支援 http/https）"
     try:
-        await _resolve_public(parts.hostname)
+        await _resolve_public(parts.hostname, config.link_allow_nets)
     except (ValueError, socket.gaierror) as error:
         return f"（{url}：無法連線——{error}）"
     try:
@@ -476,11 +501,47 @@ def x_status(url: str) -> tuple[str, str]:
     return (match.group(1), match.group(2)) if match else ("", "")
 
 
+class RefusedAddress(aiohttp.ClientError):
+    """A request or redirect hop named a non-public IP outright."""
+
+
+def _refuse_literal(url) -> None:
+    host = url.host or ""
+    if _literal_ip(host) and not _public_address(host.strip("[]")):
+        raise RefusedAddress(f"{host} is a private or reserved address")
+
+
+def _refuse_literal_hops() -> aiohttp.TraceConfig:
+    """The half of the guard `_PublicResolver` cannot see: aiohttp connects to a literal IP
+    without resolving it, so `http://127.0.0.1/` — asked for, or named by a redirect — is
+    refused here, before the request or the next hop is made."""
+
+    async def on_start(session, context, params) -> None:
+        _refuse_literal(params.url)
+
+    async def on_redirect(session, context, params) -> None:
+        location = params.response.headers.get("Location") or params.response.headers.get("URI")
+        if location:
+            _refuse_literal(params.url.join(URL(location)))
+
+    trace = aiohttp.TraceConfig()
+    trace.on_request_start.append(on_start)
+    trace.on_request_redirect.append(on_redirect)
+    return trace
+
+
 def _guarded_session(config: Config) -> aiohttp.ClientSession:
-    connector = aiohttp.TCPConnector(resolver=_PublicResolver(), use_dns_cache=False)
+    connector = aiohttp.TCPConnector(
+        resolver=_PublicResolver(config.link_allow_nets), use_dns_cache=False
+    )
     timeout = aiohttp.ClientTimeout(total=config.link_timeout_seconds)
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"}
-    return aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector)
+    return aiohttp.ClientSession(
+        timeout=timeout,
+        headers=headers,
+        connector=connector,
+        trace_configs=[_refuse_literal_hops()],
+    )
 
 
 async def _download_image(session, url: str, path: Path, config: Config) -> Path | None:
@@ -699,7 +760,9 @@ def _interactive(body: str) -> bool:
     return any(marker.lower() in lowered for marker in _INTERACTIVE)
 
 
-async def _guard_route(route, request, hosts: dict[str, bool]) -> None:
+async def _guard_route(
+    route, request, hosts: dict[str, bool], allow: Sequence[IPNetwork] = ()
+) -> None:
     """Chromium request hook: every request the page makes — navigation, redirect hop, script,
     image, fetch() from page JS — is allowed only towards a public address."""
     parts = urlsplit(request.url)
@@ -709,7 +772,7 @@ async def _guard_route(route, request, hosts: dict[str, bool]) -> None:
         return
     if host not in hosts:
         try:
-            await _resolve_public(host)
+            await _resolve_public(host, allow)
             hosts[host] = True
         except (ValueError, socket.gaierror):
             hosts[host] = False
@@ -757,7 +820,10 @@ async def _render(url: str, config: Config, out_dir: Path | None) -> tuple[str, 
                 user_agent=user_agent, locale="zh-TW", viewport={"width": 1280, "height": 900}
             )
             hosts: dict[str, bool] = {}
-            await context.route("**/*", lambda route, request: _guard_route(route, request, hosts))
+            allow = config.link_allow_nets
+            await context.route(
+                "**/*", lambda route, request: _guard_route(route, request, hosts, allow)
+            )
             await context.add_init_script(
                 "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
                 "window.chrome={runtime:{}};"
@@ -823,7 +889,7 @@ async def render_link(url: str, config: Config, out_dir: Path | None) -> tuple[s
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return f"（{url}：只支援 http/https）", None
     try:
-        await _resolve_public(parts.hostname)
+        await _resolve_public(parts.hostname, config.link_allow_nets)
     except (ValueError, socket.gaierror) as error:
         return f"（{url}：無法連線——{error}）", None
     try:
