@@ -309,7 +309,12 @@ def _chromium_installed() -> bool:
     return any(root.glob("chromium-*"))
 
 
-chromium = pytest.mark.skipif(not _chromium_installed(), reason="Playwright Chromium not installed")
+# Locally the browser tests skip without Chromium; CI sets REQUIRE_CHROMIUM so a missing browser
+# fails them instead of silently dropping the security acceptance tests.
+chromium = pytest.mark.skipif(
+    not _chromium_installed() and not os.environ.get("REQUIRE_CHROMIUM"),
+    reason="Playwright Chromium not installed",
+)
 
 
 @pytest.fixture

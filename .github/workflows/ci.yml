@@ -15,5 +15,13 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
+      # The fetch-proxy acceptance tests drive a real Chromium; without it they would skip.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+      - run: uv run playwright install --with-deps chromium
       - run: uv run ruff check .
       - run: uv run pytest
+        env:
+          REQUIRE_CHROMIUM: "1"  # a broken browser install must fail CI, not skip the tests
