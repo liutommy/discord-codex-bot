@@ -105,9 +105,37 @@ async def test_http_connection_carries_exactly_one_request() -> None:
             # ...and a second request pipelined behind it, for a name that was never checked.
             "GET http://lan.example/second HTTP/1.1\r\nHost: lan.example\r\n\r\n".encode(),
         )
-    assert reply.endswith(b"ok")
+    del reply  # a pipelining client is cut off; what matters is what reached the origin
     assert received.startswith(b"POST /first HTTP/1.1") and received.endswith(b"\r\n\r\nbody")
     assert b"second" not in received and b"lan.example" not in received
+
+
+async def test_keep_alive_origin_cannot_be_reused_for_a_second_request() -> None:
+    seen: list[bytes] = []
+
+    async def keep_alive_origin(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while True:  # answers every request it is given and never closes
+                seen.append(await reader.readuntil(b"\r\n\r\n"))
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                await writer.drain()
+        except asyncio.IncompleteReadError:
+            writer.close()
+
+    server = await asyncio.start_server(keep_alive_origin, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    async with server, FilterProxy(_resolve) as proxy:
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", int(proxy.url.rsplit(":", 1)[1])
+        )
+        writer.write(f"GET http://ok.example:{port}/first HTTP/1.1\r\n\r\n".encode())
+        assert (await asyncio.wait_for(reader.readexactly(40), 5)).endswith(b"ok")
+        # The browser would now reuse the socket. The proxy closes instead of forwarding, so the
+        # browser retries on a new connection, which is checked like any other.
+        writer.write(f"GET http://ok.example:{port}/second HTTP/1.1\r\n\r\n".encode())
+        assert await asyncio.wait_for(reader.read(), 5) == b""
+        writer.close()
+    assert len(seen) == 1 and b"/first" in seen[0]
 
 
 @pytest.mark.parametrize(
@@ -188,6 +216,11 @@ class _Collect(asyncio.Protocol):
         "GET /relative HTTP/1.1",
         "GET https://ok.example/ HTTP/1.1",
         "CONNECT :443 HTTP/1.1",
+        "CONNECT [::1:1234 HTTP/1.1",
+        "CONNECT ok.example:0 HTTP/1.1",
+        "GET http://ok.example:99999/ HTTP/1.1",
+        "GET http://ok.example/ HTTP/1.1\nTransfer-Encoding: chunked",
+        "GET http://ok.example/ HTTP/1.1\r\nX: a\rb",
     ],
 )
 async def test_malformed_requests_get_400(request_line: str) -> None:
@@ -323,9 +356,22 @@ try {{ new WebSocket('ws://127.0.0.1:{port}/ws'); }} catch (e) {{}}
 </script>""",
         )
 
+    async def rtc(request: web.Request) -> web.Response:
+        return web.Response(
+            content_type="text/html",
+            text=f"""<title>RTC</title><p>rtc page</p><script>
+const pc = new RTCPeerConnection({{iceServers: [
+  {{urls: 'stun:127.0.0.1:{request.query["udp"]}'}},
+  {{urls: 'turn:127.0.0.1:{request.query["udp"]}', username: 'u', credential: 'p'}}]}});
+pc.createDataChannel('x');
+pc.createOffer().then(o => pc.setLocalDescription(o));
+</script>""",
+        )
+
     app = web.Application()
     app.add_routes(
         [
+            web.get("/rtc", rtc),
             web.get("/page", page),
             web.get("/r302", r302),
             web.route("*", "/r307", r307),
@@ -396,3 +442,53 @@ async def test_chromium_loopback_goes_through_the_proxy_even_without_the_route_h
     with pytest.raises(links.RefusedAddress):
         await links._render(f"http://public.example:{site.port}/attack", config, None)
     assert site.hits["secret"] == 0 and site.hits["ws"] == 0
+
+
+class _Datagrams(asyncio.DatagramProtocol):
+    def __init__(self) -> None:
+        self.received: list[bytes] = []
+
+    def datagram_received(self, data: bytes, addr) -> None:
+        self.received.append(data)
+
+
+@chromium
+async def test_chromium_webrtc_cannot_send_udp_past_the_proxy(site, config: Config) -> None:
+    transport, datagrams = await asyncio.get_running_loop().create_datagram_endpoint(
+        _Datagrams, local_addr=("127.0.0.1", 0)
+    )
+    try:
+        udp = transport.get_extra_info("sockname")[1]
+        title, _text, _shot = await links._render(
+            f"http://public.example:{site.port}/rtc?udp={udp}", config, None
+        )
+        assert title == "RTC"
+        await asyncio.sleep(2)  # ICE gathering sends its STUN/TURN requests within a second
+        assert datagrams.received == []
+    finally:
+        transport.close()
+
+
+def test_yt_dlp_is_given_the_proxy_and_never_delegates_to_ffmpeg(monkeypatch, tmp_path) -> None:
+    import sys
+    import types
+
+    captured: dict = {}
+
+    class FakeYDL:
+        def __init__(self, options) -> None:
+            captured.update(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> bool:
+            return False
+
+        def extract_info(self, url, download) -> None:
+            pass
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYDL))
+    links._yt_dlp_download("https://v.example/1", tmp_path / "o", 1000, "http://127.0.0.1:9")
+    assert captured["proxy"] == "http://127.0.0.1:9"
+    assert captured["hls_prefer_native"] is True

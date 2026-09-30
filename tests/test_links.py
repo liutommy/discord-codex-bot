@@ -249,6 +249,7 @@ def test_html_to_text_keeps_article_links_when_given_a_base() -> None:
         ("224.0.0.1", False),
         ("198.18.0.1", False),  # proxy fake-IP range: refused unless LINK_ALLOW_NETS opens it
         ("100.64.0.1", False),  # CGNAT
+        ("fec0::1", False),  # deprecated site-local
     ],
 )
 def test_public_address_guard(ip: str, public: bool) -> None:
@@ -600,6 +601,13 @@ def test_pinned_address_prefers_ipv4() -> None:
     assert links._preferred({"2a03:2880:f203::43fe", "31.13.66.63"}) == "31.13.66.63"
     assert links._preferred({"2a03:2880:f203::43fe"}) == "2a03:2880:f203::43fe"
     assert links._preferred({"93.184.216.34", "104.20.23.154"}) == "104.20.23.154"
+
+
+@pytest.mark.parametrize("host", ["198.18.0.\u00ad1", "198.18.0.1\u200b", "127.0.0.\u200d1"])
+async def test_characters_idna_deletes_do_not_hide_a_literal(host: str) -> None:
+    assert links._literal_address(host) in ("198.18.0.1", "127.0.0.1")
+    with pytest.raises(ValueError):
+        await links._resolve_public(host, PROXY_NETS)
 
 
 def test_literal_address_leaves_names_alone() -> None:

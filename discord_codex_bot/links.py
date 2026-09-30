@@ -395,6 +395,7 @@ def _public_address(ip: str, allow: Sequence[IPNetwork] = ()) -> bool:
         return True
     return not (
         address in _CGNAT
+        or getattr(address, "is_site_local", False)
         or address.is_private
         or address.is_loopback
         or address.is_link_local
@@ -413,6 +414,7 @@ def _literal_address(host: str) -> str:
     # Fullwidth digits and ideographic dots are folded the way IDNA would; a trailing dot is the
     # DNS root label, still the same address.
     host = unicodedata.normalize("NFKC", host).translate(_DOTS).strip("[]").rstrip(".")
+    host = "".join(ch for ch in host if unicodedata.category(ch) != "Cf")
     try:
         return str(ipaddress.ip_address(host))
     except ValueError:
@@ -640,6 +642,7 @@ def _yt_dlp_download(url: str, out_dir: Path, cap: int, proxy_url: str) -> Path 
         "retries": 1,
         # yt-dlp resolves and follows redirects on its own; the proxy is what keeps it public.
         "proxy": proxy_url,
+        "hls_prefer_native": True,  # ffmpeg would fetch fragments itself, outside the proxy
     }
     try:
         with yt_dlp.YoutubeDL(options) as ydl:

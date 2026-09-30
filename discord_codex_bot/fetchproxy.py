@@ -71,17 +71,18 @@ class FilterProxy:
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), _HEAD_TIMEOUT)
         request_line, _, rest = head.partition(b"\r\n")
+        # A lone CR or LF would let a header hide from the checks below and still reach the origin.
+        if b"\r" in head.replace(b"\r\n", b"") or b"\n" in head.replace(b"\r\n", b""):
+            return await _reply(writer, 400, "Bad Request")
         try:
             method, target, version = request_line.decode("latin-1").split(" ")
-        except ValueError:
+            tunnel = method.upper() == "CONNECT"
+            parts = urlsplit(f"//{target}" if tunnel else target)
+            host = parts.hostname or ""
+            port = (443 if tunnel else 80) if parts.port is None else parts.port
+        except ValueError:  # not three fields, a malformed host, a port out of range
             return await _reply(writer, 400, "Bad Request")
-        tunnel = method.upper() == "CONNECT"
-        parts = urlsplit(f"//{target}" if tunnel else target)
-        try:
-            host, port = parts.hostname or "", parts.port or (443 if tunnel else 80)
-        except ValueError:  # port out of range
-            return await _reply(writer, 400, "Bad Request")
-        if not host or (not tunnel and parts.scheme != "http"):
+        if not host or port == 0 or (not tunnel and parts.scheme != "http"):
             return await _reply(writer, 400, "Bad Request")
         body = 0 if tunnel else _body_length(rest)
         if body is None:
@@ -119,7 +120,7 @@ class FilterProxy:
                 # Exactly one request: its body, then only the response. Anything else the
                 # client sends on this connection was never checked and is not forwarded.
                 await _copy(reader, upstream, body)
-                await _pipe(upstream_reader, writer)
+                await _respond(reader, upstream_reader, writer)
         finally:
             upstream.close()
 
@@ -165,6 +166,24 @@ async def _copy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, coun
         writer.write(chunk)
         await writer.drain()
         count -= len(chunk)
+
+
+async def _respond(
+    client_reader: asyncio.StreamReader,
+    upstream_reader: asyncio.StreamReader,
+    client: asyncio.StreamWriter,
+) -> None:
+    """Send the response back until the origin closes — or until the client speaks again. An
+    origin that keeps the connection alive invites the browser to reuse it; closing at the
+    first further byte makes the browser retry that request on a fresh, checked connection."""
+    response = asyncio.ensure_future(_pipe(upstream_reader, client))
+    more = asyncio.ensure_future(client_reader.read(1))
+    try:
+        await asyncio.wait({response, more}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (response, more):
+            task.cancel()
+        await asyncio.gather(response, more, return_exceptions=True)
 
 
 async def _reply(writer: asyncio.StreamWriter, status: int, reason: str) -> None:
