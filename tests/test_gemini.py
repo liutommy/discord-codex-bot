@@ -205,8 +205,8 @@ async def test_understand_video_falls_through_to_yt_dlp_for_curated_hosts(
 ) -> None:
     calls = {}
 
-    def fake_download(url, out_dir, cap):
-        calls["url"], calls["cap"] = url, cap
+    def fake_download(url, out_dir, cap, proxy_url):
+        calls["url"], calls["cap"], calls["proxy"] = url, cap, proxy_url
         clip = out_dir / "clip.mp4"
         out_dir.mkdir(parents=True, exist_ok=True)
         clip.write_bytes(b"data")
@@ -221,8 +221,10 @@ async def test_understand_video_falls_through_to_yt_dlp_for_curated_hosts(
     assert out == f"{links.VIDEO_LABEL}抖音短片內容"
     assert calls["url"] == "https://www.tiktok.com/@u/video/9"
     assert calls["cap"] == config.gemini_video_inline_max_bytes
+    # yt-dlp connects on its own, so it is handed the filtering proxy rather than trusted.
+    assert calls["proxy"].startswith("http://127.0.0.1:")
 
-    def no_file(url, out_dir, cap):
+    def no_file(url, out_dir, cap, proxy_url):
         return None
 
     monkeypatch.setattr(links, "_yt_dlp_download", no_file)

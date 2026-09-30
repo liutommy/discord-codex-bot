@@ -288,7 +288,12 @@ its own check). On a host whose DNS hands out fake IPs from a proxy range (some 
 by SNI/Host), those sites are refused as reserved; `LINK_ALLOW_NETS=198.18.0.0/15` lets through
 what DNS answers from that range and nothing else: an address typed into the URL never
 qualifies, and loopback, LAN and link-local ranges are rejected at start-up, so the setting
-cannot be used to reach the host or the compose networks. When the
+cannot be used to reach the host or the compose networks. Chromium and yt-dlp open their own
+sockets and follow their own redirects, so neither is trusted with a URL: both run behind an
+in-process loopback proxy (`fetchproxy.py`) that resolves each connection through the same
+check and dials the address it checked — a page that redirects a navigation, an image, a
+`fetch()` or a WebSocket to an internal address gets a 403 from the proxy instead. An address
+admitted only by `LINK_ALLOW_NETS` takes `CONNECT :443` and nothing else. When the
 plain fetch is blocked (bot challenge, 403/429/503, no readable text) or the model asks with
 `<fetch url="…" render="1"/>` because the member wants to know what a page *looks* like, the Bot
 falls back to headless Chromium (Playwright, installed in the image): it waits out the challenge,

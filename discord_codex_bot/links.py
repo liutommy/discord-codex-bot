@@ -19,6 +19,7 @@ from yarl import URL
 
 from . import clearurls, gemini
 from .config import Config, IPNetwork
+from .fetchproxy import FilterProxy
 
 LOGGER = logging.getLogger(__name__)
 # Anchors kept per page. 60 was measured to be binding on two of three real indexes, which is
@@ -609,7 +610,7 @@ async def x_video_url(url: str, config: Config) -> str:
     return ""
 
 
-def _yt_dlp_download(url: str, out_dir: Path, cap: int) -> Path | None:
+def _yt_dlp_download(url: str, out_dir: Path, cap: int, proxy_url: str) -> Path | None:
     """Download a single progressive clip under `cap` bytes with yt-dlp (no ffmpeg needed for a
     progressive stream); the saved file, or None. Runs in a worker thread — it is blocking."""
     try:
@@ -631,6 +632,8 @@ def _yt_dlp_download(url: str, out_dir: Path, cap: int) -> Path | None:
         "noprogress": True,
         "socket_timeout": 20,
         "retries": 1,
+        # yt-dlp resolves and follows redirects on its own; the proxy is what keeps it public.
+        "proxy": proxy_url,
     }
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
@@ -646,9 +649,11 @@ async def _describe_downloaded(url: str, config: Config, out_dir: Path | None) -
     """Download `url` with yt-dlp (curated hosts) and describe it; None when not downloadable."""
     if out_dir is None:
         return None
-    clip = await asyncio.to_thread(
-        _yt_dlp_download, url, out_dir, config.gemini_video_inline_max_bytes
-    )
+    allow = config.link_allow_nets
+    async with FilterProxy(lambda host: _resolve_public(host, allow), allow) as proxy:
+        clip = await asyncio.to_thread(
+            _yt_dlp_download, url, out_dir, config.gemini_video_inline_max_bytes, proxy.url
+        )
     if clip is None:
         return None
     description = await gemini.describe_video_bytes(clip, config)
@@ -783,8 +788,9 @@ def _interactive(body: str) -> bool:
 async def _guard_route(
     route, request, hosts: dict[str, bool], allow: Sequence[IPNetwork] = ()
 ) -> None:
-    """Chromium request hook: every request the page makes — navigation, redirect hop, script,
-    image, fetch() from page JS — is allowed only towards a public address."""
+    """Chromium request hook: refuses a non-public destination before the request is made. It
+    is the cheap first line only — Playwright never calls it for a redirected request or a
+    WebSocket, which is why the browser also runs behind `FilterProxy`."""
     parts = urlsplit(request.url)
     host = parts.hostname
     if parts.scheme not in ("http", "https") or not host:
@@ -799,18 +805,41 @@ async def _guard_route(
     await (route.continue_() if hosts[host] else route.abort("blockedbyclient"))
 
 
+async def _assert_public_frames(page, proxy: FilterProxy, allow: Sequence[IPNetwork]) -> None:
+    """Nothing the page ended up showing may come from a non-public address. The proxy already
+    refuses those, so a frame that is on one either shows the proxy's refusal (expected: the
+    result is dropped) or got there around the proxy — which must never happen and is logged."""
+    for frame in getattr(page, "frames", None) or ():
+        parts = urlsplit(frame.url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            continue  # about:blank, data:, chrome-error: carry no fetched content
+        try:
+            await _resolve_public(parts.hostname, allow)
+        except (ValueError, socket.gaierror):
+            if parts.hostname not in proxy.refused:
+                LOGGER.error("render reached %s without the fetch proxy", parts.hostname)
+            raise RefusedAddress(f"{parts.hostname} is a private or reserved address") from None
+
+
 async def _render(url: str, config: Config, out_dir: Path | None) -> tuple[str, str, Path | None]:
     """(title, text, screenshot) of `url` rendered in headless Chromium; the caller bounds time."""
     from playwright.async_api import async_playwright
 
     deadline = config.link_render_timeout_seconds
-    async with async_playwright() as pw:
+    allow = config.link_allow_nets
+    async with (
+        FilterProxy(lambda host: _resolve_public(host, allow), allow) as proxy,
+        async_playwright() as pw,
+    ):
         # Full Chromium (not the headless shell) passes bot challenges the shell fails; it needs
         # a writable HOME and no zygote inside the read-only, cap-dropped container.
         scratch = str(out_dir.parent if out_dir else Path("/tmp"))
         browser = await pw.chromium.launch(
             headless=True,
             channel="chromium",
+            # Every connection goes through the filtering proxy. Chromium exempts loopback
+            # from a proxy unless told otherwise, which would leave 127.0.0.1 wide open.
+            proxy={"server": proxy.url, "bypass": "<-loopback>"},
             env={
                 "HOME": scratch,
                 "XDG_CONFIG_HOME": f"{scratch}/.config",
@@ -825,6 +854,12 @@ async def _render(url: str, config: Config, out_dir: Path | None) -> tuple[str, 
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--headless=new",
+                # What could leave the browser without passing the proxy: QUIC and WebRTC are
+                # UDP, and with every name unresolvable a direct connection has nowhere to go.
+                "--disable-quic",
+                "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                "--force-webrtc-ip-handling-policy",
+                "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
             ],
         )
         try:
@@ -837,10 +872,12 @@ async def _render(url: str, config: Config, out_dir: Path | None) -> tuple[str, 
                 f"Chrome/{major}.0.0.0 Safari/537.36"
             )
             context = await browser.new_context(
-                user_agent=user_agent, locale="zh-TW", viewport={"width": 1280, "height": 900}
+                user_agent=user_agent,
+                locale="zh-TW",
+                viewport={"width": 1280, "height": 900},
+                service_workers="block",  # a worker's fetches are invisible to the route hook
             )
             hosts: dict[str, bool] = {}
-            allow = config.link_allow_nets
             await context.route(
                 "**/*", lambda route, request: _guard_route(route, request, hosts, allow)
             )
@@ -863,6 +900,7 @@ async def _render(url: str, config: Config, out_dir: Path | None) -> tuple[str, 
                 await page.wait_for_load_state("networkidle", timeout=8000)
             except Exception:
                 pass
+            await _assert_public_frames(page, proxy, allow)
             title = await page.title()
             # innerText drops every <a>, so a rendered news index arrives as headlines with no
             # way to reach them. Convert the rendered HTML with the same converter the plain
