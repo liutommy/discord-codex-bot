@@ -596,6 +596,12 @@ async def test_public_resolver_gives_numeric_spellings_no_allow_list(host: str) 
         await links._PublicResolver(PROXY_NETS).resolve(host, 80)
 
 
+def test_pinned_address_prefers_ipv4() -> None:
+    assert links._preferred({"2a03:2880:f203::43fe", "31.13.66.63"}) == "31.13.66.63"
+    assert links._preferred({"2a03:2880:f203::43fe"}) == "2a03:2880:f203::43fe"
+    assert links._preferred({"93.184.216.34", "104.20.23.154"}) == "104.20.23.154"
+
+
 def test_literal_address_leaves_names_alone() -> None:
     assert links._literal_address("example.com") == ""
     assert links._literal_address("198.18.0.1.nip.io") == ""

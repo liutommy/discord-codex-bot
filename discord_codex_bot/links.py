@@ -451,7 +451,13 @@ async def _resolve_public(host: str, allow: Sequence[IPNetwork] = ()) -> str:
     addresses = {info[4][0] for info in infos}
     if not addresses or not all(_public_address(ip, allow) for ip in addresses):
         raise ValueError("host resolves to a private or reserved address")
-    return sorted(addresses)[0]
+    return _preferred(addresses)
+
+
+def _preferred(addresses: set[str]) -> str:
+    """The address to dial: IPv4 first. The fetch proxy connects to exactly this one, and the
+    container has no IPv6 route, so a dual-stack site must not be pinned to its AAAA."""
+    return min(addresses, key=lambda ip: (":" in ip, ip))
 
 
 async def _read_bounded(response, limit: int) -> bytes:
