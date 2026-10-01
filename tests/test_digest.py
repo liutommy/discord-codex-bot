@@ -258,7 +258,7 @@ async def test_one_failing_scope_does_not_stop_the_rest(tmp_path: Path, config: 
         config, None, store, runner, queue_run, now=NOW, public=lambda g, c: True
     )
     assert summary == "1/個人/…3: failed (JSONDecodeError)\n1/伺服器: +1"
-    assert len(queued) == 3  # each scope is its own queue item
+    assert len(queued) == 2  # each scope is its own queue item; member 4 (one talk) is none
 
 
 async def test_digest_forever_is_off_at_weekday_minus_one(config: Config) -> None:
@@ -438,3 +438,27 @@ async def test_digest_stops_when_the_quota_gate_closes(tmp_path: Path, config: C
 
     summary = await digest_all(config, None, store, runner, now=NOW, quota=quota)
     assert calls == ["user"] and summary == "stopped at 1/個人/…4: quota gate"
+
+
+async def test_scopes_that_cannot_reach_the_model_cost_no_quota_probe(
+    tmp_path: Path, config: Config, caplog
+) -> None:
+    config, store = _setup(tmp_path, config)
+    for thread, key in (("a", "1:10:3"), ("b", "1:20:4"), ("c", "1:30:5")):
+        _thread(config, thread, [f"這是第 {thread} 則訊息"])
+        record_retired(config, key, thread, now=NOW - DAY)
+    probes = []
+
+    async def quota() -> bool:
+        probes.append(1)
+        return True
+
+    async def runner(prompt: str, scope: str) -> str:
+        raise AssertionError("nothing here can reach the model")
+
+    caplog.set_level("INFO", logger="discord_codex_bot.digest")
+    summary = await digest_all(
+        config, None, store, runner, now=NOW, public=lambda g, c: c == 10, quota=quota
+    )
+    assert summary == "nothing new" and probes == []
+    assert "Digest guild 1: 1 of 3 channels public, 1 members there" in caplog.text

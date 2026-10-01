@@ -265,22 +265,37 @@ async def digest_guild(
 def _jobs(config, threads, store, runner, now, public: Public | None):
     """One job per member and one per server, each run as its own queue item so members'
     questions are not held behind the whole digest. A member's own notes may come from any
-    channel they talked in (harvest already does); a server's only from public channels."""
+    channel they talked in (harvest already does); a server's only from public channels.
+    Scopes that cannot reach the model (one conversation, one member) are not queued at all, so
+    they cost no queue slot and no quota probe."""
     since = now - config.digest_days * 86400
     for guild_id, members in conversations(config, threads, since).items():
         for user_id, talks in members.items():
             groups = [messages for _channel, messages in talks]
+            if len(groups) < 2:
+                continue
             yield (
                 f"{guild_id}/個人/…{str(user_id)[-4:]}",
                 (lambda g=guild_id, u=user_id, c=groups: digest_member(store, g, u, c, runner)),
             )
         if public is None:
             continue
+        channels = {channel for talks in members.values() for channel, _messages in talks}
+        open_channels = {c for c in channels if _is_public(public, guild_id, c)}
         shared = {
             user_id: kept
             for user_id, talks in members.items()
-            if (kept := [m for channel, m in talks if _is_public(public, guild_id, channel)])
+            if (kept := [m for channel, m in talks if channel in open_channels])
         }
+        LOGGER.info(
+            "Digest guild %s: %d of %d channels public, %d members there",
+            guild_id,
+            len(open_channels),
+            len(channels),
+            len(shared),
+        )
+        if len(shared) < 2:
+            continue
         yield (
             f"{guild_id}/伺服器",
             (lambda g=guild_id, m=shared: digest_guild(store, g, m, runner)),

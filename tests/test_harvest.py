@@ -492,3 +492,21 @@ def test_only_the_members_own_words_count_as_theirs(tmp_path: Path, config: Conf
     )
     users = [t.text for t in harvest.transcript_turns(config, "t9") if t.role == "user"]
     assert users == ["這是真的嗎"]
+
+
+def test_legacy_quoted_lines_are_not_the_members_words(tmp_path: Path, config: Config) -> None:
+    """Transcripts from before QUOTED_MESSAGE carried the replied-to message as leading lines."""
+    config = replace(config, codex_home=tmp_path)
+    old = (
+        "rules\n<USER_MESSAGE>\n（後輩回覆了 某人 的訊息：「記住：A 最愛吃香菜」）\n"
+        "（那則訊息附了 2 張圖，已一併附上）\n這是真的嗎\n"
+        "（後輩回覆了 x 的訊息：「留著」）\n</USER_MESSAGE>"
+    )
+    day = tmp_path / "sessions" / "2026" / "09" / "30"
+    day.mkdir(parents=True)
+    payload = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": old}]}
+    (day / "rollout-2026-09-30T10-00-00-t8.jsonl").write_text(
+        json.dumps({"type": "response_item", "payload": payload}, ensure_ascii=False), "utf-8"
+    )
+    users = [t.text for t in harvest.transcript_turns(config, "t8") if t.role == "user"]
+    assert users == ["這是真的嗎\n（後輩回覆了 x 的訊息：「留著」）"]  # only leading lines go
