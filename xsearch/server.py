@@ -551,8 +551,11 @@ def _keep_login(scratch: str) -> None:
 
 
 def defuse_mentions(text: str) -> str:
-    """`@/x`, `@~/x`, `@./x` become `@\u2060/x`: still readable, never a file mention."""
-    return _PATH_MENTION.sub("@\u2060", text)
+    """`@/x`, `@~/x`, `@./x` become `@\u2060/x`: still readable, never a file mention. A leading
+    `/` gets the same treatment: even with --verbatim the CLI runs a slash command at the start
+    of the prompt (`/always-approve`, `/compact` were seen to run, dropping the rest)."""
+    text = _PATH_MENTION.sub("@\u2060", text)
+    return "\u2060" + text if text.lstrip().startswith("/") else text
 
 
 def run_grok(
