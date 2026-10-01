@@ -185,6 +185,9 @@ class Config:
     log_keep_days: int
     sandbox_url: str
     sandbox_timeout_seconds: int
+    xsearch_url: str
+    xsearch_timeout_seconds: int
+    x_tracking_interval_minutes: int
     apis_path: Path | None
     apis_max_chars: int
     openrouter_dir: Path
@@ -328,6 +331,14 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Sandbox sidecar for <run> snippets; empty SANDBOX_URL = the tool is not offered.
         sandbox_url=values.get("SANDBOX_URL", "http://sandbox:8070").strip(),
         sandbox_timeout_seconds=_bounded_int(values, "SANDBOX_TIMEOUT_SECONDS", 30, 1, 120),
+        # X lookup sidecar (xsearch/): Grok Build on the operator's Grok subscription, reading X
+        # through xAI's server-side X search. Empty = off (X links use fxtwitter alone, and X
+        # accounts cannot be tracked).
+        xsearch_url=values.get("XSEARCH_URL", "").strip(),
+        xsearch_timeout_seconds=_bounded_int(values, "XSEARCH_TIMEOUT_SECONDS", 200, 10, 600),
+        # Each check of an X account is one Grok session on the subscription, so X sources are
+        # fetched on their own, slower clock than TRACKING_INTERVAL_MINUTES.
+        x_tracking_interval_minutes=_positive_int(values, "X_TRACKING_INTERVAL_MINUTES", 60),
         # Registered data APIs the model may call with <api/> (config/apis.json baked in).
         apis_path=Path(values.get("APIS_FILE", "/opt/discord-codex/apis.json")),
         apis_max_chars=_positive_int(values, "APIS_MAX_CHARS", 60_000),  # schedules are long

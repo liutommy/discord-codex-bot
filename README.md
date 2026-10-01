@@ -464,6 +464,46 @@ file is saved into a per-request directory under `/tmp/discord-codex` (container
 directory older than one request timeout every `ATTACHMENT_SWEEP_MINUTES`. Restarting the container
 also clears the tmpfs.
 
+
+### X lookup and X accounts (optional, Grok subscription)
+
+X has no free API, so X posts are read through the fxtwitter API, and X accounts could not be
+tracked at all. The optional `xsearch` service closes both gaps with the operator's **SuperGrok
+or X Premium+ plan**: it runs Grok Build headless and asks xAI's server-side X search three
+fixed questions — this post, this account's recent posts, does this account exist. It uses the
+plan's quota, not xAI API credits. With `XSEARCH_URL` set, an X link that fxtwitter cannot serve
+falls back to it, and `/codex-track source:https://x.com/<account>` tracks an X account (every
+`X_TRACKING_INTERVAL_MINUTES`, default 60, because each check is a Grok session; a check takes
+10–100 s).
+
+Grok Build is a coding agent with a shell, files, web fetching and background jobs. In the
+sidecar it has none of them, and three independent layers keep it that way (`xsearch/server.py`):
+the command line removes every client tool and denies the rest; a root-owned enforced policy
+(`/etc/grok/requirements.toml`) denies every tool call; and each answer is used only if the
+session started with an empty toolset and used nothing but the server-side X search — anything
+else is refused and logged as `REFUSED unsafe grok session`. Members never write the prompt:
+the Bot sends a numeric post id or an account name, both validated. Grok's own `--sandbox`
+needs user namespaces that the hardened container does not grant, so there the container is the
+sandbox (read-only rootfs, non-root, no capabilities, and the host firewall described in
+Operations). Note the gotcha that motivated layer 3: `--disallowed-tools run_terminal_command`,
+spelled as the tool list spells it, leaves the shell in place.
+
+Sign-in, once: sign in to Grok Build on any machine (`grok login`), then copy its
+`~/.grok/auth.json` into the sidecar's volume (owner 1000, mode 600):
+
+```bash
+docker compose build xsearch
+docker volume create tommy_test_xsearch_home
+docker run --rm --user 0 -v tommy_test_xsearch_home:/v -v ~/.grok/auth.json:/in/auth.json:ro \
+  --entrypoint sh discord-codex-bot-xsearch:local \
+  -c 'install -o 1000 -g 1000 -m 600 /in/auth.json /v/auth.json && chown 1000:1000 /v'
+docker compose up -d xsearch
+```
+
+Then set `XSEARCH_URL=http://xsearch:8090` and restart the Bot. The token refreshes itself in
+the volume; if the machine you copied it from refreshes the same login, one of the two may have
+to sign in again.
+
 ## 6. Add the production server
 
 Invite the same application to the production server. If that server is administered by someone

@@ -16,7 +16,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from . import apis, embedfix, gemini, instructions, sandbox, search
+from . import apis, embedfix, gemini, instructions, sandbox, search, xsearch
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
@@ -101,10 +101,12 @@ from .tracking import (
     TrackerStore,
     TwitchFetcher,
     WebFetcher,
+    XFetcher,
     YouTubeFetcher,
     extract_track_tags,
     parse_twitch_locator,
     parse_web_locator,
+    parse_x_locator,
     parse_youtube_locator,
     render_watches,
     tracking_loop,
@@ -177,6 +179,7 @@ def tracking_provider(locator: str) -> str:
     for provider, parser in (
         ("youtube", parse_youtube_locator),
         ("twitch", parse_twitch_locator),
+        ("x", parse_x_locator),
         ("web", parse_web_locator),
     ):
         try:
@@ -184,7 +187,7 @@ def tracking_provider(locator: str) -> str:
         except ValueError:
             continue
         return provider
-    raise ValueError("追蹤需要 YouTube 頻道、Twitch 頻道，或任何 http(s) 網頁網址。")
+    raise ValueError("追蹤需要 YouTube 頻道、Twitch 頻道、X 帳號網址，或任何 http(s) 網頁網址。")
 
 
 def tracking_message(message: OutboxMessage, source_label: str = "") -> str:
@@ -402,6 +405,11 @@ class DiscordCodexClient(discord.Client):
         self.youtube_tracker = YouTubeFetcher(config.youtube_api_key)
         self.twitch_tracker = TwitchFetcher(config.twitch_client_id, config.twitch_client_secret)
         self.web_tracker = WebFetcher(self._read_page)
+        self.x_tracker = XFetcher(
+            lambda handle: xsearch.lookup_user(config, handle),
+            lambda handle, since_id: xsearch.recent_posts(config, handle, since_id),
+            config.x_tracking_interval_minutes,
+        )
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-remember",
@@ -609,6 +617,7 @@ class DiscordCodexClient(discord.Client):
         fetcher = {
             "youtube": self.youtube_tracker,
             "twitch": self.twitch_tracker,
+            "x": self.x_tracker,
             "web": self.web_tracker,
         }.get(source.provider)
         if fetcher is None:
@@ -1489,9 +1498,12 @@ class DiscordCodexClient(discord.Client):
             self.config.twitch_client_id and self.config.twitch_client_secret
         ):
             return "管理者尚未設定 TWITCH_CLIENT_ID／TWITCH_CLIENT_SECRET。", None
+        if provider == "x" and not xsearch.enabled(self.config):
+            return "管理者尚未設定 XSEARCH_URL（X 查詢服務），無法追蹤 X 帳號。", None
         resolver = {
             "youtube": self.youtube_tracker,
             "twitch": self.twitch_tracker,
+            "x": self.x_tracker,
             "web": self.web_tracker,
         }[provider]
         try:
@@ -1506,7 +1518,13 @@ class DiscordCodexClient(discord.Client):
                 mention_ids=mention_ids,
                 interval_minutes=interval_minutes or self.config.tracking_classify_interval_minutes,
             )
-        except (ProviderError, aiohttp.ClientError, TimeoutError, ValueError) as error:
+        except (
+            ProviderError,
+            xsearch.XSearchError,
+            aiohttp.ClientError,
+            TimeoutError,
+            ValueError,
+        ) as error:
             LOGGER.warning("Tracking source resolution failed (%s)", type(error).__name__)
             return "無法讀取這個來源；請確認網址與 provider 憑證後再試。", None
         label = str(state.get("title") or state.get("login") or external_id)
