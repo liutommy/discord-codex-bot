@@ -421,6 +421,32 @@ Operators can run it on demand inside the container with
 `python -m discord_codex_bot.harvest` (`--force` ignores the quota gate); the nightly
 consolidation has the same entry point, `python -m discord_codex_bot.consolidate [--force]`.
 
+Once a week a digest reads many conversations together, because most threads are a question or
+two and harvest finds nothing in any one of them. On `DIGEST_WEEKDAY` (0 = Monday … 6 = Sunday,
+default 6; `-1` turns it off) at `DIGEST_HOUR` (default 01:00, `CONSOLIDATE_TIMEZONE`, so the
+consolidation that night merges what it adds) it takes every thread used in the last
+`DIGEST_DAYS` (default 7): those harvest retired, from `harvest_ledger.jsonl` next to the thread
+store (kept 35 days), plus each conversation's current thread. Only members' own messages are
+read, never the assistant's.
+
+- **Per member** with at least two conversations: interests or habits that recur in two or more
+  of them. These are inferences, so the note's name starts with `（推測）`; the model is told to
+  treat such a note as a hint and never tell the member it as fact. A member who disagrees
+  deletes it with `/<prefix>-forget`.
+- **Per server** with at least two members talking: facts about the server itself (recurring
+  events, shared games, the server's own terms, running jokes, house rules) that at least two
+  different members mention. The name starts with `（多人提及）`. Nothing about an individual
+  member goes there.
+
+Each note must quote the members' own words: one exact quote from each of at least two different
+conversations (personal) or members (server), every quote found character for character in the
+message it cites, or the whole note is dropped. Sensitive traits (health, religion, politics,
+sexuality, finances, location, contact details), one-off questions, tracking/reminder operations
+and anything already noted are excluded; at most three notes per scope per week. The run uses
+`codex exec --output-schema` with no web search or other tools, shares the quota gate with
+consolidation, and logs only counts. Operators can run it now with
+`python -m discord_codex_bot.digest [--force]`.
+
 Notes are consolidated once a day. At `CONSOLIDATE_HOUR` (`CONSOLIDATE_TIMEZONE`, default 02:00
 Asia/Taipei) the Bot rewrites every scope of every guild. `CONSOLIDATE_MIN_REMAINING_PERCENT`
 defaults to `0`, so it simply runs: a spent subscription falls back to `CODEX_FALLBACK_MODEL`

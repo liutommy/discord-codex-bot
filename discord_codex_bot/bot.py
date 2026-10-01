@@ -58,6 +58,7 @@ from .codex import (
 )
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
+from .digest import digest_forever
 from .harvest import harvest_forever
 from .help import render_guide, render_sheet
 from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, is_link_only, plan, spoilered
@@ -562,6 +563,9 @@ class DiscordCodexClient(discord.Client):
         )
         self._consolidator = self.loop.create_task(
             consolidate_forever(self.memory, self.config, self.queue.run)
+        )
+        self._digester = self.loop.create_task(
+            digest_forever(self.threads, self.memory, self.config, self.queue.run)
         )
         self._harvest_wakeup = asyncio.Event()
         self._harvester = self.loop.create_task(

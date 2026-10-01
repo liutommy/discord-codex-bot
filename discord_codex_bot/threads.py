@@ -138,6 +138,15 @@ class ThreadStore:
         seen: set[str] = set()
         return [c for c in found if not (c[1] in seen or seen.add(c[1]))]
 
+    def recent(self, since: float) -> list[tuple[str, str, float]]:
+        """(key, thread_id, last used) of each conversation's latest thread used since `since`;
+        the weekly digest adds these to the harvest ledger, which only has retired threads."""
+        return [
+            (key, str(entry["thread_id"]), float(entry["at"]))
+            for key, entry in self._by_key.items()
+            if float(entry["at"]) >= since
+        ]
+
     def mark_harvested(self, thread_id: str) -> None:
         self._pending = [p for p in self._pending if p["thread_id"] != thread_id]
         for entry in self._by_key.values():

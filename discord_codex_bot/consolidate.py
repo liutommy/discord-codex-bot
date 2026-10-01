@@ -25,6 +25,9 @@ clean set:
   old.
 - Keep names short (≤ 30 characters) and texts concise but complete; keep the notes' language.
 - Order the result oldest first; give each merged note the date of its newest source.
+- A name starting with （推測） (inferred from several conversations) or （多人提及） (gathered from
+  several members) says how the note was made: keep that marker on a note built only from such
+  notes. Merged with a note without the marker, the unmarked statement wins and the marker goes.
 Return only JSON matching the schema."""
 
 

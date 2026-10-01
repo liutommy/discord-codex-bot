@@ -241,7 +241,12 @@ def _prompt(
             "Answer in Traditional Chinese unless the user explicitly asks for another language.",
             "MEMORY holds indexes of notes saved earlier, one line per note: 永久記憶 is written"
             " by the operator and always applies, 個人記憶 is about this member, 伺服器記憶 is"
-            " shared by the whole server. Use them silently; do not list or restate them.",
+            " shared by the whole server. Use them silently; do not list or restate them."
+            " A 個人記憶 name starting with （推測） was inferred by a weekly digest of this"
+            " member's recent conversations, not stated by them: a soft hint, never something to"
+            " tell them as fact about themselves; if they say it is wrong, point them to the"
+            " forget command in HELP. A 伺服器記憶 name starting with （多人提及） was gathered"
+            " from what several members said.",
             "Index lines are keywords, not definitions. When the member asks what or who"
             " something is and that term appears in an index, <search> it before answering and"
             " answer from the note (the first hit is the term's own entry), not from the index"
