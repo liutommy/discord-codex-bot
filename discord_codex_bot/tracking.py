@@ -247,6 +247,13 @@ MAX_TRACK_TAGS = 3
 MAX_TRACK_MENTIONS = 5
 # The model writes the notification itself; this only stops a runaway one from filling a message.
 MAX_MESSAGE_CHARS = 600
+# One classifier call judges at most this many items of a watch, the newest first; the rest wait
+# for the next call. A source that floods (a shop listing, a busy page) used to send its whole
+# backlog in one prompt, and one item missing from the answer threw every judgement away.
+MAX_CLASSIFY_BATCH = 30
+# Items the Bot first saw longer ago than this are no longer worth a notification: they leave
+# the queue unjudged instead of piling up behind a watch that cannot keep pace.
+PENDING_MAX_HOURS = 48
 # How the Bot's page reader hands back a link. Measured on a real index rather than assumed:
 # the URL sits alone on its own line and the headline is on the next one, so the gap between
 # them has to be allowed to cross a newline.
@@ -600,8 +607,11 @@ class TrackerStore:
         return [self._item(row) for row in rows]
 
     def pending_by_watch(self) -> list[tuple[Watch, list[ContentItem]]]:
-        """Undecided items published after the watch was created. The first sight of a source is
-        its baseline and is never classified: a new watch is about what happens from now on."""
+        """Undecided items published after the watch was created, at most MAX_CLASSIFY_BATCH per
+        watch (the newest; oldest first within the batch), none seen more than PENDING_MAX_HOURS
+        ago. The first sight of a source is its baseline and is never classified: a new watch is
+        about what happens from now on."""
+        cutoff = (datetime.now(UTC) - timedelta(hours=PENDING_MAX_HOURS)).isoformat()
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT w.*, i.id AS item_id, i.external_id AS item_external_id,
@@ -612,10 +622,11 @@ class TrackerStore:
                    FROM watches w JOIN items i ON i.source_id=w.source_id
                    LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
                    WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id
-                     AND i.baseline=0
+                     AND i.baseline=0 AND i.observed_at >= ?
                      AND CAST(strftime('%s', 'now') AS INTEGER) - w.classified_at
                          >= w.interval_minutes * 60
-                   ORDER BY w.id, i.published_at, i.id"""
+                   ORDER BY w.id, i.published_at, i.id""",
+                (cutoff,),
             ).fetchall()
         groups: dict[int, tuple[Watch, list[ContentItem]]] = {}
         for row in rows:
@@ -636,17 +647,22 @@ class TrackerStore:
                     json.loads(row["item_raw_json"]),
                 )
             )
-        return list(groups.values())
+        return [(watch, items[-MAX_CLASSIFY_BATCH:]) for watch, items in groups.values()]
 
     def save_decisions(
         self, watch: Watch, items: Sequence[ContentItem], decisions: Sequence[DecisionInput]
     ) -> None:
+        """Store the judgements given; an item without one stays pending for the next call."""
         by_external_id = {decision.external_item_id: decision for decision in decisions}
-        if set(by_external_id) != {item.external_id for item in items}:
-            raise ValueError("classifier decisions must match every pending item exactly once")
+        if len(by_external_id) != len(decisions):
+            raise ValueError("classifier decisions must name each item at most once")
+        if not set(by_external_id) <= {item.external_id for item in items}:
+            raise ValueError("classifier decided an item it was not given")
         with self._connect() as connection:
             for item in items:
-                decision = by_external_id[item.external_id]
+                decision = by_external_id.get(item.external_id)
+                if decision is None:
+                    continue
                 if not 0 <= decision.confidence <= 1:
                     raise ValueError("confidence must be between 0 and 1")
                 cursor = connection.execute(
@@ -1422,9 +1438,14 @@ def parse_classifier_result(answer: str, items: Sequence[ContentItem]) -> list[D
         )
     if len({decision.external_item_id for decision in parsed}) != len(parsed):
         raise ValueError("classifier returned duplicate item ids")
-    if {decision.external_item_id for decision in parsed} != {item.external_id for item in items}:
-        raise ValueError("classifier did not decide every pending item")
-    return parsed
+    given = {item.external_id for item in items}
+    known = [decision for decision in parsed if decision.external_item_id in given]
+    if len(known) != len(parsed):  # an id it was never shown: drop it, keep the rest
+        LOGGER.warning("Classifier named %d item(s) it was not given", len(parsed) - len(known))
+    if items and not known:
+        raise ValueError("classifier decided none of the pending items")
+    # Items it skipped stay pending and are asked about again next time (or expire).
+    return known
 
 
 Fetcher = Callable[[Source], Awaitable[FetchResult]]
