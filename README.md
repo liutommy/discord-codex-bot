@@ -465,6 +465,30 @@ directory older than one request timeout every `ATTACHMENT_SWEEP_MINUTES`. Resta
 also clears the tmpfs.
 
 
+### Grok as a model provider
+
+With `XSEARCH_URL` set, Grok is also a backend members can pick (`/codex-model provider:Grok`):
+the models and effort levels are the plan's own catalog, read from the sidecar's `/models` and
+refreshed every six hours (today grok-4.7, grok-4.7-build-fast, grok-4.6 at low/medium/high/
+xhigh, and grok-4.5 without xhigh); an effort a model does not offer maps to the closest one
+below it. `DEFAULT_MODEL=grok:grok-4.7|medium` makes it what members get until they choose.
+
+A member's message becomes the prompt of a Grok session, so prompt injection is a given: turns
+run in the same sidecar and under the same rules as X lookups — no client tools, the enforced
+deny-all hook, a fresh home per session, and an answer is used only if the session's stream is
+the locked-down one. The Bot's own `<web>`/`<fetch>`/`<run>` loop, memory and persona work as
+for every backend; Grok's server-side X search is available to the model. Grok keeps no
+conversation, so the Bot keeps a transcript (`gk-…`) and replays up to `GROK_HISTORY_CHARS`.
+
+When Grok cannot answer, the turn moves down `MODEL_CHAIN` (grok → codex → agy), the same way
+Codex already fell back to agy, and `/status` shows the last fallback. A turn skips Grok
+outright when it carries an image (Grok's headless mode cannot read images), when the plan's
+weekly usage is past `GROK_CHAT_MAX_WEEKLY_PERCENT` (chat and X lookups share one weekly quota;
+the rest is left for X), or for an hour after three refused sessions in ten minutes (one alert,
+not one per message). A request the sidecar rejects as malformed is reported, not hidden by a
+fallback. Background jobs (memory consolidation, tracking classification) stay on Codex → agy:
+they need structured output, and their quota is not the members'.
+
 ### X lookup and X accounts (optional, Grok subscription)
 
 X has no free API, so X posts are read through the fxtwitter API, and X accounts could not be
@@ -510,7 +534,11 @@ docker compose up -d xsearch
 
 Then set `XSEARCH_URL=http://xsearch:8090` and restart the Bot. After changing `GROK_VERSION`,
 re-run the negative control for the enforced hook (one Grok session):
-`docker compose exec xsearch sh /srv/smoke-layer2.sh` must print `OK`. A new version may also store its
+`docker compose exec xsearch sh /srv/smoke-layer2.sh` must print `OK`. Then the file-mention check
+(8 sessions): `docker compose exec xsearch python /srv/smoke-mentions.py` must print `OK`. The CLI
+expands `@ /path` (any whitespace after the `@`) into the file even with `--verbatim`, and runs a
+leading slash command; that it ignores a fullwidth `＠` and a word-joined `/` was measured, not
+documented, so a new version must be checked before it serves members. A new version may also store its
 login differently: a refreshed login is only kept when its fields match the old file, so if the
 xsearch log shows `login file changed shape; not kept`, sign in again and copy the new
 `auth.json` into the volume as above before the old token expires.

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import instructions
+from .backends import BackendUnavailable
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ def parse_thread_id(stdout: str) -> str:
     return ""
 
 
-class CodexFallbackError(RuntimeError):
+class CodexFallbackError(BackendUnavailable):
     """A remote Codex condition that the configured spare backend can answer through.
 
     Local configuration, process, timeout and output errors deliberately do not inherit from
