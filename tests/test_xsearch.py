@@ -114,7 +114,7 @@ def test_a_session_cannot_plant_junk_as_the_login(monkeypatch, tmp_path) -> None
     scratch = tmp_path / "s" / "home" / ".grok"
     scratch.mkdir(parents=True)
     monkeypatch.setattr(server, "AUTH_DIR", str(tmp_path))
-    for junk in ("not json", "[1, 2]"):
+    for junk in ("not json", "[1, 2]", '{"token": "x", "endpoint": "https://evil"}', "{}"):
         (scratch / "auth.json").write_text(junk)
         server._keep_login(str(tmp_path / "s"))
         assert (tmp_path / "auth.json").read_text() == '{"token": "good"}'
@@ -350,6 +350,17 @@ def test_http_handler_rejects_bad_lengths_and_slow_clients(monkeypatch) -> None:
             assert conn.getresponse().status == 411
             conn.close()
         assert server.Handler.timeout == 10
+        # the liveness peek must not clear that timeout for the rest of the request
+        import socket as socket_
+
+        left, right = socket_.socketpair()
+        left.settimeout(10)
+        probe = server.Handler.__new__(server.Handler)
+        probe.connection = left
+        assert probe._client_waiting() is True and left.gettimeout() == 10
+        right.close()
+        assert probe._client_waiting() is False
+        left.close()
     finally:
         httpd.shutdown()
 

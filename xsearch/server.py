@@ -383,17 +383,21 @@ def _fresh_home() -> tuple[str, dict]:
 
 def _keep_login(scratch: str) -> None:
     """Carry a refreshed login back to the volume — the only thing that outlives a session —
-    and only if it is still a JSON object (a session must not be able to plant junk there)."""
+    and only if it is still a JSON object with the same keys as before: a refresh changes token
+    values, never the shape, so anything else (say, an extra endpoint field) is not kept."""
     fresh = os.path.join(scratch, "home", ".grok", "auth.json")
     target = os.path.join(AUTH_DIR, "auth.json")
     try:
         with open(fresh, "rb") as handle:
             data = handle.read()
-        if not isinstance(json.loads(data), dict):
-            return
         with open(target, "rb") as handle:
-            if handle.read() == data:
-                return
+            current = handle.read()
+        new, old = json.loads(data), json.loads(current)
+        if data == current or not isinstance(new, dict) or not isinstance(old, dict):
+            return
+        if set(new) != set(old):
+            print("login file changed shape; not kept", flush=True)
+            return
     except (OSError, ValueError):
         return
     staging = f"{target}.new"
@@ -481,13 +485,14 @@ class Handler(BaseHTTPRequestHandler):
     def _client_waiting(self) -> bool:
         """False once the client has closed its end (a read would return EOF at once)."""
         try:
+            previous = self.connection.gettimeout()  # the handler's 10 s, kept for the reply
             self.connection.setblocking(False)
             try:
                 return self.connection.recv(1, socket.MSG_PEEK) != b""
             except BlockingIOError:
                 return True
             finally:
-                self.connection.setblocking(True)
+                self.connection.settimeout(previous)
         except OSError:
             return False
 

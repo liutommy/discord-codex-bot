@@ -501,6 +501,15 @@ def test_a_notification_title_cannot_carry_a_masked_link() -> None:
     assert "\\[官方公告]" in text  # the bracket is escaped, so Discord shows no link
 
 
+def test_an_x_notification_says_it_is_unverified() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy")
+    decision = Decision(1, 1, 1, True, 0.9, "公告", "符合政策", (), "decided")
+    x_item = ContentItem(1, 1, "1", "https://x.com/Riot/status/1", "patch", "", "now", "post")
+    yt_item = ContentItem(1, 1, "v", "https://www.youtube.com/watch?v=v", "mv", "", "now", "video")
+    assert "未經驗證" in tracking_message(OutboxMessage(1, decision, watch, x_item, 0), "Riot")
+    assert "未經驗證" not in tracking_message(OutboxMessage(1, decision, watch, yt_item, 0), "a")
+
+
 def test_a_notification_never_carries_a_mention_from_the_social_text() -> None:
     watch = Watch(1, 1, GUILD, 555, USER, "policy")
     item = ContentItem(
