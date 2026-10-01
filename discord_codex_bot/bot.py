@@ -597,8 +597,12 @@ class DiscordCodexClient(discord.Client):
         await self.warm_emojis()
         LOGGER.info("%s", await codex_login_status(self.config))
         if grok.enabled(self.config):  # the model list /model offers and effort mapping uses
-            catalog = await grok.models(self.config)
-            LOGGER.info("Grok models: %s", ", ".join(m.id for m in catalog) or "(unavailable)")
+            asyncio.create_task(self._load_grok_models())  # never hold up startup on the sidecar
+        if self.config.default_model.startswith(f"{GROK}:") and not self.config.model_chain:
+            LOGGER.warning(
+                "DEFAULT_MODEL is Grok but MODEL_CHAIN is empty: turns Grok cannot take (images, "
+                "past the weekly reserve, sidecar down) will fail instead of falling back"
+            )
         LOGGER.info("Alerts go to user %s", await self.alerts.resolve_owner() or "(none)")
         if not getattr(self, "_login_watch", None):
             self._login_watch = asyncio.create_task(
@@ -1229,6 +1233,10 @@ class DiscordCodexClient(discord.Client):
     def _member_effort(self, guild_id: int | None, user_id: int) -> str:
         stored = self._stored(guild_id, user_id)
         return split_stored(stored)[1] or self.config.codex_reasoning_effort
+
+    async def _load_grok_models(self) -> None:
+        catalog = await grok.models(self.config)
+        LOGGER.info("Grok models: %s", ", ".join(m.id for m in catalog) or "(unavailable)")
 
     async def _grok_usable(self, images: bool) -> bool:
         """Whether a turn may go to Grok right now. Not when it carries images (Grok's headless

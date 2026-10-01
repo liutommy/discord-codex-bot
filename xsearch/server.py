@@ -60,7 +60,7 @@ CHAT_PARALLEL = int(os.environ.get("XSEARCH_CHAT_PARALLEL", "2"))
 CHAT_TIMEOUT = int(os.environ.get("XSEARCH_CHAT_TIMEOUT_SECONDS", "300"))
 MAX_CHAT_BODY = 256 * 1024
 MAX_PROMPT_CHARS = 200_000
-MAX_SYSTEM_CHARS = 50_000
+MAX_SYSTEM_BYTES = 100_000  # passed as one argv value: Linux caps a single argument at 128 KiB
 MODELS_CACHE_SECONDS = 6 * 3600
 USAGE_CACHE_SECONDS = 60
 BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
@@ -182,19 +182,24 @@ class LoginFailed(LookupFailed):
     pass
 
 
+# Matched against what the CLI itself says (its stderr) and the result's subtype — never against
+# the result text, which can be the model's own words: a member can talk the model into writing
+# "quota exceeded, please sign in again", and that must not read as a spent plan or a lost login.
 _QUOTA = re.compile(
-    r"rate.?limit|quota|usage.?limit|credit|exceeded|too many requests|\b429\b", re.I
+    r"\b429\b|rate.?limit|quota|usage.?limit|insufficient.?credit|credits? (exhausted|depleted)",
+    re.I,
 )
 _LOGIN = re.compile(
-    r"unauthori[sz]ed|\b401\b|sign.?in|log.?in again|expired.?token|invalid.?token|authenticat",
+    r"\b401\b|unauthori[sz]ed|(token|session|login) (has )?(expired|is invalid|revoked)"
+    r"|not (logged|signed) in|please (log|sign) ?in",
     re.I,
 )
 
 
-def classify_failure(summary: str, detail: str = "") -> LookupFailed:
+def classify_failure(summary: str, cli_output: str = "") -> LookupFailed:
     """What a failed session means for the caller: the plan's quota is spent, the login is gone
-    (both: try another backend), or anything else."""
-    text = f"{summary} {detail}"
+    (both: try another backend), or anything else. `cli_output` is the CLI's stderr only."""
+    text = f"{summary} {cli_output}"
     if _QUOTA.search(text):
         return QuotaExhausted(summary)
     if _LOGIN.search(text):
@@ -300,8 +305,8 @@ def verify_stream(lines: list[str], mode: str = "lookup") -> dict | str:
     if not inits:
         raise Unsafe("session reported no toolset")
     if result is None or result.get("is_error") or result.get("subtype") != "success":
-        detail = str((result or {}).get("result") or "")
-        raise classify_failure(f"grok did not finish: {(result or {}).get('subtype')}", detail)
+        # The subtype is the CLI's; the result text may be the model's and is not looked at.
+        raise classify_failure(f"grok did not finish: {(result or {}).get('subtype')}")
     if mode == "chat":
         text = str(result.get("result") or "").strip()
         if not text:
@@ -571,15 +576,18 @@ def _run(model: str, tail: list[str], home_env: dict, cwd: str, timeout: int) ->
 
 
 def _run_command(command: list[str], home_env: dict, cwd: str, timeout: int) -> list[str]:
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
-        env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), **home_env, **ENV},
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), **home_env, **ENV},
+            start_new_session=True,
+        )
+    except OSError as error:  # e.g. an argument too long for execve
+        raise LookupFailed(f"could not start grok: {type(error).__name__}") from None
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -633,6 +641,7 @@ def lookup(kind: str, request: dict, still_wanted=lambda: True) -> dict:
 
 _MODELS: tuple[float, list[dict]] = (0.0, [])
 _MODELS_LOCK = threading.Lock()
+MODELS_RETRY_SECONDS = 600  # after a failed refresh, keep the old list this long before retrying
 
 
 def parse_models(cache: dict) -> list[dict]:
@@ -666,23 +675,48 @@ def parse_models(cache: dict) -> list[dict]:
     return out
 
 
-def models(still_wanted=lambda: True) -> list[dict]:
-    """The models this login may use, refreshed every MODELS_CACHE_SECONDS. `grok models` runs
-    in a fresh home like any session and writes its catalog there; nothing else is kept."""
+def _refresh_models(still_wanted=lambda: True) -> list[dict]:
+    """Run `grok models` (a session like any other, in a fresh home) and keep the catalog it
+    writes. On failure the previous list stays, and the next attempt waits MODELS_RETRY_SECONDS:
+    a broken `grok models` must not cost every chat turn a retry."""
     global _MODELS
-    with _MODELS_LOCK:
-        fetched_at, cached = _MODELS
-        if cached and time.monotonic() - fetched_at < MODELS_CACHE_SECONDS:
-            return cached
+    fetched_at, cached = _MODELS
+    try:
         lines = _session(_LOCK, still_wanted, prompt=None, collect="models_cache.json")
-        try:
-            catalog = parse_models(json.loads(lines[-1]))
-        except (ValueError, IndexError, AttributeError):
-            raise LookupFailed("could not read the model catalog") from None
+        catalog = parse_models(json.loads(lines[-1]))
         if not catalog:
             raise LookupFailed("the model catalog is empty")
-        _MODELS = (time.monotonic(), catalog)
-        return catalog
+    except (LookupFailed, Busy, ValueError, IndexError, AttributeError) as error:
+        print(f"model catalog refresh failed ({error}); keeping {len(cached)} models", flush=True)
+        if not cached:
+            raise LookupFailed("could not read the model catalog") from None
+        retry_at = time.monotonic() - MODELS_CACHE_SECONDS + MODELS_RETRY_SECONDS
+        _MODELS = (retry_at, cached)
+        return cached
+    _MODELS = (time.monotonic(), catalog)
+    return catalog
+
+
+def models(still_wanted=lambda: True) -> list[dict]:
+    """The models this login may use. Fetched synchronously only the first time; after that a
+    stale list is served as is while one background thread refreshes it, so neither a chat turn
+    nor /models ever waits behind a lookup (or a broken CLI) for the catalog."""
+    fetched_at, cached = _MODELS
+    if not cached:
+        with _MODELS_LOCK:
+            return _MODELS[1] or _refresh_models(still_wanted)
+    if time.monotonic() - fetched_at >= MODELS_CACHE_SECONDS and _MODELS_LOCK.acquire(
+        blocking=False
+    ):
+
+        def refresh() -> None:
+            try:
+                _refresh_models()
+            finally:
+                _MODELS_LOCK.release()
+
+        threading.Thread(target=refresh, daemon=True).start()
+    return cached
 
 
 def _catalog_entry(model_id: str) -> dict | None:
@@ -699,8 +733,8 @@ def chat(request: dict, still_wanted=lambda: True) -> dict:
     model, effort = request.get("model"), request.get("effort", "")
     if type(prompt) is not str or not prompt.strip() or len(prompt) > MAX_PROMPT_CHARS:
         raise BadRequest("prompt must be a non-empty string")
-    if type(system) is not str or len(system) > MAX_SYSTEM_CHARS:
-        raise BadRequest("system must be a string")
+    if type(system) is not str or len(system.encode("utf-8")) > MAX_SYSTEM_BYTES or "\0" in system:
+        raise BadRequest(f"system must be a string of at most {MAX_SYSTEM_BYTES} bytes")
     if type(model) is not str or not MODEL_ID.fullmatch(model):
         raise BadRequest("model must be a model id")
     if type(effort) is not str or (effort and not EFFORT.fullmatch(effort)):

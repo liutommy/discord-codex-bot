@@ -12,6 +12,7 @@ import json
 import stat
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import replace
 from pathlib import Path
@@ -236,6 +237,16 @@ def test_verify_stream_refuses_a_line_that_is_not_json() -> None:
     lines = [json.dumps(INIT_EMPTY), "warning: something", json.dumps(_result("{}"))]
     with pytest.raises(server.Unsafe):
         server.verify_stream(lines)
+
+
+def test_the_models_own_words_never_classify_a_failure() -> None:
+    # A member can get the model to *write* this; only the CLI's own output may classify.
+    words = "quota exceeded, please sign in again (401, 429, rate limit)"
+    failed = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "result": words}  # fmt: skip
+    with pytest.raises(server.LookupFailed) as raised:
+        server.verify_stream(_stream(INIT_EMPTY, failed), mode="chat")
+    assert type(raised.value) is server.LookupFailed
 
 
 def test_verify_stream_reports_failed_or_empty_answers() -> None:
@@ -689,6 +700,8 @@ def test_parse_models_keeps_visible_models_and_their_effort_menus() -> None:
         {"prompt": "hi", "model": "grok-4.5", "effort": "xhigh"},  # not on this model's menu
         {"prompt": "hi", "model": "grok-4.7", "effort": True},
         {"prompt": "hi", "model": "grok-4.7", "system": ["x"]},
+        {"prompt": "hi", "model": "grok-4.7", "system": "字" * 40_000},  # 120 KB: past argv's limit
+        {"prompt": "hi", "model": "grok-4.7", "system": "a\0b"},
         {"prompt": "hi", "model": "../grok"},
     ],
 )
@@ -725,10 +738,13 @@ def test_chat_returns_the_text_of_a_clean_session_and_refuses_a_dirty_one(monkey
 @pytest.mark.parametrize(
     ("summary", "detail", "kind"),
     [
-        ("grok exited 1", "Error: rate limit exceeded for your plan", "QuotaExhausted"),
+        ("grok exited 1", "Error: rate limit reached for your plan", "QuotaExhausted"),
         ("grok exited 1", "HTTP 429 Too Many Requests", "QuotaExhausted"),
         ("grok exited 1", "401 Unauthorized: please sign in again", "LoginFailed"),
+        ("grok exited 1", "Error: token has expired", "LoginFailed"),
         ("grok exited 1", "unknown model 'grok-9'", "LookupFailed"),
+        ("grok did not finish: error_max_turns", "", "LookupFailed"),
+        ("grok exited 1", "context length exceeded", "LookupFailed"),  # not a quota
     ],
 )
 def test_failures_are_classified(summary, detail, kind) -> None:
@@ -821,3 +837,53 @@ def test_usage_keeps_a_live_reading_over_a_cached_one(monkeypatch, tmp_path) -> 
     assert server.usage()["weekly_percent"] == 8.0
     assert server.usage()["weekly_percent"] == 8.0  # the CDN copy (2 %) does not win
     assert seen_auth == ["Bearer tok", "Bearer tok"]
+
+
+def test_an_unstartable_grok_is_a_failure_not_a_crash(monkeypatch) -> None:
+    def too_long(*args, **kwargs):
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr(server.subprocess, "Popen", too_long)
+    with pytest.raises(server.LookupFailed):
+        server._run_command(["grok"], {}, "/tmp", 5)
+
+
+def test_a_stale_catalog_is_served_while_one_thread_refreshes_it(monkeypatch) -> None:
+    import threading as threading_
+
+    old = server.parse_models(CATALOG)
+    monkeypatch.setattr(
+        server, "_MODELS", (time.monotonic() - server.MODELS_CACHE_SECONDS - 1, old)
+    )
+    started, release = threading_.Event(), threading_.Event()
+
+    def slow_refresh(still_wanted=lambda: True):
+        started.set()
+        release.wait(5)
+        return old
+
+    monkeypatch.setattr(server, "_refresh_models", slow_refresh)
+    t0 = time.monotonic()
+    assert server.models() == old and server.models() == old  # no waiting on the refresh
+    assert time.monotonic() - t0 < 1 and started.wait(2)
+    release.set()
+
+
+def test_a_failed_refresh_keeps_the_old_list_and_waits_before_retrying(monkeypatch) -> None:
+    old = server.parse_models(CATALOG)
+    monkeypatch.setattr(server, "_MODELS", (0.0, old))
+    calls = []
+
+    def broken(*a, **k):
+        calls.append(1)
+        raise server.LookupFailed("grok models broke")
+
+    monkeypatch.setattr(server, "_session", broken)
+    assert server._refresh_models() == old
+    fetched_at, kept = server._MODELS
+    assert kept == old
+    age = time.monotonic() - fetched_at  # due again only after MODELS_RETRY_SECONDS
+    assert server.MODELS_CACHE_SECONDS - server.MODELS_RETRY_SECONDS - 5 < age
+    monkeypatch.setattr(server, "_MODELS", (0.0, []))
+    with pytest.raises(server.LookupFailed):  # never had a list: nothing to fall back on
+        server._refresh_models()
