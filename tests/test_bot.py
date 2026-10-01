@@ -2111,3 +2111,38 @@ def test_public_channel_needs_everyone_to_read_it(client, monkeypatch) -> None:
     verdicts = {cid: client._public_channel(GUILD, cid) for cid in [*channels, 99]}
     assert verdicts == {1: True, 2: False, 3: True, 4: False, 5: False, 6: False, 99: False}
     assert client._public_channel(GUILD + 1, 1) is False  # a guild the Bot does not see
+
+
+async def test_tracking_tags_set_fixed_times(client, tmp_path, monkeypatch) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    client.config = replace(client.config, youtube_api_key="key")
+
+    async def resolve(_locator):
+        return "UC1", {"title": "Marine"}
+
+    monkeypatch.setattr(client.youtube_tracker, "resolve", resolve)
+    added = await client._apply_tracking_tags(
+        '<track source="https://www.youtube.com/@HoushouMarine" at="1201 2001"/>',
+        GUILD,
+        555,
+        USER,
+    )
+    assert "每天 12:01、20:01 判斷" in added and "<track" not in added
+    watch = client.tracker.watches(user_id=USER)[0]
+    assert watch.times == ("12:01", "20:01")
+    assert "每天 12:01、20:01 判斷" in client._tracked_lines(USER)
+    moved = await client._apply_tracking_tags(
+        f'好。\n<track_at id="{watch.id}" times="09:30"/>', GUILD, 555, USER
+    )
+    assert "改成每天 09:30（台灣時間）判斷" in moved and "<track_at" not in moved
+    assert client.tracker.watches(user_id=USER)[0].times == ("09:30",)
+    assert "時間看不懂" in await client._apply_tracking_tags(
+        f'<track_at id="{watch.id}" times="中午"/>', GUILD, 555, USER
+    )
+    assert "找不到你的追蹤" in await client._apply_tracking_tags(
+        f'<track_at id="{watch.id}" times="10:00"/>', GUILD, 555, 999
+    )
+    back = await client._apply_tracking_tags(
+        f'<track_every id="{watch.id}" minutes="120"/>', GUILD, 555, USER
+    )
+    assert "每 120 分鐘" in back and client.tracker.watches(user_id=USER)[0].times == ()

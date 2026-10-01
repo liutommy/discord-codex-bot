@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse, urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
@@ -80,6 +81,9 @@ class Watch:
     # because it is free; only the model costs quota, so it gets its own, slower clock.
     interval_minutes: int = 60
     classified_at: int = 0  # unix seconds; integer so no timestamp format can disagree
+    # Fixed times of day ("HH:MM", Taiwan time) instead of an interval: the watch is judged once
+    # per time, on the first pass at or after it. Empty = interval_minutes rules.
+    times: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +181,7 @@ CREATE TABLE IF NOT EXISTS watches (
     mention_ids TEXT NOT NULL DEFAULT '',
     interval_minutes INTEGER NOT NULL DEFAULT 60 CHECK (interval_minutes > 0),
     classified_at INTEGER NOT NULL DEFAULT 0,
+    times TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     UNIQUE(source_id, guild_id, channel_id, user_id, interest)
 );
@@ -232,6 +237,13 @@ TRACK_TAG = re.compile(r'<track((?:\s+[a-z_]{1,10}="[^"]{0,2000}")+)\s*/?>(?:\s*
 TRACK_EVERY_TAG = re.compile(
     r'<track_every\s+id="([0-9]{1,9})"\s+minutes="([0-9]{1,5})"\s*/?>(?:\s*</track_every>)?'
 )
+TRACK_AT_TAG = re.compile(
+    r'<track_at\s+id="([0-9]{1,9})"\s+times="([^"]{1,100})"\s*/?>(?:\s*</track_at>)?'
+)
+# Members live on Taiwan time; a watch's fixed times are read there.
+TRACK_TZ = ZoneInfo("Asia/Taipei")
+MAX_TRACK_TIMES = 6
+_TIME = re.compile(r"(?<!\d)([01]?\d|2[0-3])[:：]?([0-5]\d)(?!\d)")
 # Cancelling used to be slash-only, on the grounds that dropping a watch throws away its
 # baseline and rebuilding one costs a classification pass. That cost is the member's to spend —
 # the slash command already lets them spend it — and the asymmetry had a price of its own:
@@ -260,15 +272,59 @@ PENDING_MAX_HOURS = 48
 #   ' 2026/09/14 CARD \n <https://…/news/qi6fbzww3/> \n Vジャンプ…公開！ \n'
 WEB_LINK = re.compile(r"<(https?://[^>\s]+)>\s{0,4}([^\n<>]{0,160})")
 
-# (source, interest, extra mentions, interval in minutes — 0 means "operator default")
-TrackAdd = tuple[str, str, tuple[int, ...], int]
+# (source, interest, extra mentions, interval in minutes — 0 means "operator default",
+#  fixed times of day — () means "use the interval")
+TrackAdd = tuple[str, str, tuple[int, ...], int, tuple[str, ...]]
+
+
+def parse_times(text: str) -> tuple[str, ...]:
+    """Times of day as sorted "HH:MM": 「12:01,20:01」, 「1201 2001」 and 「9:30、21:00」 all work.
+    Anything that is not a time is ignored; at most MAX_TRACK_TIMES are kept."""
+    found = {f"{int(hour):02d}:{minute}" for hour, minute in _TIME.findall(text)}
+    return tuple(sorted(found))[:MAX_TRACK_TIMES]
+
+
+def _slots(times: Sequence[str], now: float) -> tuple[float | None, float | None]:
+    """(the latest of `times` at or before `now`, the earliest after it) as unix seconds."""
+    if not times:
+        return None, None
+    local = datetime.fromtimestamp(now, TRACK_TZ)
+    last, upcoming = [], []
+    for text in times:
+        hour, minute = (int(part) for part in text.split(":"))
+        today = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if today <= local:
+            last.append(today)
+            upcoming.append(today + timedelta(days=1))
+        else:
+            last.append(today - timedelta(days=1))
+            upcoming.append(today)
+    return max(last).timestamp(), min(upcoming).timestamp()
+
+
+def watch_due(watch: Watch, now: float) -> bool:
+    """May this watch spend a classification now? With fixed times: when one has come since the
+    last attempt (late is fine — a Bot that slept through 12:01 judges at wake-up). Otherwise:
+    when interval_minutes has passed since the last attempt."""
+    if watch.times:
+        last, _next = _slots(watch.times, now)
+        return last is not None and last > watch.classified_at
+    return now - watch.classified_at >= watch.interval_minutes * 60
+
+
+def cadence(watch: Watch) -> str:
+    if watch.times:
+        return f"每天 {'、'.join(watch.times)} 判斷"
+    return f"每 {watch.interval_minutes} 分鐘判斷一次"
 
 
 def extract_track_tags(
     answer: str,
-) -> tuple[str, list[TrackAdd], list[tuple[int, int]], list[int]]:
-    """(answer without the tags, watches to add, (id, minutes) interval changes, ids to cancel).
-    A watch is live from the moment it is made, so there is no mode to switch."""
+) -> tuple[
+    str, list[TrackAdd], list[tuple[int, int]], list[tuple[int, tuple[str, ...]]], list[int]
+]:
+    """(answer without the tags, watches to add, (id, minutes) interval changes, (id, times)
+    fixed-time changes, ids to cancel). A watch is live from the moment it is made."""
     adds: list[TrackAdd] = []
     for body in TRACK_TAG.findall(answer):
         attrs = dict(_ATTR.findall(body))
@@ -284,24 +340,27 @@ def extract_track_tags(
                     :MAX_TRACK_MENTIONS
                 ],
                 int(every) if every.isdigit() else 0,
+                parse_times(attrs.get("at", "")),
             )
         )
     every_changes = [
         (int(watch_id), int(minutes)) for watch_id, minutes in TRACK_EVERY_TAG.findall(answer)
     ][:MAX_TRACK_TAGS]
+    time_changes = [
+        (int(watch_id), parse_times(times)) for watch_id, times in TRACK_AT_TAG.findall(answer)
+    ][:MAX_TRACK_TAGS]
     cancels = [int(watch_id) for watch_id in CANCEL_TRACK_TAG.findall(answer)][:MAX_TRACK_TAGS]
     clean = answer
-    for pattern in (CANCEL_TRACK_TAG, TRACK_EVERY_TAG, TRACK_TAG):
+    for pattern in (CANCEL_TRACK_TAG, TRACK_EVERY_TAG, TRACK_AT_TAG, TRACK_TAG):
         clean = pattern.sub("", clean)
-    return clean.strip(), adds[:MAX_TRACK_TAGS], every_changes, cancels
+    return clean.strip(), adds[:MAX_TRACK_TAGS], every_changes, time_changes, cancels
 
 
 def render_watches(watches: Sequence[Watch], labels: Mapping[int, str]) -> str:
     """The member's watches as prompt lines (id, mode, source), so the model can act on one
     without inventing an id — the same trick the pending-reminder section uses."""
     return "\n".join(
-        f"#{watch.id} {labels.get(watch.source_id, '?')}"
-        f" 每 {watch.interval_minutes} 分鐘判斷一次"
+        f"#{watch.id} {labels.get(watch.source_id, '?')} {cadence(watch)}"
         + (f"（另外 @ {len(watch.mention_ids)} 人）" if watch.mention_ids else "")
         for watch in watches
     )
@@ -325,6 +384,7 @@ class TrackerStore:
                         ("mention_ids", "TEXT NOT NULL DEFAULT ''"),
                         ("interval_minutes", "INTEGER NOT NULL DEFAULT 60"),
                         ("classified_at", "INTEGER NOT NULL DEFAULT 0"),
+                        ("times", "TEXT NOT NULL DEFAULT ''"),
                     ),
                 ),
                 ("decisions", (("message", "TEXT NOT NULL DEFAULT ''"),)),
@@ -393,6 +453,7 @@ class TrackerStore:
             tuple(int(part) for part in str(row["mention_ids"] or "").split(",") if part),
             int(row["interval_minutes"] or 60),
             int(row["classified_at"] or 0),
+            tuple(part for part in str(row["times"] or "").split(",") if part),
         )
 
     @staticmethod
@@ -477,6 +538,7 @@ class TrackerStore:
         *,
         mention_ids: Sequence[int] = (),
         interval_minutes: int = 60,
+        times: Sequence[str] = (),
     ) -> Watch:
         interest = interest.strip()
         if not interest:
@@ -489,14 +551,18 @@ class TrackerStore:
             ).fetchone()[0]
             # A watch is about what happens from now on: everything already fetched is behind it.
             start_item_id = int(latest)
+            # A watch on fixed times starts counting now: its first judgement is the next time
+            # on its list, not whatever slot already passed today.
             connection.execute(
                 """INSERT INTO watches(
                      source_id, guild_id, channel_id, user_id, interest, shadow, start_item_id,
-                     mention_ids, interval_minutes, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mention_ids, interval_minutes, times, classified_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(source_id, guild_id, channel_id, user_id, interest) DO UPDATE SET
                      active=1, shadow=0, mention_ids=excluded.mention_ids,
-                     interval_minutes=excluded.interval_minutes""",
+                     interval_minutes=excluded.interval_minutes, times=excluded.times,
+                     classified_at=CASE WHEN excluded.times != '' THEN excluded.classified_at
+                                        ELSE watches.classified_at END""",
                 (
                     source_id,
                     guild_id,
@@ -507,6 +573,8 @@ class TrackerStore:
                     start_item_id,
                     extra,
                     max(1, int(interval_minutes)),
+                    ",".join(parse_times(",".join(times))),
+                    int(time.time()) if times else 0,
                     _utc_now(),
                 ),
             )
@@ -547,13 +615,45 @@ class TrackerStore:
             )
 
     def set_watch_interval(self, watch_id: int, minutes: int, user_id: int | None = None) -> bool:
-        query = "UPDATE watches SET interval_minutes=? WHERE id=?"
+        """Judge every `minutes`; any fixed times the watch had are dropped."""
+        query = "UPDATE watches SET interval_minutes=?, times='' WHERE id=?"
         params: list[object] = [max(1, int(minutes)), watch_id]
         if user_id is not None:
             query += " AND user_id=?"
             params.append(user_id)
         with self._connect() as connection:
             return bool(connection.execute(query, params).rowcount)
+
+    def set_watch_times(
+        self, watch_id: int, times: Sequence[str], user_id: int | None = None
+    ) -> bool:
+        """Judge at these times of day instead of an interval, starting from the next one."""
+        stored = ",".join(parse_times(",".join(times)))
+        if not stored:
+            raise ValueError("no valid time of day")
+        query = "UPDATE watches SET times=?, classified_at=? WHERE id=?"
+        params: list[object] = [stored, int(time.time()), watch_id]
+        if user_id is not None:
+            query += " AND user_id=?"
+            params.append(user_id)
+        with self._connect() as connection:
+            return bool(connection.execute(query, params).rowcount)
+
+    def consume_slots(self, now: float | None = None) -> None:
+        """A fixed time that came and went with nothing to judge is used up all the same:
+        otherwise an item arriving at 13:00 would find 12:01 still owed and be judged at once."""
+        now = time.time() if now is None else now
+        for watch in self.watches(active_only=True):
+            if watch.times and watch_due(watch, now):
+                self.mark_classified(watch.id)
+
+    def seconds_to_next_slot(self, now: float | None = None) -> float | None:
+        """How long until the earliest fixed time of any active watch, for the loop to wake."""
+        now = time.time() if now is None else now
+        upcoming = [
+            _slots(watch.times, now)[1] for watch in self.watches(active_only=True) if watch.times
+        ]
+        return min(upcoming) - now if upcoming else None
 
     def delete_watch(self, watch_id: int, user_id: int | None = None) -> bool:
         query, params = "DELETE FROM watches WHERE id=?", [watch_id]
@@ -623,13 +723,14 @@ class TrackerStore:
                    LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
                    WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id
                      AND i.baseline=0 AND i.observed_at >= ?
-                     AND CAST(strftime('%s', 'now') AS INTEGER) - w.classified_at
-                         >= w.interval_minutes * 60
                    ORDER BY w.id, i.published_at, i.id""",
                 (cutoff,),
             ).fetchall()
         groups: dict[int, tuple[Watch, list[ContentItem]]] = {}
+        now = time.time()
         for row in rows:
+            if row["id"] not in groups and not watch_due(self._watch(row), now):
+                continue
             if row["id"] not in groups:
                 groups[row["id"]] = (self._watch(row), [])
             groups[row["id"]][1].append(
@@ -1684,6 +1785,7 @@ async def run_tracking_once(
         finally:
             stats["classifier_calls"] += 1
             store.mark_classified(watch.id)
+    store.consume_slots()
     for message in store.pending_outbox():
         try:
             await deliverer(message)
@@ -1726,4 +1828,10 @@ async def tracking_loop(
             raise
         except Exception:
             LOGGER.exception("Social tracking pass failed")
-        await asyncio.sleep(interval_seconds)
+        # Wake for a watch's fixed time rather than up to one interval after it.
+        try:
+            upcoming = store.seconds_to_next_slot()
+        except Exception:
+            upcoming = None
+        delay = interval_seconds if upcoming is None else min(interval_seconds, upcoming + 2)
+        await asyncio.sleep(max(1.0, delay))

@@ -342,10 +342,15 @@ def _prompt(
             ' one, append <cancel_track id="N"/> using an id from that section; never invent'
             " ids, and never claim a watch was cancelled without emitting the tag."
             ' Add every="60" to <track> when the member asks how often it should be judged, and'
-            ' <track_every id="N" minutes="120"/> to change an existing one. Attribute order'
-            " does not matter. The source is always checked on the Bot's own schedule; this only"
-            " sets how often that watch may spend a judgement, so a slower number is cheaper and"
-            " a faster one is only worth it for sources that change constantly.",
+            ' <track_every id="N" minutes="120"/> to change an existing one. When they want it'
+            ' checked at fixed times of day instead, add at="12:01,20:01" (Taiwan time, up to'
+            ' six times) to <track>, or <track_at id="N" times="12:01,20:01"/> for an existing'
+            " one; the watch is then judged once at each of those times and notifies then, and"
+            " <track_every> switches it back to an interval. Attribute order does not matter."
+            " The source is always checked on the Bot's own schedule; this only sets when that"
+            " watch may spend a judgement, so a slower one is cheaper and a faster one is only"
+            " worth it for sources that change constantly. Never claim a schedule changed without"
+            " emitting the tag.",
             "If the member states a durable fact or preference about themselves, or the server"
             " agrees on something everyone should remember, append"
             ' <memory scope="user" name="short title">one sentence</memory> or'
