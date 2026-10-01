@@ -101,6 +101,7 @@ from .tracking import (
     INTEREST_POLICY,
     OutboxMessage,
     ProviderError,
+    RutenFetcher,
     Source,
     TrackerStore,
     TwitchFetcher,
@@ -108,6 +109,7 @@ from .tracking import (
     XFetcher,
     YouTubeFetcher,
     extract_track_tags,
+    parse_ruten_locator,
     parse_twitch_locator,
     parse_web_locator,
     parse_x_locator,
@@ -188,6 +190,7 @@ def tracking_provider(locator: str) -> str:
         ("youtube", parse_youtube_locator),
         ("twitch", parse_twitch_locator),
         ("x", parse_x_locator),
+        ("ruten", parse_ruten_locator),
         ("web", parse_web_locator),
     ):
         try:
@@ -195,7 +198,9 @@ def tracking_provider(locator: str) -> str:
         except ValueError:
             continue
         return provider
-    raise ValueError("追蹤需要 YouTube 頻道、Twitch 頻道、X 帳號網址，或任何 http(s) 網頁網址。")
+    raise ValueError(
+        "追蹤需要 YouTube 頻道、Twitch 頻道、X 帳號、露天賣場網址，或任何 http(s) 網頁網址。"
+    )
 
 
 def tracking_message(message: OutboxMessage, source_label: str = "") -> str:
@@ -422,6 +427,7 @@ class DiscordCodexClient(discord.Client):
         self.youtube_tracker = YouTubeFetcher(config.youtube_api_key)
         self.twitch_tracker = TwitchFetcher(config.twitch_client_id, config.twitch_client_secret)
         self.web_tracker = WebFetcher(self._read_page)
+        self.ruten_tracker = RutenFetcher()
         self.x_tracker = XFetcher(
             lambda handle: xsearch.lookup_user(config, handle),
             lambda handle, since_id: xsearch.recent_posts(config, handle, since_id),
@@ -528,7 +534,7 @@ class DiscordCodexClient(discord.Client):
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-track",
-                description="追蹤 YouTube／Twitch；留空列出，或用編號取消／切換正式提醒",
+                description="追蹤 YouTube／Twitch／X／露天賣場／網頁；留空列出，或用編號取消",
                 callback=self.track_command,
             )
         )
@@ -643,11 +649,22 @@ class DiscordCodexClient(discord.Client):
             "youtube": self.youtube_tracker,
             "twitch": self.twitch_tracker,
             "x": self.x_tracker,
+            "ruten": self.ruten_tracker,
             "web": self.web_tracker,
         }.get(source.provider)
         if fetcher is None:
             raise ProviderError(f"unsupported provider: {source.provider}")
-        return await fetcher.fetch(source)
+        if source.provider != "ruten":
+            return await fetcher.fetch(source)
+        # Ruten is read through an undocumented API: a change there must reach the operator,
+        # not just the log, or a broken source looks exactly like a quiet store.
+        try:
+            result = await fetcher.fetch(source)
+        except (ProviderError, aiohttp.ClientError, TimeoutError) as error:
+            await self.alerts.record_failure("露天追蹤", str(error) or type(error).__name__)
+            raise
+        await self.alerts.record_success("露天追蹤")
+        return result
 
     async def _classify_tracking(self, prompt: str) -> str:
         if self.tracker is None:
@@ -1597,6 +1614,7 @@ class DiscordCodexClient(discord.Client):
             "youtube": self.youtube_tracker,
             "twitch": self.twitch_tracker,
             "x": self.x_tracker,
+            "ruten": self.ruten_tracker,
             "web": self.web_tracker,
         }[provider]
         try:
@@ -1776,7 +1794,7 @@ class DiscordCodexClient(discord.Client):
         await interaction.response.send_message(message, ephemeral=True)
 
     @app_commands.describe(
-        source="YouTube 頻道或 Twitch 頻道網址；留空列出你的追蹤",
+        source="YouTube／Twitch 頻道、X 帳號、露天賣場（可帶 ?q=關鍵字）或網頁網址；留空列出",
         interest="選填：你特別想知道的內容；留空使用預設重大事件政策",
         cancel="取消你的追蹤編號",
         log="看判斷紀錄：這個追蹤最近判斷了什麼、為什麼提醒或不提醒（只有你看得到）",

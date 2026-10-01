@@ -9,10 +9,12 @@ import pytest
 from discord_codex_bot.tracking import (
     INTEREST_POLICY,
     MAX_CLASSIFY_BATCH,
+    RUTEN_MAX_PAGES,
     ContentItem,
     DecisionInput,
     FetchResult,
     ProviderError,
+    RutenFetcher,
     Source,
     TrackerStore,
     TwitchFetcher,
@@ -23,6 +25,7 @@ from discord_codex_bot.tracking import (
     build_classifier_prompt,
     extract_track_tags,
     parse_classifier_result,
+    parse_ruten_locator,
     parse_twitch_locator,
     parse_web_locator,
     parse_youtube_atom,
@@ -761,3 +764,189 @@ def test_an_answer_that_decides_nothing_it_was_given_fails() -> None:
     answer = classifier_answer('UNTRUSTED_SOCIAL_CONTENT_JSON: [{"external_item_id": "other"}]')
     with pytest.raises(ValueError, match="none of the pending items"):
         parse_classifier_result(answer, items)
+
+
+# ------------------------------------------------------------------------------- Ruten stores
+
+
+@pytest.mark.parametrize(
+    ("locator", "expected"),
+    [
+        ("https://www.ruten.com.tw/store/ykohmkphilip/list?sort=new/dc&p=1", ("ykohmkphilip", "")),
+        ("https://www.ruten.com.tw/store/ykohmkphilip/find?q=rurudo", ("ykohmkphilip", "rurudo")),
+        ("https://www.ruten.com.tw/store/ykohmkphilip/", ("ykohmkphilip", "")),
+        ("www.ruten.com.tw/store/a.b-c/find?q=%E9%BE%8D%20%20%E7%8F%A0", ("a.b-c", "龍 珠")),
+    ],
+)
+def test_a_ruten_store_url_names_the_seller_and_its_keyword(locator, expected) -> None:
+    assert parse_ruten_locator(locator) == expected
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "https://www.ruten.com.tw/item/22640792418162/",
+        "https://evil.example/store/ykohmkphilip/",
+        "https://www.ruten.com.tw/store/../x/",
+    ],
+)
+def test_anything_else_is_not_a_ruten_store(locator) -> None:
+    with pytest.raises(ValueError):
+        parse_ruten_locator(locator)
+
+
+def _ruten(monkeypatch, answers: dict[str, dict]) -> list[tuple[str, dict]]:
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_json_request(_session, _method, url, params=None, limit=0):
+        calls.append((url, dict(params or {})))
+        for suffix, answer in answers.items():
+            if url.endswith(suffix):
+                return answer
+        raise AssertionError(url)
+
+    monkeypatch.setattr("discord_codex_bot.tracking._json_request", fake_json_request)
+    return calls
+
+
+def _fetcher() -> RutenFetcher:
+    return RutenFetcher(session_factory=lambda **kw: EmptySession())
+
+
+RUTEN_LISTING = {"TotalRows": 17703, "Rows": [{"Id": "22640792418162"}, {"Id": "22640792418151"}]}
+RUTEN_ITEMS = {
+    "status": "success",
+    "data": [
+        {"id": "22640792418162", "name": "【怨念事務所】預購 12月 Rurudo 立牌", "goods_price": 1330,
+         "pre_order_ship_date": "2026/12"},
+        {"id": "22640792418151", "name": "  另一件  商品 ", "goods_price": 500},
+    ],
+}  # fmt: skip
+
+
+async def test_a_ruten_store_is_resolved_once_to_its_seller_id(monkeypatch) -> None:
+    calls = _ruten(
+        monkeypatch,
+        {"/storeinfo": {"status": "success", "data": {"user_id": "4761983", "store_name": "怨念"}}},
+    )
+    external_id, state = await _fetcher().resolve(
+        "https://www.ruten.com.tw/store/ykohmkphilip/find?q=rurudo"
+    )
+    assert external_id == "https://www.ruten.com.tw/store/ykohmkphilip/find?q=rurudo"
+    assert state == {
+        "title": "露天 怨念（搜尋：rurudo）",
+        "account": "ykohmkphilip",
+        "user_id": "4761983",
+        "keyword": "rurudo",
+    }
+    assert [url for url, _ in calls] == [
+        "https://rapi.ruten.com.tw/api/users/v1/index.php/ykohmkphilip/storeinfo"
+    ]
+
+
+async def test_ruten_listings_arrive_with_their_product_names(monkeypatch) -> None:
+    calls = _ruten(monkeypatch, {"/prod": RUTEN_LISTING, "/list": RUTEN_ITEMS})
+    source = Source(7, "ruten", "x", "x", state={"user_id": "4761983", "keyword": "rurudo"})
+    result = await _fetcher().fetch(source)
+    assert [(i.external_id, i.title, i.description, i.kind) for i in result.items] == [
+        ("22640792418151", "另一件 商品", "NT$500", "product"),  # oldest first, like a feed
+        (
+            "22640792418162",
+            "【怨念事務所】預購 12月 Rurudo 立牌",
+            "NT$1330，預購 2026/12",
+            "product",
+        ),
+    ]
+    assert result.items[0].url == "https://www.ruten.com.tw/item/22640792418151/"
+    assert calls[0] == (
+        "https://rtapi.ruten.com.tw/api/search/v3/index.php/core/seller/4761983/prod",
+        {"sort": "new/dc", "limit": str(MAX_CLASSIFY_BATCH), "offset": "1", "q": "rurudo"},
+    )
+    assert calls[1][1] == {"gno": "22640792418162,22640792418151", "level": "simple"}
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        {"/prod": {"Rows": []}},  # no TotalRows: not the shape we know
+        {"/prod": {"TotalRows": 1, "Rows": [{"Id": "../x"}]}},
+        {"/prod": RUTEN_LISTING, "/list": {"status": "error"}},
+        {"/prod": RUTEN_LISTING, "/list": {"status": "success", "data": {}}},
+        {"/prod": {"TotalRows": 0, "Rows": []}},  # a store with no keyword never lists nothing
+    ],
+)
+async def test_a_ruten_answer_that_does_not_make_sense_raises(monkeypatch, answers) -> None:
+    _ruten(monkeypatch, answers)
+    source = Source(7, "ruten", "x", "x", state={"user_id": "4761983", "keyword": ""})
+    with pytest.raises(ProviderError):
+        await _fetcher().fetch(source)
+
+
+async def test_a_keyword_nothing_matches_yet_is_an_ordinary_empty_answer(monkeypatch) -> None:
+    _ruten(monkeypatch, {"/prod": {"TotalRows": 0, "Rows": []}})
+    source = Source(7, "ruten", "x", "x", cursor="c", state={"user_id": "1", "keyword": "zz"})
+    result = await _fetcher().fetch(source)
+    assert result.items == () and result.cursor == "c"
+
+
+async def test_a_listing_without_a_name_is_left_for_the_next_pass(monkeypatch) -> None:
+    # Stored nameless, it would never be read again (items are deduplicated by id) and the
+    # classifier would be back to judging 「預購」.
+    items = {"status": "success", "data": [RUTEN_ITEMS["data"][0], {"id": "1", "name": " "}]}
+    _ruten(monkeypatch, {"/prod": RUTEN_LISTING, "/list": items})
+    source = Source(7, "ruten", "x", "x", state={"user_id": "4761983", "keyword": ""})
+    result = await _fetcher().fetch(source)
+    assert [i.external_id for i in result.items] == ["22640792418162"]
+    assert result.cursor == "22640792418162"
+
+
+async def test_listings_that_come_back_without_any_name_raise(monkeypatch) -> None:
+    renamed = {"status": "success", "data": [{"id": "22640792418162", "title": "改名了"}]}
+    _ruten(monkeypatch, {"/prod": RUTEN_LISTING, "/list": renamed})
+    source = Source(7, "ruten", "x", "x", state={"user_id": "4761983", "keyword": ""})
+    with pytest.raises(ProviderError, match="商品名"):
+        await _fetcher().fetch(source)
+
+
+def _pages(monkeypatch, pages: list[list[str]]) -> list[dict]:
+    calls: list[dict] = []
+
+    async def fake_json_request(_session, _method, url, params=None, limit=0):
+        params = dict(params or {})
+        if url.endswith("/prod"):
+            calls.append(params)
+            index = (int(params["offset"]) - 1) // int(params["limit"])
+            rows = pages[index] if index < len(pages) else []
+            return {"TotalRows": 999, "Rows": [{"Id": i} for i in rows]}
+        names = params["gno"].split(",")
+        return {"status": "success", "data": [{"id": i, "name": f"商品{i}"} for i in names]}
+
+    monkeypatch.setattr("discord_codex_bot.tracking._json_request", fake_json_request)
+    return calls
+
+
+async def test_a_busy_store_is_read_back_to_the_last_listing_seen(monkeypatch) -> None:
+    calls = _pages(monkeypatch, [["900006", "900005"], ["900004", "900003"], ["900002", "900001"]])
+    fetcher = RutenFetcher(batch=2, session_factory=lambda **kw: EmptySession())
+    source = Source(7, "ruten", "x", "x", cursor="900003", state={"user_id": "1", "keyword": ""})
+    result = await fetcher.fetch(source)
+    assert [c["offset"] for c in calls] == ["1", "3"]  # stopped on the page holding 900003
+    assert {i.external_id for i in result.items} >= {"900004", "900005", "900006"}
+    assert result.cursor == "900006"
+
+
+async def test_a_store_busier_than_the_pages_read_says_so(monkeypatch, caplog) -> None:
+    pages = [[str(900100 - 2 * p), str(900099 - 2 * p)] for p in range(10)]
+    calls = _pages(monkeypatch, pages)
+    fetcher = RutenFetcher(batch=2, session_factory=lambda **kw: EmptySession())
+    source = Source(7, "ruten", "x", "x", cursor="1", state={"user_id": "1", "keyword": ""})
+    with caplog.at_level("WARNING"):
+        await fetcher.fetch(source)
+    assert len(calls) == RUTEN_MAX_PAGES and "older ones were not read" in caplog.text
+
+
+async def test_the_first_pass_of_a_store_reads_one_page(monkeypatch) -> None:
+    calls = _pages(monkeypatch, [["900006", "900005"], ["900004", "900003"]])
+    fetcher = RutenFetcher(batch=2, session_factory=lambda **kw: EmptySession())
+    await fetcher.fetch(Source(7, "ruten", "x", "x", state={"user_id": "1", "keyword": ""}))
+    assert len(calls) == 1  # the baseline: nothing in it is judged anyway

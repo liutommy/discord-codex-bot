@@ -110,8 +110,9 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "-track": (
-        "追蹤 YouTube 頻道、Twitch 頻道，或任何網頁（網頁會以「出現沒看過的連結」當作新內容，"
-        "例如官網的最新消息頁）。建立後就開始運作：只看建立之後的新內容，"
+        "追蹤 YouTube 頻道、Twitch 頻道、X 帳號、露天賣場，或任何網頁（網頁會以「出現沒看過的連結」"
+        "當作新內容，例如官網的最新消息頁）。露天賣場會逐件讀商品名；只想看部分商品就用賣場內搜尋後的"
+        "網址（…/find?q=關鍵字），追蹤條件寫商品名裡會出現的字。建立後就開始運作：只看建立之後的新內容，"
         "符合條件才在頻道 @你，不符合的完全安靜。"
         "留空列出你的追蹤，cancel 加編號取消，log 加編號看它最近判斷了什麼、為什麼——"
         "判斷紀錄只有你自己看得到，不會貼到頻道。"
@@ -121,6 +122,8 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         [
             "/{p}-track source:https://www.youtube.com/@HoushouMarine",
             "/{p}-track source:https://www.twitch.tv/chibidoki interest:重大公告或特別企劃",
+            "/{p}-track source:https://x.com/YuGiOh_OCG_INFO interest:新卡情報",
+            "/{p}-track source:https://www.ruten.com.tw/store/ykohmkphilip/find?q=rurudo",
             "/{p}-track（留空：列出你的追蹤）",
             "/{p}-track log:1",
             "/{p}-track cancel:1",
@@ -168,14 +171,16 @@ FEATURES: list[str] = [
     "伺服器主人或管理員可用 `/{p}-embedfix` 開關。",
     "**貼影片連結**會看影片再回答：YouTube 直接看（長片也行），X、TikTok、Instagram、Bilibili、"
     "Reddit、Streamable 等會抓下來看；長片會先回「🎬 處理中」再改成正式答案。",
-    "**模型來源**：Codex（預設）、Antigravity（Gemini／Claude）、"
-    "OpenRouter 與 OrcaRouter 的免費模型；免費模型可能不穩或下架，回錯就換一個。",
+    "**模型來源**：Grok（預設，會自己用 X 搜尋查貼文與帳號；看不到圖，附圖的訊息改由 Codex 回答）、"
+    "Codex、Antigravity（Gemini／Claude）、OpenRouter 與 OrcaRouter 的免費模型；"
+    "免費模型可能不穩或下架，回錯就換一個。",
     "**記憶**分個人與伺服器兩層，另有管理者維護的永久記憶；Bot 會在需要時自己查閱。",
     "**會上網搜尋**：問到需要最新或可查證的事，Bot 會自己搜尋再讀網頁，不用你貼連結。",
     "**會寫程式算東西**：算數、資料整理、格式轉換、影片抽幀，Bot 會在隔離沙盒裡跑 Python／shell，"
     "產生的檔案直接附給你。",
     "**會查資料庫**：像英雄聯盟電競的賽程、比分、積分，Bot 會直接打官方資料 API，不靠新聞站。",
-    "**會定期追蹤社群**：YouTube／Twitch 的新內容由隔離的 Codex 判斷，符合你設定的條件才 @你；"
+    "**會定期追蹤**：YouTube／Twitch 頻道、X 帳號、露天賣場與任何網頁的新內容由隔離的 AI 判斷，"
+    "符合你設定的條件才 @你；直接跟 Bot 說「追蹤 <網址>」就行，"
     "判斷紀錄用 `/{p}-track log:<編號>` 自己查，只有你看得到。",
     "**回答上的按鈕**：生成中 ❌ 取消；答完後 🔁 用同一題重答（新開對話）、"
     "👍 把這段問答記進個人記憶。只有發問的人能按。",

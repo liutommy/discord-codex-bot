@@ -136,12 +136,14 @@ Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>
 `/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`. This README uses the
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
 
-### Social tracking: YouTube and Twitch
+### Social tracking: YouTube, Twitch, X, Ruten stores and web pages
 
-The first version polls official sources: YouTube's channel Atom feed plus Data API v3 metadata,
-and Twitch Helix streams/videos with an app access token. It does not scrape X, Instagram, or
-TikTok. A source is fetched once even when several members watch it; Codex runs only when a new
-item has no saved decision for that watch.
+Sources are read from official or structured interfaces where one exists: YouTube's Data API v3,
+Twitch Helix with an app access token, X accounts through the xsearch sidecar (see "X lookup"),
+Ruten (露天) stores through the JSON API their own web app uses, and any other public page as a
+web source. Instagram and TikTok are not tracked. A source is fetched once even when several
+members watch it; the model runs only when a new item has no saved decision for that watch, at
+most 30 items per call (the newest), and items not judged within 48 hours leave the queue.
 
 For YouTube, create a Google Cloud project, enable **YouTube Data API v3**, create an API key, and
 restrict that key to the YouTube Data API. For Twitch, register an application in the Twitch
@@ -182,6 +184,18 @@ exactly which URLs have been seen, the model reads them and decides which is wor
 about. A site's navigation is stable, so it arrives in the first fetch, which is the baseline and
 is never classified. This also works on sites that refuse plain HTTP (Konami's Yu-Gi-Oh site answers
 403 and is read through Chromium) because it goes through the same reader as `<fetch>`.
+
+A Ruten store is not a web source. Its store page is a script shell, and read as a page it gave
+links labelled only 「預購」 — the classifier had no product name to judge, and a busy store adds
+about twenty listings an hour. `https://www.ruten.com.tw/store/<account>/` is resolved once to the
+seller's numeric id (`rapi.ruten.com.tw/api/users/v1/index.php/<account>/storeinfo`); each pass then
+reads the newest 30 listing ids (`rtapi.ruten.com.tw/api/search/v3/index.php/core/seller/<id>/prod`)
+and their names, prices and pre-order months (`rapi.ruten.com.tw/api/items/v2/list`). The store's
+own search narrows it: `…/store/<account>/find?q=rurudo` is a separate source that lists only the
+matching products, often none in an hour. Only names are judged, not images, so an interest should
+use words a product name contains. The API is undocumented: an answer of an unknown shape, or a
+store without a keyword that suddenly lists nothing, raises instead of looking like "nothing new",
+and `ALERT_AFTER_FAILURES` such passes in a row DM the operator (`露天追蹤`).
 
 A watch is live the moment it is made. It only ever considers content published after that — the
 first sight of a source is its baseline and is never classified — and it posts only the items that
