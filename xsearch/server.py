@@ -69,8 +69,13 @@ LIVE_CACHE_STATUS = {"DYNAMIC", "MISS", "EXPIRED", "BYPASS", "REVALIDATED"}
 REFRESH_MARGIN_SECONDS = max(TIMEOUT, CHAT_TIMEOUT) + 600
 EFFORT = re.compile(r"[a-z]{1,16}")
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-# Second line behind --verbatim: an `@` that would start a path mention is broken up.
-_PATH_MENTION = re.compile(r"@(?=[/~.\\])")
+# --verbatim does not stop file mentions: `@ /x`, `@\t/x`, `@\n/x` (any whitespace after the
+# `@`) and --prompt-json text blocks were all still expanded into the file. So the CLI never
+# sees an ASCII `@` at all (see defuse_mentions). A login string in the output is refused too.
+FULLWIDTH_AT = "\uff20"
+AT_SIGNS = "@" + FULLWIDTH_AT  # a handle as written back by the model
+WORD_JOINER = "\u2060"
+MIN_SECRET_CHARS = 20
 # Lookups run one at a time and chat turns CHAT_PARALLEL at a time (each session spends plan
 # quota). A request that cannot get a turn within QUEUE_WAIT is turned away (429) instead of
 # queueing work its caller has given up on.
@@ -230,13 +235,14 @@ def build_prompt(kind: str, request: dict) -> str:
             "found, return found=false. Report only what X search returned."
         )
     handle = request.get("handle", "")
-    handle = handle.lstrip("@") if type(handle) is str else handle
+    handle = handle.lstrip(AT_SIGNS) if type(handle) is str else handle
     if not _is_handle(handle):
         raise BadRequest("handle must be an X username")
     if kind == "user":
         return (
-            f"Use X search to check whether the X account @{handle} exists. Return its handle, "
-            "display name and bio, or exists=false. Report only what X search returned."
+            f"Use X search to check whether the X account with username {handle} exists. "
+            "Return its handle, display name and bio, or exists=false. Report only what X "
+            "search returned."
         )
     if kind == "recent":
         since = request.get("since_id", "") or ""
@@ -247,10 +253,10 @@ def build_prompt(kind: str, request: dict) -> str:
             raise BadRequest("limit must be 1-20")
         newer = f" with a status id greater than {since}" if since else ""
         return (
-            f"Use X search to list up to {limit} of the most recent posts authored by "
-            f"@{handle}{newer}, newest first. Include the account's replies and reposts but "
-            "mark them. For each post give its numeric status id, UTC time, full text and "
-            "the fields of the schema. Report only what X search returned."
+            f"Use X search to list up to {limit} of the most recent posts authored by the "
+            f"account with username {handle}{newer}, newest first. Include the account's "
+            "replies and reposts but mark them. For each post give its numeric status id, UTC "
+            "time, full text and the fields of the schema. Report only what X search returned."
         )
     raise BadRequest(f"unknown lookup {kind!r}")
 
@@ -378,7 +384,7 @@ def _clean_post(post: object) -> dict | None:
         return None
     clean = {
         "id": post_id,
-        "author_handle": str(post.get("author_handle", "")).lstrip("@")[:15],
+        "author_handle": str(post.get("author_handle", "")).lstrip(AT_SIGNS)[:15],
         "author_name": str(post.get("author_name", ""))[:100],
         "created_at": created,
         "text": str(post.get("text", ""))[:MAX_TEXT],
@@ -402,8 +408,8 @@ def shape(kind: str, request: dict, answer: dict) -> dict:
             post = None
         return {"found": post is not None, "post": post}
     if kind == "user":
-        handle = str(request["handle"]).lstrip("@")
-        same = str(answer.get("handle", handle)).lstrip("@").lower() == handle.lower()
+        handle = str(request["handle"]).lstrip(AT_SIGNS)
+        same = str(answer.get("handle", handle)).lstrip(AT_SIGNS).lower() == handle.lower()
         exists = answer.get("exists") is True and same
         return {
             "exists": exists,
@@ -411,7 +417,7 @@ def shape(kind: str, request: dict, answer: dict) -> dict:
             "name": str(answer.get("name", ""))[:100] if exists else "",
             "description": str(answer.get("description", ""))[:500] if exists else "",
         }
-    handle = str(request["handle"]).lstrip("@").lower()
+    handle = str(request["handle"]).lstrip(AT_SIGNS).lower()
     since = int(request.get("since_id") or 0)
     posts = []
     for raw in answer.get("posts") or []:
@@ -551,11 +557,49 @@ def _keep_login(scratch: str) -> None:
 
 
 def defuse_mentions(text: str) -> str:
-    """`@/x`, `@~/x`, `@./x` become `@\u2060/x`: still readable, never a file mention. A leading
-    `/` gets the same treatment: even with --verbatim the CLI runs a slash command at the start
-    of the prompt (`/always-approve`, `/compact` were seen to run, dropping the rest)."""
-    text = _PATH_MENTION.sub("@\u2060", text)
-    return "\u2060" + text if text.lstrip().startswith("/") else text
+    """Text the CLI's parser cannot act on, whatever it holds. Every `@` becomes a fullwidth `＠`
+    (the model reads it the same; the mention parser only knows ASCII `@`, and a blocklist of
+    what may follow it already missed whitespace). A word joiner goes first: even with
+    --verbatim a slash command at the very start runs (`/always-approve`, `/compact` did)."""
+    return WORD_JOINER + text.replace("@", FULLWIDTH_AT)
+
+
+def _login_secrets(*paths: str) -> set[str]:
+    """Every long string in these login files: the tokens, whatever the file calls them."""
+    found: set[str] = set()
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, str) and len(value) >= MIN_SECRET_CHARS:
+            found.add(value)
+
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                walk(json.load(handle))
+        except (OSError, ValueError):
+            continue
+    return found
+
+
+def refuse_login_echo(lines: list[str], scratch: str) -> None:
+    """Raise Unsafe if the session's stream (answer or reasoning) carries the login: whatever
+    got it into the context, it must not reach a Discord channel."""
+    secrets = _login_secrets(
+        os.path.join(scratch, _ORIGINAL_LOGIN), os.path.join(scratch, "home", ".grok", "auth.json")
+    )
+    if not secrets:
+        return
+    stream = "\n".join(lines)
+    squeezed = re.sub(r"\s+", "", stream)
+    # json.dumps: a token as it appears inside the JSON event lines (escaped `/`, `+`, ...)
+    if any(s in stream or s in squeezed or json.dumps(s)[1:-1] in stream for s in secrets):
+        raise Unsafe("the session's output contains the login")
 
 
 def run_grok(
@@ -587,6 +631,7 @@ def run_grok(
         if system:  # `=` form: a value can never be read as another flag
             tail += [f"--system-prompt-override={defuse_mentions(system)}"]
         lines = _run(model, tail, home_env, os.path.join(scratch, "work"), timeout)
+        refuse_login_echo(lines, scratch)
         if collect:
             with open(os.path.join(home_env["GROK_HOME"], collect), encoding="utf-8") as handle:
                 lines.append(handle.read())
