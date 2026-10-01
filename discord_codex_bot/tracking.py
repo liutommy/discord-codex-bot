@@ -1295,6 +1295,7 @@ RUTEN_HOSTS = {"www.ruten.com.tw", "ruten.com.tw", "m.ruten.com.tw"}
 _RUTEN_ACCOUNT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")
 _RUTEN_ID = re.compile(r"[0-9]{6,20}")  # a listing
 _RUTEN_SELLER = re.compile(r"[0-9]{1,20}")
+RUTEN_MAX_PAGES = 4  # pages of listings read back per pass when a store got busy
 
 
 def parse_ruten_locator(locator: str) -> tuple[str, str]:
@@ -1368,35 +1369,64 @@ class RutenFetcher:
         state = {"title": title, "account": account, "user_id": user_id, "keyword": keyword}
         return ruten_source_url(account, keyword), state
 
+    async def _listing(self, session, user_id: str, keyword: str, page: int) -> list[str]:
+        params = {"sort": "new/dc", "limit": str(self.batch), "offset": str(page * self.batch + 1)}
+        if keyword:
+            params["q"] = keyword
+        listing = await self._get(session, f"{self.SEARCH}/{user_id}/prod", **params)
+        rows = listing.get("Rows")
+        if not isinstance(listing.get("TotalRows"), int) or not isinstance(rows, list):
+            raise ProviderError("露天商品清單的格式看不懂（介面可能改了）")
+        ids = [str(row.get("Id", "")) for row in rows if isinstance(row, dict)]
+        if len(ids) != len(rows) or not all(_RUTEN_ID.fullmatch(item_id) for item_id in ids):
+            raise ProviderError("露天商品清單的格式看不懂（介面可能改了）")
+        return ids
+
     async def fetch(self, source: Source) -> FetchResult:
         user_id = str(source.state.get("user_id", ""))
         keyword = str(source.state.get("keyword", ""))
         if not _RUTEN_SELLER.fullmatch(user_id):
             raise ProviderError("Ruten source has no seller id")
-        params = {"sort": "new/dc", "limit": str(self.batch), "offset": "1"}
-        if keyword:
-            params["q"] = keyword
+        seen = int(source.cursor) if source.cursor.isdigit() else 0
+        products: dict[str, Mapping[str, Any]] = {}
+        ids: list[str] = []
         async with self._session() as session:
-            listing = await self._get(session, f"{self.SEARCH}/{user_id}/prod", **params)
-            rows = listing.get("Rows")
-            if not isinstance(listing.get("TotalRows"), int) or not isinstance(rows, list):
-                raise ProviderError("露天商品清單的格式看不懂（介面可能改了）")
-            ids = [str(row.get("Id", "")) for row in rows if isinstance(row, dict)]
-            if not all(_RUTEN_ID.fullmatch(item_id) for item_id in ids) or len(ids) != len(rows):
-                raise ProviderError("露天商品清單的格式看不懂（介面可能改了）")
+            # Newest first. Listing ids grow with time, so a page that reaches the newest id the
+            # last pass saw means everything newer is in hand. A busy store can add more than a
+            # page while the host is frozen: read back up to RUTEN_MAX_PAGES, and say what was
+            # left unread rather than drop it without a trace. The first pass is the baseline.
+            for page in range(RUTEN_MAX_PAGES if seen else 1):
+                page_ids = await self._listing(session, user_id, keyword, page)
+                ids += page_ids
+                if len(page_ids) < self.batch or min(map(int, page_ids)) <= seen:
+                    break
+            else:
+                if seen:
+                    LOGGER.warning(
+                        "Ruten store %s: more than %d new listings since the last pass; "
+                        "older ones were not read",
+                        user_id,
+                        len(ids),
+                    )
             if not ids:
                 if keyword:  # nothing matches the keyword right now: an ordinary answer
                     return FetchResult((), source.cursor, dict(source.state))
                 raise ProviderError("露天賣場回了 0 件商品（介面可能改了，或賣場已關閉）")
-            detail = await self._get(session, self.ITEMS, gno=",".join(ids), level="simple")
-        products = detail.get("data")
-        if detail.get("status") != "success" or not isinstance(products, list):
-            raise ProviderError("露天商品資料的格式看不懂（介面可能改了）")
-        by_id = {str(p.get("id")): p for p in products if isinstance(p, dict)}
+            for start in range(0, len(ids), self.batch):
+                chunk = ids[start : start + self.batch]
+                detail = await self._get(session, self.ITEMS, gno=",".join(chunk), level="simple")
+                data = detail.get("data")
+                if detail.get("status") != "success" or not isinstance(data, list):
+                    raise ProviderError("露天商品資料的格式看不懂（介面可能改了）")
+                products.update((str(p.get("id")), p) for p in data if isinstance(p, dict))
         items = []
         for item_id in reversed(ids):  # oldest first, like a feed
-            product = by_id.get(item_id, {})
-            name = " ".join(str(product.get("name") or "").split())
+            product = products.get(item_id, {})
+            name = " ".join(str(product.get("name") or "").split())[:300]
+            if not name:
+                # Not stored: items are deduplicated by id, so one stored without its name
+                # would never be read again. Still listed next pass, it is retried then.
+                continue
             price = product.get("goods_price")
             ship = str(product.get("pre_order_ship_date") or "").strip()
             facts = [
@@ -1409,13 +1439,16 @@ class RutenFetcher:
                     source.id,
                     item_id,
                     f"https://www.ruten.com.tw/item/{item_id}/",
-                    name[:300] or "（沒有商品名）",
+                    name,
                     "，".join(fact for fact in facts if fact),
                     _utc_now(),
                     "product",
                 )
             )
-        return FetchResult(tuple(items), items[-1].external_id, dict(source.state))
+        if not items:  # listed, but not one name came back: the item format moved
+            raise ProviderError("露天商品資料裡沒有任何商品名（介面可能改了）")
+        cursor = max(ids, key=int)
+        return FetchResult(tuple(items), cursor, dict(source.state))
 
 
 def parse_web_locator(locator: str) -> str:

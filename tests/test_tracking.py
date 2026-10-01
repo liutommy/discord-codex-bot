@@ -9,6 +9,7 @@ import pytest
 from discord_codex_bot.tracking import (
     INTEREST_POLICY,
     MAX_CLASSIFY_BATCH,
+    RUTEN_MAX_PAGES,
     ContentItem,
     DecisionInput,
     FetchResult,
@@ -886,3 +887,66 @@ async def test_a_keyword_nothing_matches_yet_is_an_ordinary_empty_answer(monkeyp
     source = Source(7, "ruten", "x", "x", cursor="c", state={"user_id": "1", "keyword": "zz"})
     result = await _fetcher().fetch(source)
     assert result.items == () and result.cursor == "c"
+
+
+async def test_a_listing_without_a_name_is_left_for_the_next_pass(monkeypatch) -> None:
+    # Stored nameless, it would never be read again (items are deduplicated by id) and the
+    # classifier would be back to judging 「預購」.
+    items = {"status": "success", "data": [RUTEN_ITEMS["data"][0], {"id": "1", "name": " "}]}
+    _ruten(monkeypatch, {"/prod": RUTEN_LISTING, "/list": items})
+    source = Source(7, "ruten", "x", "x", state={"user_id": "4761983", "keyword": ""})
+    result = await _fetcher().fetch(source)
+    assert [i.external_id for i in result.items] == ["22640792418162"]
+    assert result.cursor == "22640792418162"
+
+
+async def test_listings_that_come_back_without_any_name_raise(monkeypatch) -> None:
+    renamed = {"status": "success", "data": [{"id": "22640792418162", "title": "改名了"}]}
+    _ruten(monkeypatch, {"/prod": RUTEN_LISTING, "/list": renamed})
+    source = Source(7, "ruten", "x", "x", state={"user_id": "4761983", "keyword": ""})
+    with pytest.raises(ProviderError, match="商品名"):
+        await _fetcher().fetch(source)
+
+
+def _pages(monkeypatch, pages: list[list[str]]) -> list[dict]:
+    calls: list[dict] = []
+
+    async def fake_json_request(_session, _method, url, params=None, limit=0):
+        params = dict(params or {})
+        if url.endswith("/prod"):
+            calls.append(params)
+            index = (int(params["offset"]) - 1) // int(params["limit"])
+            rows = pages[index] if index < len(pages) else []
+            return {"TotalRows": 999, "Rows": [{"Id": i} for i in rows]}
+        names = params["gno"].split(",")
+        return {"status": "success", "data": [{"id": i, "name": f"商品{i}"} for i in names]}
+
+    monkeypatch.setattr("discord_codex_bot.tracking._json_request", fake_json_request)
+    return calls
+
+
+async def test_a_busy_store_is_read_back_to_the_last_listing_seen(monkeypatch) -> None:
+    calls = _pages(monkeypatch, [["900006", "900005"], ["900004", "900003"], ["900002", "900001"]])
+    fetcher = RutenFetcher(batch=2, session_factory=lambda **kw: EmptySession())
+    source = Source(7, "ruten", "x", "x", cursor="900003", state={"user_id": "1", "keyword": ""})
+    result = await fetcher.fetch(source)
+    assert [c["offset"] for c in calls] == ["1", "3"]  # stopped on the page holding 900003
+    assert {i.external_id for i in result.items} >= {"900004", "900005", "900006"}
+    assert result.cursor == "900006"
+
+
+async def test_a_store_busier_than_the_pages_read_says_so(monkeypatch, caplog) -> None:
+    pages = [[str(900100 - 2 * p), str(900099 - 2 * p)] for p in range(10)]
+    calls = _pages(monkeypatch, pages)
+    fetcher = RutenFetcher(batch=2, session_factory=lambda **kw: EmptySession())
+    source = Source(7, "ruten", "x", "x", cursor="1", state={"user_id": "1", "keyword": ""})
+    with caplog.at_level("WARNING"):
+        await fetcher.fetch(source)
+    assert len(calls) == RUTEN_MAX_PAGES and "older ones were not read" in caplog.text
+
+
+async def test_the_first_pass_of_a_store_reads_one_page(monkeypatch) -> None:
+    calls = _pages(monkeypatch, [["900006", "900005"], ["900004", "900003"]])
+    fetcher = RutenFetcher(batch=2, session_factory=lambda **kw: EmptySession())
+    await fetcher.fetch(Source(7, "ruten", "x", "x", state={"user_id": "1", "keyword": ""}))
+    assert len(calls) == 1  # the baseline: nothing in it is judged anyway
