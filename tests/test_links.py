@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import socket
 import sys
 import types
@@ -8,6 +9,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+from yarl import URL
 
 from discord_codex_bot import links
 from discord_codex_bot.config import Config
@@ -22,10 +26,11 @@ from discord_codex_bot.links import (
     html_to_text,
     link_blocks,
     render_link,
+    strip_tracking,
 )
 
 
-async def _resolve_ok(host: str) -> str:
+async def _resolve_ok(host: str, allow=()) -> str:
     return "93.184.216.34"
 
 
@@ -118,13 +123,86 @@ def test_find_urls_dedupes_strips_punctuation_and_caps() -> None:
     assert find_urls("no links", 3) == []
 
 
+def test_strip_tracking_removes_utm_and_known_params_only() -> None:
+    dirty = "https://a.example/p?utm_source=dlvr.it&utm_medium=social&id=42&v=1"
+    assert strip_tracking(dirty) == "https://a.example/p?id=42&v=1"
+    # The floor: click ids the ClearURLs set lacks (ttclid, xmt, __cft__) still go.
+    assert (
+        strip_tracking("https://www.tiktok.com/@u/video/1?ttclid=abc&is_from_webapp=1")
+        == "https://www.tiktok.com/@u/video/1?is_from_webapp=1"
+    )
+    assert (
+        strip_tracking("https://www.threads.com/@u/post/A?xmt=tok")
+        == "https://www.threads.com/@u/post/A"
+    )
+    assert strip_tracking("https://a.example/?xmt=keep") == "https://a.example/?xmt=keep"
+    assert (
+        strip_tracking("https://www.facebook.com/u/posts/1?__cft__[0]=abc&__tn__=R&comment_id=2")
+        == "https://www.facebook.com/u/posts/1?comment_id=2"
+    )
+    assert (
+        strip_tracking("https://youtu.be/id?fbclid=xyz&si=abc&feature=share")
+        == "https://youtu.be/id"
+    )
+    # A host-scoped param covers subdomains too: ETtoday puts each section on its own.
+    assert (
+        strip_tracking("https://sports.ettoday.net/news/3240217?from=fb_et_sports")
+        == "https://sports.ettoday.net/news/3240217"
+    )
+    assert strip_tracking("https://www.ettoday.net/n/1?from=x&id=2") == (
+        "https://www.ettoday.net/n/1?id=2"
+    )
+    # Yahoo: ClearURLs files these under sister sites only, so the scope table carries them.
+    assert (
+        strip_tracking(
+            "https://tw.news.yahoo.com/a-032657573.html?link_source=ta_first_comment"
+            "&taid=6ab4&guccounter=1&guce_referrer=aHR0&guce_referrer_sig=AQAA"
+        )
+        == "https://tw.news.yahoo.com/a-032657573.html"
+    )
+    assert strip_tracking("https://a.example/p?taid=1&guccounter=1") == (
+        "https://a.example/p?taid=1&guccounter=1"
+    )
+    # ...and nowhere else. On most sites `from` carries the return path of a login or redirect,
+    # so stripping it globally would change where the member lands.
+    assert strip_tracking("https://a.example/login?from=/deep/page") == (
+        "https://a.example/login?from=/deep/page"
+    )
+    assert (
+        strip_tracking("https://notettoday.net/n/1?from=x") == "https://notettoday.net/n/1?from=x"
+    )
+    # Case-insensitive, and percent-encoded keys count too (%75 == "u").
+    assert (
+        strip_tracking("https://c.example/?UTM_Campaign=x&%75tm_term=y&id=9")
+        == "https://c.example/?id=9"
+    )
+    # Non-tracking params, fragments and blank values keep their exact form.
+    assert (
+        strip_tracking("https://d.example/?flag&ref2=x#sec") == "https://d.example/?flag&ref2=x#sec"
+    )
+    assert strip_tracking("https://e.example/?keep=") == "https://e.example/?keep="
+    assert strip_tracking("https://f.example/plain") == "https://f.example/plain"
+    # Idempotent: a clean URL strips to itself, byte for byte.
+    assert strip_tracking(strip_tracking(dirty)) == strip_tracking(dirty)
+
+
+def test_find_urls_cleans_by_default_and_dedupes_after_stripping() -> None:
+    text = "https://a.example/x?utm_source=mail 與 https://a.example/x"
+    assert find_urls(text, 3) == ["https://a.example/x"]
+    assert find_urls(text, 3, clean=False) == [
+        "https://a.example/x?utm_source=mail",
+        "https://a.example/x",
+    ]
+
+
 def test_extract_fetch_tags_reads_render_attribute_and_merges_duplicates() -> None:
     answer = (
         '<fetch url="https://a.example/p"/> <fetch url="https://b.example/q" render="1"/>'
         ' <fetch url="https://a.example/p" render="true"></fetch> <fetch url="ftp://x"/>'
     )
     assert extract_fetch_tags(answer) == [
-        ("https://a.example/p", True), ("https://b.example/q", True)
+        ("https://a.example/p", True),
+        ("https://b.example/q", True),
     ]
     assert extract_fetch_tags('<fetch url="https://c.example" render="0"/>') == [
         ("https://c.example", False)
@@ -140,11 +218,39 @@ def test_html_to_text_drops_scripts_keeps_title_and_block_breaks() -> None:
     assert html_to_text(html) == ("T", "one\n\ntwo & three")
 
 
+def test_html_to_text_keeps_article_links_when_given_a_base() -> None:
+    html = (
+        '<html><body><a href="/news/detail/123">新カード</a>'
+        '<a href="#top">top</a><a href="https://other.example/x">other</a>'
+        '<a href="/news/detail/123">again</a></body></html>'
+    )
+    _title, text = html_to_text(html, "https://yu-gi-oh.jp/news/")
+    # Without this the model can read that an article exists but cannot hand over its URL.
+    assert "https://yu-gi-oh.jp/news/detail/123" in text
+    assert "https://other.example/x" in text
+    assert "#top" not in text  # an in-page anchor is not an article link
+    assert text.count("https://yu-gi-oh.jp/news/detail/123") == 1  # deduplicated
+    # No base: the old text-only behaviour is unchanged, so existing callers keep working.
+    assert "http" not in html_to_text(html)[1]
+
+
 @pytest.mark.parametrize(
     ("ip", "public"),
-    [("8.8.8.8", True), ("10.0.0.1", False), ("127.0.0.1", False), ("169.254.1.1", False),
-     ("192.168.1.1", False), ("::1", False), ("fe80::1", False), ("2606:4700::1", True),
-     ("0.0.0.0", False), ("224.0.0.1", False)],
+    [
+        ("8.8.8.8", True),
+        ("10.0.0.1", False),
+        ("127.0.0.1", False),
+        ("169.254.1.1", False),
+        ("192.168.1.1", False),
+        ("::1", False),
+        ("fe80::1", False),
+        ("2606:4700::1", True),
+        ("0.0.0.0", False),
+        ("224.0.0.1", False),
+        ("198.18.0.1", False),  # proxy fake-IP range: refused unless LINK_ALLOW_NETS opens it
+        ("100.64.0.1", False),  # CGNAT
+        ("fec0::1", False),  # deprecated site-local
+    ],
 )
 def test_public_address_guard(ip: str, public: bool) -> None:
     assert _public_address(ip) is public
@@ -154,7 +260,7 @@ def test_public_address_guard(ip: str, public: bool) -> None:
 async def test_fetch_link_refuses_private_hosts_and_bad_schemes(
     monkeypatch, config: Config
 ) -> None:
-    async def resolve_private(host: str) -> str:
+    async def resolve_private(host: str, allow=()) -> str:
         raise ValueError("host resolves to a private or reserved address")
 
     monkeypatch.setattr(links, "_resolve_public", resolve_private)
@@ -162,7 +268,7 @@ async def test_fetch_link_refuses_private_hosts_and_bad_schemes(
     assert "只支援 http/https" in await fetch_link("ftp://a.example/", config)
     assert "只支援 http/https" in (await render_link("file:///etc/passwd", config, None))[0]
 
-    async def resolve_fail(host: str) -> str:
+    async def resolve_fail(host: str, allow=()) -> str:
         raise socket.gaierror("no such host")
 
     monkeypatch.setattr(links, "_resolve_public", resolve_fail)
@@ -196,14 +302,18 @@ async def test_fetch_or_render_falls_back_only_when_blocked_or_asked(
     monkeypatch.setattr(links, "render_link", fake_render)
     assert await fetch_or_render("https://ok.example", config, tmp_path) == ("text", [])
     assert await fetch_or_render("https://blocked.example", config, tmp_path) == (
-        "rendered", [tmp_path / "page.jpg"]
+        "rendered",
+        [tmp_path / "page.jpg"],
     )
     assert await fetch_or_render("https://ok.example", config, tmp_path, render=True) == (
-        "rendered", [tmp_path / "page.jpg"]
+        "rendered",
+        [tmp_path / "page.jpg"],
     )
     assert calls == [
-        "fetch https://ok.example", "fetch https://blocked.example",
-        "render https://blocked.example", "render https://ok.example",
+        "fetch https://ok.example",
+        "fetch https://blocked.example",
+        "render https://blocked.example",
+        "render https://ok.example",
     ]
 
 
@@ -211,7 +321,7 @@ async def test_fetch_or_render_falls_back_only_when_blocked_or_asked(
 async def test_link_blocks_wraps_each_page_and_collects_screenshots(
     monkeypatch, config: Config, tmp_path: Path
 ) -> None:
-    async def fake(url: str, config: Config, out_dir, render: bool = False, preview=None):
+    async def fake(url: str, config: Config, out_dir, render: bool = False, preview=None, **kwargs):
         return f"body of {url}", [out_dir / "page.jpg"] if "shot" in url else []
 
     monkeypatch.setattr(links, "fetch_or_render", fake)
@@ -234,6 +344,7 @@ async def test_fetch_link_clips_text_and_reports_bot_challenge(monkeypatch, conf
 
         async def read(self, n: int) -> bytes:
             return self._body[:n]
+
         async def iter_chunked(self, n: int):
             yield await self.read(n)
 
@@ -258,7 +369,7 @@ async def test_fetch_link_clips_text_and_reports_bot_challenge(monkeypatch, conf
         async def __aexit__(self, *args):
             return False
 
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     monkeypatch.setattr(links, "_resolve_public", resolve_ok)
@@ -284,7 +395,8 @@ async def test_render_link_reports_missing_chromium_when_playwright_is_unavailab
     monkeypatch.setattr(links, "_resolve_public", _resolve_ok)
     monkeypatch.setitem(sys.modules, "playwright.async_api", None)
     assert await render_link("https://ok.example/", config, None) == (
-        "（https://ok.example/：此部署沒有 Chromium，無法渲染）", None
+        "（https://ok.example/：此部署沒有 Chromium，無法渲染）",
+        None,
     )
 
 
@@ -334,7 +446,7 @@ class FakeRoute:
 async def test_guard_route_allows_public_hosts_only_and_caches_per_host(monkeypatch) -> None:
     seen: list[str] = []
 
-    async def resolve(host: str) -> str:
+    async def resolve(host: str, allow=()) -> str:
         seen.append(host)
         if host.startswith("lan"):
             raise ValueError("private")
@@ -343,21 +455,32 @@ async def test_guard_route_allows_public_hosts_only_and_caches_per_host(monkeypa
     monkeypatch.setattr(links, "_resolve_public", resolve)
     hosts: dict[str, bool] = {}
     outcomes = []
-    for url in ("https://ok.example/a.js", "http://lan.example/x", "https://ok.example/b.png",
-                "ftp://ok.example/c", "http://lan.example/y"):
+    for url in (
+        "https://ok.example/a.js",
+        "http://lan.example/x",
+        "https://ok.example/b.png",
+        "ftp://ok.example/c",
+        "http://lan.example/y",
+    ):
         route = FakeRoute(url)
         await links._guard_route(route, route.request, hosts)
         outcomes.append(route.outcome)
-    assert outcomes == ["continue", "abort:blockedbyclient", "continue", "abort:blockedbyclient",
-                        "abort:blockedbyclient"]
+    assert outcomes == [
+        "continue",
+        "abort:blockedbyclient",
+        "continue",
+        "abort:blockedbyclient",
+        "abort:blockedbyclient",
+    ]
     assert seen == ["ok.example", "lan.example"]  # one resolution per host, then cached
 
 
 async def test_public_resolver_refuses_private_answers_at_connect_time(monkeypatch) -> None:
     async def fake_super(self, host, port=0, family=socket.AF_INET):
         ip = "10.0.0.5" if host == "rebind.example" else "93.184.216.34"
-        return [{"hostname": host, "host": ip, "port": port, "family": family, "proto": 6,
-                 "flags": 0}]
+        return [
+            {"hostname": host, "host": ip, "port": port, "family": family, "proto": 6, "flags": 0}
+        ]
 
     monkeypatch.setattr(links.ThreadedResolver, "resolve", fake_super)
     resolver = links._PublicResolver()
@@ -366,8 +489,200 @@ async def test_public_resolver_refuses_private_answers_at_connect_time(monkeypat
         await resolver.resolve("rebind.example", 80)
 
 
+PROXY_NETS = (ipaddress.ip_network("198.18.0.0/15"),)
+
+
+@pytest.mark.parametrize(
+    ("ip", "public"),
+    [
+        ("198.18.0.1", True),
+        ("198.19.255.254", True),
+        ("198.20.0.1", True),  # ordinary public address, outside the range
+        ("127.0.0.1", False),
+        ("10.0.0.2", False),
+        ("172.19.0.3", False),
+        ("192.168.1.1", False),
+        ("169.254.169.254", False),
+        ("::1", False),
+    ],
+)
+def test_allow_nets_open_only_the_listed_range(ip: str, public: bool) -> None:
+    assert _public_address(ip, PROXY_NETS) is public
+
+
+async def test_public_resolver_with_allow_nets_still_refuses_lan_answers(monkeypatch) -> None:
+    answers = {
+        "proxied.example": ["198.18.0.1"],
+        "redirect-target.example": ["10.0.0.2"],  # every redirect hop resolves through here
+        "mixed.example": ["198.18.0.1", "172.19.0.3"],
+    }
+
+    async def fake_super(self, host, port=0, family=socket.AF_INET):
+        return [
+            {"hostname": host, "host": ip, "port": port, "family": family, "proto": 6, "flags": 0}
+            for ip in answers[host]
+        ]
+
+    monkeypatch.setattr(links.ThreadedResolver, "resolve", fake_super)
+    with pytest.raises(socket.gaierror):
+        await links._PublicResolver().resolve("proxied.example", 443)  # default: refused
+    resolver = links._PublicResolver(PROXY_NETS)
+    assert (await resolver.resolve("proxied.example", 443))[0]["host"] == "198.18.0.1"
+    for host in ("redirect-target.example", "mixed.example"):
+        with pytest.raises(socket.gaierror):
+            await resolver.resolve(host, 443)
+
+
+async def test_fetch_and_render_hand_the_allow_nets_to_every_guard(
+    monkeypatch, config: Config
+) -> None:
+    config = replace(config, link_allow_nets=PROXY_NETS)
+    seen: list[tuple[str, object]] = []
+
+    async def refuse(host: str, allow=()) -> str:
+        seen.append((host, allow))
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(links, "_resolve_public", refuse)
+    await fetch_link("https://a.example/", config)
+    await render_link("https://b.example/", config, None)
+    route = types.SimpleNamespace(abort=_noop, continue_=_noop)
+    request = types.SimpleNamespace(url="https://c.example/x.js")
+    await links._guard_route(route, request, {}, config.link_allow_nets)
+    assert seen == [
+        ("a.example", PROXY_NETS),
+        ("b.example", PROXY_NETS),
+        ("c.example", PROXY_NETS),
+    ]
+    session = links._guarded_session(config)
+    try:
+        assert session.connector._resolver._allow == PROXY_NETS
+    finally:
+        await session.close()
+
+
+async def _noop(*_args) -> None:
+    return None
+
+
+# 198.18.0.1 in the notations inet_aton accepts: not "an IP" to ipaddress, so they reach the
+# resolver like a name would — and must not collect the allow-list on the way.
+PROXY_SPELLINGS = (
+    "198.18.0.1",
+    "198.19.0.7",
+    "3323068417",
+    "0xc6.0x12.0.1",
+    "198.18.1",
+    "198.18.0.1.",
+    "１９８.１８.０.１",
+    "198。18。0。1",
+)
+LOOPBACK_SPELLINGS = ("127.0.0.1", "2130706433", "0x7f.1", "0177.0.0.1", "127.1", "127.0.0.1.")
+MAPPED = ("::ffff:127.0.0.1", "::ffff:10.0.0.2", "::ffff:198.18.0.1")
+
+
+@pytest.mark.parametrize("host", PROXY_SPELLINGS + LOOPBACK_SPELLINGS + MAPPED)
+async def test_allow_nets_never_cover_an_address_written_into_the_url(host: str) -> None:
+    # The proxy range is reachable through the names DNS maps into it, not as a destination.
+    # Either outcome refuses it: some resolvers (GitHub's runners) will not resolve a literal
+    # with a trailing dot at all, and every caller treats gaierror as "cannot connect".
+    with pytest.raises((ValueError, socket.gaierror)):
+        await links._resolve_public(host, PROXY_NETS)
+    with pytest.raises(links.RefusedAddress):
+        links._refuse_literal(URL(f"http://[{host}]/" if ":" in host else f"http://{host}/"))
+
+
+@pytest.mark.parametrize("host", PROXY_SPELLINGS[2:5] + LOOPBACK_SPELLINGS[1:5])
+async def test_public_resolver_gives_numeric_spellings_no_allow_list(host: str) -> None:
+    # Real resolution, no DNS involved: getaddrinfo parses these itself.
+    with pytest.raises(socket.gaierror):
+        await links._PublicResolver(PROXY_NETS).resolve(host, 80)
+
+
+def test_pinned_address_prefers_ipv4() -> None:
+    assert links._preferred({"2a03:2880:f203::43fe", "31.13.66.63"}) == "31.13.66.63"
+    assert links._preferred({"2a03:2880:f203::43fe"}) == "2a03:2880:f203::43fe"
+    assert links._preferred({"93.184.216.34", "104.20.23.154"}) == "104.20.23.154"
+
+
+@pytest.mark.parametrize("host", ["198.18.0.\u00ad1", "198.18.0.1\u200b", "127.0.0.\u200d1"])
+async def test_characters_idna_deletes_do_not_hide_a_literal(host: str) -> None:
+    assert links._literal_address(host) in ("198.18.0.1", "127.0.0.1")
+    with pytest.raises(ValueError):
+        await links._resolve_public(host, PROXY_NETS)
+
+
+def test_literal_address_leaves_names_alone() -> None:
+    assert links._literal_address("example.com") == ""
+    assert links._literal_address("198.18.0.1.nip.io") == ""
+    assert links._literal_address("[::1]") == "::1"
+    assert links._literal_address("0x7f.1") == "127.0.0.1"
+
+
+async def test_guarded_session_refuses_literal_private_ips_asked_for_or_redirected_to(
+    monkeypatch, config: Config
+) -> None:
+    hits: list[str] = []
+
+    async def redirect(request: web.Request) -> web.Response:
+        hits.append("redirect")
+        raise web.HTTPFound(f"http://127.0.0.1:{request.url.port}/secret")
+
+    async def secret(request: web.Request) -> web.Response:
+        hits.append("secret")
+        return web.Response(text="INTERNAL")
+
+    location = {"value": ""}
+
+    async def malformed(request: web.Request) -> web.Response:
+        return web.Response(status=302, headers={"Location": location["value"]})
+
+    app = web.Application()
+    app.add_routes(
+        [
+            web.get("/redirect", redirect),
+            web.get("/secret", secret),
+            web.get("/malformed", malformed),
+        ]
+    )
+    async with TestServer(app) as server:
+
+        async def to_test_server(self, host, port=0, family=socket.AF_INET):
+            return [
+                {
+                    "hostname": host,
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "family": family,
+                    "proto": 6,
+                    "flags": 0,
+                }
+            ]
+
+        # Let the *name* through so the request reaches the redirect: the hop is what is tested.
+        monkeypatch.setattr(links._PublicResolver, "resolve", to_test_server)
+        async with links._guarded_session(config) as session:
+            with pytest.raises(links.RefusedAddress):
+                await session.get(f"http://public.example:{server.port}/redirect")
+            with pytest.raises(links.RefusedAddress):
+                await session.get(f"http://127.0.0.1:{server.port}/secret")
+            for host in ("[::1]", "[::ffff:127.0.0.1]", "2130706433", "0x7f.1"):
+                with pytest.raises(links.RefusedAddress):
+                    await session.get(f"http://{host}:{server.port}/secret")
+        monkeypatch.setattr(links, "_resolve_public", _resolve_ok)  # first hop: a public name
+        text = await fetch_link(f"http://public.example:{server.port}/redirect", config)
+        # A Location that does not parse stays an ordinary fetch failure, not a crash.
+        for bad in ("http://[::1/secret", "http://127.0.0.1\\@public.example/"):
+            location["value"] = bad
+            assert "抓取失敗" in await fetch_link(
+                f"http://public.example:{server.port}/malformed", config
+            )
+    assert hits == ["redirect", "redirect"]  # the redirect was served; /secret never reached
+    assert "抓取失敗" in text and "INTERNAL" not in text
+
+
 async def test_render_link_is_bounded_by_the_render_timeout(monkeypatch, config: Config) -> None:
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     async def hang(url, cfg, out_dir):
@@ -388,7 +703,7 @@ async def test_render_link_is_bounded_by_the_render_timeout(monkeypatch, config:
 async def test_render_link_uses_the_browser_version_without_the_headless_token(
     monkeypatch, config: Config
 ) -> None:
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     monkeypatch.setattr(links, "_resolve_public", resolve_ok)
@@ -400,7 +715,8 @@ async def test_render_link_uses_the_browser_version_without_the_headless_token(
 
 def test_x_status_recognises_x_and_its_mirrors_only() -> None:
     assert links.x_status("https://fixvx.com/aiban_imas/status/2098659648509559228") == (
-        "aiban_imas", "2098659648509559228"
+        "aiban_imas",
+        "2098659648509559228",
     )
     assert links.x_status("https://www.x.com/a_b/status/12345?s=20")[1] == "12345"
     assert links.x_status("https://mobile.twitter.com/a/status/12345/photo/1")[1] == "12345"
@@ -417,6 +733,7 @@ async def test_fetch_link_treats_a_redirect_shell_as_blocked(monkeypatch, config
 
         async def read(self, n: int) -> bytes:
             return b"<title>Redirecting...</title><p>Redirecting\u2026</p>"
+
         async def iter_chunked(self, n: int):
             yield await self.read(n)
 
@@ -439,7 +756,7 @@ async def test_fetch_link_treats_a_redirect_shell_as_blocked(monkeypatch, config
         async def __aexit__(self, *args):
             return False
 
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     monkeypatch.setattr(links, "_resolve_public", resolve_ok)
@@ -451,16 +768,24 @@ async def test_fetch_link_treats_a_redirect_shell_as_blocked(monkeypatch, config
 async def test_fetch_x_status_returns_text_and_downloads_media(
     monkeypatch, config: Config, tmp_path: Path
 ) -> None:
-    payload = {"tweet": {
-        "text": "…？", "created_at": "Sat Sep 12 06:27:00 +0000 2026",
-        "author": {"name": "あいばん", "screen_name": "aiban_imas"},
-        "media": {"all": [
-            {"type": "photo", "url": "https://pbs.twimg.com/media/a.jpg?name=orig"},
-            {"type": "video", "url": "https://video.twimg.com/v.mp4",
-             "thumbnail_url": "https://pbs.twimg.com/thumb.jpg"},
-        ]},
-        "quote": {"text": "原文", "author": {"screen_name": "someone"}},
-    }}
+    payload = {
+        "tweet": {
+            "text": "…？",
+            "created_at": "Sat Sep 12 06:27:00 +0000 2026",
+            "author": {"name": "あいばん", "screen_name": "aiban_imas"},
+            "media": {
+                "all": [
+                    {"type": "photo", "url": "https://pbs.twimg.com/media/a.jpg?name=orig"},
+                    {
+                        "type": "video",
+                        "url": "https://video.twimg.com/v.mp4",
+                        "thumbnail_url": "https://pbs.twimg.com/thumb.jpg",
+                    },
+                ]
+            },
+            "quote": {"text": "原文", "author": {"screen_name": "someone"}},
+        }
+    }
     fetched: list[str] = []
 
     class Response:
@@ -474,6 +799,7 @@ async def test_fetch_x_status_returns_text_and_downloads_media(
 
         async def read(self, n: int) -> bytes:
             return b"jpegbytes"
+
         async def iter_chunked(self, n: int):
             yield await self.read(n)
 
@@ -504,7 +830,8 @@ async def test_fetch_x_status_returns_text_and_downloads_media(
     assert (tmp_path / "x" / "x1.jpg").read_bytes() == b"jpegbytes"
     assert fetched == [
         "https://api.fxtwitter.com/aiban_imas/status/2098659648509559228",
-        "https://pbs.twimg.com/media/a.jpg?name=large", "https://pbs.twimg.com/thumb.jpg",
+        "https://pbs.twimg.com/media/a.jpg?name=large",
+        "https://pbs.twimg.com/thumb.jpg",
     ]
 
 
@@ -587,14 +914,15 @@ async def test_fetch_or_render_uses_the_discord_preview_only_when_the_site_is_un
     monkeypatch.setattr(links, "render_link", fake_render)
     no_image = links.Preview("https://blocked.example/p", "", "只有描述")
     assert await fetch_or_render("https://blocked.example/p", config, None, preview=no_image) == (
-        "（Discord 預覽，不是全文；網站本身擋住了 Bot。）\n只有描述", []
+        "（Discord 預覽，不是全文；網站本身擋住了 Bot。）\n只有描述",
+        [],
     )
 
 
 async def test_render_link_gives_up_at_once_on_an_interactive_turnstile(
     monkeypatch, config: Config
 ) -> None:
-    async def resolve_ok(host: str) -> str:
+    async def resolve_ok(host: str, allow=()) -> str:
         return "93.184.216.34"
 
     async def no_sleep(seconds):
@@ -608,3 +936,17 @@ async def test_render_link_gives_up_at_once_on_an_interactive_turnstile(
     text, shot = await render_link("https://www.dcard.tw/f/x/p/1", config, None)
     assert text == "（https://www.dcard.tw/f/x/p/1：機器人驗證沒過，打不開）" and shot is None
     assert browser.closed
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://[invalid/?utm_source=x",
+        "opaque?utm_source=x",
+        "https://a.example/?source=article&ref=revision&src=image&feature=preview&si=id",
+        "https://a.example/?utm_source=x&X-Amz-Signature=signed",
+        "https://a.example/?utm_source=x&sig=signed",
+    ],
+)
+def test_strip_tracking_preserves_application_ids_signatures_and_bad_input(url):
+    assert strip_tracking(url) == url

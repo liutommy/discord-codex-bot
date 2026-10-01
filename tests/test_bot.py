@@ -1,11 +1,23 @@
 import asyncio
 import logging
 import logging.handlers
+import time
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
-from discord_codex_bot.bot import DiscordCodexClient, strip_mention, with_quoted_message
+import discord
+
+from discord_codex_bot import embedfix
+from discord_codex_bot.bot import (
+    DiscordCodexClient,
+    strip_mention,
+    tracking_message,
+    tracking_provider,
+    with_quoted_message,
+)
 from discord_codex_bot.config import Config
+from discord_codex_bot.linkclean import snowflake_before
 
 
 @dataclass
@@ -15,13 +27,16 @@ class FakeAttachment:
     filename: str = "blob.bin"
 
 
-def test_registers_only_expected_slash_commands(config: Config) -> None:
+def test_registers_only_expected_slash_commands(config: Config, tmp_path) -> None:
     from dataclasses import replace
 
-    client = DiscordCodexClient(replace(config, command_prefix="inmu-king"))
+    client = DiscordCodexClient(
+        replace(config, command_prefix="inmu-king", codex_home=tmp_path / "codex")
+    )
     assert {command.name for command in client.tree.get_commands()} == {
         "inmu-king",
         "inmu-king-status",
+        "inmu-king-persona",
         "inmu-king-help",
         "inmu-king-reset",
         "inmu-king-stop",
@@ -33,9 +48,236 @@ def test_registers_only_expected_slash_commands(config: Config) -> None:
         "inmu-king-memory",
         "inmu-king-style",
         "inmu-king-model",
+        "inmu-king-track",
+        "inmu-king-linkclean",
+        "inmu-king-embedfix",
     }
     assert client.intents.guilds
     assert client.intents.message_content
+
+
+class _FakeChannel:
+    def __init__(self, manage_messages: bool) -> None:
+        self.id = 222222222222222222
+        self.parent_id = None
+        self._manage = manage_messages
+        self.sent: list[str] = []
+        self.ids: list[int] = []
+        self.references: list[object] = []
+
+    def permissions_for(self, user: object) -> types.SimpleNamespace:
+        assert isinstance(user, discord.Member)
+        return types.SimpleNamespace(manage_messages=self._manage)
+
+    async def send(self, text: str, **kwargs: object) -> types.SimpleNamespace:
+        assert len(text) <= 2000
+        mentions = kwargs["allowed_mentions"].to_dict()
+        assert "everyone" not in mentions["parse"] and "roles" not in mentions["parse"]
+        self.sent.append(text)
+        self.references.append(kwargs.get("reference"))
+        # A real-looking snowflake: the repost table prunes ids older than its retention.
+        self.ids.append(snowflake_before(0) + len(self.sent))
+        return types.SimpleNamespace(id=self.ids[-1])
+
+
+def _fake_message(
+    content: str, channel: _FakeChannel, guild_id: int | None = None
+) -> types.SimpleNamespace:
+    message = types.SimpleNamespace(
+        content=content,
+        channel=channel,
+        author=types.SimpleNamespace(id=USER),
+        deleted=0,
+        attachments=[],
+        stickers=[],
+        reference=None,
+        thread=None,
+    )
+
+    async def delete() -> None:
+        assert channel.sent, "must deliver before deleting"
+        message.deleted += 1
+
+    message.delete = delete
+    message.guild = types.SimpleNamespace(
+        id=guild_id if guild_id is not None else GUILD, me=_Member(False, False)
+    )
+    return message
+
+
+async def test_linkclean_replaces_links_only_messages_when_it_can_delete(client) -> None:
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("🔥 https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [f"<@{USER}>\n🔥 https://a.example/x"]
+
+
+async def test_linkclean_degrades_to_append_when_it_cannot_delete(client) -> None:
+    channel = _FakeChannel(manage_messages=False)
+    message = _fake_message("🔥 https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(message)
+    assert message.deleted == 0
+    assert channel.sent == ["https://a.example/x"]
+
+
+async def test_linkclean_appends_only_the_changed_links_of_a_text_message(client) -> None:
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message(
+        "看這個 https://a.example/x?utm_source=mail 還有 https://b.example/y", channel
+    )
+    await client._linkclean(message)
+    assert message.deleted == 0
+    assert channel.sent == ["https://a.example/x"]
+
+
+async def test_linkclean_stays_quiet_when_clean_disabled_or_not_our_guild(client) -> None:
+    clean = _fake_message("https://a.example/x?keep=1", _FakeChannel(True))
+    await client._linkclean(clean)
+    assert clean.channel.sent == []
+    client.linkclean.set(GUILD, "off")
+    off = _fake_message("https://a.example/x?utm_source=mail", _FakeChannel(True))
+    await client._linkclean(off)
+    assert off.channel.sent == []
+    client.linkclean.set(GUILD, "all")
+    foreign = _fake_message("https://a.example/x?utm_source=mail", _FakeChannel(True), guild_id=999)
+    await client._linkclean(foreign)
+    assert foreign.channel.sent == []
+
+
+async def test_embedfix_swaps_verified_post_links_and_keeps_the_rest(client, monkeypatch) -> None:
+    async def fake_pick(url, fetch):
+        if url == "https://x.com/u/status/1":
+            return embedfix.Fix("https://fixupx.com/u/status/1", spoiler=False)
+        return None
+
+    monkeypatch.setattr(embedfix, "pick", fake_pick)
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("看 https://x.com/u/status/1?s=20 和 https://x.com/u/status/2", channel)
+    await client._linkclean(message)
+    assert message.deleted == 0
+    # status/1 is embed-fixed (its tracking param was stripped first); status/2 had no
+    # verified proxy page and stays as posted, so nothing is appended for it.
+    assert channel.sent == ["https://fixupx.com/u/status/1"]
+    client.linkclean.set_embedfix(GUILD, False)
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("https://x.com/u/status/1", channel)
+    await client._linkclean(message)
+    assert channel.sent == [] and message.deleted == 0
+    client.linkclean.set_embedfix(GUILD, True)
+
+
+async def test_embedfix_spoilers_rated_works_and_keeps_member_spoilers(client, monkeypatch) -> None:
+    async def fake_pick(url, fetch):
+        if url.startswith("https://www.pixiv.net/artworks/"):
+            return embedfix.Fix(url.replace("www.pixiv.net", "phixiv.net"), spoiler=True)
+        if url.startswith("https://x.com/"):
+            return embedfix.Fix(url.replace("x.com", "fixupx.com"), spoiler=False)
+        return None
+
+    monkeypatch.setattr(embedfix, "pick", fake_pick)
+    # R-18: the replacement gets the bars the member did not write.
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("https://www.pixiv.net/artworks/1", channel)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [f"<@{USER}>\n||https://phixiv.net/artworks/1||"]
+    # ...and so does an appended copy under a text message.
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("看 https://www.pixiv.net/artworks/1 這張", channel)
+    await client._linkclean(message)
+    assert channel.sent == ["||https://phixiv.net/artworks/1||"]
+    # The member's own spoiler: still links-only, bars kept once, and kept on the append.
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("||https://www.pixiv.net/artworks/1||", channel)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [f"<@{USER}>\n||https://phixiv.net/artworks/1||"]
+    channel = _FakeChannel(manage_messages=False)
+    message = _fake_message("看 ||https://x.com/u/status/1|| 這則", channel)
+    await client._linkclean(message)
+    assert channel.sent == ["||https://fixupx.com/u/status/1||"]
+
+
+async def test_embedfix_command_toggles_and_reports(client) -> None:
+    responses = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    interaction = _interaction(555, 555)  # the guild owner
+    interaction.guild.id = GUILD
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send)
+    await client.embedfix_command(interaction)
+    assert responses[-1] == "預覽修正：開"
+    await client.embedfix_command(interaction, "off")
+    assert responses[-1] == "預覽修正：關" and client.linkclean.embedfix(GUILD) is False
+    client.linkclean.set(GUILD, "off")
+    await client.embedfix_command(interaction, "on")
+    assert responses[-1] == "預覽修正：開（連結洗參數為全關時不會投遞）"
+    client.linkclean.set(GUILD, "all")
+
+
+async def test_linkclean_links_mode_replaces_only_and_never_appends(client) -> None:
+    client.linkclean.set(GUILD, "links")
+    channel = _FakeChannel(manage_messages=True)
+    pure = _fake_message("🔥 https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(pure)
+    assert pure.deleted == 1 and channel.sent == [f"<@{USER}>\n🔥 https://a.example/x"]
+    # Text around the link: left exactly as posted, no clean link appended.
+    channel = _FakeChannel(manage_messages=True)
+    text = _fake_message("看這個 https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(text)
+    assert text.deleted == 0 and channel.sent == []
+    # Links-only but the Bot cannot delete: nothing, rather than the append `all` would do.
+    channel = _FakeChannel(manage_messages=False)
+    stuck = _fake_message("https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(stuck)
+    assert stuck.deleted == 0 and channel.sent == []
+    client.linkclean.set(GUILD, "all")
+
+
+class _Member(discord.Member):
+    def __init__(self, administrator: bool, manage_guild: bool, user_id: int = 555) -> None:
+        self._user = types.SimpleNamespace(id=user_id)  # Member.id is attrgetter("_user.id")
+        self._perms = types.SimpleNamespace(administrator=administrator, manage_guild=manage_guild)
+
+    @property
+    def guild_permissions(self) -> types.SimpleNamespace:
+        return self._perms
+
+
+def _interaction(user_id: int, owner_id: int, user: object | None = None) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        user=user if user is not None else types.SimpleNamespace(id=user_id),
+        guild=types.SimpleNamespace(owner_id=owner_id),
+    )
+
+
+def test_linkclean_gate_allows_owner_guild_admins_and_listed_ids(client) -> None:
+    plain = types.SimpleNamespace(id=555)
+    assert client._is_guild_admin(_interaction(555, owner_id=555)) is True
+    assert client._is_guild_admin(_interaction(555, owner_id=777, user=plain)) is False
+    client.config = replace(client.config, linkclean_admin_ids=frozenset({555}))
+    assert client._is_guild_admin(_interaction(555, owner_id=777, user=plain)) is True
+    assert client._is_guild_admin(_interaction(666, 777, _Member(True, False, 666))) is True
+    assert client._is_guild_admin(_interaction(666, 777, _Member(False, True, 666))) is True
+    assert (
+        client._is_guild_admin(_interaction(666, 777, _Member(False, False, user_id=666))) is False
+    )
+
+
+def test_tracking_provider_prefers_the_specific_source_over_a_plain_page() -> None:
+    # Order is the invariant worth guarding: a YouTube URL silently falling through to the
+    # page reader would still "work", but would lose titles, publish times and the feed.
+    assert tracking_provider("https://www.youtube.com/@HoushouMarine") == "youtube"
+    assert tracking_provider("https://www.twitch.tv/chibidoki") == "twitch"
+    assert tracking_provider("https://yu-gi-oh.jp/news/") == "web"
+    with pytest.raises(ValueError, match="追蹤需要"):
+        tracking_provider("ftp://example.com/person")
 
 
 def test_strip_mention_removes_every_bot_mention_form() -> None:
@@ -43,8 +285,8 @@ def test_strip_mention_removes_every_bot_mention_form() -> None:
     assert strip_mention("<@999> 不是我", 123) == "<@999> 不是我"
 
 
-def test_validate_rejects_too_many_or_non_image_attachments(config: Config) -> None:
-    client = DiscordCodexClient(config)
+def test_validate_rejects_too_many_or_non_image_attachments(config: Config, tmp_path) -> None:
+    client = DiscordCodexClient(replace(config, codex_home=tmp_path / "codex"))
     images = [FakeAttachment("image/png", 10)] * config.max_attachments
     assert client._validate("q", images) == ""
     assert "最多" in client._validate("q", images + [FakeAttachment("image/png", 10)])
@@ -53,10 +295,10 @@ def test_validate_rejects_too_many_or_non_image_attachments(config: Config) -> N
     assert client._validate("", []) != ""
 
 
-def test_codex_command_offers_every_verified_effort(config: Config) -> None:
+def test_codex_command_offers_every_verified_effort(config: Config, tmp_path) -> None:
     from discord_codex_bot.config import REASONING_EFFORTS
 
-    client = DiscordCodexClient(config)
+    client = DiscordCodexClient(replace(config, codex_home=tmp_path / "codex"))
     command = next(c for c in client.tree.get_commands() if c.name == "codex")
     effort = next(p for p in command.parameters if p.name == "effort")
     assert {choice.value: choice.name for choice in effort.choices} == REASONING_EFFORTS
@@ -81,9 +323,22 @@ import pytest  # noqa: E402
 
 from discord_codex_bot import bot as bot_module  # noqa: E402
 from discord_codex_bot.bot import FAILURE_MESSAGE, QUEUE_FULL_MESSAGE  # noqa: E402
-from discord_codex_bot.codex import CodexResult  # noqa: E402
+from discord_codex_bot.codex import (  # noqa: E402
+    CodexResult,
+    CodexServerOverloaded,
+    CodexUnauthorized,
+    CodexUsageLimit,
+)
 from discord_codex_bot.links import Preview  # noqa: E402
 from discord_codex_bot.queue import SerialQueue  # noqa: E402
+from discord_codex_bot.tracking import (  # noqa: E402
+    ContentItem,
+    Decision,
+    OutboxMessage,
+    TrackerStore,
+    Watch,
+)
+from discord_codex_bot.usage import RateLimits  # noqa: E402
 
 GUILD, USER = 111111111111111111, 5
 
@@ -133,6 +388,226 @@ async def test_answer_defaults_to_codex_with_stored_or_explicit_effort(client, b
     assert codex.calls[-1][2]["effort"] == "low"  # the member's stored level
     await client._answer("q", [], GUILD, USER, effort="max", resume="t-old")
     assert codex.calls[-1][2]["effort"] == "max" and codex.calls[-1][2]["resume"] == "t-old"
+
+
+async def test_tracking_classifier_is_isolated_and_bounded(client, tmp_path, monkeypatch) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    client.config = replace(
+        client.config,
+        tracking_schema_path=tmp_path / "tracking-schema.json",
+        tracking_reasoning_effort="high",
+        tracking_min_remaining_percent=50,
+    )
+    calls = []
+
+    async def limits(_config):
+        return RateLimits(10, 20, "test")
+
+    async def batch(prompt, config, **kwargs):
+        calls.append((prompt, config, kwargs))
+        return '{"decisions":[]}'
+
+    monkeypatch.setattr(bot_module, "probe_rate_limits", limits)
+    monkeypatch.setattr(bot_module, "run_batch", batch)
+    assert await client._classify_tracking("classify") == '{"decisions":[]}'
+    kwargs = calls[0][2]
+    assert kwargs["isolated"] and kwargs["effort"] == "high"
+    assert kwargs["schema"] == client.config.tracking_schema_path
+    await client._classify_tracking("again")
+    assert len(calls) == 2  # the window gate is the only limit; there is no daily cap
+
+
+async def test_tracking_tags_add_a_watch_and_switch_its_mode(client, tmp_path, monkeypatch) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    client.config = replace(client.config, youtube_api_key="key")
+
+    async def resolve(_locator):
+        return "UC1", {"title": "Marine"}
+
+    monkeypatch.setattr(client.youtube_tracker, "resolve", resolve)
+    # A real Discord id: <track who=…> only accepts 17-20 digit snowflakes, so that a stray
+    # number in the attribute cannot turn into a mention.
+    friend = 222222222222222222
+    added = await client._apply_tracking_tags(
+        f'好，幫你追。\n<track source="https://www.youtube.com/@HoushouMarine" who="<@{friend}>"/>',
+        GUILD,
+        555,
+        USER,
+    )
+    assert "已新增追蹤 #1" in added and f"<@{friend}>" in added and "<track" not in added
+    watch = client.tracker.watches(user_id=USER)[0]
+    assert watch.mention_ids == (friend,) and watch.interval_minutes == 60
+    # The member's own watches are listed in the prompt, so ids never have to be invented.
+    assert f"#{watch.id} youtube" in client._tracked_lines(USER)
+    slower = await client._apply_tracking_tags(
+        f'<track_every id="{watch.id}" minutes="180"/>', GUILD, 555, USER
+    )
+    assert "每 180 分鐘" in slower
+    assert client.tracker.watches(user_id=USER)[0].interval_minutes == 180
+    # Someone else's watch is not theirs to retune: the store checks the owner.
+    assert "找不到你的追蹤" in await client._apply_tracking_tags(
+        f'<track_every id="{watch.id}" minutes="5"/>', GUILD, 555, 999
+    )
+    # Cancelling is scoped to the asker the same way, so one member cannot talk the Bot into
+    # dropping someone else's watch.
+    assert "找不到你的追蹤" in await client._apply_tracking_tags(
+        f'<cancel_track id="{watch.id}"/>', GUILD, 555, 999
+    )
+    assert client.tracker.watches(user_id=USER)
+    stopped = await client._apply_tracking_tags(
+        f'好，取消了。\n<cancel_track id="{watch.id}"/>', GUILD, 555, USER
+    )
+    assert f"已取消追蹤 #{watch.id}" in stopped and "<cancel_track" not in stopped
+    assert client.tracker.watches(user_id=USER) == []
+
+
+def test_a_tag_the_bot_cannot_perform_never_goes_out_as_a_confirmation() -> None:
+    # 2026-09-19: the model answered "星街的追蹤取消了" and emitted <cancel_track id="1"/> when
+    # no such tag existed. The claim went out, the raw tag went out, the watch kept notifying.
+    text, invented = bot_module.strip_invented_tags('好，取消了。\n<cancel_track id="1"/>')
+    assert text == "好，取消了。" and invented == ["cancel_track"]
+    # Only the Bot's own shape of tag; prose and markup a member might be shown are left alone.
+    for untouched in ("<br/>", '<img src="a.png"/>', "2 < 3 and 4 > 1", "<https://example.com>"):
+        assert bot_module.strip_invented_tags(untouched) == (untouched, [])
+
+
+def test_notification_uses_the_wording_the_model_wrote() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy", mention_ids=(7, 8))
+    item = ContentItem(1, 1, "v1", "https://example.com/v1", "新曲發表", "", "now", "video")
+    said = "前輩發現星街彗星發新曲了，而且是久違的原創曲"
+    decision = Decision(1, 1, 1, True, 0.9, "新曲", "符合政策", (), "decided", said)
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "星街彗星")
+    assert text.startswith(f"<@{USER}> <@7> <@8> {said}")
+    assert "https://example.com/v1" in text
+    # Category, confidence and reasoning are log material, not notification material.
+    assert "符合政策" not in text and "0.9" not in text
+
+
+def test_notification_falls_back_when_the_model_wrote_no_wording() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy")
+    item = ContentItem(1, 1, "v1", "https://example.com/v1", "新曲發表", "", "now", "video")
+    decision = Decision(1, 1, 1, True, 0.9, "新曲", "符合政策", (), "decided")
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "星街彗星")
+    assert "前輩發現星街彗星有新曲了" in text
+
+
+def test_a_notification_title_cannot_carry_a_masked_link() -> None:
+    # An X post's title is its own text: whoever wrote the post wrote this.
+    watch = Watch(1, 1, GUILD, 555, USER, "policy")
+    item = ContentItem(1, 1, "1", "https://x.com/a/status/1", "[官方公告](https://evil.example)",
+                       "", "now", "post")  # fmt: skip
+    decision = Decision(1, 1, 1, True, 0.9, "公告", "符合政策", (), "decided")
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "a")
+    assert "\\[官方公告]" in text  # the bracket is escaped, so Discord shows no link
+
+
+def test_an_x_notification_says_it_is_unverified() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy")
+    decision = Decision(1, 1, 1, True, 0.9, "公告", "符合政策", (), "decided")
+    x_item = ContentItem(1, 1, "1", "https://x.com/Riot/status/1", "patch", "", "now", "post")
+    yt_item = ContentItem(1, 1, "v", "https://www.youtube.com/watch?v=v", "mv", "", "now", "video")
+    assert "未經驗證" in tracking_message(OutboxMessage(1, decision, watch, x_item, 0), "Riot")
+    assert "未經驗證" not in tracking_message(OutboxMessage(1, decision, watch, yt_item, 0), "a")
+
+
+def test_a_notification_never_carries_a_mention_from_the_social_text() -> None:
+    watch = Watch(1, 1, GUILD, 555, USER, "policy")
+    item = ContentItem(
+        1, 1, "v1", "https://example.com/v1", "@everyone 新衣裝公開", "", "now", "video"
+    )
+    # Even the model's own wording is derived from untrusted text, so it is escaped too.
+    decision = Decision(
+        1, 1, 1, True, 0.9, "新衣裝", "@everyone 符合", (), "decided", "@everyone 新衣裝公開了"
+    )
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "星街彗星")
+    assert "@everyone" not in text and text.startswith(f"<@{USER}> ")
+
+
+async def test_tracking_classifier_defers_before_calling_the_model(
+    client, tmp_path, monkeypatch
+) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    client.config = replace(client.config, tracking_min_remaining_percent=50)
+    calls = []
+
+    async def limits(_config):
+        return RateLimits(55, 10, "test")
+
+    async def batch(prompt, config, **kwargs):
+        calls.append(prompt)
+        return "{}"
+
+    monkeypatch.setattr(bot_module, "probe_rate_limits", limits)
+    monkeypatch.setattr(bot_module, "run_batch", batch)
+    with pytest.raises(RuntimeError, match="below the tracking gate"):
+        await client._classify_tracking("classify")
+    assert calls == []
+
+
+async def test_answer_falls_back_to_the_spare_backend_when_codex_quota_is_spent(
+    client, monkeypatch
+) -> None:
+    agy = FakeBackend("備援答案")
+
+    async def spent(*_args, **_kw):
+        raise CodexUsageLimit("You've hit your usage limit. Try again at 2:33 PM.")
+
+    monkeypatch.setattr(bot_module, "run_codex", spent)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    result = await client._answer("q", [], GUILD, USER, resume="t-old")
+    assert result.text == "備援答案"  # no notice: the member gains nothing from it (owner ruling)
+    assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)  # CODEX_FALLBACK_MODEL default
+    when, why, model = client._last_fallback  # /status is where the fallback shows
+    assert isinstance(why, CodexUsageLimit) and model == "gemini-3.8-flash-medium"
+    assert "resume" not in agy.calls[0][2]  # a Codex thread id means nothing to agy
+    assert result.thread_id == "" and not result.resumed  # nothing to resume back on Codex
+
+
+async def test_answer_falls_back_silently_when_codex_is_overloaded(client, monkeypatch) -> None:
+    agy = FakeBackend("滿載備援答案")
+
+    async def overloaded(*_args, **_kw):
+        raise CodexServerOverloaded("Selected model is at capacity.")
+
+    monkeypatch.setattr(bot_module, "run_codex", overloaded)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    result = await client._answer("q", [], GUILD, USER, resume="t-old")
+    assert result.text == "滿載備援答案"
+    assert isinstance(client._last_fallback[1], CodexServerOverloaded)
+    assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)
+    assert "resume" not in agy.calls[0][2]
+    assert result.thread_id == "" and not result.resumed
+
+
+async def test_answer_alerts_the_operator_when_the_codex_login_is_gone(client, monkeypatch) -> None:
+    # Quota refills on its own; a lost login does not. The spare still answers, but the operator
+    # hears about it on this request instead of at the next periodic login check.
+    agy = FakeBackend("登入失效備援答案")
+    alerts: list[tuple[str, str]] = []
+
+    async def gone(*_args, **_kw):
+        raise CodexUnauthorized("Unauthorized", "unauthorized")
+
+    async def login_lost(backend, detail):
+        alerts.append((backend, detail))
+
+    monkeypatch.setattr(bot_module, "run_codex", gone)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    monkeypatch.setattr(client.alerts, "login_lost", login_lost)
+    result = await client._answer("q", [], GUILD, USER, resume="t-old")
+    assert result.text == "登入失效備援答案"  # the operator is told, the member is not
+    assert alerts == [("Codex", "Unauthorized")]
+    assert result.thread_id == "" and not result.resumed
+
+
+async def test_answer_without_a_spare_backend_reports_the_failure(client, monkeypatch) -> None:
+    async def spent(*_args, **_kw):
+        raise CodexUsageLimit("quota spent")
+
+    client.config = replace(client.config, codex_fallback_model="")
+    monkeypatch.setattr(bot_module, "run_codex", spent)
+    result = await client._answer("q", [], GUILD, USER)
+    assert "額度用完了" not in result.text  # the generic failure message, not a silent answer
 
 
 async def test_answer_dispatches_to_agy_from_the_stored_model(client, backends) -> None:
@@ -203,7 +678,7 @@ async def test_answer_stores_and_strips_memory_tags(client, backends) -> None:
 
 
 async def test_answer_truncates_and_reports_failures(client, backends, monkeypatch) -> None:
-    codex, _ = backends
+    codex, agy = backends
     codex.replies = ["x" * 100]
     client.config = replace(client.config, max_response_chars=30)
     result = await client._answer("q", [], GUILD, USER)
@@ -215,6 +690,7 @@ async def test_answer_truncates_and_reports_failures(client, backends, monkeypat
     monkeypatch.setattr(bot_module, "run_codex", boom)
     failed = await client._answer("q", [], GUILD, USER)
     assert failed.text == FAILURE_MESSAGE.format(prefix="codex") and failed.thread_id == ""
+    assert agy.calls == []  # arbitrary RuntimeError must not be hidden by the spare backend
     client.queue = SerialQueue(0)
     assert (await client._answer("q", [], GUILD, USER)).text == QUEUE_FULL_MESSAGE
 
@@ -332,8 +808,10 @@ async def test_model_command_autocomplete_and_openrouter_reminder(client, monkey
         return client.openrouter.models
 
     monkeypatch.setattr(client.openrouter, "free_models", no_refresh)
-    client.openrouter.models = [Model("g/vision:free", "Vision", True, False, 1),
-                                Model("t/text:free", "Text", False, True, 1)]
+    client.openrouter.models = [
+        Model("g/vision:free", "Vision", True, False, 1),
+        Model("t/text:free", "Text", False, True, 1),
+    ]
     names = [c.name for c in await client.model_options("openrouter", "")]
     assert names == ["OpenRouter · Vision（看圖）", "OpenRouter · Text"]
     assert [c.value for c in await client.model_options("openrouter", "TEXT")] == [
@@ -359,13 +837,25 @@ def test_previews_from_reads_discord_embeds_preferring_the_proxied_picture() -> 
     from discord_codex_bot.bot import previews_from
 
     thumb = NS(url="https://cdn.dcard/1.jpg", proxy_url="https://images.discordapp.net/1.jpg")
-    article = NS(type="article", url="https://www.dcard.tw/f/x/p/1", title="T", description="D",
-                 thumbnail=thumb, image=None)
-    bare = NS(type="link", url="https://a.example", title=None, description=None,
-              thumbnail=NS(url=None, proxy_url=None), image=NS(url="https://a.example/i.png",
-              proxy_url=None))
-    gif = NS(type="gifv", url="https://tenor.com/x", title="", description="", thumbnail=None,
-             image=None)
+    article = NS(
+        type="article",
+        url="https://www.dcard.tw/f/x/p/1",
+        title="T",
+        description="D",
+        thumbnail=thumb,
+        image=None,
+    )
+    bare = NS(
+        type="link",
+        url="https://a.example",
+        title=None,
+        description=None,
+        thumbnail=NS(url=None, proxy_url=None),
+        image=NS(url="https://a.example/i.png", proxy_url=None),
+    )
+    gif = NS(
+        type="gifv", url="https://tenor.com/x", title="", description="", thumbnail=None, image=None
+    )
     previews = previews_from([NS(embeds=[article, gif]), NS(embeds=[bare, article])])
     assert list(previews) == ["https://www.dcard.tw/f/x/p/1", "https://a.example"]
     assert previews["https://www.dcard.tw/f/x/p/1"] == Preview(
@@ -387,9 +877,7 @@ async def test_answer_hands_previews_to_link_blocks(client, backends, monkeypatc
     assert seen == {"urls": ["https://x.example"], "previews": previews}
 
 
-async def test_understand_videos_races_the_timer_and_fires_the_interim(
-    client, monkeypatch
-) -> None:
+async def test_understand_videos_races_the_timer_and_fires_the_interim(client, monkeypatch) -> None:
     import asyncio
 
     from discord_codex_bot import bot as bm
@@ -407,9 +895,7 @@ async def test_understand_videos_races_the_timer_and_fires_the_interim(
         notices.append(1)
 
     monkeypatch.setattr(bm, "understand_video", slow_understand)
-    block = await client._understand_videos(
-        ["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow
-    )
+    block = await client._understand_videos(["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow)
     assert block == '<VIDEO url="https://youtu.be/dQw4w9WgXcQ">\n描述\n</VIDEO>'
     assert notices == [1]  # the slow clip fired the interim exactly once
 
@@ -432,9 +918,10 @@ async def test_understand_videos_stays_silent_when_fast_or_disabled(client, monk
     # no video urls, or Gemini disabled → no work, no notice
     assert await client._understand_videos(["https://example.com"], Path("/tmp"), on_slow) == ""
     monkeypatch.setattr(bm.gemini, "available", lambda config: False)
-    assert await client._understand_videos(
-        ["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow
-    ) == ""
+    assert (
+        await client._understand_videos(["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow)
+        == ""
+    )
 
 
 async def test_answer_dispatches_to_orcarouter_with_its_own_catalog(
@@ -494,7 +981,11 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     async def no_refresh_oc():
         return client.orcarouter.models
 
+    async def usage(config):
+        return RateLimits(12.0, 3.0, "test")
+
     monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", usage)
     monkeypatch.setattr(client.openrouter, "free_models", no_refresh_or)
     monkeypatch.setattr(client.orcarouter, "free_models", no_refresh_oc)
     client.openrouter.models = [Model("g/free", "G", True, False, 0)]
@@ -503,10 +994,11 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     # defaults: nothing set, no thread
     text = await client._status_text(GUILD, 555, USER)
     assert "模型：Codex · gpt-5.6-luna · 強度 High（預設）" in text
-    assert "風格：無（用預設）" in text and "續接：無，下一句會新開對話" in text
+    assert "風格：無（用預設）；人設：保留" in text and "續接：無，下一句會新開對話" in text
     assert "記憶：個人 0 條 / 0 KB（上限 50 MB） · 伺服器 0 條" in text
     assert "永久 0 主題" in text
-    assert "Codex：ChatGPT 訂閱登入有效" in text
+    assert "Codex：ChatGPT 訂閱登入有效 · 額度 5h 12% / 7d 3%" in text
+    assert "額度已達上限" not in text and "備援" not in text  # headroom, nothing fell back
     assert "OpenRouter 1 個免費模型 · OrcaRouter 1 個免費模型" in text
     assert "影片理解：開 · 讀連結：開" in text
 
@@ -515,10 +1007,11 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     client.memory.set_style(GUILD, USER, "條列、少於 50 字")
     client.memory.add("user", GUILD, USER, "拉麵", "小明喜歡拉麵")
     key = ThreadStore.key(GUILD, 555, USER)
+    client.memory.set_persona_off(GUILD, USER, True)
     client.threads.remember(key, "oc-abc", None, plain=True, model="orcarouter:tencent/hy3-free")
     text = await client._status_text(GUILD, 555, USER)
     assert "模型：OrcaRouter · tencent/hy3-free · 強度 無（你設定） · 看不到圖" in text
-    assert "風格：條列、少於 50 字" in text
+    assert "風格：條列、少於 50 字；人設：關閉" in text
     assert "續接：會接續 0 分鐘前的對話（OrcaRouter · tencent/hy3-free）" in text
     assert "個人 1 條" in text
 
@@ -532,6 +1025,54 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     text = await client._status_text(GUILD, 555, USER)
     assert "OpenRouter 1 個免費模型" in text and "OrcaRouter" not in text.split("【系統】")[1]
     assert "影片理解：關" in text
+
+
+async def test_status_shows_the_live_quota_and_the_last_fallback(client, monkeypatch) -> None:
+    # The member gets no notice in the answer (owner ruling); /status is the one place that
+    # shows Codex is spent and the spare is answering. 100% + a recent fallback = "right now".
+    async def login(config):
+        return "ChatGPT 訂閱登入有效"
+
+    async def usage(config):
+        return RateLimits(100.0, 40.0, "test")
+
+    client.config = replace(
+        client.config, openrouter_api_key="", orcarouter_api_key="", gemini_api_key=""
+    )
+    monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", usage)
+    client._last_fallback = (
+        time.time() - 120,
+        CodexUsageLimit("spent", "usage_limit_exceeded"),
+        "gemini-3.8-flash-medium",
+    )
+    text = await client._status_text(GUILD, 555, USER)
+    assert "額度 5h 100% / 7d 40%" in text
+    # "right now" comes from the probe alone, so a fresh process (no _last_fallback yet) and
+    # batch-only fallbacks still show it; the last-fallback line is the evidence trail.
+    assert "額度已達上限，現在的請求改用 gemini-3.8-flash-medium 回答" in text
+    assert "最近一次備援：2 分鐘前額度用完，改用 gemini-3.8-flash-medium 回答" in text
+    client._last_fallback = None
+    text = await client._status_text(GUILD, 555, USER)
+    assert "額度已達上限，現在的請求改用" in text and "最近一次備援" not in text
+    client.config = replace(client.config, codex_fallback_model="")
+    assert "額度已達上限，且沒有設定備援模型" in await client._status_text(GUILD, 555, USER)
+
+
+async def test_status_says_when_the_quota_is_unreadable(client, monkeypatch) -> None:
+    async def login(config):
+        return "ChatGPT 訂閱登入有效"
+
+    async def no_usage(config):
+        return None
+
+    client.config = replace(
+        client.config, openrouter_api_key="", orcarouter_api_key="", gemini_api_key=""
+    )
+    monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", no_usage)
+    text = await client._status_text(GUILD, 555, USER)
+    assert "額度讀不到" in text
 
 
 def test_help_sheet_is_generated_from_the_registered_commands(client) -> None:
@@ -566,7 +1107,7 @@ def test_every_registered_command_has_a_guide_entry_and_vice_versa(client) -> No
 
     prefix = client.config.command_prefix
     registered = {c.name.removeprefix(prefix) for c in client.tree.get_commands()}
-    assert registered == set(COMMAND_GUIDE), (registered ^ set(COMMAND_GUIDE))
+    assert registered == set(COMMAND_GUIDE), registered ^ set(COMMAND_GUIDE)
 
 
 def test_help_guide_and_sheet_come_from_the_same_source(client) -> None:
@@ -621,8 +1162,9 @@ async def test_stop_command_cancels_only_an_in_flight_request(client) -> None:
             sent.append(text)
 
     channel_id = 222222222222222222  # the conftest allowlisted channel
-    interaction = NS(guild_id=GUILD, channel_id=channel_id, channel=None, user=NS(id=USER),
-                     response=Response())
+    interaction = NS(
+        guild_id=GUILD, channel_id=channel_id, channel=None, user=NS(id=USER), response=Response()
+    )
     await client.stop_command(interaction)
     assert sent[-1] == "你在這個頻道沒有進行中的請求。"
     key = ThreadStore.key(GUILD, channel_id, USER)
@@ -674,8 +1216,13 @@ async def test_answer_reads_attached_documents_into_a_files_block(
     codex, _ = backends
     client.config = replace(client.config, attachment_dir=tmp_path)
     await client._answer(
-        "這兩份在講什麼", [Doc("text/plain", 5, "a.txt", b"hello file"),
-                            Doc("application/octet-stream", 3, "b.py", b"print(1)")], GUILD, USER,
+        "這兩份在講什麼",
+        [
+            Doc("text/plain", 5, "a.txt", b"hello file"),
+            Doc("application/octet-stream", 3, "b.py", b"print(1)"),
+        ],
+        GUILD,
+        USER,
     )
     kw = codex.calls[-1][2]
     assert '<FILE name="a.txt">\nhello file\n</FILE>' in kw["files"]
@@ -711,7 +1258,7 @@ async def test_streamer_throttles_skips_tag_interims_and_clips(client, monkeypat
     clock = {"t": 100.0}
     monkeypatch.setattr(time_module, "monotonic", lambda: clock["t"])
     on_delta = client._streamer(show, None)
-    await on_delta("<fetch url=\"https://x\"/>")  # a read request, not an answer
+    await on_delta('<fetch url="https://x"/>')  # a read request, not an answer
     await on_delta("你好")
     await on_delta("你好，我是")  # within 1.5s: suppressed
     clock["t"] += 2
@@ -741,7 +1288,8 @@ async def test_exchange_of_uses_the_replied_message_or_the_quoted_block(
         return original
 
     replied = NS(
-        content="去吃一蘭", reference=NS(message_id=1, resolved=None),
+        content="去吃一蘭",
+        reference=NS(message_id=1, resolved=None),
         channel=NS(fetch_message=fetch_message),
     )
     # a resolved reference is a discord.Message in production; the fallback path is exercised
@@ -792,8 +1340,13 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
     assert backends[0].calls[-1][0] == "今天吃什麼"
     assert backends[0].calls[-1][2]["resume"] == "thread-abc"
     assert client.threads.by_message(9999, plain=plain, model=model) == "t1"  # redo answer linked
-    empty = NS(message=NS(content="沒有引用", reference=None), guild_id=GUILD, channel_id=555,
-               response=Response(), followup=Followup())
+    empty = NS(
+        message=NS(content="沒有引用", reference=None),
+        guild_id=GUILD,
+        channel_id=555,
+        response=Response(),
+        followup=Followup(),
+    )
     await client.handle_answer_button(empty, "redo", USER)
     assert sent[-1][1].startswith("找不到原本的問題")
 
@@ -802,11 +1355,13 @@ async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monke
     from discord_codex_bot import search as search_module
     from discord_codex_bot.bot import request_only
 
-    assert request_only('<web query="台北 夜市"/>') and not request_only("先說<web query=\"x\"/>")
-    replies = iter([
-        CodexResult('<web query="台北 夜市"/>', (), None, "t1", False),
-        CodexResult("答案", (), None, "t1", True),
-    ])
+    assert request_only('<web query="台北 夜市"/>') and not request_only('先說<web query="x"/>')
+    replies = iter(
+        [
+            CodexResult('<web query="台北 夜市"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
     calls = []
 
     async def fake_codex(text, config, **kw):
@@ -827,9 +1382,13 @@ async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monke
 def test_remember_button_uses_the_guild_custom_emoji_when_present(client, monkeypatch) -> None:
     from types import SimpleNamespace as NS
 
-    monkeypatch.setattr(client, "get_guild", lambda gid: NS(
-        emojis=[NS(name="other", id=1, animated=False), NS(name="114514", id=2, animated=False)]
-    ))
+    monkeypatch.setattr(
+        client,
+        "get_guild",
+        lambda gid: NS(
+            emojis=[NS(name="other", id=1, animated=False), NS(name="114514", id=2, animated=False)]
+        ),
+    )
     view = client._answer_view(GUILD, USER, "q", CodexResult("a"))
     remember = [b for b in view.children if b.custom_id.startswith("inmu:remember")][0]
     assert remember.item.emoji.id == 2 and remember.item.emoji.name == "114514"
@@ -858,13 +1417,19 @@ async def test_answer_creates_and_cancels_reminders_from_model_tags(
     client, backends, monkeypatch
 ) -> None:
     codex, _ = backends
-    replies = iter([
-        CodexResult(
-            '好，明天叫你。<remind when="2026-12-01 09:30" text="倒垃圾"/>', (), None, "t", False
-        ),
-        CodexResult('取消了。<cancel_reminder id="1"/>', (), None, "t", False),
-        CodexResult('這個不行。<remind when="等一下" text="x"/>', (), None, "t", False),
-    ])
+    replies = iter(
+        [
+            CodexResult(
+                '好，明天叫你。<remind when="2026-12-01 09:30" text="倒垃圾"/>',
+                (),
+                None,
+                "t",
+                False,
+            ),
+            CodexResult('取消了。<cancel_reminder id="1"/>', (), None, "t", False),
+            CodexResult('這個不行。<remind when="等一下" text="x"/>', (), None, "t", False),
+        ]
+    )
 
     async def fake_codex(text, config, **kw):
         fake_codex.prompts.append(kw)
@@ -890,10 +1455,12 @@ async def test_recall_loop_runs_sandbox_snippets_and_delivers_files(
 
     assert request_only('<run lang="python">print(1)</run>')
     client.config = replace(client.config, attachment_dir=tmp_path)
-    replies = iter([
-        CodexResult('<run lang="python">\nprint(6*7)\n</run>', (), None, "t1", False),
-        CodexResult("答案是 42", (), None, "t1", True),
-    ])
+    replies = iter(
+        [
+            CodexResult('<run lang="python">\nprint(6*7)\n</run>', (), None, "t1", False),
+            CodexResult("答案是 42", (), None, "t1", True),
+        ]
+    )
     prompts = []
 
     async def fake_codex(text, config, **kw):
@@ -925,10 +1492,12 @@ async def test_recall_loop_calls_registered_apis_and_help_lists_them(
     client.apis = {"lol": apis_module.Api("lol", "https://x/", {}, "先 getLeagues")}
     assert "- lol：先 getLeagues" in client.help_sheet()
     assert request_only('<api name="lol" path="getLeagues"/>')
-    replies = iter([
-        CodexResult('<api name="lol" path="getLeagues?hl=zh-TW"/>', (), None, "t1", False),
-        CodexResult("LCK 有 10 隊", (), None, "t1", True),
-    ])
+    replies = iter(
+        [
+            CodexResult('<api name="lol" path="getLeagues?hl=zh-TW"/>', (), None, "t1", False),
+            CodexResult("LCK 有 10 隊", (), None, "t1", True),
+        ]
+    )
     prompts = []
 
     async def fake_codex(text, config, **kw):
@@ -962,8 +1531,7 @@ def test_configure_logging_writes_to_the_host_dir_and_survives_an_unusable_one(
             handler.flush()
         assert "hello-log" in (tmp_path / "logs" / "bot.log").read_text("utf-8")
         rotating = [
-            h for h in root.handlers
-            if isinstance(h, logging.handlers.TimedRotatingFileHandler)
+            h for h in root.handlers if isinstance(h, logging.handlers.TimedRotatingFileHandler)
         ]
         assert len(rotating) == 1 and rotating[0].backupCount == 3
         for handler in root.handlers:
@@ -973,9 +1541,7 @@ def test_configure_logging_writes_to_the_host_dir_and_survives_an_unusable_one(
         blocker = tmp_path / "blocker"
         blocker.write_text("a file, not a directory", "utf-8")
         configure_logging(replace(config, log_dir=blocker / "logs"))
-        assert root.handlers and not any(
-            isinstance(h, logging.FileHandler) for h in root.handlers
-        )
+        assert root.handlers and not any(isinstance(h, logging.FileHandler) for h in root.handlers)
     finally:
         for handler in root.handlers:
             handler.close()
@@ -1005,24 +1571,38 @@ async def test_redo_puts_back_the_message_the_question_pointed_at(
             return NS(id=9999)
 
     video = "https://www.youtube.com/watch?v=r28Uo9uWGSo"
-    pointed = NS(content=video, embeds=[], attachments=[],
-                 author=NS(display_name="030", id=5), reference=None, channel=None)
+    pointed = NS(
+        content=video,
+        embeds=[],
+        attachments=[],
+        author=NS(display_name="030", id=5),
+        reference=None,
+        channel=None,
+    )
 
     async def fetch_pointed(message_id):
         return pointed
 
-    asked = NS(content="<@999> 整理一下影片大綱", embeds=[], attachments=[],
-               reference=NS(message_id=2, resolved=None),
-               channel=NS(fetch_message=fetch_pointed))
+    asked = NS(
+        content="<@999> 整理一下影片大綱",
+        embeds=[],
+        attachments=[],
+        reference=NS(message_id=2, resolved=None),
+        channel=NS(fetch_message=fetch_pointed),
+    )
 
     async def fetch_asked(message_id):
         return asked
 
-    answer = NS(content="**問**：\n> 整理一下影片大綱\n\n看不到影片內容", id=4242,
-                reference=NS(message_id=1, resolved=None),
-                channel=NS(fetch_message=fetch_asked))
-    interaction = NS(message=answer, guild_id=GUILD, channel_id=555,
-                     response=Response(), followup=Followup())
+    answer = NS(
+        content="**問**：\n> 整理一下影片大綱\n\n看不到影片內容",
+        id=4242,
+        reference=NS(message_id=1, resolved=None),
+        channel=NS(fetch_message=fetch_asked),
+    )
+    interaction = NS(
+        message=answer, guild_id=GUILD, channel_id=555, response=Response(), followup=Followup()
+    )
     await client.handle_answer_button(interaction, "redo", USER)
     prompt = backends[0].calls[-1][0]
     assert video in prompt  # the link lived in the quoted message, not in the member's own words
@@ -1038,11 +1618,13 @@ async def test_recall_loop_does_not_re_send_an_identical_api_query(
 
     client.apis = {"lp": apis_module.Api("lp", "https://x/", {}, "doc")}
     tag = '<api name="lp" path="tables=ScoreboardGames"/>'
-    replies = iter([
-        CodexResult(tag, (), None, "t1", False),
-        CodexResult(tag, (), None, "t1", False),
-        CodexResult("來源被限流，稍後再問", (), None, "t1", True),
-    ])
+    replies = iter(
+        [
+            CodexResult(tag, (), None, "t1", False),
+            CodexResult(tag, (), None, "t1", False),
+            CodexResult("來源被限流，稍後再問", (), None, "t1", True),
+        ]
+    )
     prompts = []
 
     async def fake_codex(text, config, **kw):
@@ -1061,3 +1643,397 @@ async def test_recall_loop_does_not_re_send_an_identical_api_query(
     assert result.text == "來源被限流，稍後再問"
     assert calls == [("lp", "tables=ScoreboardGames")]  # asked once, not once per round
     assert "沿用當時的結果" in prompts[2]
+
+
+def memory_interaction(client, *, guild=GUILD, user=USER, scope="user"):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    return SimpleNamespace(
+        client=client,
+        guild_id=guild,
+        channel=None,
+        channel_id=222222222222222222,
+        user=SimpleNamespace(id=user),
+        namespace=SimpleNamespace(scope=scope),
+        response=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+
+async def test_memory_autocomplete_filters_scope_member_archive_and_access(client):
+    from discord_codex_bot.bot import _memory_autocomplete
+
+    client.memory._limits = replace(client.memory._limits, index_max_lines=1)
+    client.memory.add("user", GUILD, USER, "封存偏好", "old")
+    client.memory.add("user", GUILD, USER, "新偏好", "new")
+    client.memory.add("user", GUILD, 99, "他人秘密", "private")
+    client.memory.add("guild", GUILD, None, "共同規則", "shared")
+    choices = await _memory_autocomplete(memory_interaction(client), "")
+    assert {c.name.split(" · ")[0] for c in choices} == {"封存偏好", "新偏好"}
+    assert len(await _memory_autocomplete(memory_interaction(client), "old")) == 1
+    assert len(await _memory_autocomplete(memory_interaction(client, scope="guild"), "")) == 1
+    assert await _memory_autocomplete(memory_interaction(client, guild=999), "") == []
+    assert await _memory_autocomplete(memory_interaction(client, scope=None), "") == []
+    assert "封存偏好" in client._memory_text(GUILD, USER)
+    command = client.tree.get_command(f"{client.config.command_prefix}-forget")
+    assert next(p for p in command.parameters if p.name == "name").autocomplete
+
+
+async def test_forget_duplicate_titles_require_selection_and_delete_only_selected_file(
+    client, caplog
+):
+    from discord import app_commands
+
+    for text in ("first", "second"):
+        client.memory.add("user", GUILD, USER, "相同", text)
+    # A title can even equal another note's filename; selecting a file must not delete it.
+    client.memory.add("user", GUILD, USER, "相同-2.md", "keep")
+    interaction = memory_interaction(client)
+    scope = app_commands.Choice(name="個人", value="user")
+    with caplog.at_level(logging.INFO):
+        await client.forget_command(interaction, scope, "相同")
+        assert "同名" in interaction.response.send_message.call_args.args[0]
+        assert len(client.memory.all_entries("user", GUILD, USER)) == 3
+        await client.forget_command(interaction, scope, "相同-2.md")
+    remaining = client.memory.all_entries("user", GUILD, USER)
+    assert [e.name for e in remaining] == ["相同", "相同-2.md"]
+    assert "outcome=ambiguous" in caplog.text and "outcome=deleted" in caplog.text
+    assert interaction.response.send_message.call_args.kwargs["ephemeral"]
+
+
+async def test_forget_feature_numbers_explain_both_namespaces_without_deleting(client, tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from discord import app_commands
+
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = client.tracker.add_source("youtube", "UC1", "Suisei Channel")
+    watch = client.tracker.add_watch(source.id, GUILD, 555, USER)
+    second = client.tracker.add_watch(source.id, GUILD, 556, USER, "cards")
+    reminder = client.reminders.add(GUILD, 555, USER, datetime.now(UTC) + timedelta(days=1), "喝水")
+    client.memory.add("user", GUILD, USER, "喜好", "tea")
+    watches_before = client.tracker.watches()
+    reminders_before = client.reminders.for_user(USER)
+    i = memory_interaction(client)
+    await client.forget_command(
+        i, app_commands.Choice(name="個人", value="user"), f"取消 #{watch.id} #{second.id}"
+    )
+    text = i.response.send_message.call_args.args[0]
+    assert f"-track cancel:{watch.id}" in text and f"-track cancel:{second.id}" in text
+    assert f"-remind cancel:{reminder['id']}" in text and "沒有刪除" in text
+    assert client.tracker.watches() == watches_before
+    assert client.reminders.for_user(USER) == reminders_before
+    assert len(client.memory.all_entries("user", GUILD, USER)) == 1
+    assert client._forget_guidance(GUILD, 999, "#1 #2") == ""
+    assert client._forget_guidance(999, USER, "#1 #2") == ""
+
+
+async def test_forget_title_works_stale_selection_and_denied_access_do_not_delete(client):
+    from discord import app_commands
+
+    scope = app_commands.Choice(name="個人", value="user")
+    client.memory.add("user", GUILD, USER, "茶", "green")
+    client.memory.add("guild", GUILD, None, "茶", "shared")
+    i = memory_interaction(client, guild=999)
+    await client.forget_command(i, scope, "茶")
+    assert len(client.memory.all_entries("user", GUILD, USER)) == 1
+    i = memory_interaction(client)
+    await client.forget_command(i, scope, " 茶 ")
+    assert "已刪除個人記憶" in i.response.send_message.call_args.args[0]
+    await client.forget_command(i, scope, "茶.md")
+    assert "找不到" in i.response.send_message.call_args.args[0]
+    assert len(client.memory.all_entries("guild", GUILD, None)) == 1
+
+
+def test_memory_options_cap_and_search_beyond_first_page(client):
+    for number in range(30):
+        client.memory.add("user", GUILD, USER, f"note {number}", f"fact {number}")
+    assert len(client.memory_options(GUILD, USER, "user", "")) == 25
+    assert [c.value for c in client.memory_options(GUILD, USER, "user", "note 29")] == [
+        "note-29.md"
+    ]
+    assert "note 29" in client._memory_text(GUILD, USER)
+
+
+async def test_linkclean_preserves_nontext_content_and_oversized_messages(client) -> None:
+    forward = discord.MessageReference(
+        message_id=999, channel_id=222222222222222222, type=discord.MessageReferenceType.forward
+    )
+    for attribute, value in (
+        ("attachments", [object()]),
+        ("stickers", [object()]),
+        ("reference", forward),
+        ("thread", object()),
+    ):
+        channel = _FakeChannel(True)
+        message = _fake_message("https://a.example/?utm_source=x", channel)
+        setattr(message, attribute, value)
+        await client._linkclean(message)
+        assert message.deleted == 0
+        assert channel.sent == ["https://a.example/"]
+    message = _fake_message("https://a.example/" + "x" * 1970 + "?utm_source=x", _FakeChannel(True))
+    message.author.id = 123456789012345678
+    await client._linkclean(message)
+    assert message.deleted == 0
+
+
+async def test_linkclean_replaces_a_link_only_reply_and_keeps_the_reply_arrow(client) -> None:
+    # A reply used to be left untouched: replacing it would have dropped it out of its
+    # conversation. The repost carries the same reference instead, so it stays in place.
+    channel = _FakeChannel(True)
+    message = _fake_message("https://a.example/?utm_source=x", channel)
+    message.reference = discord.MessageReference(message_id=999, channel_id=channel.id)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [f"<@{USER}>\nhttps://a.example/"]
+    reference = channel.references[-1]
+    assert reference.message_id == 999
+    # The replied-to message may be gone by now; that costs the arrow, not the repost.
+    assert reference.fail_if_not_exists is False
+
+
+async def test_linkclean_failed_send_never_deletes(client) -> None:
+    message = _fake_message("https://a.example/?utm_source=x", _FakeChannel(True))
+
+    async def failed(*args, **kwargs):
+        raise discord.HTTPException(types.SimpleNamespace(status=403, reason="Forbidden"), "denied")
+
+    message.channel.send = failed
+    with pytest.raises(discord.HTTPException):
+        await client._linkclean(message)
+    assert message.deleted == 0
+
+
+async def test_linkclean_failure_does_not_block_mention_entry(client, monkeypatch) -> None:
+    # With no mention the handler must still return normally after any cleanup exception.
+    client._connection.user = types.SimpleNamespace(id=123)
+    message = _fake_message("https://a.example/", _FakeChannel(True))
+    message.author.bot = False
+    message.mentions = []
+
+    async def failed(message):
+        raise ValueError("bad input")
+
+    monkeypatch.setattr(client, "_linkclean", failed)
+    await client.on_message(message)
+
+
+async def test_reply_ping_to_a_repost_is_not_a_question_but_a_typed_mention_is(
+    client, monkeypatch
+) -> None:
+    bot = types.SimpleNamespace(id=123)
+    client._connection.user = bot
+    channel = _FakeChannel(manage_messages=True)
+    original = _fake_message("https://a.example/x?utm_source=mail", channel)
+    await client._linkclean(original)
+    repost_id = channel.ids[-1]
+    assert channel.sent and client.linkclean.is_repost(repost_id)
+    accessed: list[str] = []
+
+    def access(*args):
+        accessed.append("called")
+        return "擋下"  # any refusal text ends on_message right after the gate
+
+    monkeypatch.setattr(client, "_access", access)
+    reply = _fake_message("這是什麼", channel)
+    reply.author.bot = False
+    reply.mentions = [bot]  # Discord's reply ping
+    reply.reference = types.SimpleNamespace(message_id=repost_id, resolved=None)
+
+    async def replied(text, **kwargs):
+        pass
+
+    reply.reply = replied
+    await client.on_message(reply)
+    assert accessed == []  # not a question
+    reply.content = "<@123> 這是什麼"
+    await client.on_message(reply)
+    assert accessed == ["called"]  # a typed @ is
+    # A reply-ping to something that is not a repost keeps the old behaviour.
+    reply.content = "接著問"
+    reply.reference = types.SimpleNamespace(message_id=1, resolved=None)
+    answer = types.SimpleNamespace(id=1, author=bot, content="這是我的回答 https://a.example/")
+    monkeypatch.setattr(client, "_referenced", _resolving(answer))
+    await client.on_message(reply)
+    assert accessed == ["called", "called"]
+    # A repost from before the table existed is recognised by its shape.
+    old = types.SimpleNamespace(
+        id=2, author=bot, content=f"<@{USER}>\n||https://fixupx.com/u/status/1||"
+    )
+    reply.reference = types.SimpleNamespace(message_id=2, resolved=None)
+    monkeypatch.setattr(client, "_referenced", _resolving(old))
+    await client.on_message(reply)
+    assert accessed == ["called", "called"]  # not a question
+    reply.content = "<@123> 這是什麼"
+    await client.on_message(reply)
+    assert accessed == ["called", "called", "called"]
+
+
+def _resolving(quoted):
+    async def referenced(message):
+        return quoted
+
+    return referenced
+
+
+async def test_linkclean_command_checks_access_before_changing_state(client) -> None:
+    responses = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    interaction = _interaction(555, 777)
+    interaction.guild.id = GUILD
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send)
+    await client.linkclean_command(interaction, "off")
+    assert client.linkclean.mode(GUILD) == "all"
+    client.config = replace(client.config, linkclean_admin_ids=frozenset({555}))
+    interaction.guild_id = 999
+    await client.linkclean_command(interaction, "off")
+    assert client.linkclean.mode(GUILD) == "all"
+    interaction.guild_id = GUILD
+    await client.linkclean_command(interaction, "links")
+    assert client.linkclean.mode(GUILD) == "links"
+    await client.linkclean_command(interaction)
+    assert responses[-1] == "連結洗參數：只清洗純連結"
+    await client.linkclean_command(interaction, "off")
+    assert client.linkclean.mode(GUILD) == "off"
+    await client.linkclean_command(interaction)
+    assert responses[-1] == "連結洗參數：全關"
+
+
+async def test_style_command_keeps_persona_separate_and_offers_the_file_route(client) -> None:
+    from discord_codex_bot.ui import StyleModal
+
+    responses: list[str] = []
+    modals: list[object] = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    async def send_modal(modal):
+        modals.append(modal)
+
+    interaction = _interaction(USER, 777)
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send, send_modal=send_modal)
+
+    await client.style_command(interaction, text="條列、少於 50 字")
+    assert client.memory.get_style(GUILD, USER) == "條列、少於 50 字"
+    assert client.memory.get_persona_off(GUILD, USER) is False  # the character survives a style
+    assert "人設：保留" in responses[-1]
+
+    await client.style_command(interaction, persona="off")
+    assert client.memory.get_persona_off(GUILD, USER) is True
+    assert client.memory.get_style(GUILD, USER) == "條列、少於 50 字"  # the style survives it too
+    assert "人設：關閉" in responses[-1]
+
+    await client.style_command(interaction, clear=True)
+    assert client.memory.get_style(GUILD, USER) == ""
+    assert client.memory.get_persona_off(GUILD, USER) is True  # clearing a style is not a reset
+
+    await client.style_command(interaction, persona="keep")
+    assert client.memory.get_persona_off(GUILD, USER) is False
+
+    await client.style_command(interaction, upload=True)
+    assert len(modals) == 1 and isinstance(modals[0], StyleModal)
+    await client.style_command(interaction, upload=True, text="短")
+    assert len(modals) == 1 and "一次做一件事" in responses[-1]
+
+
+def _operator_client(config: Config, tmp_path) -> DiscordCodexClient:
+    """A client whose instruction files are all writable, shaped like the container's layout."""
+    image = tmp_path / "image"
+    (image / "persona").mkdir(parents=True)
+    (image / "rules").mkdir(parents=True)
+    (image / "rules" / "AGENTS.md").write_text("RULES\n", "utf-8")
+    (image / "persona" / "AGENTS.md").write_text("image persona\n", "utf-8")
+    (image / "output-style.md").write_text("image style\n", "utf-8")
+    cfg = replace(
+        config,
+        command_prefix="inmu-king",
+        codex_home=tmp_path / "vol",
+        codex_workspace=tmp_path / "vol" / "workspace",
+        codex_workspace_plain=tmp_path / "vol" / "workspace-plain",
+        codex_rules_path=image / "rules" / "AGENTS.md",
+        persona_dir=image / "persona",
+        output_style_path=image / "output-style.md",
+        backup_dir=tmp_path / "backups",
+        permanent_memory_dir=tmp_path / "perm",
+    )
+    bot_module.instructions.compose_workspaces(cfg)
+    return DiscordCodexClient(cfg)
+
+
+def _operator_interaction(user_id: int, owner_id: int, user=None):
+    responses: list[str] = []
+    modals: list[object] = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    async def send_modal(modal):
+        modals.append(modal)
+
+    hit = _interaction(user_id, owner_id, user)
+    hit.guild.id = GUILD
+    hit.guild_id = GUILD
+    hit.channel = _FakeChannel(True)
+    hit.channel_id = hit.channel.id
+    hit.response = types.SimpleNamespace(send_message=send, send_modal=send_modal)
+    return hit, responses, modals
+
+
+async def test_persona_command_is_admin_only_and_reports_which_copy_is_live(
+    config: Config, tmp_path
+) -> None:
+    from discord_codex_bot.ui import InstructionsModal
+
+    client = _operator_client(config, tmp_path)
+    stranger, said, modals = _operator_interaction(
+        555, owner_id=777, user=types.SimpleNamespace(id=555)
+    )
+    await client.persona_command(stranger, "upload")
+    assert modals == [] and "只有伺服器主人" in said[-1]
+
+    admin, said, modals = _operator_interaction(555, owner_id=555)
+    await client.persona_command(admin)
+    assert "人設：image 預設" in said[-1] and "預設輸出風格：image 預設" in said[-1]
+
+    await client.persona_command(admin, "reset_persona")
+    assert "本來就是 image 預設" in said[-1]
+
+    await client.persona_command(admin, "upload")
+    assert len(modals) == 1 and isinstance(modals[0], InstructionsModal)
+
+
+async def test_uploading_a_persona_retires_every_live_thread_and_keeps_the_old_one(
+    config: Config, tmp_path
+) -> None:
+    from discord_codex_bot.threads import ThreadStore
+
+    client = _operator_client(config, tmp_path)
+    key = ThreadStore.key(GUILD, 555, USER)
+    model = "codex:gpt-5.6-luna"
+    client.threads.remember(key, "t-old", None, plain=False, model=model)
+    assert client.threads.current(key, plain=False, model=model) == "t-old"
+
+    report = await client._save_instructions({bot_module.instructions.PERSONA: "新人設"}, USER)
+    # Codex reads AGENTS.md once per thread, so a live thread would keep the old persona forever
+    assert client.threads.current(key, plain=False, model=model) == ""
+    assert (client.config.codex_workspace / "AGENTS.md").read_text("utf-8") == "RULES\n\n\n新人設\n"
+    assert "人設：上傳版" in report and "備份：" in report
+    kept = sorted((client.config.backup_dir / "instructions").glob("persona-*.md"))
+    assert len(kept) == 1 and kept[0].read_text("utf-8").strip() == "image persona"
+
+    admin, said, _ = _operator_interaction(555, owner_id=555)
+    await client.persona_command(admin, "reset_persona")
+    assert "已還原成 image 預設" in said[-1]
+    assert (client.config.codex_workspace / "AGENTS.md").read_text(
+        "utf-8"
+    ) == "RULES\n\n\nimage persona\n"

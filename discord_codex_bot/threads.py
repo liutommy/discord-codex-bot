@@ -24,6 +24,11 @@ class ThreadStore:
     memory. `harvest_candidates()` lists them, `mark_harvested()` retires them.
     """
 
+    def set_version(self, version: str) -> None:
+        """Point at a new instruction version. Every thread started under the old one stops being
+        resumable at once, which is the only way a persona change reaches live conversations."""
+        self._version = version
+
     def __init__(self, path: Path, ttl_seconds: float, version: str = "") -> None:
         self._path = path
         self._ttl = ttl_seconds

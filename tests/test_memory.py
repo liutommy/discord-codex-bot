@@ -1,12 +1,16 @@
 from pathlib import Path
 
+import pytest
+
 from discord_codex_bot.memory import (
     ARCHIVE_FILE,
     INDEX_FILE,
+    STYLE_MAX_CHARS,
     MemoryLimits,
     MemoryStore,
     extract_memory_tags,
     extract_read_requests,
+    parse_style_upload,
     slugify,
 )
 
@@ -237,9 +241,11 @@ def test_rewrite_keeps_slugs_unique_and_backs_up_the_previous_state(tmp_path: Pa
     store.rewrite("guild", 1, None, [Note("n", "2026-09-04", "t")])
     assert (directory / ".backup" / "topics" / "綠茶-3.md").exists()
     assert not (directory / ".backup" / "topics" / "old.md").exists()  # one backup generation
-    assert store.usage_bytes("guild", 1, None) == sum(
-        p.stat().st_size for p in (directory / "topics").iterdir()
-    ) + (directory / INDEX_FILE).stat().st_size
+    assert (
+        store.usage_bytes("guild", 1, None)
+        == sum(p.stat().st_size for p in (directory / "topics").iterdir())
+        + (directory / INDEX_FILE).stat().st_size
+    )
 
 
 def test_add_avoids_slugs_already_in_the_archive(tmp_path: Path) -> None:
@@ -263,3 +269,34 @@ def test_catastrophic_regex_query_is_literal_and_fast() -> None:
     assert out.startswith("## x (x.md) line 2") and "line 1" not in out and "line 3" not in out
     assert search_snippets(sources, "(a+)+$|zzz", LIMITS, "none").count("## x") == 1
     assert search_snippets([("x", "x.md", ["a" * 40 + "b"])], "(a+)+$", LIMITS, "none") == "none"
+
+
+def test_persona_opt_out_is_independent_of_the_personal_style(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path, LIMITS)
+    assert store.get_persona_off(1, 2) is False
+    store.set_style(1, 2, "短")
+    assert store.get_persona_off(1, 2) is False  # wanting shorter answers is not wanting a reset
+    store.set_persona_off(1, 2, True)
+    assert store.get_persona_off(1, 2) is True and store.get_persona_off(1, 3) is False
+    assert store.get_style(1, 2) == "短"  # and the opt-out leaves the style alone
+    store.clear_style(1, 2)
+    assert store.get_persona_off(1, 2) is True
+    store.set_persona_off(1, 2, False)
+    assert store.get_persona_off(1, 2) is False
+    store.set_persona_off(1, 2, False)  # clearing what is already clear is not an error
+
+
+def test_parse_style_upload_accepts_markdown_and_names_every_rejection() -> None:
+    assert parse_style_upload("STYLE.MD", "  短句  \n".encode()) == "短句"
+    assert parse_style_upload("a.markdown", b"- one\n- two") == "- one\n- two"
+    for name, data, reason in (
+        ("style.txt", b"x", "只收"),
+        ("style.md", b"\xff\xfe\x00", "UTF-8"),
+        ("style.md", b"   \n", "空的"),
+    ):
+        with pytest.raises(ValueError, match=reason):
+            parse_style_upload(name, data)
+    limit = ("字" * STYLE_MAX_CHARS).encode()
+    assert len(parse_style_upload("style.md", limit)) == STYLE_MAX_CHARS  # the bound itself passes
+    with pytest.raises(ValueError, match=f"{STYLE_MAX_CHARS + 1} 字"):
+        parse_style_upload("style.md", ("字" * (STYLE_MAX_CHARS + 1)).encode())

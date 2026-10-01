@@ -41,12 +41,27 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "-style": (
-        "設定你個人的回覆風格，會覆蓋伺服器預設（人設也會換成不帶角色的版本）。"
+        "設定你個人的回覆風格，會覆蓋伺服器預設。風格與人設是兩個獨立設定："
+        "設風格不會換掉角色，要不帶角色的版本請用 persona:關閉人設。"
+        "長一點的風格用 upload:True 傳一個 .md 檔（UTF-8、上限 4000 字）。"
         "留空＝查看；clear 清除回到預設。",
         [
             "/{p}-style text:條列、少於 100 字、用英文",
-            "/{p}-style（留空：看目前風格）",
+            "/{p}-style upload:True（開視窗上傳 .md）",
+            "/{p}-style persona:關閉人設",
+            "/{p}-style（留空：看目前風格與人設）",
             "/{p}-style clear:True",
+        ],
+    ),
+    "-persona": (
+        "管理員限定。查詢／上傳／還原全伺服器共用的人設與預設輸出風格。"
+        "上傳開一個視窗，人設與風格各一個 .md（UTF-8、上限 20000 字），只傳一個也可以；"
+        "被換掉的舊版會先存進備份。人設是對話開始時載入的，所以一改就會讓所有進行中的"
+        "對話串重新開始。",
+        [
+            "/{p}-persona（查詢目前用的是上傳版還是預設）",
+            "/{p}-persona action:上傳",
+            "/{p}-persona action:還原人設為預設",
         ],
     ),
     "-remember": (
@@ -58,11 +73,14 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         ],
     ),
     "-forget": (
-        "刪除一則記憶。用 /{p}-memory 查名稱後，指定 scope 與 name。",
+        "刪除一則長期記憶：選 scope 後從 name 選單選取，可打字篩選。"
+        "追蹤與提醒另存，#編號不是記憶名稱；取消請用 /{p}-track cancel:編號"
+        " 或 /{p}-remind cancel:編號。刪除記憶不會清除舊對話脈絡"
+        "（重開對話用 /{p}-reset）。",
         ["/{p}-forget scope:個人 name:拉麵"],
     ),
     "-memory": (
-        "列出 Bot 記得的事的索引（個人＋伺服器）；scope 可只看其中一層。只有你看得到。",
+        "列出 Bot 記得的事（含封存，個人＋伺服器）；scope 可只看其中一層。只有你看得到。",
         ["/{p}-memory", "/{p}-memory scope:伺服器"],
     ),
     "-reset": (
@@ -91,6 +109,38 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             "/{p}-remind cancel:3",
         ],
     ),
+    "-track": (
+        "追蹤 YouTube 頻道、Twitch 頻道，或任何網頁（網頁會以「出現沒看過的連結」當作新內容，"
+        "例如官網的最新消息頁）。建立後就開始運作：只看建立之後的新內容，"
+        "符合條件才在頻道 @你，不符合的完全安靜。"
+        "留空列出你的追蹤，cancel 加編號取消，log 加編號看它最近判斷了什麼、為什麼——"
+        "判斷紀錄只有你自己看得到，不會貼到頻道。"
+        "新增、查看、改判斷頻率都可以直接跟 Bot 說（@Bot 用講的就行）；"
+        "預設只 @ 你，明講要一起通知誰就會加上那些人。取消只能用指令。"
+        "來源本身照常定期抓，但每個追蹤預設每 60 分鐘才讓 AI 判斷一次，說一聲就能改。",
+        [
+            "/{p}-track source:https://www.youtube.com/@HoushouMarine",
+            "/{p}-track source:https://www.twitch.tv/chibidoki interest:重大公告或特別企劃",
+            "/{p}-track（留空：列出你的追蹤）",
+            "/{p}-track log:1",
+            "/{p}-track cancel:1",
+        ],
+    ),
+    "-linkclean": (
+        "設定「連結洗參數」：全部清洗（預設；純連結訊息整則換成乾淨版、帶文字的在下面補乾淨連結）、"
+        "只清洗純連結（只換純連結訊息，帶文字的不動也不補連結；Bot 沒有刪訊息權限時就什麼都不做）、"
+        "全關。查詢會顯示目前設定。只有伺服器主人、管理員或被特別列出的人能用。",
+        ["/{p}-linkclean 查詢", "/{p}-linkclean 只清洗純連結", "/{p}-linkclean 全關"],
+    ),
+    "-embedfix": (
+        "開關「預覽修正」：預設開啟。貼 X、Threads、TikTok、Pixiv、Tumblr 的貼文連結時，Bot 會換成"
+        "能讓 Discord 直接預覽影片和圖片的版本（fixupx、vxthreads、tnktok、phixiv、tpmblr），點進去"
+        "仍會回到原站；"
+        "換之前會先確認那個版本真的有影片或圖片，沒有就維持原連結；Pixiv 的 R-18 作品和 X 標為"
+        "敏感的貼文會用 ||暴雷|| 包住讓預覽打碼。投遞方式跟著「連結洗參數」走。"
+        "只有伺服器主人、管理員或被特別列出的人能用。",
+        ["/{p}-embedfix 查詢", "/{p}-embedfix 關閉", "/{p}-embedfix 開啟"],
+    ),
     "-export": (
         "把你在這個伺服器的個人記憶（索引、archive、每一則內容）打包成 zip 私下給你，"
         "當作自己的備份或搬家用。伺服器記憶不在裡面。",
@@ -109,6 +159,13 @@ FEATURES: list[str] = [
     "附的檔案（PDF／文字／程式碼）會讀內容。",
     "**回覆某則訊息**再 @Bot：接續那段對話，或讓 Bot 看那則訊息的文字與圖。",
     "**貼連結**會自動讀網頁（含 X／fixvx 貼文的全文與圖片；網站擋 Bot 時退回 Discord 預覽）。",
+    "**連結洗參數**：貼出的連結會自動去掉 utm 等追蹤參數。整則訊息只有連結時，Bot 會把原訊息換成"
+    "乾淨版並 @你；有其他文字的訊息則在下面補上乾淨連結。伺服器主人或管理員可用 "
+    "`/{p}-linkclean` 設為全部清洗、只清洗純連結或全關。",
+    "**預覽修正**：X、Threads、TikTok、Pixiv、Tumblr 的貼文連結會換成 Discord 能直接播影片、"
+    "看圖的版本"
+    "（點進去仍回原站），確認過真的有內容才換；Pixiv R-18 與 X 敏感貼文會自動加 ||暴雷||。"
+    "伺服器主人或管理員可用 `/{p}-embedfix` 開關。",
     "**貼影片連結**會看影片再回答：YouTube 直接看（長片也行），X、TikTok、Instagram、Bilibili、"
     "Reddit、Streamable 等會抓下來看；長片會先回「🎬 處理中」再改成正式答案。",
     "**模型來源**：Codex（預設）、Antigravity（Gemini／Claude）、"
@@ -118,6 +175,8 @@ FEATURES: list[str] = [
     "**會寫程式算東西**：算數、資料整理、格式轉換、影片抽幀，Bot 會在隔離沙盒裡跑 Python／shell，"
     "產生的檔案直接附給你。",
     "**會查資料庫**：像英雄聯盟電競的賽程、比分、積分，Bot 會直接打官方資料 API，不靠新聞站。",
+    "**會定期追蹤社群**：YouTube／Twitch 的新內容由隔離的 Codex 判斷，符合你設定的條件才 @你；"
+    "判斷紀錄用 `/{p}-track log:<編號>` 自己查，只有你看得到。",
     "**回答上的按鈕**：生成中 ❌ 取消；答完後 🔁 用同一題重答（新開對話）、"
     "👍 把這段問答記進個人記憶。只有發問的人能按。",
 ]
@@ -133,7 +192,9 @@ def render_guide(prefix: str, registered: Iterable[str]) -> str:
         lines = [f"**/{name}**", summary.replace("{p}", p)]
         lines += [f"　`{example.replace('{p}', p)}`" for example in examples]
         blocks.append("\n".join(lines))
-    blocks.append("**不用指令也能做的事**\n" + "\n".join(f"・{f}" for f in FEATURES))
+    blocks.append(
+        "**不用指令也能做的事**\n" + "\n".join(f"・{f.replace('{p}', p)}" for f in FEATURES)
+    )
     return "\n\n".join(blocks)
 
 
@@ -144,5 +205,7 @@ def render_sheet(prefix: str, commands: Iterable[tuple[str, str, list[str]]]) ->
     for name, description, params in commands:
         suffix = f"（參數：{'、'.join(params)}）" if params else ""
         lines.append(f"/{name} — {description}{suffix}")
-    lines.append("其他用法：" + " ".join(f.replace("**", "") for f in FEATURES))
+    lines.append(
+        "其他用法：" + " ".join(f.replace("{p}", prefix).replace("**", "") for f in FEATURES)
+    )
     return "\n".join(lines)

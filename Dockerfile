@@ -4,7 +4,7 @@ FROM node:22-bookworm-slim AS node-runtime
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-runtime
 FROM python:3.12-slim-bookworm
 
-ARG CODEX_VERSION=0.153.4
+ARG CODEX_VERSION=0.156.1
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 COPY --from=uv-runtime /uv /uvx /bin/
@@ -22,11 +22,19 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY --chown=1000:1000 discord_codex_bot ./discord_codex_bot
 COPY --chown=1000:1000 scripts ./scripts
-COPY --chown=1000:1000 workspace /workspace
+# The rules half of AGENTS.md. The Bot composes the working directories from it plus whatever
+# persona is in force, at start-up and after every change, so neither needs an image rebuild.
+COPY --chown=1000:1000 workspace /opt/discord-codex/rules
 COPY --chown=1000:1000 config/codex-config.toml /opt/discord-codex/config.toml
-COPY --chown=1000:1000 config/output-style.md /opt/discord-codex/output-style.md
+# The operator's own file is gitignored, so a fresh clone has only the sample; the glob copies
+# whichever exist and the RUN below falls back to the sample.
+COPY --chown=1000:1000 config/output-style*.md /opt/discord-codex/
 COPY --chown=1000:1000 config/consolidate-schema.json /opt/discord-codex/consolidate-schema.json
+COPY --chown=1000:1000 config/harvest-schema.json /opt/discord-codex/harvest-schema.json
+COPY --chown=1000:1000 config/tracking-schema.json /opt/discord-codex/tracking-schema.json
 COPY --chown=1000:1000 config/apis.json /opt/discord-codex/apis.json
+COPY --chown=1000:1000 config/lol-names.json /opt/discord-codex/lol-names.json
+COPY --chown=1000:1000 config/clearurls.json /opt/discord-codex/clearurls.json
 COPY --chown=1000:1000 permanent /opt/discord-codex/permanent
 COPY --chown=1000:1000 persona /opt/discord-codex/persona
 COPY --chown=1000:1000 config/agy-settings.json /opt/discord-codex/agy-settings.json
@@ -48,15 +56,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 # /home/node/.gemini is a named volume; creating it here (owned by 1000) makes Docker seed a fresh
 # volume with that ownership instead of root's.
 
-# Two Codex working directories: /workspace = runtime rules + operator persona (persona/*.md,
-# gitignored, appended at build time); /workspace-plain = runtime rules only, used when a member
-# has set a personal output style.
-RUN mkdir -p /var/lib/codex /workspace-plain \
-    && cp /workspace/AGENTS.md /workspace-plain/AGENTS.md \
-    && for f in /opt/discord-codex/persona/*.md; do \
-         case "$f" in */README.md) ;; *) printf '\n\n' >> /workspace/AGENTS.md; cat "$f" >> /workspace/AGENTS.md ;; esac; \
-       done \
-    && chown -R 1000:1000 /var/lib/codex /workspace /workspace-plain /app \
+# The Codex working directories now live in the named volume, because the persona they are
+# composed from can be replaced at runtime and the image's filesystem is read-only.
+RUN mkdir -p /var/lib/codex \
+    && [ -f /opt/discord-codex/output-style.md ] \
+       || cp /opt/discord-codex/output-style.example.md /opt/discord-codex/output-style.md \
+    && chown -R 1000:1000 /var/lib/codex /opt/discord-codex /app \
     && chmod 0555 /app/scripts/entrypoint.sh
 
 ENV PATH="/app/.venv/bin:/home/node/.local/bin:${PATH}" \
@@ -64,8 +69,9 @@ ENV PATH="/app/.venv/bin:/home/node/.local/bin:${PATH}" \
     AGY_HOME=/home/node \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
     CODEX_HOME=/var/lib/codex \
-    CODEX_WORKSPACE=/workspace \
-    CODEX_WORKSPACE_PLAIN=/workspace-plain \
+    CODEX_WORKSPACE=/var/lib/codex/workspace \
+    CODEX_WORKSPACE_PLAIN=/var/lib/codex/workspace-plain \
+    CODEX_RULES=/opt/discord-codex/rules/AGENTS.md \
     PYTHONUNBUFFERED=1
 
 USER 1000:1000

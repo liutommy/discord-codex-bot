@@ -1,10 +1,10 @@
 services:
   bot:
-    container_name: ${BOT_CONTAINER_NAME:-discord-codex-bot}
+    container_name: ${BOT_CONTAINER_NAME:-tommy_test}
     build:
       context: .
       args:
-        CODEX_VERSION: ${CODEX_VERSION:-0.153.4}
+        CODEX_VERSION: ${CODEX_VERSION:-0.156.1}
         UV_VERSION: ${UV_VERSION:-0.10.0}
     image: discord-codex-bot:local
     restart: always
@@ -13,7 +13,9 @@ services:
       - .env
     environment:
       CODEX_HOME: /var/lib/codex
-      CODEX_WORKSPACE: /workspace
+      # CODEX_WORKSPACE / CODEX_WORKSPACE_PLAIN / CODEX_RULES stay at the image defaults: the
+      # working directories are composed into the volume at start-up, because the persona they
+      # are built from can be replaced while the Bot runs and the image filesystem is read-only.
       PYTHONUNBUFFERED: "1"
       TZ: ${TZ:-Asia/Taipei}  # logs, backup names and note dates in the members' local time
     volumes:
@@ -56,13 +58,21 @@ services:
     networks:
       - default
       - sandbox_net
+      - xsearch_net
 
-  # Self-hosted web search for the Bot's <web> tool. No host port: only the bot container can
-  # reach it (http://searxng:8080 on the compose network), so it publishes nothing.
+  # Self-hosted web search. The Bot's <web> tool reaches it by name on the compose network
+  # (http://searxng:8080); other agents on this host reach it through the loopback port below.
+  #
+  # Loopback only, and deliberately so: the service has no authentication, so the published
+  # port is what decides who can query it. Binding 127.0.0.1 keeps that set to "processes on
+  # this host" -- the same trust boundary the agents already sit inside -- while 0.0.0.0 would
+  # hand an open search proxy to both of this machine's networks.
   searxng:
     image: searxng/searxng:latest
-    container_name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_searxng
+    container_name: ${BOT_CONTAINER_NAME:-tommy_test}_searxng
     restart: always
+    ports:
+      - "127.0.0.1:${SEARXNG_HOST_PORT:-17970}:8080"
     environment:
       BASE_URL: http://searxng:8080/
       SEARXNG_SETTINGS_PATH: /etc/searxng/settings.yml
@@ -89,7 +99,7 @@ services:
   sandbox:
     build: ./sandbox
     image: discord-codex-bot-sandbox:local
-    container_name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_sandbox
+    container_name: ${BOT_CONTAINER_NAME:-tommy_test}_sandbox
     restart: always
     init: true
     read_only: true
@@ -111,13 +121,51 @@ services:
     networks:
       - sandbox_net
 
+  # X lookup sidecar: Grok Build signed in with the operator's SuperGrok / X Premium+ plan,
+  # answering "this post", "this account's recent posts" and "does this account exist" through
+  # xAI's server-side X search. Optional: the Bot only calls it when XSEARCH_URL is set. Grok
+  # Build is a coding agent; server.py strips every tool from it and refuses any session that
+  # had one. It needs the internet (xAI) but holds nothing except its own login.
+  xsearch:
+    build: ./xsearch
+    image: discord-codex-bot-xsearch:local
+    container_name: ${BOT_CONTAINER_NAME:-tommy_test}_xsearch
+    restart: always
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=128m,uid=1000,gid=1000
+    volumes:
+      - type: volume
+        source: xsearch-home
+        target: /var/lib/grok
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Each grok process runs ~60 threads; two chats plus a lookup measured 122 of 128 before.
+    pids_limit: 384
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    # Its own network, shared only with the Bot: the service has no authentication, so this is
+    # what decides who can spend the plan's quota through it. Not internal: it needs xAI.
+    networks:
+      - xsearch_net
+
 networks:
   default:
   sandbox_net:
     internal: true
+  xsearch_net:
 
 volumes:
   codex-home:
-    name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_codex_home
+    name: ${BOT_CONTAINER_NAME:-tommy_test}_codex_home
   agy-home:
-    name: ${BOT_CONTAINER_NAME:-discord-codex-bot}_agy_home
+    name: ${BOT_CONTAINER_NAME:-tommy_test}_agy_home
+  xsearch-home:
+    name: ${BOT_CONTAINER_NAME:-tommy_test}_xsearch_home

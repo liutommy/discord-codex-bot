@@ -4,7 +4,15 @@ import asyncio
 import re
 from types import SimpleNamespace as NS
 
-from discord_codex_bot.ui import NOT_YOURS, AnswerButton, AnswerView, CancelView, recover_exchange
+from discord_codex_bot.ui import (
+    NOT_YOURS,
+    AnswerButton,
+    AnswerView,
+    CancelView,
+    InstructionsModal,
+    StyleModal,
+    recover_exchange,
+)
 
 
 class Response:
@@ -66,3 +74,97 @@ def test_recover_exchange_parses_a_slash_answer_and_leaves_others_alone() -> Non
     assert recover_exchange(content) == ("第一行\n第二行", "這是答案\n第二段")
     assert recover_exchange("純答案") == ("", "純答案")
     assert recover_exchange("") == ("", "")
+
+
+class _Upload:
+    """A submitted attachment. `read` fails loudly so a test can prove it was never called."""
+
+    def __init__(self, filename: str, data: bytes, size: int | None = None) -> None:
+        self.filename = filename
+        self.size = len(data) if size is None else size
+        self._data = data
+
+    async def read(self) -> bytes:
+        if self._data is None:
+            raise AssertionError("the file was downloaded when it should have been refused")
+        return self._data
+
+
+def _style_modal(*uploads):
+    saved: list[str] = []
+    modal = StyleModal(saved.append, 4000)
+    modal.upload._values = list(uploads)  # what Discord fills in when the modal comes back
+    return modal, saved
+
+
+async def test_style_modal_saves_one_markdown_file() -> None:
+    modal, saved = _style_modal(_Upload("me.md", "  條列、少於 50 字  \n".encode()))
+    hit = interaction(1)
+    await modal.on_submit(hit)
+    assert saved == ["條列、少於 50 字"]
+    text, ephemeral = hit.response.sent[-1]
+    assert "me.md" in text and "10 字" in text and ephemeral is True
+
+
+async def test_style_modal_refuses_and_saves_nothing() -> None:
+    for uploads, reason in (
+        ((), "沒有收到檔案"),
+        ((_Upload("notes.txt", b"x"),), "只收"),
+        ((_Upload("me.md", b"   "),), "空的"),
+        ((_Upload("me.md", "字" * 4001),), "4001 字"),
+    ):
+        payload = tuple(
+            _Upload(u.filename, u._data.encode() if isinstance(u._data, str) else u._data)
+            for u in uploads
+        )
+        modal, saved = _style_modal(*payload)
+        hit = interaction(1)
+        await modal.on_submit(hit)
+        assert saved == [] and reason in hit.response.sent[-1][0]
+
+
+async def test_style_modal_refuses_an_oversized_file_without_downloading_it() -> None:
+    modal, saved = _style_modal(_Upload("me.md", None, size=10_000_000))
+    hit = interaction(1)
+    await modal.on_submit(hit)
+    assert saved == [] and "太大" in hit.response.sent[-1][0]
+
+
+def _instructions_modal(persona=None, style=None):
+    saved: list[dict] = []
+
+    async def save(uploads, who):
+        saved.append(uploads)
+        return f"已更新 {len(uploads)} 份（by {who}）"
+
+    modal = InstructionsModal(save, 20000)
+    modal.persona._values = [persona] if persona else []
+    modal.style._values = [style] if style else []
+    return modal, saved
+
+
+async def test_instructions_modal_takes_either_file_or_both() -> None:
+    modal, saved = _instructions_modal(persona=_Upload("p.md", "新人設".encode()))
+    hit = interaction(1)
+    await modal.on_submit(hit)
+    assert saved == [{"persona": "新人設"}] and "已更新 1 份" in hit.response.sent[-1][0]
+
+    modal, saved = _instructions_modal(
+        persona=_Upload("p.md", "人設".encode()), style=_Upload("s.md", "風格".encode())
+    )
+    await modal.on_submit(interaction(1))
+    assert saved == [{"persona": "人設", "output-style": "風格"}]
+
+
+async def test_instructions_modal_writes_nothing_when_either_file_is_bad() -> None:
+    for persona, style, reason in (
+        (None, None, "沒有東西要改"),
+        (_Upload("p.txt", b"x"), None, "只收"),
+        (_Upload("p.md", b"ok"), _Upload("s.md", b"   "), "空的"),
+        (None, _Upload("s.md", None, size=10_000_000), "太大"),
+    ):
+        modal, saved = _instructions_modal(persona, style)
+        hit = interaction(1)
+        await modal.on_submit(hit)
+        # all-or-nothing: a bad second file must not leave the first one applied
+        assert saved == [] and reason in hit.response.sent[-1][0]

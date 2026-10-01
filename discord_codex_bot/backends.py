@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 
+LOGGER = logging.getLogger(__name__)
 CODEX = "codex"
 AGY = "agy"
+GROK = "grok"
 OPENROUTER = "openrouter"
 ORCAROUTER = "orcarouter"
 # OpenAI-compatible routers: any model id is a valid choice value; the live catalog decides
@@ -39,6 +43,13 @@ AGY_FAMILIES: dict[str, tuple[str, dict[str, str]]] = {
     "gpt-oss-120b": ("GPT-OSS 120B（固定 medium）", {"": "gpt-oss-120b-medium"}),
 }
 _ORDER = ["low", "medium", "high", "xhigh", "max"]
+_GROK_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+class BackendUnavailable(RuntimeError):
+    """A backend cannot answer right now — quota spent, at capacity, login gone, unreachable —
+    and the next one in the fallback chain should. Mistakes of the Bot's own (bad requests,
+    broken configuration) must not be of this kind: falling back would hide them."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,11 +68,18 @@ class Resolved:
 
 
 def choices(codex_model: str) -> list[ModelChoice]:
+    from . import grok  # late: grok imports codex, which imports this module
+
     out = [ModelChoice(f"{CODEX}:{codex_model}", f"Codex · {codex_model}", CODEX, codex_model)]
+    out += [grok_choice(m.id, m.name) for m in grok.cached_models()]
     out += [
         ModelChoice(f"{AGY}:{fam}", label, AGY, fam) for fam, (label, _) in AGY_FAMILIES.items()
     ]
     return out
+
+
+def grok_choice(model_id: str, name: str = "") -> ModelChoice:
+    return ModelChoice(f"{GROK}:{model_id}", f"Grok · {name or model_id}", GROK, model_id)
 
 
 def router_choice(backend: str, model_id: str, name: str = "") -> ModelChoice:
@@ -80,13 +98,19 @@ def split_stored(value: str) -> tuple[str, str]:
     return choice, effort.strip()
 
 
-def parse_choice(value: str, codex_model: str) -> ModelChoice:
-    """Resolve a stored value; unknown or stale values fall back to the Codex default.
-    Values stored by the earlier slug-based command ("agy:gemini-3.8-flash-high") still map."""
+def parse_choice(value: str, codex_model: str, default: str = "") -> ModelChoice:
+    """Resolve a stored value; empty, unknown or stale values fall back to `default` (the
+    DEFAULT_MODEL setting, itself a stored value) and then to Codex. Values stored by the
+    earlier slug-based command ("agy:gemini-3.8-flash-high") still map."""
     value = split_stored(value)[0]
+    if not value and default:
+        return parse_choice(default, codex_model)
     for choice in choices(codex_model):
         if choice.value == value:
             return choice
+    if value.startswith(f"{GROK}:") and _GROK_ID.fullmatch(value.split(":", 1)[1]):
+        # Any well-formed id: the catalog may not be loaded yet; the sidecar is the judge.
+        return grok_choice(value.split(":", 1)[1])
     for backend in ROUTER_BACKENDS:
         if value.startswith(f"{backend}:") and len(value) > len(backend) + 1:
             return router_choice(backend, value.split(":", 1)[1])
@@ -95,13 +119,87 @@ def parse_choice(value: str, codex_model: str) -> ModelChoice:
         for fam, (_, by_effort) in AGY_FAMILIES.items():
             if slug in by_effort.values():
                 return parse_choice(f"{AGY}:{fam}", codex_model)
+    if default and split_stored(default)[0] != value:
+        return parse_choice(default, codex_model)
     return choices(codex_model)[0]
+
+
+async def run_batch(
+    prompt: str,
+    config,
+    *,
+    schema=None,
+    effort: str = "",
+    isolated: bool = False,
+) -> str:
+    """One background turn (memory consolidation, social classification) as text.
+
+    Batch jobs have nobody watching to retry them, so a spent subscription or temporarily full
+    model must not simply fail: the same CODEX_FALLBACK_MODEL that answers members takes over.
+    agy keeps its own deny-list
+    (commands, writes, URL reads and MCP are all refused) and is given a fresh conversation each
+    time, which is what `isolated` buys on the Codex side.
+    """
+    from .agy import run_agy
+    from .codex import CodexFallbackError, run_codex
+
+    try:
+        result = await run_codex(
+            prompt, config, effort=effort, raw=True, schema=schema, isolated=isolated
+        )
+        return result.text
+    except CodexFallbackError as unavailable:
+        spare = fallback_target(
+            config.codex_fallback_model, config.codex_model, config.codex_reasoning_effort
+        )
+        if spare is None or spare.backend != AGY:
+            raise
+        LOGGER.warning(
+            "Codex unavailable (%s: %s); running this batch on %s",
+            type(unavailable).__name__,
+            unavailable,
+            spare.model,
+        )
+        result = await run_agy(prompt, config, spare.model, raw=True, schema=schema, plain=True)
+        return result.text
+
+
+def fallback_target(stored: str, codex_model: str, default_effort: str) -> Resolved | None:
+    """The spare backend to answer on while Codex quota/capacity is unavailable, written like a
+    member's stored model ("<backend>:<family>|<effort>"). Empty means no fallback; so does Codex
+    itself, which cannot stand in for its own outage."""
+    if not stored:
+        return None
+    choice = parse_choice(stored, codex_model)
+    if choice.backend == CODEX:
+        return None
+    return resolve(choice, split_stored(stored)[1] or default_effort)
+
+
+def _closest(effort: str, offered: list[str] | tuple[str, ...]) -> str:
+    """The offered level closest at or below `effort`, else the lowest offered."""
+    wanted = _ORDER.index(effort) if effort in _ORDER else len(_ORDER)
+    for level in reversed(_ORDER[: wanted + 1]):
+        if level in offered:
+            return level
+    return next((level for level in _ORDER if level in offered), offered[0] if offered else "")
 
 
 def resolve(choice: ModelChoice, effort: str) -> Resolved:
     """Map the shared effort option onto what this backend/family can actually run."""
     if choice.backend == CODEX:
         return Resolved(CODEX, choice.family, effort)
+    if choice.backend == GROK:
+        from . import grok
+
+        model = grok.cached_model(choice.family)
+        if model is None or not model.efforts:
+            return Resolved(GROK, choice.family, effort)  # the sidecar validates it
+        return Resolved(
+            GROK,
+            choice.family,
+            effort if effort in model.efforts else _closest(effort, model.efforts),
+        )
     if choice.backend in ROUTER_BACKENDS:
         return Resolved(choice.backend, choice.family, effort)  # applied only if the model takes it
     _label, by_effort = AGY_FAMILIES[choice.family]
@@ -116,3 +214,25 @@ def resolve(choice: ModelChoice, effort: str) -> Resolved:
             return Resolved(AGY, by_effort[level], level)
     lowest = next(level for level in _ORDER if level in by_effort)
     return Resolved(AGY, by_effort[lowest], lowest)
+
+
+def fallback_chain(member: ModelChoice, chain: tuple[str, ...], codex_model: str,
+                   default_effort: str, legacy_spare: str = "") -> list[Resolved]:  # fmt: skip
+    """Where a turn goes when the member's backend cannot answer: the MODEL_CHAIN entries after
+    the member's backend, in order ("grok → codex → agy": a Grok turn may end on Codex, then
+    agy; a Codex turn on agy; never back up the chain). A backend missing from the chain (the
+    routers) has no fallback. Without MODEL_CHAIN, the old single CODEX_FALLBACK_MODEL spare
+    still backs Codex."""
+    if not chain:
+        spare = fallback_target(legacy_spare, codex_model, default_effort)
+        return [spare] if spare is not None and member.backend == CODEX else []
+    entries = [
+        (parse_choice(f"{CODEX}:{codex_model}" if entry == CODEX else entry, codex_model),
+         split_stored(entry)[1] or default_effort)
+        for entry in chain
+    ]  # fmt: skip
+    backends = [choice.backend for choice, _ in entries]
+    if member.backend not in backends:
+        return []
+    after = entries[backends.index(member.backend) + 1 :]
+    return [resolve(choice, effort) for choice, effort in after if choice.backend != member.backend]

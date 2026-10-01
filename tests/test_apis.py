@@ -9,12 +9,20 @@ from discord_codex_bot.apis import Api, call_api, extract_api_calls, load_regist
 
 def test_load_registry_expands_env_and_rejects_non_https(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SECRET_KEY", "s3cret")
-    (tmp_path / "apis.json").write_text(json.dumps({
-        "good": {"base": "https://api.example/v1/", "headers": {"x-key": "${SECRET_KEY}"},
-                 "doc": "用法"},
-        "bad": {"base": "http://plain.example/"},
-        "junk": "nope",
-    }), "utf-8")
+    (tmp_path / "apis.json").write_text(
+        json.dumps(
+            {
+                "good": {
+                    "base": "https://api.example/v1/",
+                    "headers": {"x-key": "${SECRET_KEY}"},
+                    "doc": "用法",
+                },
+                "bad": {"base": "http://plain.example/"},
+                "junk": "nope",
+            }
+        ),
+        "utf-8",
+    )
     registry = load_registry(tmp_path / "apis.json")
     assert list(registry) == ["good"]
     assert registry["good"].headers == {"x-key": "s3cret"} and registry["good"].doc == "用法"
@@ -82,6 +90,7 @@ async def test_call_api_builds_the_url_sends_headers_and_compacts_json(monkeypat
     assert "只能是相對" in await call_api("lol", "https://evil/x", registry, config)
     assert "只能是相對" in await call_api("lol", "../x", registry, config)
     assert "沒有叫 nope" in await call_api("nope", "x", registry, config)
+
     # HTTP 429 is throttling as well: retried once, then reported as throttling, not as an answer
     async def no_sleep(seconds):
         pass
@@ -123,8 +132,16 @@ def test_load_registry_reads_a_bot_password_login_and_stays_anonymous_without_on
 ) -> None:
     monkeypatch.setenv("WIKI_USER", "bot@app")
     monkeypatch.setenv("WIKI_PASS", "secret")
-    spec = {"wiki": {"base": "https://w.example/api.php?", "login": {
-        "api": "https://w.example/api.php", "user": "${WIKI_USER}", "password": "${WIKI_PASS}"}}}
+    spec = {
+        "wiki": {
+            "base": "https://w.example/api.php?",
+            "login": {
+                "api": "https://w.example/api.php",
+                "user": "${WIKI_USER}",
+                "password": "${WIKI_PASS}",
+            },
+        }
+    }
     (tmp_path / "a.json").write_text(json.dumps(spec), "utf-8")
     assert load_registry(tmp_path / "a.json")["wiki"].login["user"] == "bot@app"
     monkeypatch.delenv("WIKI_PASS")
@@ -133,8 +150,15 @@ def test_load_registry_reads_a_bot_password_login_and_stays_anonymous_without_on
 
 
 async def test_call_api_logs_in_once_and_reuses_the_session(monkeypatch, config) -> None:
-    registry = {"wiki": Api("wiki", "https://w.example/api.php?", {}, "",
-                            {"api": "https://w.example/api.php", "user": "u", "password": "p"})}
+    registry = {
+        "wiki": Api(
+            "wiki",
+            "https://w.example/api.php?",
+            {},
+            "",
+            {"api": "https://w.example/api.php", "user": "u", "password": "p"},
+        )
+    }
     apis._LOGGED_IN.discard("wiki")
     logins = []
 
@@ -152,3 +176,79 @@ async def test_call_api_logs_in_once_and_reuses_the_session(monkeypatch, config)
         assert logins == ["wiki"]  # the cookie jar outlives the call; no login per query
     finally:
         apis._LOGGED_IN.discard("wiki")
+
+
+def test_resolve_path_fixes_a_lone_typo_but_asks_when_siblings_are_close() -> None:
+    from discord_codex_bot.apis import resolve_path
+
+    aliases = {
+        "hero/好運姐": "hero/21-missfortune",
+        "hero/厄运小姐": "hero/21-missfortune",
+        "hero/凱爾": "hero/10-kayle",
+        "hero/凱莎": "hero/145-kaisa",
+        "augment/靈光一閃": "augment/1030-eureka",
+    }
+    assert resolve_path("/hero/好運姐/", aliases) == ("hero/21-missfortune", "")  # exact
+    real, note = resolve_path("hero/好運結", aliases)  # one close match: resolve and say so
+    assert real == "hero/21-missfortune" and note == "（好運結 解讀為 好運姐）\n"
+    real, note = resolve_path("hero/凱耳", aliases)  # 凱爾 or 凱莎: a real question, not a guess
+    assert real == "" and "找不到 hero/凱耳" in note and "凱爾" in note and "凱莎" in note
+    assert resolve_path("hero/亞菲利歐", aliases) == ("hero/亞菲利歐", "")  # nothing close
+    assert resolve_path("data/ai-summary.json", aliases) == ("data/ai-summary.json", "")
+    assert resolve_path("hero/凱耳", {}) == ("hero/凱耳", "")  # no aliases configured
+
+
+def test_localize_rewrites_longest_names_first_in_one_pass() -> None:
+    from discord_codex_bot.apis import localize
+
+    names = {"凯尔": "凱爾", "凯尔特": "凱爾特", "回响施放": "共鳴施放"}
+    out = localize("推荐 回响施放 给 凯尔 和 凯尔特", names)
+    assert out == "推荐 共鳴施放（回响施放） 给 凱爾（凯尔） 和 凱爾特（凯尔特）"
+    assert localize("nothing here", names) == "nothing here" and localize("x", {}) == "x"
+
+
+async def test_call_api_applies_the_names_map_from_next_to_the_registry(
+    tmp_path: Path, monkeypatch, config
+) -> None:
+    mapping = {
+        "names": {"回响施放": "共鳴施放", "同": "同"},
+        "paths": {"hero/逆命": "hero/4-twistedfate", "hero/TF": "hero/4-twistedfate"},
+    }
+    (tmp_path / "names.json").write_text(json.dumps(mapping, ensure_ascii=False), "utf-8")
+    spec = {"hx": {"base": "https://hx.example/", "names": "names.json"}}
+    (tmp_path / "apis.json").write_text(json.dumps(spec), "utf-8")
+    registry = load_registry(tmp_path / "apis.json")
+    assert registry["hx"].names == {"回响施放": "共鳴施放"}  # identical pairs dropped
+    assert registry["hx"].paths["hero/TF"] == "hero/4-twistedfate"
+    page = "<html><body>推荐 回响施放 98.0</body></html>".encode()
+    session = Session(Response(page, 200, "text/html"))
+    monkeypatch.setattr(apis.aiohttp, "ClientSession", lambda **kw: session)
+    # the member's own word resolves to the real page; the reply comes back localised
+    assert "共鳴施放（回响施放） 98.0" in await call_api("hx", "/hero/逆命", registry, config)
+    assert session.calls == ["https://hx.example/hero/4-twistedfate"]
+    await call_api("hx", "hero/unknown-thing", registry, config)
+    assert session.calls[-1] == "https://hx.example/hero/unknown-thing"  # unknown: pass through
+    body = await call_api("hx", "hero/逆令", registry, config)  # a typo of the only close alias
+    assert body.startswith("（逆令 解讀為 逆命）\n") and session.calls[-1].endswith("4-twistedfate")
+    # a missing map is a warning, not a broken API
+    spec["hx"]["names"] = "gone.json"
+    (tmp_path / "apis.json").write_text(json.dumps(spec), "utf-8")
+    assert load_registry(tmp_path / "apis.json")["hx"].names == {}
+
+
+async def test_call_api_hands_a_page_over_as_text_not_markup(monkeypatch, config) -> None:
+    # hexdata's hero pages are plain HTML. Given the raw page (styles, JSON-LD, tags) the model
+    # skipped it and web-searched another site for the same numbers; as text it reads it.
+    registry = {"hx": Api("hx", "https://hx.example/", {}, "")}
+    page = (
+        b"<html><head><title>Yasuo - Hexdata</title><style>body{margin:0}</style></head>"
+        b"<body><h1>Patch 16.18</h1><table><tr><td>\xe8\x83\x9c\xe7\x8e\x87 57.5%</td></tr></table>"
+        b'<a href="/augment/1030-eureka">Eureka</a></body></html>'
+    )
+    monkeypatch.setattr(
+        apis.aiohttp, "ClientSession", lambda **kw: Session(Response(page, 200, "text/html"))
+    )
+    body = await call_api("hx", "hero/157-yasuo", registry, config)
+    assert body.startswith("Yasuo - Hexdata\n\n") and "胜率 57.5%" in body
+    assert "<style>" not in body and "margin:0" not in body and "<td>" not in body
+    assert "https://hx.example/augment/1030-eureka" in body  # links survive, absolute

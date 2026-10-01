@@ -64,8 +64,12 @@ async def run_code(lang: str, code: str, config: Config, out_dir: Path | None) -
         await asyncio.to_thread(_save, target, base64.b64decode(item["b64"]))
         files.append(target)
     return RunResult(
-        int(payload.get("exit", -1)), bool(payload.get("timed_out")),
-        str(payload.get("stdout") or ""), str(payload.get("stderr") or ""), files, skipped,
+        int(payload.get("exit", -1)),
+        bool(payload.get("timed_out")),
+        str(payload.get("stdout") or ""),
+        str(payload.get("stderr") or ""),
+        files,
+        skipped,
     )
 
 

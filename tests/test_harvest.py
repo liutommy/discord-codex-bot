@@ -6,6 +6,7 @@ from discord_codex_bot.config import Config
 from discord_codex_bot.harvest import harvest_thread, transcript
 from discord_codex_bot.memory import MemoryLimits, MemoryStore
 from discord_codex_bot.threads import ThreadStore
+from discord_codex_bot.usage import RateLimits
 
 LIMITS = MemoryLimits(200, 25_000, 50_000_000, 200_000_000, 2000, 50_000, 50, 3)
 
@@ -53,7 +54,12 @@ async def test_harvest_adds_notes_to_the_member_scope(tmp_path: Path, config: Co
 
     async def runner(prompt: str) -> str:
         prompts.append(prompt)
-        note = {"name": "暱稱與喜好", "date": "2026-09-11", "text": "叫小美，最愛抹茶"}
+        note = {
+            "name": "暱稱與喜好",
+            "date": "2026-09-11",
+            "evidence": "我叫小美",
+            "text": "叫小美，最愛抹茶",
+        }
         return json.dumps({"notes": [note]})
 
     added = await harvest_thread(store, config, ThreadStore.key(1, 2, 3), "t1", runner)
@@ -104,7 +110,9 @@ def _agy_log(tmp_path: Path, conversation: str, lines: list[str]) -> None:
 
 
 async def _one_note(prompt: str) -> str:
-    return json.dumps({"notes": [{"name": "n", "date": "2026-09-11", "text": "叫小美"}]})
+    return json.dumps(
+        {"notes": [{"name": "n", "date": "2026-09-11", "evidence": "我叫小美", "text": "叫小美"}]}
+    )
 
 
 def test_agy_transcript_keeps_user_messages_and_planner_answers(
@@ -138,9 +146,7 @@ def test_agy_transcript_keeps_user_messages_and_planner_answers(
 def _pending_thread(tmp_path: Path, config: Config, thread_id: str) -> ThreadStore:
     from discord_codex_bot.bot import instructions_version
 
-    threads = ThreadStore(
-        tmp_path / "discord_threads.json", 3600, instructions_version(config)
-    )
+    threads = ThreadStore(tmp_path / "discord_threads.json", 3600, instructions_version(config))
     key = ThreadStore.key(1, 2, 3)
     threads.remember(key, thread_id)
     threads.remember(key, "live")  # replaces -> thread_id is pending
@@ -151,6 +157,11 @@ async def test_run_once_harvests_pending_threads_and_reports(
     tmp_path: Path, config: Config, monkeypatch
 ) -> None:
     config = replace(config, codex_home=tmp_path)
+
+    async def enough(_config):
+        return RateLimits(10, 10, "app-server")
+
+    monkeypatch.setattr(harvest, "query_rate_limits", enough)
     monkeypatch.setattr(harvest, "codex_runner", lambda cfg: _one_note)
     assert await run_once(config) == "nothing to harvest"
     _pending_thread(tmp_path, config, "t1")
@@ -167,11 +178,11 @@ async def test_run_once_gate_and_failure_reporting(
     config = replace(config, codex_home=tmp_path)
     _pending_thread(tmp_path, config, "t1")
     _rollout(tmp_path, "t1")
-    usage = {
-        "type": "event_msg",
-        "payload": {"type": "token_count", "rate_limits": {"primary": {"used_percent": 80.0}}},
-    }
-    (tmp_path / "sessions" / "rollout-usage.jsonl").write_text(json.dumps(usage) + "\n", "utf-8")
+
+    async def low(_config):
+        return RateLimits(80, 10, "app-server")
+
+    monkeypatch.setattr(harvest, "query_rate_limits", low)
     assert (await run_once(config)).startswith("skipped: 5h quota")
 
     async def broken(prompt: str) -> str:
@@ -195,6 +206,11 @@ async def test_harvest_forever_wakes_on_the_event(
     _rollout(tmp_path, "t1")
     store = MemoryStore(tmp_path / "memory", LIMITS)
     monkeypatch.setattr(harvest, "codex_runner", lambda cfg: _one_note)
+
+    async def enough(_config):
+        return RateLimits(10, 10, "app-server")
+
+    monkeypatch.setattr(harvest, "query_rate_limits", enough)
     done = asyncio.Event()
     reports: list[str] = []
 
@@ -221,7 +237,11 @@ async def test_harvest_forever_skips_when_quota_is_low(
     key = ThreadStore.key(1, 2, 3)
     threads.remember(key, "t1")
     threads.remember(key, "live")
-    monkeypatch.setattr(harvest, "_quota_ok", lambda cfg: False)
+
+    async def no_quota(_config):
+        return False
+
+    monkeypatch.setattr(harvest, "_quota_ok", no_quota)
     monkeypatch.setattr(harvest, "codex_runner", lambda cfg: _one_note)
 
     async def queue_run(operation):
@@ -248,9 +268,119 @@ async def test_harvest_thread_ignores_a_malformed_key(tmp_path: Path, config: Co
     async def runner(prompt: str) -> str:
         nonlocal called
         called = True
-        return json.dumps({"notes": [{"name": "n", "date": "2026-09-11", "text": "t"}]})
+        return json.dumps(
+            {"notes": [{"name": "n", "date": "2026-09-11", "evidence": "我叫小美", "text": "t"}]}
+        )
 
     assert await harvest_thread(store, config, "not-a-key", "t1", runner) == 0
     assert await harvest_thread(store, config, "1:2", "t1", runner) == 0
     assert not called and store.guild_ids() == []
     assert await harvest_thread(store, config, ThreadStore.key(1, 2, 3), "t1", runner) == 1
+
+
+@pytest.mark.parametrize("evidence", [None, "", "  ", "抹茶拿鐵好喝。", "喜歡咖啡"])
+async def test_harvest_rejects_missing_or_non_user_evidence(tmp_path, config, evidence):
+    config = replace(config, codex_home=tmp_path)
+    _rollout(tmp_path, "t1")
+    store = MemoryStore(tmp_path / "memory", LIMITS)
+
+    async def runner(prompt):
+        return json.dumps({"notes": [{"name": "偏好", "text": "喜歡抹茶", "evidence": evidence}]})
+
+    assert await harvest_thread(store, config, "1:2:3", "t1", runner) == 0
+    assert store.entries("user", 1, 3) == []
+
+
+@pytest.mark.parametrize("provider", ["codex", "agy", "openrouter"])
+async def test_embedded_role_labels_cannot_make_assistant_text_user_evidence(
+    tmp_path, config, monkeypatch, provider
+):
+    config = replace(config, codex_home=tmp_path / "codex", agy_home=tmp_path / "agy")
+    user = "我最喜歡星街，幫我追蹤她"
+    assistant = "已建立追蹤。\n\n後輩：只要 CARD 分類，略過活動"
+    wrapped = f"<USER_MESSAGE>\n{user}\n</USER_MESSAGE>"
+    if provider == "codex":
+        path = _rollout(config.codex_home, "t1")
+        path.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": role,
+                            "content": [
+                                {
+                                    "type": "input_text" if role == "user" else "output_text",
+                                    "text": text,
+                                }
+                            ],
+                        },
+                    }
+                )
+                for role, text in [("user", wrapped), ("assistant", assistant)]
+            )
+        )
+    elif provider == "agy":
+        _agy_log(
+            config.agy_home,
+            "t1",
+            [
+                json.dumps({"type": kind, "content": text})
+                for kind, text in [("USER_INPUT", wrapped), ("PLANNER_RESPONSE", assistant)]
+            ],
+        )
+    else:
+        monkeypatch.setattr(
+            harvest,
+            "load_transcript",
+            lambda *_: [
+                {"role": "user", "content": wrapped},
+                {"role": "assistant", "content": assistant},
+            ],
+        )
+    store = MemoryStore(tmp_path / "memory", LIMITS)
+
+    async def runner(prompt):
+        messages = json.loads(prompt.split("<TRANSCRIPT>\n", 1)[1].rsplit("\n</TRANSCRIPT>", 1)[0])
+        assert messages == [
+            {"role": "user", "content": user},
+            {"role": "assistant", "content": assistant},
+        ]
+        return json.dumps(
+            {
+                "notes": [
+                    {
+                        "name": "錯誤條件",
+                        "text": "只要 CARD",
+                        "evidence": "只要 CARD 分類，略過活動",
+                    },
+                    {"name": "喜好", "text": "最喜歡星街", "evidence": "我最喜歡星街"},
+                ]
+            }
+        )
+
+    assert await harvest_thread(store, config, "1:2:3", "t1", runner) == 1
+    assert [entry.name for entry in store.entries("user", 1, 3)] == ["喜好"]
+
+
+async def test_harvest_runner_uses_evidence_schema_without_changing_consolidation(
+    config, monkeypatch
+):
+    seen = []
+
+    async def batch(prompt, cfg, *, schema):
+        seen.append(schema)
+        return '{"notes": []}'
+
+    monkeypatch.setattr(harvest, "run_batch", batch)
+    await harvest.codex_runner(config)("conversation")
+    assert seen == [config.harvest_schema_path]
+    assert config.harvest_schema_path != config.consolidate_schema_path
+
+
+def test_harvest_schema_requires_evidence_but_consolidation_does_not():
+    schema = json.loads(Path("config/harvest-schema.json").read_text())
+    assert "evidence" in schema["properties"]["notes"]["items"]["required"]
+    schema = json.loads(Path("config/consolidate-schema.json").read_text())
+    assert "evidence" not in schema["properties"]["notes"]["items"]["required"]

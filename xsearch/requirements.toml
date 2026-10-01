@@ -1,0 +1,27 @@
+# Enforced policy for the X lookup sidecar (root-owned, so Grok treats it as organisation policy).
+
+# Nothing outside this file may add hooks or MCP servers: those run commands without a tool
+# call, i.e. where neither the hook below nor server.py's stream check can see them.
+# (Top-level keys must come before the first table header, or TOML files them under it.)
+allow_managed_hooks_only = true
+allowed_mcp_servers = []
+
+[cli]
+auto_update = false
+
+[compat.claude]
+hooks = false
+mcps = false
+skills = false
+rules = false
+
+[compat.cursor]
+hooks = false
+mcps = false
+skills = false
+rules = false
+
+# Server-side X search does not pass through PreToolUse; every client tool (shell, files, web,
+# background commands, ...) does, and is denied.
+[[hooks.PreToolUse]]
+hooks = [{ type = "command", command = "/usr/local/bin/deny-all", timeout = 5 }]

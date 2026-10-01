@@ -110,7 +110,9 @@ def render_results(query: str, provider: str, hits: list[Hit]) -> str:
     if not hits:
         empty = "（沒有搜尋結果，或搜尋服務暫時不可用）"
         return f'<RESULT kind="web" query="{query}">\n{empty}\n</RESULT>'
-    lines = [f"{i}. {h.title} — {h.url}" + (f"\n   {h.snippet}" if h.snippet else "")
-             for i, h in enumerate(hits, start=1)]
+    lines = [
+        f"{i}. {h.title} — {h.url}" + (f"\n   {h.snippet}" if h.snippet else "")
+        for i, h in enumerate(hits, start=1)
+    ]
     body = "\n".join(lines)
     return f'<RESULT kind="web" query="{query}" via="{provider}">\n{body}\n</RESULT>'

@@ -49,12 +49,15 @@ def test_extract_web_queries_dedupes_and_ignores_prose() -> None:
 
 
 async def test_search_web_tries_the_api_then_searxng(monkeypatch, config) -> None:
-    searx = {"results": [
-        {"title": "SearX hit", "url": "https://a.example", "content": "a  b\n c"},
-        {"title": "skip", "url": "javascript:void(0)"},
-    ]}
-    brave = {"web": {"results": [{"title": "Brave hit", "url": "https://b.example",
-                                  "description": "d"}]}}
+    searx = {
+        "results": [
+            {"title": "SearX hit", "url": "https://a.example", "content": "a  b\n c"},
+            {"title": "skip", "url": "javascript:void(0)"},
+        ]
+    }
+    brave = {
+        "web": {"results": [{"title": "Brave hit", "url": "https://b.example", "description": "d"}]}
+    }
     session = Session({"searxng": Response(searx), "brave": Response(brave)})
     monkeypatch.setattr(search.aiohttp, "ClientSession", lambda **kw: session)
     # no key: SearXNG only

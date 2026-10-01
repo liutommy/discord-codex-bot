@@ -105,9 +105,13 @@ def test_extract_reminder_tags_and_render_pending() -> None:
     assert cancels == [3]
     assert extract_reminder_tags("沒有標籤") == ("沒有標籤", [], [])
     items = [
-        {"id": 1, "user_id": 3, "target_id": 3, "due": "2026-09-14T01:30:00+00:00",
-         "text": "倒垃圾"},
-        {"id": 2, "user_id": 3, "target_id": 9, "due": "2026-09-14T02:00:00+00:00",
-         "text": "開團"},
+        {
+            "id": 1,
+            "user_id": 3,
+            "target_id": 3,
+            "due": "2026-09-14T01:30:00+00:00",
+            "text": "倒垃圾",
+        },
+        {"id": 2, "user_id": 3, "target_id": 9, "due": "2026-09-14T02:00:00+00:00", "text": "開團"},
     ]
     assert render_pending(items) == "#1 09/14 09:30 倒垃圾\n#2 09/14 10:00 開團（提醒 <@9>）"

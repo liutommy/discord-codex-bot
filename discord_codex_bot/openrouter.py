@@ -253,14 +253,11 @@ async def run_router(
     conversation lives in a Bot-kept transcript (thread id `<prefix>…`); `resume` replays it,
     bounded by OPENROUTER_HISTORY_CHARS. Images go inline (base64) when the catalog says the
     model reads them; effort is sent only when the catalog says the model takes it."""
-    plain = plain or bool(personal_style)
     info = catalog.get(model) if catalog else None
     prompt = (
         user_prompt
         if raw
-        else _prompt(
-            user_prompt, memory, output_style(config), personal_style, links, help, files
-        )
+        else _prompt(user_prompt, memory, output_style(config), personal_style, links, help, files)
     )
     history = load_transcript(config, resume) if resume else []
     resumed = bool(history)
@@ -309,9 +306,14 @@ async def run_router(
     # Stored without the image bytes: replaying base64 every turn would swamp the history.
     stored_user = prompt + (f"\n\n[附圖 {len(images)} 張]" if images else "")
     _save_transcript(
-        config, thread_id, model,
-        history + [{"role": "user", "content": stored_user},
-                   {"role": "assistant", "content": text.strip()}],
+        config,
+        thread_id,
+        model,
+        history
+        + [
+            {"role": "user", "content": stored_user},
+            {"role": "assistant", "content": text.strip()},
+        ],
     )
     return CodexResult(text.strip(), (), None, thread_id, resumed)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from collections.abc import Mapping
@@ -9,7 +10,7 @@ from pathlib import Path
 DISCORD_ID = re.compile(r"^\d{17,20}$")
 # Discord command names: lowercase, digits, hyphen; the prefix leaves room for "-remember" etc.
 COMMAND_PREFIX = re.compile(r"^[a-z0-9][a-z0-9-]{0,19}$")
-# Codex CLI value -> Codex UI label. Verified against `codex debug models` for gpt-5.6-luna
+# Codex CLI value -> Codex UI label. Verified against `codex debug models` for gpt-6-luna
 # (supported_reasoning_levels) and the request payload each value produces; re-verify on upgrade.
 REASONING_EFFORTS = {
     "low": "Low",
@@ -34,6 +35,44 @@ def parse_id_set(value: str | None, name: str, *, required: bool = False) -> fro
     if any(not DISCORD_ID.fullmatch(item) for item in raw_ids):
         raise ValueError(f"{name} contains an invalid Discord ID")
     return frozenset(int(item) for item in raw_ids)
+
+
+IPNetwork = ipaddress.IPv4Network
+# Ranges LINK_ALLOW_NETS may never open to the link fetcher: the host itself, LANs (the compose
+# and sandbox networks live in 172.16/12), CGNAT, link-local (cloud metadata), multicast and
+# class E. IPv4 only: a proxy's fake-IP range is IPv4, and an IPv6 net could smuggle any of
+# these back in as a mapped or NAT64 address.
+_NEVER_FETCH = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.168.0.0/16",
+        "224.0.0.0/3",
+    )
+)
+
+
+def parse_allow_nets(value: str | None, name: str) -> tuple[IPNetwork, ...]:
+    nets: list[IPNetwork] = []
+    for part in (value or "").split(","):
+        if not part.strip():
+            continue
+        try:
+            net = ipaddress.ip_network(part.strip())
+        except ValueError:
+            raise ValueError(f"{name} contains an invalid network: {part.strip()}") from None
+        if not isinstance(net, ipaddress.IPv4Network):
+            raise ValueError(f"{name} takes IPv4 networks only: {net}")
+        if any(net.overlaps(never) for never in _NEVER_FETCH):
+            raise ValueError(f"{name} may not include loopback, LAN or link-local ranges: {net}")
+        nets.append(net)
+    return tuple(nets)
 
 
 def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -69,13 +108,24 @@ def _command_prefix(env: Mapping[str, str]) -> str:
     return value
 
 
-def _effort(env: Mapping[str, str]) -> str:
-    value = env.get("CODEX_REASONING_EFFORT", "").strip() or "medium"
+def _effort(
+    env: Mapping[str, str], name: str = "CODEX_REASONING_EFFORT", default: str = "medium"
+) -> str:
+    value = env.get(name, "").strip() or default
     if value not in REASONING_EFFORTS:
-        raise ValueError(
-            f"CODEX_REASONING_EFFORT must be one of {', '.join(REASONING_EFFORTS)}"
-        )
+        raise ValueError(f"{name} must be one of {', '.join(REASONING_EFFORTS)}")
     return value
+
+
+def _boolean(env: Mapping[str, str], name: str, default: bool = False) -> bool:
+    raw = env.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +137,11 @@ class Config:
     command_prefix: str
     codex_model: str
     codex_reasoning_effort: str
+    codex_fallback_model: str
     codex_home: Path
     codex_workspace: Path
     codex_workspace_plain: Path
+    codex_rules_path: Path
     codex_timeout_seconds: int
     max_prompt_chars: int
     max_response_chars: int
@@ -111,6 +163,7 @@ class Config:
     memory_recall_rounds: int
     output_style_path: Path
     permanent_memory_dir: Path
+    persona_dir: Path
     agy_home: Path
     agy_probe_model: str
     agy_settings_path: Path
@@ -132,6 +185,14 @@ class Config:
     log_keep_days: int
     sandbox_url: str
     sandbox_timeout_seconds: int
+    xsearch_url: str
+    xsearch_timeout_seconds: int
+    x_tracking_interval_minutes: int
+    default_model: str
+    model_chain: tuple[str, ...]
+    grok_dir: Path
+    grok_history_chars: int
+    grok_chat_max_weekly_percent: int
     apis_path: Path | None
     apis_max_chars: int
     openrouter_dir: Path
@@ -144,6 +205,7 @@ class Config:
     link_max_bytes: int
     link_max_chars: int
     link_timeout_seconds: int
+    link_allow_nets: tuple[IPNetwork, ...]
     link_render_timeout_seconds: int
     link_screenshot_max_height: int
     link_preview_wait_seconds: float
@@ -159,6 +221,23 @@ class Config:
     consolidate_min_remaining_percent: int
     consolidate_max_input_bytes: int
     consolidate_schema_path: Path
+    harvest_schema_path: Path
+    tracking_enabled: bool
+    tracking_db_path: Path
+    tracking_interval_seconds: int
+    tracking_min_remaining_percent: int
+    tracking_classify_interval_minutes: int
+    tracking_keep_days: int
+    tracking_max_per_user: int
+    tracking_schema_path: Path
+    tracking_reasoning_effort: str
+    youtube_api_key: str
+    twitch_client_id: str
+    twitch_client_secret: str
+    # Member-visible link cleaning: extra user ids that may flip the per-guild switch,
+    # on top of the server owner and guild admins (covers a delegated owner who does not hold
+    # the Discord account that owns the server). The switch itself lives in SQLite, not here.
+    linkclean_admin_ids: frozenset[int]
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -172,16 +251,22 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         allowed_guild_ids=parse_id_set(
             values.get("ALLOWED_GUILD_IDS"), "ALLOWED_GUILD_IDS", required=True
         ),
-        allowed_channel_ids=parse_id_set(
-            values.get("ALLOWED_CHANNEL_IDS"), "ALLOWED_CHANNEL_IDS"
-        ),
+        allowed_channel_ids=parse_id_set(values.get("ALLOWED_CHANNEL_IDS"), "ALLOWED_CHANNEL_IDS"),
         command_prefix=_command_prefix(values),
-        codex_model=values.get("CODEX_MODEL", "").strip() or "gpt-5.6-luna",
+        codex_model=values.get("CODEX_MODEL", "").strip() or "gpt-6-luna",
         codex_reasoning_effort=_effort(values),
+        # Spare backend for spent ChatGPT quota or temporary Codex model capacity, written like a
+        # stored model ("<backend>:<family>|<effort>"). Empty = report the failure instead.
+        codex_fallback_model=values.get(
+            "CODEX_FALLBACK_MODEL", "agy:gemini-3.8-flash|medium"
+        ).strip(),
         codex_home=Path(values.get("CODEX_HOME", "/var/lib/codex")),
         codex_workspace=Path(values.get("CODEX_WORKSPACE", "/workspace")),
         # Same rules without the operator persona; used when a member set a personal style.
         codex_workspace_plain=Path(values.get("CODEX_WORKSPACE_PLAIN", "/workspace-plain")),
+        # The runtime rules half of AGENTS.md. The Bot composes the working directories from it
+        # plus the persona at start-up, so the persona can change without rebuilding the image.
+        codex_rules_path=Path(values.get("CODEX_RULES", "/opt/discord-codex/rules/AGENTS.md")),
         codex_timeout_seconds=_positive_int(values, "CODEX_TIMEOUT_SECONDS", 600),
         max_prompt_chars=_positive_int(values, "MAX_PROMPT_CHARS", 6_000),
         max_response_chars=_positive_int(values, "MAX_RESPONSE_CHARS", 12_000),
@@ -212,6 +297,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         permanent_memory_dir=Path(
             values.get("PERMANENT_MEMORY_DIR", "/opt/discord-codex/permanent")
         ),
+        # Operator persona shipped in the image; an upload overrides it without touching this.
+        persona_dir=Path(values.get("PERSONA_DIR", "/opt/discord-codex/persona")),
         # Antigravity CLI backend (second backend; members pick it per user with /<prefix>-model).
         agy_home=Path(values.get("AGY_HOME", "/home/node")),
         agy_probe_model=values.get("AGY_PROBE_MODEL", "").strip() or "gemini-3.8-flash-low",
@@ -249,6 +336,35 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Sandbox sidecar for <run> snippets; empty SANDBOX_URL = the tool is not offered.
         sandbox_url=values.get("SANDBOX_URL", "http://sandbox:8070").strip(),
         sandbox_timeout_seconds=_bounded_int(values, "SANDBOX_TIMEOUT_SECONDS", 30, 1, 120),
+        # X lookup sidecar (xsearch/): Grok Build on the operator's Grok subscription, reading X
+        # through xAI's server-side X search. Empty = off (X links use fxtwitter alone, and X
+        # accounts cannot be tracked).
+        xsearch_url=values.get("XSEARCH_URL", "").strip(),
+        # Longer than the sidecar's own queue wait (30 s) plus session timeout (180 s), so the
+        # Bot does not give up on a lookup the sidecar is still going to run.
+        xsearch_timeout_seconds=_bounded_int(values, "XSEARCH_TIMEOUT_SECONDS", 240, 10, 600),
+        # Each check of an X account is one Grok session on the subscription, so X sources are
+        # fetched on their own, slower clock than TRACKING_INTERVAL_MINUTES.
+        x_tracking_interval_minutes=_positive_int(values, "X_TRACKING_INTERVAL_MINUTES", 60),
+        # The model a member gets until they pick one, written like a stored choice
+        # ("<backend>:<model>|<effort>"). Empty = Codex at CODEX_REASONING_EFFORT, as before.
+        default_model=values.get("DEFAULT_MODEL", "").strip(),
+        # Where a turn goes when its backend cannot answer (quota, overload, login, outage): the
+        # entries after the member's backend, in order. Empty = the single CODEX_FALLBACK_MODEL.
+        model_chain=tuple(
+            part.strip() for part in values.get("MODEL_CHAIN", "").split(",") if part.strip()
+        ),
+        grok_dir=Path(
+            values.get("GROK_DIR", "").strip()
+            or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "grok")
+        ),
+        # Grok spends plan quota per session, and replayed history is part of every session.
+        grok_history_chars=_positive_int(values, "GROK_HISTORY_CHARS", 60_000),
+        # Chat and X lookups share Grok's weekly quota: past this share, chat skips Grok and the
+        # rest is left to X lookups. 100 = no reserve.
+        grok_chat_max_weekly_percent=_bounded_int(
+            values, "GROK_CHAT_MAX_WEEKLY_PERCENT", 80, 1, 100
+        ),
         # Registered data APIs the model may call with <api/> (config/apis.json baked in).
         apis_path=Path(values.get("APIS_FILE", "/opt/discord-codex/apis.json")),
         apis_max_chars=_positive_int(values, "APIS_MAX_CHARS", 60_000),  # schedules are long
@@ -273,6 +389,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         link_max_bytes=_positive_int(values, "LINK_MAX_BYTES", 2_000_000),
         link_max_chars=_positive_int(values, "LINK_MAX_CHARS", 20_000),
         link_timeout_seconds=_positive_int(values, "LINK_TIMEOUT_SECONDS", 15),
+        # Extra networks the public-address guard lets through, for a host whose DNS answers
+        # with fake IPs from a proxy range (198.18.0.0/15). Empty = public addresses only.
+        link_allow_nets=parse_allow_nets(values.get("LINK_ALLOW_NETS"), "LINK_ALLOW_NETS"),
         # Chromium fallback (bot-challenge / client-rendered pages) and on-demand page screenshots.
         link_render_timeout_seconds=_positive_int(values, "LINK_RENDER_TIMEOUT_SECONDS", 40),
         link_screenshot_max_height=_positive_int(values, "LINK_SCREENSHOT_MAX_HEIGHT", 4000),
@@ -295,11 +414,47 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Daily memory consolidation: every scope of every guild, gated on 5h quota remaining.
         consolidate_hour=_bounded_int(values, "CONSOLIDATE_HOUR", 2, 0, 23),
         consolidate_timezone=values.get("CONSOLIDATE_TIMEZONE", "").strip() or "Asia/Taipei",
+        # 0 = no gate: a spent subscription now falls back to CODEX_FALLBACK_MODEL instead of
+        # failing, so holding quota back from the nightly job only delays it for no gain. Raise
+        # it again to keep that much of the five-hour window for members' own questions.
         consolidate_min_remaining_percent=_bounded_int(
-            values, "CONSOLIDATE_MIN_REMAINING_PERCENT", 50, 0, 100
+            values, "CONSOLIDATE_MIN_REMAINING_PERCENT", 0, 0, 100
         ),
         consolidate_max_input_bytes=_positive_int(values, "CONSOLIDATE_MAX_INPUT_BYTES", 100_000),
         consolidate_schema_path=Path(
             values.get("CONSOLIDATE_SCHEMA_FILE", "/opt/discord-codex/consolidate-schema.json")
         ),
+        harvest_schema_path=Path(
+            values.get("HARVEST_SCHEMA_FILE", "/opt/discord-codex/harvest-schema.json")
+        ),
+        # Optional social-source tracking. Provider credentials stay in the Bot process; Codex
+        # child processes receive the allowlisted environment from codex._safe_environment.
+        tracking_enabled=_boolean(values, "TRACKING_ENABLED"),
+        tracking_db_path=Path(
+            values.get("TRACKING_DB_FILE", "").strip()
+            or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "tracking.sqlite3")
+        ),
+        tracking_interval_seconds=_positive_int(values, "TRACKING_INTERVAL_MINUTES", 15) * 60,
+        # 0 = no gate, for the same reason as CONSOLIDATE_MIN_REMAINING_PERCENT above.
+        tracking_min_remaining_percent=_bounded_int(
+            values, "TRACKING_MIN_REMAINING_PERCENT", 0, 0, 100
+        ),
+        # Fetching every source stays on TRACKING_INTERVAL_MINUTES because HTTP is free; this is
+        # how often a single watch may spend a classification, which is what costs quota. Each
+        # watch stores its own and members can change it in words.
+        tracking_classify_interval_minutes=_positive_int(
+            values, "TRACKING_CLASSIFY_INTERVAL_MINUTES", 60
+        ),
+        # How long the judgement history is kept. Items themselves are never deleted — their
+        # (source, external_id) row is what stops old content being seen as new again.
+        tracking_keep_days=_positive_int(values, "TRACKING_KEEP_DAYS", 90),
+        tracking_max_per_user=_positive_int(values, "TRACKING_MAX_PER_USER", 10),
+        tracking_schema_path=Path(
+            values.get("TRACKING_SCHEMA_FILE", "/opt/discord-codex/tracking-schema.json")
+        ),
+        tracking_reasoning_effort=_effort(values, "TRACKING_REASONING_EFFORT", "high"),
+        youtube_api_key=values.get("YOUTUBE_API_KEY", "").strip(),
+        twitch_client_id=values.get("TWITCH_CLIENT_ID", "").strip(),
+        twitch_client_secret=values.get("TWITCH_CLIENT_SECRET", "").strip(),
+        linkclean_admin_ids=parse_id_set(values.get("LINKCLEAN_ADMIN_IDS"), "LINKCLEAN_ADMIN_IDS"),
     )

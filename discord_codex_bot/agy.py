@@ -127,9 +127,13 @@ async def ensure_project(config: Config, workspace: Path) -> str:
         return existing
     code, _out, err = await _run(
         [
-            "--new-project", "-p", "回覆 OK",
-            "--model", config.agy_probe_model,
-            "--output-format", "json",
+            "--new-project",
+            "-p",
+            "回覆 OK",
+            "--model",
+            config.agy_probe_model,
+            "--output-format",
+            "json",
         ],
         "",
         workspace,
@@ -184,15 +188,12 @@ async def run_agy(
     model to open them with view_file; agy has no attach-image flag in print mode.
     """
     # Same rule as run_codex: a member with a personal style gets the persona-free workspace.
-    plain = plain or bool(personal_style)
     workspace = config.codex_workspace_plain if plain else config.codex_workspace
     project = await ensure_project(config, workspace)
     prompt = (
         user_prompt
         if raw
-        else _prompt(
-            user_prompt, memory, output_style(config), personal_style, links, help, files
-        )
+        else _prompt(user_prompt, memory, output_style(config), personal_style, links, help, files)
     )
     args = ["--project", project, "--model", model, "--output-format", "stream-json"]
     args += ["--input-format", "stream-json", "--print-timeout", f"{config.codex_timeout_seconds}s"]

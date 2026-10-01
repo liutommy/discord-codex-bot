@@ -10,12 +10,12 @@ from discord_codex_bot.sandbox import RunResult, extract_runs, render_result, ru
 
 def test_extract_runs_takes_multiline_code_verbatim_and_caps_the_count() -> None:
     answer = (
-        "<run lang=\"python\">\nimport math\nprint(1 < 2, math.pi)\n</run>"
-        "<run lang=\"sh\">echo hi</run><run lang=\"python\">print(3)</run>"
+        '<run lang="python">\nimport math\nprint(1 < 2, math.pi)\n</run>'
+        '<run lang="sh">echo hi</run><run lang="python">print(3)</run>'
     )
     runs = extract_runs(answer)
     assert runs == [("python", "import math\nprint(1 < 2, math.pi)"), ("sh", "echo hi")]
-    assert extract_runs("<run lang=\"ruby\">x</run>") == []
+    assert extract_runs('<run lang="ruby">x</run>') == []
 
 
 class Response:
@@ -48,9 +48,13 @@ class Session:
 
 
 async def test_run_code_posts_and_saves_returned_files(monkeypatch, config, tmp_path) -> None:
-    payload = {"exit": 0, "timed_out": False, "stdout": "42\n", "stderr": "",
-               "files": [{"name": "../a.png", "b64": "aGk="},
-                         {"name": "big.bin", "skipped": "9 bytes"}]}
+    payload = {
+        "exit": 0,
+        "timed_out": False,
+        "stdout": "42\n",
+        "stderr": "",
+        "files": [{"name": "../a.png", "b64": "aGk="}, {"name": "big.bin", "skipped": "9 bytes"}],
+    }
     session = Session(payload)
     monkeypatch.setattr(sandbox.aiohttp, "ClientSession", lambda **kw: session)
     result = await run_code("python", "print(42)", config, tmp_path / "out")
@@ -69,7 +73,7 @@ def test_render_result_shapes() -> None:
     ok = render_result("python", RunResult(0, False, "hi\n", "", [Path("/x/out.txt")], []))
     assert ok == (
         '<RESULT kind="run" lang="python" status="exit 0">\nhi\n'
-        '[檔案已回傳並附給成員：out.txt]\n</RESULT>'
+        "[檔案已回傳並附給成員：out.txt]\n</RESULT>"
     )
     late = render_result("sh", RunResult(-1, True, "", "boom", [], ["big（cap）"]))
     assert 'status="逾時被中止"' in late and "[stderr]\nboom" in late

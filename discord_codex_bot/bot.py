@@ -11,12 +11,13 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime as _dt
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 import discord
 from discord import app_commands
 
-from . import apis, gemini, sandbox, search
+from . import apis, embedfix, gemini, grok, instructions, sandbox, search, xsearch
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
@@ -31,35 +32,52 @@ from .attachments import (
 )
 from .backends import (
     AGY,
+    GROK,
     OPENROUTER,
     ORCAROUTER,
     ROUTER_BACKENDS,
+    BackendUnavailable,
     choices,
+    fallback_chain,
+    fallback_target,
+    grok_choice,
     parse_choice,
     resolve,
     router_choice,
+    run_batch,
     split_stored,
 )
 from .backup import backup_forever, export_memory_zip
-from .codex import CodexResult, codex_login_status, run_codex
+from .codex import (
+    CodexResult,
+    CodexServerOverloaded,
+    CodexUnauthorized,
+    CodexUsageLimit,
+    codex_login_status,
+    run_codex,
+)
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .harvest import harvest_forever
 from .help import render_guide, render_sheet
+from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, is_link_only, plan, spoilered
 from .links import (
     FETCH_TAG,
     Preview,
+    _guarded_session,
     extract_fetch_tags,
     fetch_or_render,
     find_urls,
     has_video,
     link_blocks,
+    strip_tracking,
     understand_video,
 )
 from .memory import (
     RECALL_TAG,
     SCOPES,
     SEARCH_TAG,
+    STYLE_MAX_CHARS,
     MemoryLimits,
     MemoryStore,
     PermanentMemory,
@@ -79,7 +97,33 @@ from .reminders import (
 )
 from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
 from .threads import ThreadStore
-from .ui import AnswerButton, AnswerView, CancelView, recover_exchange
+from .tracking import (
+    INTEREST_POLICY,
+    OutboxMessage,
+    ProviderError,
+    Source,
+    TrackerStore,
+    TwitchFetcher,
+    WebFetcher,
+    XFetcher,
+    YouTubeFetcher,
+    extract_track_tags,
+    parse_twitch_locator,
+    parse_web_locator,
+    parse_x_locator,
+    parse_youtube_locator,
+    render_watches,
+    tracking_loop,
+)
+from .ui import (
+    AnswerButton,
+    AnswerView,
+    CancelView,
+    InstructionsModal,
+    StyleModal,
+    recover_exchange,
+)
+from .usage import probe_rate_limits
 
 LOGGER = logging.getLogger(__name__)
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
@@ -89,15 +133,43 @@ FAILURE_MESSAGE = (
 
 
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
+LINKCLEAN_CHOICES = [app_commands.Choice(name="查詢", value="status")] + [
+    app_commands.Choice(name=label, value=value) for value, label in MODES.items()
+]
+INSTRUCTION_CHOICES = [
+    app_commands.Choice(name=label, value=value)
+    for value, label in (
+        ("status", "查詢"),
+        ("upload", "上傳"),
+        ("reset_persona", "還原人設為預設"),
+        ("reset_style", "還原輸出風格為預設"),
+    )
+]
+PERSONA_CHOICES = [
+    app_commands.Choice(name=label, value=value)
+    for value, label in (("keep", "保留人設"), ("off", "關閉人設"))
+]
+EMBEDFIX_CHOICES = [
+    app_commands.Choice(name=label, value=value)
+    for value, label in (("status", "查詢"), ("on", "開啟"), ("off", "關閉"))
+]
 # Discord allows 25 choices per option; Codex + 14 agy slugs = 15. Built with the default
 # Codex model name, which is also what load_config() falls back to.
 EFFORT_CHOICES = [app_commands.Choice(name=v, value=k) for k, v in REASONING_EFFORTS.items()]
 VIDEO_INTERIM = "🎬 影片較長，前輩正在看，稍等…"
 THINKING = "🤔 思考中…"
 STREAM_EDIT_SECONDS = 1.5  # Discord edits per placeholder while an answer streams in
+# Why the last request fell back, for /status only. type() match, not isinstance: these are
+# sibling subclasses, and anything not listed (CodexServiceError, future kinds) reads as generic.
+_FALLBACK_LABEL = {
+    CodexUsageLimit: "額度用完",
+    CodexServerOverloaded: "模型滿載",
+    CodexUnauthorized: "登入失效",
+}
 STREAM_SHOW_CHARS = 1900
 CANCELLED = "⛔ 已取消。"
 PROVIDER_CHOICES = [
+    app_commands.Choice(name="Grok（xAI）", value=GROK),
     app_commands.Choice(name="Codex", value="codex"),
     app_commands.Choice(name="Antigravity（Gemini／Claude）", value=AGY),
     app_commands.Choice(name="OpenRouter（免費模型）", value=OPENROUTER),
@@ -106,13 +178,75 @@ PROVIDER_CHOICES = [
 FREE_MODEL_NOTE = "免費模型可能隨時不穩或下架，失敗時請換一個。"
 
 
+X_ITEM_KINDS = ("post", "reply", "repost")  # what XFetcher produces
+
+
+def tracking_provider(locator: str) -> str:
+    """Return the provider for a supported locator without doing network I/O. The specific
+    providers are tried first; anything else that is a public page is tracked as a page."""
+    for provider, parser in (
+        ("youtube", parse_youtube_locator),
+        ("twitch", parse_twitch_locator),
+        ("x", parse_x_locator),
+        ("web", parse_web_locator),
+    ):
+        try:
+            parser(locator)
+        except ValueError:
+            continue
+        return provider
+    raise ValueError("追蹤需要 YouTube 頻道、Twitch 頻道、X 帳號網址，或任何 http(s) 網頁網址。")
+
+
+def tracking_message(message: OutboxMessage, source_label: str = "") -> str:
+    """One notification in the Bot's own voice: who, what, and the link. Category, confidence
+    and reasoning are log material — read on request, never pushed at the member. Social text
+    is escaped before Discord sees it."""
+    item, decision, watch = message.item, message.decision, message.watch
+    # Titles are other people's text (an X post's is its whole first line): no mentions, and no
+    # markdown either, so a masked link cannot pose as something else.
+    title = discord.utils.escape_markdown(discord.utils.escape_mentions(item.title.strip()))
+    title = title[:300] or "（無標題）"
+    # What the model wrote, having read the content, the policy and the source. The fallback is
+    # only for a decision made before the model was asked for wording.
+    said = discord.utils.escape_mentions(decision.message.strip())[:600]
+    if not said:
+        who = discord.utils.escape_mentions(source_label.strip())[:80] or "追蹤的頻道"
+        what = discord.utils.escape_mentions(decision.category.strip())[:60] or "新內容"
+        said = f"前輩發現{who}有{what}了"
+    # The owner always; anyone else only because the member named them when asking.
+    targets = [uid for uid in (watch.user_id, *watch.mention_ids) if uid]
+    mention = " ".join(f"<@{uid}>" for uid in targets)
+    body = f"{said}\n**{title}**\n{item.url}"
+    if item.kind in X_ITEM_KINDS and urlsplit(item.url).hostname == "x.com":
+        # Read out of X search by a model (xsearch sidecar), not from an API: say so.
+        body += "\n（X 搜尋取得，作者與內容未經驗證）"
+    return truncate(f"{mention} {body}" if mention else body, 1900)
+
+
+def render_decision_log(rows: list[dict]) -> str:
+    """The judgement history for one member, shown only to them. This is the log behind the
+    notifications: every item that was looked at, and why it was or was not worth interrupting."""
+    if not rows:
+        return "還沒有判斷紀錄。追蹤只看建立之後的新內容，所以剛建立時這裡是空的。"
+    lines = ["你的追蹤判斷紀錄（最新在上，只有你看得到）："]
+    for row in rows:
+        mark = "🔔 提醒了" if row["notify"] else "🔇 沒提醒"
+        when = str(row["at"])[:16].replace("T", " ")
+        title = discord.utils.escape_mentions(str(row["title"]))[:120]
+        reason = discord.utils.escape_mentions(str(row["reason"]))[:200] or "未提供理由"
+        source = discord.utils.escape_mentions(str(row["source"]))[:60]
+        lines.append(f"{mark} · {when} · {source}\n　{title}\n　理由：{reason}\n　{row['url']}")
+    return "\n".join(lines)
+
+
 def instructions_version(config: Config) -> str:
     """Fingerprint of the instruction files Codex bakes into a thread at its start."""
     digest = hashlib.sha256()
     for path in (
         config.codex_workspace / "AGENTS.md",
         config.codex_workspace_plain / "AGENTS.md",
-        config.output_style_path,
+        instructions.style_path(config),
     ):
         try:
             digest.update(path.read_bytes())
@@ -125,6 +259,12 @@ def instructions_version(config: Config) -> str:
 def strip_mention(content: str, bot_id: int) -> str:
     """Remove every <@id> / <@!id> mention of the bot so only the question remains."""
     return re.sub(rf"<@!?{bot_id}>", "", content).strip()
+
+
+def mentions_explicitly(content: str, bot_id: int) -> bool:
+    """An @ typed into the text -- as opposed to the ping Discord adds to a reply, which also
+    lands in `message.mentions` but says nothing about who the member is talking to."""
+    return re.search(rf"<@!?{bot_id}>", content) is not None
 
 
 def with_quoted_message(prompt: str, author: str, content: str, image_count: int) -> str:
@@ -149,9 +289,51 @@ def request_only(answer: str) -> bool:
     return bool(answer.strip()) and not rest.strip()
 
 
+# A control tag the model made up. Every real one is handled and stripped before this runs, so
+# whatever is still here is an operation the Bot cannot perform — and the sentence above it has
+# already told the member it was performed. The underscore is what makes this safe to match on:
+# the Bot's own vocabulary uses it (track_every, cancel_reminder, cancel_track) and no HTML or
+# XML element a member might be shown does, so quoted markup is never mistaken for an order.
+INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{0,200}")*\s*/?>')
+
+
+def strip_invented_tags(text: str) -> tuple[str, list[str]]:
+    """(text with the leftover tags removed, the names that were in it).
+
+    2026-09-19: asked in the channel to stop a watch, the model wrote "星街的追蹤取消了" and
+    `<cancel_track id="1"/>`. Cancelling was slash-only, so nothing happened, the raw tag was
+    posted, and the watch kept notifying. `<cancel_track>` is real now, but the next invented
+    tag is a matter of time; what must not survive is a claim the Bot never carried out.
+    Stripping alone would make that worse — the visible tag is the only reason this was caught
+    at all — so the member gets told, and the log gets the name to fix next.
+    """
+    names = list(dict.fromkeys(INVENTED_TAG.findall(text)))
+    return (INVENTED_TAG.sub("", text).strip(), names) if names else (text, [])
+
+
 def _for_other(item: dict) -> bool:
     """A reminder set for someone other than the member who set it."""
     return item.get("target_id", item["user_id"]) != item["user_id"]
+
+
+def _reply_reference(message: discord.Message) -> discord.MessageReference | None:
+    """The reference a repost of `message` must carry to stay a reply to the same message.
+    Replacing a link-only reply would otherwise drop it out of its conversation, which is why
+    replies used to be left alone entirely. A forward is not a reply and carries content the
+    repost cannot reproduce, so those still are. `fail_if_not_exists=False`: a replied-to
+    message deleted in the meantime costs the reply arrow, not the repost."""
+    reference = message.reference
+    if reference is None or reference.message_id is None:
+        return None
+    kind = getattr(reference, "type", None)
+    if kind is not None and kind != discord.MessageReferenceType.default:
+        return None
+    return discord.MessageReference(
+        message_id=reference.message_id,
+        channel_id=reference.channel_id,
+        guild_id=reference.guild_id,
+        fail_if_not_exists=False,
+    )
 
 
 def previews_from(messages) -> dict[str, Preview]:
@@ -177,6 +359,18 @@ async def _model_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     provider = getattr(interaction.namespace, "provider", None) or "codex"
     return await interaction.client.model_options(provider, current)
+
+
+async def _memory_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    client = interaction.client
+    if client._access(interaction.guild_id, interaction.channel, interaction.channel_id):
+        return []
+    scope = getattr(interaction.namespace, "scope", None)
+    if scope not in SCOPES:
+        return []
+    return client.memory_options(interaction.guild_id, interaction.user.id, scope, current)
 
 
 class DiscordCodexClient(discord.Client):
@@ -211,12 +405,28 @@ class DiscordCodexClient(discord.Client):
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.alerts = Alerter(self, config)
+        # The most recent request answered on the spare backend: (when, why, which model).
+        # Shown by /status only; the answer itself carries no notice.
+        self._last_fallback: tuple[float, BackendUnavailable, str] | None = None
+        # Grok sessions the sidecar refused, for the circuit breaker in _grok_usable.
+        self._grok_refusals: list[float] = []
+        self._grok_off_until = 0.0
         self._emoji_cache: dict[int, dict[str, discord.PartialEmoji]] = {}
         self.reminders = ReminderStore(config.codex_home / "reminders.json")
         self.apis = apis.load_registry(config.apis_path)
         self.openrouter = Catalog(config)
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
+        self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
+        self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
+        self.youtube_tracker = YouTubeFetcher(config.youtube_api_key)
+        self.twitch_tracker = TwitchFetcher(config.twitch_client_id, config.twitch_client_secret)
+        self.web_tracker = WebFetcher(self._read_page)
+        self.x_tracker = XFetcher(
+            lambda handle: xsearch.lookup_user(config, handle),
+            lambda handle, since_id: xsearch.recent_posts(config, handle, since_id),
+            config.x_tracking_interval_minutes,
+        )
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-remember",
@@ -227,7 +437,7 @@ class DiscordCodexClient(discord.Client):
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-forget",
-                description=f"刪除一則記憶（用 /{prefix}-memory 看名稱）",
+                description="刪除一則記憶（從名稱選單選取；取消追蹤用 -track）",
                 callback=self.forget_command,
             )
         )
@@ -264,6 +474,13 @@ class DiscordCodexClient(discord.Client):
                 name=f"{prefix}-help",
                 description="所有指令的說明與範例用法",
                 callback=self.help_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-persona",
+                description="管理員：查詢／上傳／還原全伺服器共用的人設與預設輸出風格",
+                callback=self.persona_command,
             )
         )
         self.tree.add_command(
@@ -308,6 +525,27 @@ class DiscordCodexClient(discord.Client):
                 callback=self.stop_command,
             )
         )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-track",
+                description="追蹤 YouTube／Twitch；留空列出，或用編號取消／切換正式提醒",
+                callback=self.track_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-linkclean",
+                description="本伺服器的連結洗參數開關（只有伺服器的管理層）",
+                callback=self.linkclean_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-embedfix",
+                description="本伺服器的預覽修正開關：社群貼文連結換成 Discord 能預覽的版本",
+                callback=self.embedfix_command,
+            )
+        )
 
     async def setup_hook(self) -> None:
         self.add_dynamic_items(AnswerButton)  # answer buttons keep working across restarts
@@ -325,6 +563,8 @@ class DiscordCodexClient(discord.Client):
                 self.threads, self.memory, self.config, self.queue.run, self._harvest_wakeup
             )
         )
+        if self.tracker is not None:
+            self._tracking_loop = self.loop.create_task(self._tracking_forever())
         # A guild that has not invited the bot yet (e.g. production before rollout) must not take
         # the whole client down; the runtime access check still rejects it until it is synced.
         for guild_id in self.config.allowed_guild_ids:
@@ -356,27 +596,132 @@ class DiscordCodexClient(discord.Client):
         LOGGER.info("Discord bot ready as %s", self.user)
         await self.warm_emojis()
         LOGGER.info("%s", await codex_login_status(self.config))
+        if grok.enabled(self.config):  # the model list /model offers and effort mapping uses
+            # never hold up startup on the sidecar; kept so the task is not garbage-collected
+            self._grok_models_task = asyncio.create_task(self._load_grok_models())
+        if self.config.default_model.startswith(f"{GROK}:") and not self.config.model_chain:
+            LOGGER.warning(
+                "DEFAULT_MODEL is Grok but MODEL_CHAIN is empty: turns Grok cannot take (images, "
+                "past the weekly reserve, sidecar down) will fail instead of falling back"
+            )
         LOGGER.info("Alerts go to user %s", await self.alerts.resolve_owner() or "(none)")
         if not getattr(self, "_login_watch", None):
-            self._login_watch = asyncio.create_task(login_watch(
-                self.alerts, self.config, codex_login_status,
-                self.config.alert_login_check_minutes * 60,
-            ))
+            self._login_watch = asyncio.create_task(
+                login_watch(
+                    self.alerts,
+                    self.config,
+                    codex_login_status,
+                    self.config.alert_login_check_minutes * 60,
+                )
+            )
         try:
             await announce_once(self, self.config)
         except Exception:
             LOGGER.exception("Announcement pass failed")
 
+    async def _tracking_forever(self) -> None:
+        await self.wait_until_ready()
+        if self.tracker is None:
+            return
+        await tracking_loop(
+            self.tracker,
+            self._fetch_tracking_source,
+            self._classify_tracking,
+            self._deliver_tracking,
+            self.config.tracking_interval_seconds,
+            self.config.tracking_keep_days,
+        )
+
+    async def _read_page(self, url: str) -> str:
+        """One page as text, with its links kept inline. No out_dir: a background poll has
+        nobody to show a screenshot to, and nothing to clean up afterwards."""
+        text, _shots = await fetch_or_render(url, self.config, None, False)
+        return text
+
+    async def _fetch_tracking_source(self, source: Source):
+        fetcher = {
+            "youtube": self.youtube_tracker,
+            "twitch": self.twitch_tracker,
+            "x": self.x_tracker,
+            "web": self.web_tracker,
+        }.get(source.provider)
+        if fetcher is None:
+            raise ProviderError(f"unsupported provider: {source.provider}")
+        return await fetcher.fetch(source)
+
+    async def _classify_tracking(self, prompt: str) -> str:
+        if self.tracker is None:
+            raise RuntimeError("tracking is disabled")
+
+        async def classify() -> str:
+            gate = self.config.tracking_min_remaining_percent
+            if gate > 0:
+                # Only worth probing when a gate is actually set: with a spare backend a spent
+                # subscription is survivable, so "quota unknown" no longer has to stop the pass.
+                limits = await probe_rate_limits(self.config)
+                if limits is None:
+                    raise RuntimeError("Codex usage is unknown; tracking classification deferred")
+                remaining = min(
+                    100.0 - limits.primary_used_percent,
+                    100.0 - limits.secondary_used_percent,
+                )
+                if remaining < gate:
+                    raise RuntimeError("Codex remaining quota is below the tracking gate")
+            return await run_batch(
+                prompt,
+                self.config,
+                schema=self.config.tracking_schema_path,
+                effort=self.config.tracking_reasoning_effort,
+                isolated=True,
+            )
+
+        return await self.queue.run(classify)
+
+    async def _deliver_tracking(self, message: OutboxMessage) -> None:
+        channel = self.get_channel(message.watch.channel_id) or await self.fetch_channel(
+            message.watch.channel_id
+        )
+        channel_guild = getattr(getattr(channel, "guild", None), "id", None)
+        reason = self._access(message.watch.guild_id, channel, message.watch.channel_id)
+        if channel_guild != message.watch.guild_id or reason:
+            raise RuntimeError("tracking destination is outside the configured allowlist")
+        mentioned = [message.watch.user_id, *message.watch.mention_ids]
+        allowed_users = [discord.Object(id=uid) for uid in mentioned if uid] or False
+        source = self.tracker.get_source(message.watch.source_id) if self.tracker else None
+        label = ""
+        if source is not None:
+            label = str(
+                source.state.get("title") or source.state.get("login") or source.external_id
+            )
+        await channel.send(
+            tracking_message(message, label),
+            allowed_mentions=discord.AllowedMentions(
+                users=allowed_users, everyone=False, roles=False, replied_user=False
+            ),
+        )
+
     # ----- shared pipeline -------------------------------------------------------------------
 
     def _access(self, guild_id: int | None, channel: object, channel_id: int | None) -> str:
         """Empty string when allowed, otherwise the user-facing rejection reason."""
+        parent_id = getattr(channel, "parent_id", None)
         decision = check_access(
             guild_id=guild_id,
             channel_id=channel_id,
-            parent_channel_id=getattr(channel, "parent_id", None),
+            parent_channel_id=parent_id,
             config=self.config,
         )
+        if not decision.allowed:
+            # Every command funnels through here, so this is the only place a refusal can be
+            # recorded. Without it a mistyped allowlist turns the Bot off for a whole guild and
+            # leaves nothing in the host log to find it by.
+            LOGGER.info(
+                "Access refused guild=%s channel=%s parent=%s: %s",
+                guild_id,
+                channel_id,
+                parent_id,
+                decision.reason,
+            )
         return "" if decision.allowed else decision.reason
 
     def _validate(self, prompt: str, attachments: Sequence[discord.Attachment]) -> str:
@@ -408,9 +753,7 @@ class DiscordCodexClient(discord.Client):
 
     def help_guide(self) -> str:
         """The detailed member guide behind /<prefix>-help (same source as the model's sheet)."""
-        return render_guide(
-            self.config.command_prefix, [row[0] for row in self._command_rows()]
-        )
+        return render_guide(self.config.command_prefix, [row[0] for row in self._command_rows()])
 
     async def _understand_videos(
         self,
@@ -427,11 +770,14 @@ class DiscordCodexClient(discord.Client):
 
         async def describe() -> list[str]:
             done = await asyncio.gather(
-                *(understand_video(u, self.config, out_dir / f"vid{i}")
-                  for i, u in enumerate(targets))
+                *(
+                    understand_video(u, self.config, out_dir / f"vid{i}")
+                    for i, u in enumerate(targets)
+                )
             )
-            return [f'<VIDEO url="{u}">\n{d}\n</VIDEO>' for u, d in zip(targets, done, strict=True)
-                    if d]
+            return [
+                f'<VIDEO url="{u}">\n{d}\n</VIDEO>' for u, d in zip(targets, done, strict=True) if d
+            ]
 
         task = asyncio.create_task(describe())
         try:
@@ -459,25 +805,86 @@ class DiscordCodexClient(discord.Client):
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
         `on_delta` receives the accumulated answer while a backend streams it (agy, routers)."""
-        stored = self.memory.get_model(guild_id, user_id)
-        choice = parse_choice(stored, self.config.codex_model)
+        stored = self._stored(guild_id, user_id)
+        choice = self._choice(stored)
         target = resolve(
             choice, effort or split_stored(stored)[1] or self.config.codex_reasoning_effort
         )
+        spares = fallback_chain(
+            choice,
+            self.config.model_chain,
+            self.config.codex_model,
+            self.config.codex_reasoning_effort,
+            self.config.codex_fallback_model,
+        )
+        if (
+            target.backend == GROK
+            and grok.cached_models()
+            and grok.cached_model(target.model) is None
+        ):
+            # A stored Grok model the plan no longer offers: the default Grok model, not an error
+            # on every message until the member notices and runs /model.
+            fallback = self._choice(self.config.default_model)
+            if fallback.backend == GROK and grok.cached_model(fallback.family) is not None:
+                target = resolve(fallback, target.effort)
+        has_images = any((a.content_type or "").startswith("image/") for a in attachments)
+        if target.backend == GROK and spares and not await self._grok_usable(has_images):
+            # Straight to the next backend: an image, the reserve for X lookups, or the breaker.
+            LOGGER.info("Skipping Grok for this turn; answering with %s", spares[0].model)
+            target, spares = spares[0], spares[1:]
+        spares = [spare for spare in spares if spare.backend != GROK]  # never fall *into* Grok
+        fell_back = False
 
-        async def turn(text: str, **kw) -> CodexResult:
-            kw.setdefault("on_delta", on_delta)
-            if target.backend == AGY:
+        async def run_on(via, text: str, **kw) -> CodexResult:
+            if via.backend == GROK:
+                return await grok.run_grok(text, self.config, via.model, effort=via.effort, **kw)
+            if via.backend == AGY:
                 kw.pop("effort", None)
-                return await run_agy(text, self.config, target.model, **kw)
-            if target.backend in ROUTER_BACKENDS:
-                catalog = self.catalogs[target.backend]
+                return await run_agy(text, self.config, via.model, **kw)
+            if via.backend in ROUTER_BACKENDS:
+                catalog = self.catalogs[via.backend]
                 await catalog.free_models()  # image / effort capability lookup
                 return await run_router(
-                    ROUTERS[target.backend], text, self.config, target.model,
-                    effort=target.effort, catalog=catalog, **kw,
+                    ROUTERS[via.backend],
+                    text,
+                    self.config,
+                    via.model,
+                    effort=via.effort,
+                    catalog=catalog,
+                    **kw,
                 )
-            return await run_codex(text, self.config, effort=target.effort, **kw)
+            return await run_codex(text, self.config, effort=via.effort, **kw)
+
+        async def turn(text: str, **kw) -> CodexResult:
+            nonlocal target, fell_back, spares
+            kw.setdefault("on_delta", on_delta)
+            while True:
+                try:
+                    return await run_on(target, text, **kw)
+                except BackendUnavailable as unavailable:
+                    if not spares:
+                        raise
+                    # Answer on the next backend for the rest of this request. Switching
+                    # mid-request keeps the recall loop's resume ids on one backend, since a
+                    # thread id means nothing to another backend.
+                    LOGGER.warning(
+                        "%s unavailable (%s: %s); answering with %s",
+                        target.backend,
+                        type(unavailable).__name__,
+                        unavailable,
+                        spares[0].model,
+                    )
+                    target, spares, fell_back = spares[0], spares[1:], True
+                    self._last_fallback = (time.time(), unavailable, target.model)
+                    if isinstance(unavailable, CodexUnauthorized):
+                        # Quota comes back by itself; a lost login does not. Tell the operator
+                        # now rather than let the spare hide it until the next login check.
+                        await self.alerts.login_lost("Codex", str(unavailable))
+                    elif isinstance(unavailable, grok.GrokLogin):
+                        await self.alerts.login_lost("Grok", str(unavailable))
+                    elif isinstance(unavailable, grok.GrokRefused):
+                        await self._grok_refused(unavailable)
+                    kw.pop("resume", None)
 
         images: list[Path] = []
         self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
@@ -494,24 +901,25 @@ class DiscordCodexClient(discord.Client):
                     images.append(await download_attachment(attachment, suffix, self.config))
                 elif kind == "document":
                     saved = await download_attachment(attachment, suffix, self.config, "doc")
-                    text = await asyncio.to_thread(
-                        extract_text, saved, self.config.link_max_chars
-                    )
+                    text = await asyncio.to_thread(extract_text, saved, self.config.link_max_chars)
                     documents.append(f'<FILE name="{attachment.filename}">\n{text}\n</FILE>')
                     remove_request_dir(saved)
             files = "\n\n".join(documents)
             permanent = self.permanent.index_text()
             pending = render_pending(self.reminders.for_user(user_id))
+            tracked = self._tracked_lines(user_id)
             memory = "\n\n".join(
                 section
                 for section in (
                     f"[永久記憶索引]\n{permanent}" if permanent else "",
                     self.memory.render(guild_id, user_id),
                     f"[待辦提醒]\n{pending}" if pending else "",
+                    f"[社群追蹤]\n{tracked}" if tracked else "",
                 )
                 if section
             )
             style = self.memory.get_style(guild_id, user_id)
+            persona_off = self.memory.get_persona_off(guild_id, user_id)
             found = find_urls(prompt, self.config.link_max_urls)
             links, shots = await link_blocks(found, self.config, link_dir, previews)
             images.extend(shots)
@@ -524,6 +932,7 @@ class DiscordCodexClient(discord.Client):
                     resume=resume,
                     memory=memory,
                     personal_style=style,
+                    plain=persona_off,
                     links=links,
                     help=self.help_sheet(),
                     files=files,
@@ -565,9 +974,7 @@ class DiscordCodexClient(discord.Client):
                 extra: list[Path] = []
                 for i, (lang, code) in enumerate(runs):
                     try:
-                        ran = await sandbox.run_code(
-                            lang, code, self.config, link_dir / f"run{i}"
-                        )
+                        ran = await sandbox.run_code(lang, code, self.config, link_dir / f"run{i}")
                     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
                         ran = sandbox.RunResult(
                             -1, False, "", f"沙盒無法使用：{type(error).__name__}"
@@ -591,12 +998,27 @@ class DiscordCodexClient(discord.Client):
                         resume=thread,
                         raw=True,
                         personal_style=style,
+                        plain=persona_off,
                     )
                 )
             text, facts = extract_memory_tags(result.text)
             for scope, name, fact in facts:
                 self.memory.add(scope, guild_id, user_id, name, fact)
             text = self._apply_reminder_tags(text, guild_id, channel_id, user_id)
+            text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id)
+            text, invented = strip_invented_tags(text)
+            if invented:
+                LOGGER.warning(
+                    "Invented tags guild=%s channel=%s user=%s tags=%s",
+                    guild_id,
+                    channel_id,
+                    user_id,
+                    ",".join(invented),
+                )
+                text += (
+                    "\n\n（⚠️ 上面說的操作其實沒有執行——我用了不存在的指令。"
+                    "請直接用斜線指令，或再說一次。）"
+                )
             await self.alerts.record_success(target.backend)
             generated_dir = result.generated_dir
             outgoing = tuple(result.images)  # not `images`: that list is cleaned up in finally
@@ -604,16 +1026,17 @@ class DiscordCodexClient(discord.Client):
                 if generated_dir is None:
                     generated_dir = deliver_dir  # the caller removes it after sending
                 else:
-                    delivered = [
-                        self._keep_for_member(path, generated_dir) for path in delivered
-                    ]
+                    delivered = [self._keep_for_member(path, generated_dir) for path in delivered]
                 outgoing += tuple(delivered)
+            # A fallback is not announced in the answer (owner ruling 2026-09-14: the member
+            # gains nothing from it; /status shows the last one). The thread id is dropped so
+            # nothing tries to resume it back on Codex.
             return CodexResult(
                 truncate(text, self.config.max_response_chars),
                 outgoing,
                 generated_dir,
-                result.thread_id,
-                result.resumed,
+                "" if fell_back else result.thread_id,
+                result.resumed and not fell_back,
             )
         except QueueFullError:
             return CodexResult(QUEUE_FULL_MESSAGE)
@@ -645,6 +1068,122 @@ class DiscordCodexClient(discord.Client):
         if kind == "search":
             return self.memory.search(scope, guild_id, user_id, target)
         return self.memory.recall(scope, guild_id, user_id, target, offset, lines)
+
+    async def _linkclean(self, message: discord.Message) -> None:
+        """Strip tracking params from the links a member just shared, per the guild mode.
+        `all`: a links-only message is replaced (original deleted, clean links reposted with
+        the author @'d); anything else keeps its text and only the changed links are appended
+        below; a links-only message the Bot cannot delete degrades to the append. `links`:
+        only the replacement, never an append -- a message with text, or one the Bot cannot
+        replace, is left exactly as posted. `off`: nothing. The caller contains failures so
+        mention handling continues."""
+        guild = message.guild
+        if guild is None:
+            return
+        # Same access rules as every other surface, checked directly (not via _access) because
+        # _access logs a refusal per message and this one runs on all of them.
+        if not check_access(
+            guild_id=guild.id,
+            channel_id=message.channel.id,
+            parent_channel_id=getattr(message.channel, "parent_id", None),
+            config=self.config,
+        ).allowed:
+            return
+        mode = self.linkclean.mode(guild.id)
+        if mode == "off":
+            return
+        raw = find_urls(message.content, MAX_URLS, clean=False)
+        clean = [strip_tracking(url) for url in raw]
+        spoil = [False] * len(raw)
+        if self.linkclean.embedfix(guild.id):
+            clean, spoil = await self._embedfix(clean)
+        outcome = plan(message.content, raw, clean)
+        if outcome is None:
+            return
+        _, _, links_only = outcome
+        if mode == "links" and not links_only:
+            return
+        member = guild.me
+        replacement = message.content
+        for original, cleaned, spoiler in zip(raw, clean, spoil, strict=True):
+            # The member's own ||bars|| stay in the text; a rating-forced spoiler adds them.
+            wrapped = deliver(cleaned, spoiler and not spoilered(message.content, original))
+            replacement = replacement.replace(original, wrapped)
+        replacement = f"<@{message.author.id}>\n{replacement}"
+        reply_to = _reply_reference(message)
+        can_replace = (
+            links_only
+            and member is not None
+            and message.channel.permissions_for(member).manage_messages
+            and not message.attachments
+            and not message.stickers
+            and (message.reference is None or reply_to is not None)
+            and message.thread is None
+            and len(replacement) <= 2000
+        )
+        if can_replace:
+            # Never remove the only copy: delivery must succeed before deletion.
+            posted = await message.channel.send(
+                replacement,
+                allowed_mentions=discord.AllowedMentions(
+                    users=[message.author], everyone=False, roles=False, replied_user=True
+                ),
+                **({"reference": reply_to} if reply_to is not None else {}),
+            )
+            self._remember_repost(posted)
+            await message.delete()
+        elif mode == "links":
+            return  # nothing to replace means nothing to do: this mode never appends
+        else:
+            # Individual URLs keep each send within Discord's limit. Oversized URLs remain
+            # in the untouched original instead of being truncated into broken links.
+            for original, cleaned, spoiler in zip(raw, clean, spoil, strict=True):
+                if cleaned == original:
+                    continue
+                text = deliver(cleaned, spoiler or spoilered(message.content, original))
+                if len(text) <= 2000:
+                    posted = await message.channel.send(
+                        text, allowed_mentions=discord.AllowedMentions.none()
+                    )
+                    self._remember_repost(posted)
+
+    def _remember_repost(self, posted: object) -> None:
+        message_id = getattr(posted, "id", None)
+        if isinstance(message_id, int):
+            self.linkclean.remember_repost(message_id)
+
+    async def _replies_to_repost(self, message: discord.Message) -> bool:
+        """Whether `message` replies to one of the Bot's cleaned-link reposts: by id for those
+        posted since the table existed, else by shape (the Bot's own message that is nothing
+        but an optional leading @author line and links) for the ones posted before."""
+        replied_to = message.reference.message_id if message.reference else None
+        if replied_to is None:
+            return False
+        if self.linkclean.is_repost(replied_to):
+            return True
+        quoted = await self._referenced(message)
+        if quoted is None or quoted.author != self.user:
+            return False
+        body = re.sub(r"^<@!?\d+>\n", "", quoted.content or "")
+        urls = find_urls(body, MAX_URLS, clean=False)
+        return bool(urls) and is_link_only(body, urls)
+
+    async def _embedfix(self, urls: list[str]) -> tuple[list[str], list[bool]]:
+        """Each link in its embed-fixer proxy form when a proxy page verifiably carries
+        media for Discord's crawler (embedfix.pick), else as given; plus, per link, whether
+        it must be delivered spoilered (an age-restricted work)."""
+        if not any(embedfix.candidates(url) for url in urls):
+            return urls, [False] * len(urls)
+        async with _guarded_session(self.config) as session:
+
+            async def fetch(url: str, headers: dict[str, str]) -> str | None:
+                return await embedfix.fetch_text(session, url, headers)
+
+            fixes = [await embedfix.pick(url, fetch) for url in urls]
+        return (
+            [fix.url if fix else url for fix, url in zip(fixes, urls, strict=True)],
+            [bool(fix and fix.spoiler) for fix in fixes],
+        )
 
     async def _previews(
         self, message: discord.Message, quoted: discord.Message | None
@@ -682,7 +1221,7 @@ class DiscordCodexClient(discord.Client):
         return REASONING_EFFORTS.get(target.effort, target.effort) if target.effort else "固定"
 
     def _describe(self, value: str, level: str) -> str:
-        chosen = parse_choice(value, self.config.codex_model)
+        chosen = self._choice(value)
         target = resolve(chosen, level or self.config.codex_reasoning_effort)
         text = f"{chosen.label} · {self._effort_label(target)} → `{target.model}`"
         if chosen.backend in ROUTER_BACKENDS:
@@ -691,8 +1230,52 @@ class DiscordCodexClient(discord.Client):
             text += f"（免費，{sees}圖片）\n{FREE_MODEL_NOTE}"
         return text
 
+    def _stored(self, guild_id: int | None, user_id: int) -> str:
+        """The member's stored "<backend>:<model>|<effort>", or DEFAULT_MODEL when they have
+        none: what a member who never ran /model gets is a setting, not a code path."""
+        return self.memory.get_model(guild_id, user_id) or self.config.default_model
+
+    def _choice(self, stored: str):
+        return parse_choice(stored, self.config.codex_model, self.config.default_model)
+
     def _model(self, guild_id: int | None, user_id: int) -> str:
-        return parse_choice(self.memory.get_model(guild_id, user_id), self.config.codex_model).value
+        return self._choice(self._stored(guild_id, user_id)).value
+
+    def _member_effort(self, guild_id: int | None, user_id: int) -> str:
+        stored = self._stored(guild_id, user_id)
+        return split_stored(stored)[1] or self.config.codex_reasoning_effort
+
+    async def _load_grok_models(self) -> None:
+        catalog = await grok.models(self.config)
+        LOGGER.info("Grok models: %s", ", ".join(m.id for m in catalog) or "(unavailable)")
+
+    async def _grok_usable(self, images: bool) -> bool:
+        """Whether a turn may go to Grok right now. Not when it carries images (Grok's headless
+        mode cannot read them), not past the weekly share reserved for X lookups, and not while
+        the circuit breaker is open after repeated refused sessions."""
+        if images or not grok.enabled(self.config) or time.time() < self._grok_off_until:
+            return False
+        reading = await grok.usage(self.config)
+        percent = (reading or {}).get("weekly_percent")
+        return not (
+            isinstance(percent, (int, float))
+            and percent >= self.config.grok_chat_max_weekly_percent
+        )
+
+    async def _grok_refused(self, error: Exception) -> None:
+        """A refused session is either an injection that got a tool call through, or Grok's
+        output changed under the sidecar. One alert, and after three in ten minutes Grok is
+        switched off for an hour so a format change does not mean a refusal per message."""
+        now = time.time()
+        self._grok_refusals = [t for t in self._grok_refusals if now - t < 600] + [now]
+        if len(self._grok_refusals) >= 3 and now >= self._grok_off_until:
+            self._grok_off_until = now + 3600
+            LOGGER.error("Grok refused 3 sessions in 10 minutes; off for an hour")
+            await self.alerts.record_failure(
+                GROK, "Grok 的工作階段連續被安全檢查拒絕，已暫停一小時（xsearch log 有 REFUSED）"
+            )
+        elif len(self._grok_refusals) == 1:
+            await self.alerts.record_failure(GROK, f"Grok session refused: {error}")
 
     def _remember(
         self, key: str, thread_id: str, message_id: int | None, plain: bool, model: str
@@ -805,7 +1388,7 @@ class DiscordCodexClient(discord.Client):
         # The answer's own message id is the link; if that thread is no longer resumable (TTL,
         # style or model change) fall back to the member's current thread here, then to none.
         key = ThreadStore.key(interaction.guild_id, interaction.channel_id, user_id)
-        plain = bool(self.memory.get_style(interaction.guild_id, user_id))
+        plain = self.memory.get_persona_off(interaction.guild_id, user_id)
         model = self._model(interaction.guild_id, user_id)
         resume = self.threads.by_message(
             getattr(interaction.message, "id", None), plain=plain, model=model
@@ -819,18 +1402,24 @@ class DiscordCodexClient(discord.Client):
         pointed = await self._referenced(asked) if asked is not None else None
         if pointed is not None and pointed.author != self.user:
             # The quoted images are not re-downloaded here, so they are not announced as attached.
-            prompt = with_quoted_message(
-                question, pointed.author.display_name, pointed.content, 0
-            )
+            prompt = with_quoted_message(question, pointed.author.display_name, pointed.content, 0)
         if asked is not None:
             previews = await self._previews(asked, pointed)
         LOGGER.info(
             "Button redo guild=%s user=%s resume=%s quoted=%s",
-            interaction.guild_id, user_id, bool(resume), pointed is not None,
+            interaction.guild_id,
+            user_id,
+            bool(resume),
+            pointed is not None,
         )
         result = await self._answer(
-            prompt, [], interaction.guild_id, user_id, resume=resume,
-            channel_id=interaction.channel_id, previews=previews,
+            prompt,
+            [],
+            interaction.guild_id,
+            user_id,
+            resume=resume,
+            channel_id=interaction.channel_id,
+            previews=previews,
         )
         sent = await self.send_answer(
             interaction.followup, question, result, interaction.guild_id, user_id
@@ -845,7 +1434,8 @@ class DiscordCodexClient(discord.Client):
         chunks = split_discord_message(result.text)
         try:
             sent = await destination.send(
-                chunks[0], files=self._files(result),
+                chunks[0],
+                files=self._files(result),
                 view=self._answer_view(guild_id, user_id, prompt, result),
             )
             for chunk in chunks[1:]:
@@ -873,9 +1463,12 @@ class DiscordCodexClient(discord.Client):
         await interaction.response.defer(thinking=True)
         try:
             if hours is not None:
-                fetched = [m async for m in interaction.channel.history(
-                    limit=MAX_MESSAGES, after=since(hours), oldest_first=True
-                )]
+                fetched = [
+                    m
+                    async for m in interaction.channel.history(
+                        limit=MAX_MESSAGES, after=since(hours), oldest_first=True
+                    )
+                ]
             else:
                 fetched = [m async for m in interaction.channel.history(limit=count)]
                 fetched.reverse()
@@ -899,9 +1492,15 @@ class DiscordCodexClient(discord.Client):
 
         # A fresh, unremembered turn: the summary must not become the member's conversation.
         result = await self._run_tracked(
-            key, interaction.user.id, show,
+            key,
+            interaction.user.id,
+            show,
             lambda on_video_slow, on_delta: self._answer(
-                prompt, [], interaction.guild_id, interaction.user.id, resume="",
+                prompt,
+                [],
+                interaction.guild_id,
+                interaction.user.id,
+                resume="",
                 on_delta=on_delta,
             ),
         )
@@ -958,6 +1557,157 @@ class DiscordCodexClient(discord.Client):
             )
         return f"{clean}\n\n" + "\n".join(notes)
 
+    async def _add_watch(
+        self,
+        locator: str,
+        interest: str,
+        mention_ids: Sequence[int],
+        guild_id: int | None,
+        channel_id: int | None,
+        user_id: int,
+        interval_minutes: int = 0,
+    ) -> tuple[str, object | None]:
+        """Resolve one source and start watching it. Returns (message, watch or None);
+        shared by the slash command and the <track> tag so both enforce the same limits."""
+        store = self.tracker
+        if store is None:
+            return "社群追蹤尚未啟用；管理者需設定 TRACKING_ENABLED=true 與 provider 憑證。", None
+        if guild_id is None or channel_id is None:
+            return "這裡沒辦法建立追蹤。", None
+        policy = interest.strip() or INTEREST_POLICY
+        if len(locator) > 500 or len(policy) > 4000:
+            return "網址或追蹤條件太長。", None
+        if len(store.watches(user_id=user_id, active_only=True)) >= (
+            self.config.tracking_max_per_user
+        ):
+            return f"每人最多 {self.config.tracking_max_per_user} 個追蹤。", None
+        try:
+            provider = tracking_provider(locator)
+        except ValueError as error:
+            return str(error), None
+        if provider == "youtube" and not self.config.youtube_api_key:
+            return "管理者尚未設定 YOUTUBE_API_KEY。", None
+        if provider == "twitch" and not (
+            self.config.twitch_client_id and self.config.twitch_client_secret
+        ):
+            return "管理者尚未設定 TWITCH_CLIENT_ID／TWITCH_CLIENT_SECRET。", None
+        if provider == "x" and not xsearch.enabled(self.config):
+            return "管理者尚未設定 XSEARCH_URL（X 查詢服務），無法追蹤 X 帳號。", None
+        resolver = {
+            "youtube": self.youtube_tracker,
+            "twitch": self.twitch_tracker,
+            "x": self.x_tracker,
+            "web": self.web_tracker,
+        }[provider]
+        try:
+            external_id, state = await resolver.resolve(locator)
+            tracked = store.add_source(provider, external_id, locator, state)
+            watch = store.add_watch(
+                tracked.id,
+                guild_id,
+                channel_id,
+                user_id,
+                policy,
+                mention_ids=mention_ids,
+                interval_minutes=interval_minutes or self.config.tracking_classify_interval_minutes,
+            )
+        except (
+            ProviderError,
+            xsearch.XSearchError,
+            aiohttp.ClientError,
+            TimeoutError,
+            ValueError,
+        ) as error:
+            LOGGER.warning("Tracking source resolution failed (%s)", type(error).__name__)
+            return "無法讀取這個來源；請確認網址與 provider 憑證後再試。", None
+        label = str(state.get("title") or state.get("login") or external_id)
+        also = (
+            "，也會 @ " + "、".join(f"<@{uid}>" for uid in watch.mention_ids)
+            if watch.mention_ids
+            else ""
+        )
+        return (
+            f"已新增追蹤 #{watch.id}：{provider} · {label}{also}\n"
+            f"從現在起有符合的新內容就會通知（每 {watch.interval_minutes} 分鐘判斷一次，"
+            "建立之前的舊內容不算）。判斷過程用 "
+            f"/{self.config.command_prefix}-track log:{watch.id} 查，只有你看得到。",
+            watch,
+        )
+
+    async def _apply_tracking_tags(
+        self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
+    ) -> str:
+        """Create / retime / cancel the watches the model asked for and append a confirmation."""
+        clean, adds, intervals, cancels = extract_track_tags(text)
+        if not adds and not intervals and not cancels:
+            return text
+        store = self.tracker
+        if store is None:
+            return f"{clean}\n\n（社群追蹤尚未啟用。）"
+        notes: list[str] = []
+        for locator, interest, who, every in adds:
+            note, watch = await self._add_watch(
+                locator, interest, who, guild_id, channel_id, user_id, every
+            )
+            # A refusal only ever reached the member as text: the log recorded that a tag had
+            # been parsed and nothing more, so a watch that was never created looked exactly
+            # like one that was. Record the outcome, not just the intent.
+            LOGGER.info(
+                "Tracking add guild=%s channel=%s user=%s source=%r -> %s",
+                guild_id,
+                channel_id,
+                user_id,
+                locator[:120],
+                f"#{getattr(watch, 'id', '?')}" if watch is not None else note[:100],
+            )
+            notes.append(note)
+        for watch_id, minutes in intervals:
+            done = store.set_watch_interval(watch_id, minutes, user_id)
+            notes.append(
+                f"⏱️ 追蹤 #{watch_id} 改成每 {max(1, minutes)} 分鐘判斷一次。"
+                if done
+                else f"（找不到你的追蹤 #{watch_id}）"
+            )
+        for watch_id in cancels:
+            # Scoped to the asking member, exactly like the slash command: one member can never
+            # talk the Bot into dropping someone else's watch.
+            done = store.delete_watch(watch_id, user_id)
+            LOGGER.info(
+                "Tracking cancel guild=%s channel=%s user=%s watch=%s -> %s",
+                guild_id,
+                channel_id,
+                user_id,
+                watch_id,
+                "deleted" if done else "not found",
+            )
+            notes.append(
+                f"⛔ 已取消追蹤 #{watch_id}。" if done else f"（找不到你的追蹤 #{watch_id}）"
+            )
+        LOGGER.info(
+            "Tracking tags guild=%s channel=%s user=%s adds=%d every=%d cancels=%d",
+            guild_id,
+            channel_id,
+            user_id,
+            len(adds),
+            len(intervals),
+            len(cancels),
+        )
+        return f"{clean}\n\n" + "\n".join(notes)
+
+    def _tracked_lines(self, user_id: int) -> str:
+        """The member's watches for the prompt, so the model can act on one without guessing."""
+        if self.tracker is None:
+            return ""
+        watches = self.tracker.watches(user_id=user_id, active_only=True)
+        if not watches:
+            return ""
+        labels = {}
+        for watch in watches:
+            source = self.tracker.get_source(watch.source_id)
+            if source is not None:
+                labels[watch.source_id] = f"{source.provider} · {source.locator}"
+        return render_watches(watches, labels)
+
     async def _fire_reminder(self, item: dict) -> None:
         channel = self.get_channel(item["channel_id"]) or await self.fetch_channel(
             item["channel_id"]
@@ -1003,19 +1753,102 @@ class DiscordCodexClient(discord.Client):
                     interaction.guild_id, interaction.channel_id, user_id, due, text, target
                 )
                 whom = f"提醒 {who.display_name}" if who is not None else "提醒你"
-                message = item if isinstance(item, str) else (
-                    f"好，{describe(due)} 在這個頻道{whom}：{item['text']}（#{item['id']}）"
+                message = (
+                    item
+                    if isinstance(item, str)
+                    else (f"好，{describe(due)} 在這個頻道{whom}：{item['text']}（#{item['id']}）")
                 )
         elif when or text:
             message = "要同時給 when（時間）和 text（內容）。"
         else:
             mine = self.reminders.for_user(user_id)
-            message = "你沒有提醒。" if not mine else "你的提醒：\n" + "\n".join(
-                f"#{i['id']} {describe(_dt.fromisoformat(i['due']))}"
-                + (f" → <@{i['target_id']}>" if _for_other(i) else "")
-                + f" — {i['text']}" for i in mine
+            message = (
+                "你沒有提醒。"
+                if not mine
+                else "你的提醒：\n"
+                + "\n".join(
+                    f"#{i['id']} {describe(_dt.fromisoformat(i['due']))}"
+                    + (f" → <@{i['target_id']}>" if _for_other(i) else "")
+                    + f" — {i['text']}"
+                    for i in mine
+                )
             )
         await interaction.response.send_message(message, ephemeral=True)
+
+    @app_commands.describe(
+        source="YouTube 頻道或 Twitch 頻道網址；留空列出你的追蹤",
+        interest="選填：你特別想知道的內容；留空使用預設重大事件政策",
+        cancel="取消你的追蹤編號",
+        log="看判斷紀錄：這個追蹤最近判斷了什麼、為什麼提醒或不提醒（只有你看得到）",
+    )
+    async def track_command(
+        self,
+        interaction: discord.Interaction,
+        source: str | None = None,
+        interest: str | None = None,
+        cancel: int | None = None,
+        log: int | None = None,
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        store = self.tracker
+        if store is None:
+            await interaction.response.send_message(
+                "社群追蹤尚未啟用；管理者需設定 TRACKING_ENABLED=true 與 provider 憑證。",
+                ephemeral=True,
+            )
+            return
+        actions = (
+            int(bool(source and source.strip())) + int(cancel is not None) + int(log is not None)
+        )
+        if actions > 1 or (interest and not source):
+            await interaction.response.send_message(
+                "新增、取消、看判斷紀錄一次只能做一件；interest 必須和 source 一起使用。",
+                ephemeral=True,
+            )
+            return
+        if cancel is not None:
+            deleted = store.delete_watch(cancel, interaction.user.id)
+            text = f"已取消追蹤 #{cancel}。" if deleted else f"找不到你的追蹤 #{cancel}。"
+            await interaction.response.send_message(text, ephemeral=True)
+            return
+        if log is not None:
+            rows = store.recent_decisions(interaction.user.id, 10, log or None)
+            await interaction.response.send_message(
+                truncate(render_decision_log(rows), 1900), ephemeral=True
+            )
+            return
+        if not source or not source.strip():
+            watches = store.watches(user_id=interaction.user.id, active_only=True)
+            if not watches:
+                text = "你目前沒有社群追蹤。"
+            else:
+                lines = []
+                for watch in watches:
+                    tracked = store.get_source(watch.source_id)
+                    if tracked is None:
+                        continue
+                    lines.append(
+                        f"#{watch.id} {tracked.provider} · {tracked.locator}"
+                        f"（每 {watch.interval_minutes} 分鐘判斷一次）"
+                    )
+                text = "你的社群追蹤：\n" + "\n".join(lines)
+            await interaction.response.send_message(truncate(text, 1900), ephemeral=True)
+            return
+
+        # Same path as the <track> tag, so both enforce the same limits and say the same things.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        text, _watch = await self._add_watch(
+            source.strip(),
+            interest or "",
+            (),  # extra mentions come from asking in words, not from a command option
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.user.id,
+        )
+        await interaction.followup.send(text, ephemeral=True)
 
     async def export_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
@@ -1057,6 +1890,167 @@ class DiscordCodexClient(discord.Client):
             text = "你在這個頻道沒有進行中的請求。"
         await interaction.response.send_message(text, ephemeral=True)
 
+    @app_commands.describe(action="查詢，或設為全部清洗／只清洗純連結／全關")
+    @app_commands.choices(action=LINKCLEAN_CHOICES)
+    async def linkclean_command(
+        self, interaction: discord.Interaction, action: str = "status"
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
+            return
+        if not self._is_guild_admin(interaction):
+            await interaction.response.send_message(
+                "只有伺服器主人、管理員（Administrator／Manage Guild）或指定管理員可以切換。",
+                ephemeral=True,
+            )
+            return
+        action = action.strip().lower()
+        if action == "status":
+            label = MODES[self.linkclean.mode(interaction.guild.id)]
+            await interaction.response.send_message(f"連結洗參數：{label}", ephemeral=True)
+        elif action in MODES:
+            self.linkclean.set(interaction.guild.id, action)
+            await interaction.response.send_message(
+                f"連結洗參數已設為「{MODES[action]}」。", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "action 請用 status、all、links 或 off。", ephemeral=True
+            )
+
+    @app_commands.describe(action="查詢、開啟或關閉")
+    @app_commands.choices(action=EMBEDFIX_CHOICES)
+    async def embedfix_command(
+        self, interaction: discord.Interaction, action: str = "status"
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
+            return
+        if not self._is_guild_admin(interaction):
+            await interaction.response.send_message(
+                "只有伺服器主人、管理員（Administrator／Manage Guild）或指定管理員可以切換。",
+                ephemeral=True,
+            )
+            return
+        action = action.strip().lower()
+        if action in ("on", "off"):
+            self.linkclean.set_embedfix(interaction.guild.id, action == "on")
+        state = "開" if self.linkclean.embedfix(interaction.guild.id) else "關"
+        note = (
+            ""
+            if self.linkclean.mode(interaction.guild.id) != "off"
+            else "（連結洗參數為全關時不會投遞）"
+        )
+        await interaction.response.send_message(f"預覽修正：{state}{note}", ephemeral=True)
+
+    def _instructions_status(self) -> str:
+        persona = instructions.persona_text(self.config)
+        style = instructions.style_text(self.config)
+        lines = []
+        for kind, text in ((instructions.PERSONA, persona), (instructions.OUTPUT_STYLE, style)):
+            where = "上傳版" if instructions.is_uploaded(self.config, kind) else "image 預設"
+            size = f"{len(text)} 字" if text else "空的"
+            lines.append(f"{instructions.LABELS[kind]}：{where}，{size}")
+        return "\n".join(lines)
+
+    async def _apply_instructions(self) -> None:
+        """Rebuild the Codex working directories and retire every live thread. Codex reads
+        AGENTS.md once when a thread starts and never again on resume, so without this the old
+        persona would answer in every conversation that is still inside its TTL."""
+        await asyncio.to_thread(instructions.compose_workspaces, self.config)
+        self.threads.set_version(instructions_version(self.config))
+
+    @app_commands.describe(action="查詢、上傳，或把人設／輸出風格還原成 image 內的預設")
+    @app_commands.choices(action=INSTRUCTION_CHOICES)
+    async def persona_command(
+        self, interaction: discord.Interaction, action: str = "status"
+    ) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
+            return
+        if not self._is_guild_admin(interaction):
+            await interaction.response.send_message(
+                "只有伺服器主人、管理員（Administrator／Manage Guild）或指定管理員可以修改。",
+                ephemeral=True,
+            )
+            return
+        action = action.strip().lower()
+        if action == "upload":
+            await interaction.response.send_modal(
+                InstructionsModal(self._save_instructions, instructions.MAX_CHARS)
+            )
+            return
+        if action in ("reset_persona", "reset_style"):
+            kind = instructions.PERSONA if action == "reset_persona" else instructions.OUTPUT_STYLE
+            removed, kept = await asyncio.to_thread(instructions.reset, self.config, kind)
+            if removed:
+                await self._apply_instructions()
+            label = instructions.LABELS[kind]
+            head = (
+                f"{label}已還原成 image 預設，所有對話串重新開始。"
+                if removed
+                else f"{label}本來就是 image 預設，沒有東西要還原。"
+            )
+            LOGGER.info(
+                "instructions reset kind=%s removed=%s by=%s",
+                kind,
+                removed,
+                interaction.user.id,
+            )
+            await interaction.response.send_message(
+                self._with_backup(f"{head}\n{self._instructions_status()}", kept), ephemeral=True
+            )
+            return
+        await interaction.response.send_message(self._instructions_status(), ephemeral=True)
+
+    @staticmethod
+    def _with_backup(text: str, kept: Path | None) -> str:
+        return f"{text}\n備份：{kept.name}" if kept else text
+
+    async def _save_instructions(self, uploads: dict[str, str], who: int) -> str:
+        """Store one or both uploaded files, keep what they replaced, then rebuild and retire."""
+        kept: list[Path] = []
+        for kind, text in uploads.items():
+            backup = await asyncio.to_thread(instructions.save, self.config, kind, text)
+            if backup is not None:
+                kept.append(backup)
+            LOGGER.info("instructions uploaded kind=%s chars=%d by=%s", kind, len(text), who)
+        await self._apply_instructions()
+        names = "、".join(instructions.LABELS[kind] for kind in uploads)
+        lines = [f"已更新 {names}，所有對話串重新開始。", self._instructions_status()]
+        if kept:
+            lines.append("備份：" + "、".join(path.name for path in kept))
+        return "\n".join(lines)
+
+    def _is_guild_admin(self, interaction: discord.Interaction) -> bool:
+        """Who may change operator settings: the server owner, a guild admin, or an id the
+        operator listed in LINKCLEAN_ADMIN_IDS (covers a delegated owner who is not the
+        Discord account that owns the server). Note this is a per-guild test applied to the
+        persona, which is global: an admin of any allowed guild changes it for all of them.
+        Owner's ruling, 2026-09-17."""
+        user_id = interaction.user.id
+        guild = interaction.guild
+        if guild is not None and guild.owner_id == user_id:
+            return True
+        member = interaction.user
+        if isinstance(member, discord.Member) and (
+            member.guild_permissions.administrator or member.guild_permissions.manage_guild
+        ):
+            return True
+        return user_id in self.config.linkclean_admin_ids
+
     async def help_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
         if reason:
@@ -1078,24 +2072,26 @@ class DiscordCodexClient(discord.Client):
         )
         await interaction.followup.send(text, ephemeral=True)
 
-    async def _status_text(
-        self, guild_id: int | None, channel_id: int | None, user_id: int
-    ) -> str:
+    async def _status_text(self, guild_id: int | None, channel_id: int | None, user_id: int) -> str:
         """Two sections: what this member has set (model, style, whether the next request
-        continues a thread, memory sizes) and what the system offers. No usage figures: the
-        Codex quota is the operator's, and the routers' free limits are not published."""
-        stored = self.memory.get_model(guild_id, user_id)
-        chosen = parse_choice(stored, self.config.codex_model)
+        continues a thread, memory sizes) and what the system offers. The system section carries
+        the live Codex quota and the last spare-backend fallback, so a member who gets no notice
+        in the answer itself can still see here that Codex is at its limit right now."""
+        own = self.memory.get_model(guild_id, user_id)
+        stored = own or self.config.default_model
+        chosen = self._choice(stored)
         level = split_stored(stored)[1]
         target = resolve(chosen, level or self.config.codex_reasoning_effort)
-        origin = "你設定" if stored else "預設"
+        origin = "你設定" if own else "預設"
         model_line = f"模型：{chosen.label} · 強度 {self._effort_label(target)}（{origin}）"
         if chosen.backend in ROUTER_BACKENDS:
             info = self.catalogs[chosen.backend].get(chosen.family)
             if info is not None and not info.image:
                 model_line += " · 看不到圖"
         style = self.memory.get_style(guild_id, user_id)
+        persona_off = self.memory.get_persona_off(guild_id, user_id)
         style_line = f"風格：{style[:60]}" if style else "風格：無（用預設）"
+        style_line += "；人設：關閉" if persona_off else "；人設：保留"
 
         key = ThreadStore.key(guild_id, channel_id, user_id)
         entry = self.threads.live_entry(key)
@@ -1103,16 +2099,14 @@ class DiscordCodexClient(discord.Client):
             thread_line = "續接：無，下一句會新開對話"
         else:
             minutes = max(0, int((time.time() - float(entry["at"])) // 60))
-            previous = parse_choice(str(entry.get("model", "")), self.config.codex_model).label
-            if self.threads.current(key, plain=bool(style), model=chosen.value):
+            previous = self._choice(str(entry.get("model", ""))).label
+            if self.threads.current(key, plain=persona_off, model=chosen.value):
                 thread_line = (
                     f"續接：會接續 {minutes} 分鐘前的對話（{previous}）"
                     f"；/{self.config.command_prefix} 的 new 可重來"
                 )
             else:
-                thread_line = (
-                    f"續接：{minutes} 分鐘前的對話是 {previous}／另一種風格，下一句會新開"
-                )
+                thread_line = f"續接：{minutes} 分鐘前的對話是 {previous}／另一種風格，下一句會新開"
 
         def scope_line(label: str, scope: str, owner: int | None, limit: int) -> str:
             shown = len(self.memory.entries(scope, guild_id, owner))
@@ -1121,20 +2115,65 @@ class DiscordCodexClient(discord.Client):
             text = f"{label} {total} 條 / {used // 1024} KB（上限 {limit // 1_000_000} MB）"
             return text + (f"，{total - shown} 條已推到 archive" if total > shown else "")
 
-        memory_line = "記憶：" + " · ".join((
-            scope_line("個人", "user", user_id, self.config.memory_user_max_bytes),
-            scope_line("伺服器", "guild", None, self.config.memory_guild_max_bytes),
-            f"永久 {self.permanent.topic_count()} 主題",
-        ))
+        memory_line = "記憶：" + " · ".join(
+            (
+                scope_line("個人", "user", user_id, self.config.memory_user_max_bytes),
+                scope_line("伺服器", "guild", None, self.config.memory_guild_max_bytes),
+                f"永久 {self.permanent.topic_count()} 主題",
+            )
+        )
 
         codex = await codex_login_status(self.config)
+        limits = await probe_rate_limits(self.config)
+        spare = fallback_target(
+            self.config.codex_fallback_model,
+            self.config.codex_model,
+            self.config.codex_reasoning_effort,
+        )
+        if limits is not None:
+            codex += (
+                f" · 額度 5h {limits.primary_used_percent:.0f}%"
+                f" / 7d {limits.secondary_used_percent:.0f}%"
+            )
+            # "Falling back right now" needs no memory: a spent window means the next request
+            # goes to the spare. Derived from the live probe, so it survives a restart and covers
+            # requests this process has not seen (the batch jobs fall back the same way).
+            if max(limits.primary_used_percent, limits.secondary_used_percent) >= 100:
+                codex += (
+                    f"\n　└ 額度已達上限，現在的請求改用 {spare.model} 回答"
+                    if spare is not None
+                    else "\n　└ 額度已達上限，且沒有設定備援模型"
+                )
+        else:
+            codex += " · 額度讀不到"
+        if self._last_fallback is not None:
+            when, why, model = self._last_fallback
+            mins = max(0, int((time.time() - when) // 60))
+            label = _FALLBACK_LABEL.get(type(why)) or getattr(why, "label", "服務異常")
+            codex += f"\n　└ 最近一次備援：{mins} 分鐘前{label}，改用 {model} 回答"
         routers = []
         for backend, catalog in self.catalogs.items():
             if ROUTERS[backend].api_key(self.config):
                 count = len(await catalog.free_models())
                 routers.append(f"{ROUTERS[backend].label} {count} 個免費模型")
-        system = [
-            f"Codex：{codex}",
+        system = [f"Codex：{codex}"]
+        if grok.enabled(self.config):
+            reading = await grok.usage(self.config)
+            line = "Grok：可選"
+            if reading and isinstance(reading.get("weekly_percent"), (int, float)):
+                percent = reading["weekly_percent"]
+                line += f" · 額度 7d {percent:.0f}%"
+                if percent >= self.config.grok_chat_max_weekly_percent:
+                    line += (
+                        f"\n　└ 已超過 {self.config.grok_chat_max_weekly_percent}%，"
+                        "聊天改用備援，剩下的留給 X 查詢"
+                    )
+            else:
+                line += " · 額度讀不到"
+            if time.time() < self._grok_off_until:
+                line += "\n　└ 安全檢查連續失敗，暫停中"
+            system.append(line)
+        system += [
             "Antigravity：可選（Gemini／Claude）",
             " · ".join(routers) if routers else "OpenRouter／OrcaRouter：未設定",
             f"影片理解：{'開' if gemini.available(self.config) else '關'} · 讀連結：開"
@@ -1142,10 +2181,18 @@ class DiscordCodexClient(discord.Client):
             f" · 沙盒：{'開' if sandbox.available(self.config) else '關'}"
             f" · 資料 API：{'／'.join(self.apis) or '無'}",
         ]
-        return "\n".join((
-            "【你的設定】", model_line, style_line, thread_line, memory_line,
-            "", "【系統】", *system,
-        ))
+        return "\n".join(
+            (
+                "【你的設定】",
+                model_line,
+                style_line,
+                thread_line,
+                memory_line,
+                "",
+                "【系統】",
+                *system,
+            )
+        )
 
     @app_commands.describe(
         scope="個人＝只對你；伺服器＝這裡所有人", name="短標題", text="要記住的內容"
@@ -1165,8 +2212,40 @@ class DiscordCodexClient(discord.Client):
         line = self.memory.add(scope.value, interaction.guild_id, interaction.user.id, name, text)
         await interaction.response.send_message(f"已記住：{line}", ephemeral=True)
 
-    @app_commands.describe(scope="個人或伺服器", name="記憶名稱（用 -memory 指令查看）")
+    def memory_options(
+        self, guild_id: int | None, user_id: int, scope: str, current: str
+    ) -> list[app_commands.Choice[str]]:
+        needle = current.strip().casefold()
+        entries = self.memory.all_entries(scope, guild_id, user_id)
+        return [
+            app_commands.Choice(name=f"{e.name} · {e.file}"[:100], value=e.file)
+            for e in entries
+            if not needle or needle in f"{e.name} {e.file} {e.hook}".casefold()
+        ][:25]
+
+    def _forget_guidance(self, guild_id: int | None, user_id: int, name: str) -> str:
+        """Identify feature IDs without mutating either feature's independent store."""
+        ids = set(re.findall(r"(?<![0-9])[#＃]?([0-9]{1,9})(?![0-9])", name))
+        prefix = self.config.command_prefix
+        lines = []
+        watches = self.tracker.watches(user_id=user_id, active_only=True) if self.tracker else []
+        for watch in watches:
+            if watch.guild_id == guild_id and str(watch.id) in ids:
+                source = self.tracker.get_source(watch.source_id)
+                title = source.locator if source else ""
+                lines.append(f"追蹤 #{watch.id} {title}：`/{prefix}-track cancel:{watch.id}`")
+        for item in self.reminders.for_user(user_id):
+            if item.get("guild_id") == guild_id and str(item["id"]) in ids:
+                lines.append(
+                    f"提醒 #{item['id']} {item['text']}：`/{prefix}-remind cancel:{item['id']}`"
+                )
+        if not lines:
+            return ""
+        return "\n這些是追蹤／提醒編號，不是記憶編號；請選擇要取消的項目：\n" + "\n".join(lines)
+
+    @app_commands.describe(scope="個人或伺服器", name="從選單選記憶，或輸入完整名稱；不是追蹤編號")
     @app_commands.choices(scope=SCOPE_CHOICES)
+    @app_commands.autocomplete(name=_memory_autocomplete)
     async def forget_command(
         self, interaction: discord.Interaction, scope: app_commands.Choice[str], name: str
     ) -> None:
@@ -1174,19 +2253,63 @@ class DiscordCodexClient(discord.Client):
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
-        forgot = self.memory.forget(scope.value, interaction.guild_id, interaction.user.id, name)
-        await interaction.response.send_message(
-            f"已刪除「{name}」。" if forgot else f"找不到「{name}」。", ephemeral=True
+        name = name.strip()
+        entries = self.memory.all_entries(scope.value, interaction.guild_id, interaction.user.id)
+        matches = [e for e in entries if e.file == name] or [e for e in entries if e.name == name]
+        outcome = "not_found"
+        if len(matches) == 1:
+            entry = matches[0]
+            forgot = self.memory.forget(
+                scope.value, interaction.guild_id, interaction.user.id, entry.file, by_file=True
+            )
+            outcome = "deleted" if forgot else "not_found"
+            text = (
+                f"已刪除{SCOPES[scope.value]}記憶「{entry.name}」。"
+                if forgot
+                else "記憶已不存在，請重新選取。"
+            )
+        else:
+            if matches:
+                outcome = "ambiguous"
+                text = f"有多條同名記憶「{name}」，請從 name 選單選取個別項目。沒有刪除任何資料。"
+            else:
+                text = f"找不到{SCOPES[scope.value]}記憶「{name}」。沒有刪除任何資料。"
+                text += self._forget_guidance(interaction.guild_id, interaction.user.id, name)
+            choices = self.memory_options(
+                interaction.guild_id, interaction.user.id, scope.value, ""
+            )
+            if choices:
+                text += "\n可選記憶（最多列 25 條；輸入文字可篩選）：\n" + "\n".join(
+                    c.name for c in choices
+                )
+            text += f"\n記憶用名稱選取；完整清單：`/{self.config.command_prefix}-memory`。"
+        LOGGER.info(
+            "Memory forget guild=%s user=%s scope=%s target=%r outcome=%s",
+            interaction.guild_id,
+            interaction.user.id,
+            scope.value,
+            name[:100],
+            outcome,
         )
+        await interaction.response.send_message(truncate(text, 1900), ephemeral=True)
 
     def _memory_text(self, guild_id: int | None, user_id: int, scope: str = "") -> str:
-        """Index listing for one scope, or both; the archive is not listed (search finds it)."""
-        if scope:
-            owner = user_id if scope == "user" else None
-            text = self.memory.index_text(scope, guild_id, owner)
-            label = SCOPES[scope]
-            return f"[{label}記憶索引]\n{text}" if text else f"目前沒有{label}記憶。"
-        return self.memory.render(guild_id, user_id) or "目前沒有記憶。"
+        """List all removable notes, including archived notes, without positional IDs."""
+        sections = []
+        for kind in (scope,) if scope else SCOPES:
+            entries = self.memory.all_entries(kind, guild_id, user_id)
+            if entries:
+                lines = [f"- **{e.name}**（{e.file}）— {e.hook}" for e in entries]
+                sections.append(f"[{SCOPES[kind]}記憶索引]\n" + "\n".join(lines))
+        if not sections:
+            return f"目前沒有{SCOPES[scope] if scope else ''}記憶。"
+        prefix = self.config.command_prefix
+        sections.append(
+            f"刪除記憶：`/{prefix}-forget`，選 scope 後從 name 選單選取。\n"
+            f"追蹤／提醒另存，編號不適用於記憶；取消用 `/{prefix}-track cancel:編號`"
+            f" 或 `/{prefix}-remind cancel:編號`。刪除記憶不會清除既有對話脈絡。"
+        )
+        return "\n\n".join(sections)
 
     @app_commands.describe(scope="只看個人或伺服器；留空＝兩者都列")
     @app_commands.choices(scope=SCOPE_CHOICES)
@@ -1216,6 +2339,11 @@ class DiscordCodexClient(discord.Client):
                 router_choice(provider, m.id, f"{m.name}{'（看圖）' if m.image else ''}")
                 for m in await self.catalogs[provider].free_models()
             ]
+        elif provider == GROK:
+            options = [
+                grok_choice(m.id, f"{m.name}（{'／'.join(m.efforts) or '無 effort'}）")
+                for m in await grok.models(self.config)
+            ]
         else:
             options = [c for c in choices(self.config.codex_model) if c.backend == provider]
         needle = current.strip().lower()
@@ -1229,11 +2357,14 @@ class DiscordCodexClient(discord.Client):
     def _chosen_model(self, provider: str, model: str):
         """The ModelChoice for a typed or picked model value; None when it is not offered."""
         value = model.strip()
-        if not value.startswith(("codex:", f"{AGY}:", *(f"{b}:" for b in ROUTER_BACKENDS))):
+        prefixes = ("codex:", f"{AGY}:", f"{GROK}:", *(f"{b}:" for b in ROUTER_BACKENDS))
+        if not value.startswith(prefixes):
             value = f"{provider}:{value}"  # typed bare id (router ids themselves contain ":")
         chosen = parse_choice(value, self.config.codex_model)
         if chosen.value != value:
             return None  # unknown Codex / Antigravity value fell back to the default
+        if chosen.backend == GROK and grok.cached_model(chosen.family) is None:
+            return None  # not in this plan's catalog
         if chosen.backend in ROUTER_BACKENDS:
             if self.catalogs[chosen.backend].get(chosen.family) is None:
                 return None
@@ -1243,7 +2374,7 @@ class DiscordCodexClient(discord.Client):
         provider="模型來源；留空＝查看目前設定",
         model="模型（打字篩選；OpenRouter 只列免費模型）",
         effort="這個模型的預設推理強度（/inmu-king 的 effort 可臨時覆蓋）",
-        clear="設為 True 清除，回到預設（Codex）",
+        clear="設為 True 清除，回到預設模型",
     )
     @app_commands.choices(provider=PROVIDER_CHOICES, effort=EFFORT_CHOICES)
     @app_commands.autocomplete(model=_model_autocomplete)
@@ -1269,6 +2400,8 @@ class DiscordCodexClient(discord.Client):
             if model is not None:
                 if source in ROUTER_BACKENDS:
                     await self.catalogs[source].free_models()
+                elif source == GROK:
+                    await grok.models(self.config)
                 chosen = self._chosen_model(source, model)
                 if chosen is None:
                     await interaction.response.send_message(
@@ -1276,39 +2409,69 @@ class DiscordCodexClient(discord.Client):
                     )
                     return
             else:
-                chosen = parse_choice(stored, self.config.codex_model)
+                chosen = self._choice(stored or self.config.default_model)
             level = effort.value if effort else split_stored(stored)[1]
             value = f"{chosen.value}|{level}" if level else chosen.value
             self.memory.set_model(guild_id, user_id, value)
             message = f"已設定：{self._describe(chosen.value, level)}"
         else:
-            message = f"目前：{self._describe(*split_stored(stored))}"
+            current = stored or self.config.default_model
+            origin = "" if stored else "（預設）"
+            message = f"目前{origin}：{self._describe(*split_stored(current))}"
         await interaction.response.send_message(message, ephemeral=True)
+
+    def _style_status(self, guild_id: int | None, user_id: int) -> str:
+        """Style and persona are two independent settings, so both are reported every time: the
+        pair is what decides how an answer comes out, and one of them used to move on its own."""
+        style = self.memory.get_style(guild_id, user_id)
+        persona = "關閉（不帶角色）" if self.memory.get_persona_off(guild_id, user_id) else "保留"
+        return f"風格：{style or '無（用預設）'}\n人設：{persona}"
 
     @app_commands.describe(
         text="你的回覆風格（例如：條列、少於 100 字、用英文）；留空＝查看目前設定",
         clear="設為 True 清除個人風格，回到預設",
+        upload=f"設為 True 開啟上傳視窗，用一個 .md 檔當個人風格（上限 {STYLE_MAX_CHARS} 字）",
+        persona="要不要保留伺服器人設；不選＝維持現狀",
     )
+    @app_commands.choices(persona=PERSONA_CHOICES)
     async def style_command(
         self,
         interaction: discord.Interaction,
         text: str | None = None,
         clear: bool = False,
+        upload: bool = False,
+        persona: str | None = None,
     ) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
         guild_id, user_id = interaction.guild_id, interaction.user.id
+        if upload and (clear or (text and text.strip())):
+            await interaction.response.send_message(
+                "上傳檔案時不要同時給 text 或 clear，一次做一件事。", ephemeral=True
+            )
+            return
+        if upload:
+            # A modal must be the first response to the interaction, so nothing else happens here.
+            await interaction.response.send_modal(
+                StyleModal(
+                    lambda body: self.memory.set_style(guild_id, user_id, body), STYLE_MAX_CHARS
+                )
+            )
+            return
+        changed = False
+        if persona is not None:
+            self.memory.set_persona_off(guild_id, user_id, persona == "off")
+            changed = True
         if clear:
-            cleared = self.memory.clear_style(guild_id, user_id)
-            message = "已清除個人風格，回到預設。" if cleared else "你沒有設定個人風格。"
+            self.memory.clear_style(guild_id, user_id)
+            changed = True
         elif text and text.strip():
             self.memory.set_style(guild_id, user_id, text)
-            message = f"已設定個人風格：\n{text.strip()}"
-        else:
-            current = self.memory.get_style(guild_id, user_id)
-            message = f"目前個人風格：\n{current}" if current else "目前使用預設風格。"
+            changed = True
+        head = "已更新。" if changed else "目前設定："
+        message = f"{head}\n{self._style_status(guild_id, user_id)}"
         await interaction.response.send_message(split_discord_message(message)[0], ephemeral=True)
 
     async def reset_command(self, interaction: discord.Interaction) -> None:
@@ -1345,7 +2508,12 @@ class DiscordCodexClient(discord.Client):
     ) -> None:
         attachments = [image] if image is not None else []
         prompt = prompt.strip()
-        effort_value = effort.value if effort is not None else self.config.codex_reasoning_effort
+        # Unset means the member's own /model effort (or DEFAULT_MODEL's), not Codex's default.
+        effort_value = (
+            effort.value
+            if effort is not None
+            else self._member_effort(interaction.guild_id, interaction.user.id)
+        )
         reason = self._access(
             interaction.guild_id, interaction.channel, interaction.channel_id
         ) or self._validate(prompt, attachments)
@@ -1354,7 +2522,7 @@ class DiscordCodexClient(discord.Client):
             return
 
         key = ThreadStore.key(interaction.guild_id, interaction.channel_id, interaction.user.id)
-        plain = bool(self.memory.get_style(interaction.guild_id, interaction.user.id))
+        plain = self.memory.get_persona_off(interaction.guild_id, interaction.user.id)
         model = self._model(interaction.guild_id, interaction.user.id)
         resume = "" if new else self.threads.current(key, plain=plain, model=model)
         await interaction.response.defer(thinking=True)
@@ -1366,10 +2534,18 @@ class DiscordCodexClient(discord.Client):
                 pass
 
         result = await self._run_tracked(
-            key, interaction.user.id, show,
+            key,
+            interaction.user.id,
+            show,
             lambda on_video_slow, on_delta: self._answer(
-                prompt, attachments, interaction.guild_id, interaction.user.id, effort_value,
-                resume, on_video_slow=on_video_slow, on_delta=on_delta,
+                prompt,
+                attachments,
+                interaction.guild_id,
+                interaction.user.id,
+                effort_value,
+                resume,
+                on_video_slow=on_video_slow,
+                on_delta=on_delta,
                 channel_id=interaction.channel_id,
             ),
         )
@@ -1379,7 +2555,7 @@ class DiscordCodexClient(discord.Client):
             )
             return
         # Discord does not echo slash command inputs, so quote the question above the answer.
-        target = resolve(parse_choice(model, self.config.codex_model), effort_value)
+        target = resolve(self._choice(model), effort_value)
         shown = self._effort_label(target)
         reply = format_reply(
             prompt,
@@ -1392,7 +2568,8 @@ class DiscordCodexClient(discord.Client):
         sent_id = None
         try:
             sent = await interaction.edit_original_response(
-                content=chunks[0], attachments=self._files(result),
+                content=chunks[0],
+                attachments=self._files(result),
                 view=self._answer_view(interaction.guild_id, interaction.user.id, prompt, result),
             )
             sent_id = sent.id
@@ -1411,12 +2588,33 @@ class DiscordCodexClient(discord.Client):
         finally:
             remove_dir(result.generated_dir)
         self._remember(key, result.thread_id, sent_id, plain, model)
-        LOGGER.info("Completed slash guild=%s user=%s", interaction.guild_id, interaction.user.id)
+        # channel too: a watch is created in whichever channel the member spoke in, and without
+        # it a request cannot be traced back to where its side effects landed.
+        LOGGER.info(
+            "Completed slash guild=%s channel=%s user=%s",
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.user.id,
+        )
 
     # ----- @mention entry point --------------------------------------------------------------
 
     async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot or self.user is None or self.user not in message.mentions:
+        if message.author.bot or self.user is None:
+            return
+        # Member-visible link cleaning runs on every message in an allowed channel, not just on
+        # @mentions — a link nobody asks about is exactly the one whose params should go.
+        try:
+            await self._linkclean(message)
+        except Exception:
+            LOGGER.exception(
+                "linkclean failed channel=%s; continuing mention handling", message.channel.id
+            )
+        if self.user not in message.mentions:
+            return
+        # A reply to a cleaned-link repost pings the Bot too; only a typed @ is a question.
+        typed = mentions_explicitly(message.content, self.user.id)
+        if not typed and await self._replies_to_repost(message):
             return
         guild_id = message.guild.id if message.guild else None
         reason = self._access(guild_id, message.channel, message.channel.id)
@@ -1428,9 +2626,12 @@ class DiscordCodexClient(discord.Client):
         # Replying to another member's message (e.g. one that carries a picture) points the Bot
         # at it: its text and images are folded into this request.
         quoted = await self._referenced(message)
-        if quoted is not None and quoted.author != self.user:
+        if quoted is not None and (
+            quoted.author != self.user or await self._replies_to_repost(message)
+        ):
             usable = [
-                a for a in quoted.attachments
+                a
+                for a in quoted.attachments
                 if validate_attachment(a.content_type, a.filename, a.size, self.config)[0]
             ]
             attachments.extend(usable)
@@ -1447,9 +2648,9 @@ class DiscordCodexClient(discord.Client):
         # Replying to one of the Bot's answers continues that exact thread; otherwise the member's
         # most recent thread in this channel (within the TTL) is continued.
         key = ThreadStore.key(guild_id, message.channel.id, message.author.id)
-        plain = bool(self.memory.get_style(guild_id, message.author.id))
-        replied_to = message.reference.message_id if message.reference else None
+        plain = self.memory.get_persona_off(guild_id, message.author.id)
         model = self._model(guild_id, message.author.id)
+        replied_to = message.reference.message_id if message.reference else None
         resume = self.threads.by_message(
             replied_to, plain=plain, model=model
         ) or self.threads.current(key, plain=plain, model=model)
@@ -1460,18 +2661,24 @@ class DiscordCodexClient(discord.Client):
                 if placeholder:
                     await placeholder[0].edit(content=text, view=view)
                 else:
-                    placeholder.append(
-                        await message.reply(text, view=view, mention_author=False)
-                    )
+                    placeholder.append(await message.reply(text, view=view, mention_author=False))
             except discord.HTTPException:
                 pass
 
         async with message.channel.typing():
             result = await self._run_tracked(
-                key, message.author.id, show,
+                key,
+                message.author.id,
+                show,
                 lambda on_video_slow, on_delta: self._answer(
-                    prompt, attachments, guild_id, message.author.id, resume=resume,
-                    previews=previews, on_video_slow=on_video_slow, on_delta=on_delta,
+                    prompt,
+                    attachments,
+                    guild_id,
+                    message.author.id,
+                    resume=resume,
+                    previews=previews,
+                    on_video_slow=on_video_slow,
+                    on_delta=on_delta,
                     channel_id=message.channel.id,
                 ),
             )
@@ -1499,7 +2706,12 @@ class DiscordCodexClient(discord.Client):
         finally:
             remove_dir(result.generated_dir)
         self._remember(key, result.thread_id, sent_id, plain, model)
-        LOGGER.info("Completed @mention guild=%s user=%s", message.guild.id, message.author.id)
+        LOGGER.info(
+            "Completed @mention guild=%s channel=%s user=%s",
+            message.guild.id,
+            message.channel.id,
+            message.author.id,
+        )
 
 
 def configure_logging(config: Config) -> None:
@@ -1518,7 +2730,9 @@ def configure_logging(config: Config) -> None:
     try:
         config.log_dir.mkdir(parents=True, exist_ok=True)
         rotating = logging.handlers.TimedRotatingFileHandler(
-            config.log_dir / "bot.log", when="midnight", backupCount=config.log_keep_days,
+            config.log_dir / "bot.log",
+            when="midnight",
+            backupCount=config.log_keep_days,
             encoding="utf-8",
         )
     except OSError as error:
@@ -1532,5 +2746,7 @@ def configure_logging(config: Config) -> None:
 def main() -> None:
     config = load_config()
     configure_logging(config)
+    # Before the client, which fingerprints these files to decide which threads may resume.
+    instructions.compose_workspaces(config)
     client = DiscordCodexClient(config)
     client.run(config.discord_token, log_handler=None)

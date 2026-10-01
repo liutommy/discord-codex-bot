@@ -8,6 +8,7 @@ strings, never hosts."""
 from __future__ import annotations
 
 import asyncio
+import difflib
 import html
 import json
 import logging
@@ -19,7 +20,7 @@ from pathlib import Path
 import aiohttp
 
 from .config import Config
-from .links import _read_bounded
+from .links import _read_bounded, html_to_text
 
 LOGGER = logging.getLogger(__name__)
 API_TAG = re.compile(
@@ -42,6 +43,13 @@ class Api:
     # Optional MediaWiki bot-password login: {"api": ..., "user": ..., "password": ...}. An
     # anonymous Cargo query is throttled within a couple of calls; a logged-in one is not.
     login: dict[str, str] = field(default_factory=dict)
+    # Optional {foreign name: local name} applied to every reply as "local（foreign）", for a
+    # source that names things in another locale than the members use. Telling the model to
+    # look names up in a table did not work (it answered in the source's names 4 times of 4).
+    names: dict[str, str] = field(default_factory=dict)
+    # Optional {alias path: real path}, e.g. {"hero/逆命": "hero/4-twistedfate"}: the model
+    # passes the member's own words and the Bot resolves them before the request goes out.
+    paths: dict[str, str] = field(default_factory=dict)
 
 
 # One cookie jar per API for the life of the process, so the login survives between calls
@@ -72,10 +80,54 @@ def load_registry(path: Path | None) -> dict[str, Api]:
         login = {str(k): _expand(str(v)) for k, v in (spec.get("login") or {}).items()}
         if not (login.get("user") and login.get("password")):
             login = {}  # credentials not configured: stay anonymous rather than fail every call
+        names, paths = _names(path.parent / str(spec["names"])) if spec.get("names") else ({}, {})
         out[str(name)] = Api(
-            str(name), str(spec["base"]), headers, str(spec.get("doc") or ""), login
+            str(name), str(spec["base"]), headers, str(spec.get("doc") or ""), login, names, paths
         )
     return out
+
+
+def _names(path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """({foreign: local}, {alias path: real path}) from the JSON next to apis.json; missing or
+    malformed registers nothing (logged) and the API still works, just untranslated."""
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError) as error:
+        LOGGER.warning("names map %s unreadable: %s", path, type(error).__name__)
+        return {}, {}
+    names = {str(k): str(v) for k, v in (data.get("names") or {}).items() if k and v and k != v}
+    paths = {str(k): str(v) for k, v in (data.get("paths") or {}).items() if k and v}
+    return names, paths
+
+
+def resolve_path(path: str, aliases: dict[str, str]) -> tuple[str, str]:
+    """(real path, note). An exact alias wins silently. Otherwise the name part is compared to
+    every alias of the same kind: a typo or a variant with one close match resolves and says so
+    in the note; several close matches (凱耳 -> 凱爾? 凱莎?) are returned as a question instead
+    of a guess, because next to a short name the nearest string is often another real thing.
+    Nothing close, or no aliases at all: the path goes out unchanged."""
+    key = path.strip("/ ")
+    if not aliases or key in aliases:
+        return aliases.get(key, path), ""
+    kind, _, name = key.partition("/")
+    if not name or "/" in name:
+        return path, ""
+    pool = {k.split("/", 1)[1]: v for k, v in aliases.items() if k.startswith(kind + "/")}
+    close = difflib.get_close_matches(name, list(pool), n=3, cutoff=0.5)
+    if not close:
+        return path, ""
+    if len({pool[c] for c in close}) == 1:
+        return pool[close[0]], f"（{name} 解讀為 {close[0]}）\n"
+    return "", f"（找不到 {key}；相近的有：{'、'.join(close)}。請確認是哪一個再查，不要猜。）"
+
+
+def localize(text: str, names: dict[str, str]) -> str:
+    """Rewrite every foreign name as local（foreign） in one pass. Longest names first inside a
+    single alternation, so 凯尔特 wins over 凯尔 and nothing is rewritten twice."""
+    if not names:
+        return text
+    pattern = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.sub(pattern, lambda m: f"{names[m.group()]}（{m.group()}）", text)
 
 
 def extract_api_calls(answer: str) -> list[tuple[str, str]]:
@@ -142,11 +194,12 @@ async def _login(api: Api, config: Config) -> bool:
             if not token:
                 LOGGER.warning("%s login: no token in reply", api.name)
                 return False
-            form = {"lgname": api.login["user"], "lgpassword": api.login["password"],
-                    "lgtoken": token}
-            async with session.post(
-                f"{endpoint}?action=login&format=json", data=form
-            ) as response:
+            form = {
+                "lgname": api.login["user"],
+                "lgpassword": api.login["password"],
+                "lgtoken": token,
+            }
+            async with session.post(f"{endpoint}?action=login&format=json", data=form) as response:
                 result = (await response.json(content_type=None)).get("login") or {}
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
         LOGGER.warning("%s login failed: %s", api.name, type(error).__name__)
@@ -167,6 +220,9 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     if api is None:
         return f"（沒有叫 {name} 的 API；可用：{'、'.join(registry) or '無'}）"
     path = html.unescape(path)  # models tend to write &amp; inside tag attributes
+    path, note = resolve_path(path, api.paths)  # hero/逆命 -> hero/4-twistedfate
+    if not path:
+        return note
     if "://" in path or path.startswith("//") or ".." in path:
         return "（path 只能是相對於該 API 的端點與查詢字串）"
     url = api.base + path.lstrip("/")
@@ -181,17 +237,20 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
         code, info = _api_error(body)
         throttled = status == 429 or code in RATE_LIMIT_CODES
         if throttled and attempt == 1:
-            LOGGER.info("%s throttled (%s); one retry in %ss", name, code or status,
-                        RETRY_AFTER_SECONDS)
+            LOGGER.info(
+                "%s throttled (%s); one retry in %ss", name, code or status, RETRY_AFTER_SECONDS
+            )
             if api.login:  # a dropped session looks exactly like throttling: log in again
                 _LOGGED_IN.discard(api.name)
                 await _login(api, config)
             await asyncio.sleep(RETRY_AFTER_SECONDS)
             continue
         if throttled:
-            return (f"（{name} 被限流，已自動重試一次仍被擋。**這不是查無資料**：同一條查詢稍後"
-                    f"會成功。不要改寫成「沒有紀錄」，也不要換到查不到這類資料的來源硬答；"
-                    f"告訴成員稍後再問即可。{info}）")
+            return (
+                f"（{name} 被限流，已自動重試一次仍被擋。**這不是查無資料**：同一條查詢稍後"
+                f"會成功。不要改寫成「沒有紀錄」，也不要換到查不到這類資料的來源硬答；"
+                f"告訴成員稍後再問即可。{info}）"
+            )
         if status >= 400:
             return f"（{name} 回 HTTP {status}：{_bounded(body, 300)}）"
         if code:
@@ -201,7 +260,16 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
                 body = json.dumps(json.loads(body), ensure_ascii=False, separators=(",", ":"))
             except ValueError:
                 pass
-        return _bounded(body.strip() or "（空回應）", config.apis_max_chars)
+        elif "html" in content_type:
+            # A page rather than an API: hand over the readable text (links kept inline), not
+            # markup and stylesheets. hexdata's hero pages are 10 KB raw and 3 KB as text; given
+            # the raw form the model went to a web search for the same numbers instead.
+            title, text = html_to_text(body, url)
+            body = f"{title}\n\n{text}" if title else text
+        body = note + (localize(body.strip(), api.names) or "（空回應）")
+        # Which source answered is otherwise invisible: the answer cites what it likes.
+        LOGGER.info("api %s %s -> HTTP %s, %d chars", name, path, status, len(body))
+        return _bounded(body, config.apis_max_chars)
     return f"（{name} 被限流）"  # unreachable: both attempts return above
 
 

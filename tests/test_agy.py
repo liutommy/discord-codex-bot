@@ -134,14 +134,18 @@ async def test_run_agy_builds_stream_json_arguments(
     assert "<USER_MESSAGE>\n問題\n</USER_MESSAGE>" in content and "<MEMORY>\n- [a]" in content
 
 
-async def test_run_agy_personal_style_alone_uses_the_plain_workspace(
+async def test_run_agy_personal_style_alone_keeps_the_persona_workspace(
     agy_config: Config, project, monkeypatch
 ) -> None:
     fake = FakeRun((0, _stream("c", "ok"), ""))
     monkeypatch.setattr(agy, "_run", fake)
     await run_agy("q", agy_config, "m", personal_style="條列、少於 100 字")
+    assert project == [agy_config.codex_workspace]
+    assert fake.calls[0]["cwd"] == agy_config.codex_workspace
+    project.clear()
+    await run_agy("q", agy_config, "m", personal_style="條列、少於 100 字", plain=True)
     assert project == [agy_config.codex_workspace_plain]
-    assert fake.calls[0]["cwd"] == agy_config.codex_workspace_plain
+    assert fake.calls[-1]["cwd"] == agy_config.codex_workspace_plain
 
 
 async def test_run_agy_raw_plain_and_schema(agy_config: Config, project, monkeypatch) -> None:
@@ -227,16 +231,24 @@ async def test_run_streams_agent_text_deltas_while_agy_runs(monkeypatch, config)
     from discord_codex_bot import agy as agy_module
 
     def update(delta, state):
-        return json.dumps({"event": "step_update", "step_update": {
-            "step_type": "agent_response", "state": state, "text_delta": delta}})
+        return json.dumps(
+            {
+                "event": "step_update",
+                "step_update": {"step_type": "agent_response", "state": state, "text_delta": delta},
+            }
+        )
 
     events = [
         json.dumps({"event": "init", "conversation_id": "c1"}),
         update("Hel", "ACTIVE"),
         "SLEEP",
         update("lo", "DONE"),
-        json.dumps({"event": "result", "result": {
-            "conversation_id": "c1", "response": "Hello", "status": "SUCCESS"}}),
+        json.dumps(
+            {
+                "event": "result",
+                "result": {"conversation_id": "c1", "response": "Hello", "status": "SUCCESS"},
+            }
+        ),
     ]
     script = ";".join(
         "sleep 0.05" if e == "SLEEP" else "printf '%s\\n' '" + e.replace("'", "'\\''") + "'"
