@@ -155,11 +155,13 @@ def _recent_turns(turns: list[Turn]) -> list[Turn]:
     return list(reversed(selected))
 
 
-def _parse(answer: str, turns: list[Turn]) -> list[tuple[str, str]]:
+def _parse(answer: str, turns: list[Turn]) -> tuple[list[tuple[str, str]], int]:
+    """(notes that passed the checks, how many the model proposed)."""
     data = json.loads(answer)
     user_texts = [turn.text for turn in turns if turn.role == "user"]
+    proposed = data.get("notes", [])
     notes = []
-    for item in data.get("notes", []):
+    for item in proposed:
         if not isinstance(item, dict):
             continue
         name, body, evidence = (item.get(key) for key in ("name", "text", "evidence"))
@@ -170,7 +172,7 @@ def _parse(answer: str, turns: list[Turn]) -> list[tuple[str, str]]:
             LOGGER.warning("Harvest skipped candidate without matching user evidence")
             continue
         notes.append((name.strip(), body.strip()))
-    return notes
+    return notes, len(proposed)
 
 
 async def harvest_thread(
@@ -183,12 +185,29 @@ async def harvest_thread(
         LOGGER.warning("Harvest: malformed key %r for thread %s; dropping", key, thread_id[:8])
         return 0
     turns = _recent_turns(transcript_turns(config, thread_id))
-    if not any(turn.role == "user" for turn in turns):
+    users = sum(turn.role == "user" for turn in turns)
+    if not users:
+        # Not the same as "nothing worth remembering": an unread backend or a pruned rollout
+        # hid behind a plain "0 notes" until Grok threads went missing this way.
+        LOGGER.warning(
+            "Harvest: no readable transcript for thread %s (%d turns); nothing to distil",
+            thread_id[:8],
+            len(turns),
+        )
         return 0
     text = json.dumps(
         [{"role": turn.role, "content": turn.text} for turn in turns], ensure_ascii=False
     )
-    notes = _parse(await runner(f"{INSTRUCTIONS}\n\n<TRANSCRIPT>\n{text}\n</TRANSCRIPT>"), turns)
+    answer = await runner(f"{INSTRUCTIONS}\n\n<TRANSCRIPT>\n{text}\n</TRANSCRIPT>")
+    notes, proposed = _parse(answer, turns)
+    LOGGER.info(
+        "Harvest %s: %d member / %d assistant turns, %d proposed, %d kept",
+        thread_id[:8],
+        users,
+        len(turns) - users,
+        proposed,
+        len(notes),
+    )
     for name, body in notes:
         store.add("user", guild_id, user_id, name, body)
     return len(notes)
