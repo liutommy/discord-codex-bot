@@ -195,7 +195,10 @@ def tracking_message(message: OutboxMessage, source_label: str = "") -> str:
     and reasoning are log material — read on request, never pushed at the member. Social text
     is escaped before Discord sees it."""
     item, decision, watch = message.item, message.decision, message.watch
-    title = discord.utils.escape_mentions(item.title.strip())[:300] or "（無標題）"
+    # Titles are other people's text (an X post's is its whole first line): no mentions, and no
+    # markdown either, so a masked link cannot pose as something else.
+    title = discord.utils.escape_markdown(discord.utils.escape_mentions(item.title.strip()))
+    title = title[:300] or "（無標題）"
     # What the model wrote, having read the content, the policy and the source. The fallback is
     # only for a decision made before the model was asked for wording.
     said = discord.utils.escape_mentions(decision.message.strip())[:600]

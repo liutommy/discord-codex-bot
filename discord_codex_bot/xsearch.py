@@ -14,8 +14,12 @@ import aiohttp
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
-POST_ID = re.compile(r"^[0-9]{1,20}$")
-HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+POST_ID = re.compile(r"[0-9]{1,19}")  # fullmatch: ASCII digits only, below 2**63
+HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
+
+
+def is_post_id(value: str) -> bool:
+    return bool(POST_ID.fullmatch(value)) and int(value) < 1 << 63
 
 
 # X links in chat fall back to a Grok session each, and members can paste many: at most this
@@ -50,7 +54,7 @@ async def _ask(config: Config, kind: str, body: dict) -> dict:
 
 
 async def fetch_post(config: Config, post_id: str) -> dict | None:
-    if not POST_ID.match(post_id):
+    if not is_post_id(post_id):
         raise ValueError("not an X post id")
     now = time.monotonic()
     while _post_lookups and now - _post_lookups[0] > 3600:
@@ -66,14 +70,14 @@ async def fetch_post(config: Config, post_id: str) -> dict | None:
 async def recent_posts(
     config: Config, handle: str, since_id: str = "", limit: int = 10
 ) -> list[dict]:
-    if not HANDLE.match(handle) or (since_id and not POST_ID.match(since_id)):
+    if not HANDLE.fullmatch(handle) or (since_id and not is_post_id(since_id)):
         raise ValueError("not an X handle / post id")
     answer = await _ask(config, "recent", {"handle": handle, "since_id": since_id, "limit": limit})
     return [post for post in answer.get("posts") or [] if isinstance(post, dict)]
 
 
 async def lookup_user(config: Config, handle: str) -> dict | None:
-    if not HANDLE.match(handle):
+    if not HANDLE.fullmatch(handle):
         raise ValueError("not an X handle")
     answer = await _ask(config, "user", {"handle": handle})
     return answer if answer.get("exists") else None

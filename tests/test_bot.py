@@ -491,6 +491,16 @@ def test_notification_falls_back_when_the_model_wrote_no_wording() -> None:
     assert "前輩發現星街彗星有新曲了" in text
 
 
+def test_a_notification_title_cannot_carry_a_masked_link() -> None:
+    # An X post's title is its own text: whoever wrote the post wrote this.
+    watch = Watch(1, 1, GUILD, 555, USER, "policy")
+    item = ContentItem(1, 1, "1", "https://x.com/a/status/1", "[官方公告](https://evil.example)",
+                       "", "now", "post")  # fmt: skip
+    decision = Decision(1, 1, 1, True, 0.9, "公告", "符合政策", (), "decided")
+    text = tracking_message(OutboxMessage(1, decision, watch, item, 0), "a")
+    assert "\\[官方公告]" in text  # the bracket is escaped, so Discord shows no link
+
+
 def test_a_notification_never_carries_a_mention_from_the_social_text() -> None:
     watch = Watch(1, 1, GUILD, 555, USER, "policy")
     item = ContentItem(

@@ -335,7 +335,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # through xAI's server-side X search. Empty = off (X links use fxtwitter alone, and X
         # accounts cannot be tracked).
         xsearch_url=values.get("XSEARCH_URL", "").strip(),
-        xsearch_timeout_seconds=_bounded_int(values, "XSEARCH_TIMEOUT_SECONDS", 200, 10, 600),
+        # Longer than the sidecar's own queue wait (30 s) plus session timeout (180 s), so the
+        # Bot does not give up on a lookup the sidecar is still going to run.
+        xsearch_timeout_seconds=_bounded_int(values, "XSEARCH_TIMEOUT_SECONDS", 240, 10, 600),
         # Each check of an X account is one Grok session on the subscription, so X sources are
         # fetched on their own, slower clock than TRACKING_INTERVAL_MINUTES.
         x_tracking_interval_minutes=_positive_int(values, "X_TRACKING_INTERVAL_MINUTES", 60),

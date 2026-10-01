@@ -64,7 +64,7 @@ def config() -> Config:
         sandbox_url="http://sandbox:8070",
         sandbox_timeout_seconds=30,
         xsearch_url="",
-        xsearch_timeout_seconds=200,
+        xsearch_timeout_seconds=240,
         x_tracking_interval_minutes=60,
         apis_path=None,
         apis_max_chars=60_000,

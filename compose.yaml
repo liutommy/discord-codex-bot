@@ -58,6 +58,7 @@ services:
     networks:
       - default
       - sandbox_net
+      - xsearch_net
 
   # Self-hosted web search. The Bot's <web> tool reaches it by name on the compose network
   # (http://searxng:8080); other agents on this host reach it through the loopback port below.
@@ -149,13 +150,16 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
+    # Its own network, shared only with the Bot: the service has no authentication, so this is
+    # what decides who can spend the plan's quota through it. Not internal: it needs xAI.
     networks:
-      - default
+      - xsearch_net
 
 networks:
   default:
   sandbox_net:
     internal: true
+  xsearch_net:
 
 volumes:
   codex-home:

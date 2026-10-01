@@ -766,6 +766,7 @@ async def link_blocks(
                 config,
                 out_dir / f"link{i}" if out_dir else None,
                 preview=match_preview(url, previews),
+                x_lookup=True,  # the member posted these links
             )
             for i, url in enumerate(urls)
         )
@@ -992,17 +993,22 @@ async def fetch_or_render(
     out_dir: Path | None,
     render: bool = False,
     preview: Preview | None = None,
+    x_lookup: bool = False,
 ) -> tuple[str, list[Path]]:
     """(text, images): X posts through the API; otherwise plain fetch first, Chromium when that
     cannot read the page (or when the model asked for the rendered page), and only when the site
-    itself cannot be read at all, the Discord preview the message carried."""
+    itself cannot be read at all, the Discord preview the message carried.
+
+    `x_lookup`: an X post fxtwitter cannot serve may fall back to the X lookup sidecar — one
+    Grok session on the operator's plan — so only for links a member posted, never for page
+    tracking or the model's own <fetch> requests."""
     user, post_id = x_status(url)
     if post_id:
         post = await fetch_x_status(url, config, out_dir)
         if post is not None:
             return post
-        if xsearch.enabled(config):  # fxtwitter could not serve it: ask X search instead
-            try:
+        if x_lookup and xsearch.enabled(config) and xsearch.is_post_id(post_id):
+            try:  # fxtwitter could not serve it: ask X search instead
                 found = await xsearch.fetch_post(config, post_id)
             except xsearch.XSearchError as error:
                 LOGGER.warning("X lookup of %s failed: %s", post_id, error)

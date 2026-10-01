@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import threading
@@ -59,8 +60,9 @@ _POST_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 TWITTER_EPOCH_MS = 1288834974657
 SNOWFLAKE_MIN = 1 << 32  # ids below this predate snowflakes (2006-2010) and carry no time
 
-POST_ID = re.compile(r"^[0-9]{1,20}$")
-HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+POST_ID = re.compile(r"[0-9]{1,19}")  # fullmatch only: `$` would let a trailing newline through
+HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
+MAX_ID = (1 << 63) - 1
 
 # Every client tool Grok Build 1.0.x offers, under every spelling it accepts.
 _TOOLS = (
@@ -129,6 +131,14 @@ SCHEMAS = {
 }
 
 
+def _is_id(value: object) -> bool:
+    return type(value) is str and bool(POST_ID.fullmatch(value)) and int(value) <= MAX_ID
+
+
+def _is_handle(value: object) -> bool:
+    return type(value) is str and bool(HANDLE.fullmatch(value))
+
+
 class BadRequest(ValueError):
     pass
 
@@ -141,6 +151,10 @@ class Busy(RuntimeError):
     pass
 
 
+class Gone(RuntimeError):
+    pass
+
+
 class Unsafe(RuntimeError):
     """The session was not the locked-down one this service relies on."""
 
@@ -148,8 +162,8 @@ class Unsafe(RuntimeError):
 def build_prompt(kind: str, request: dict) -> str:
     """The whole prompt, from validated fields only."""
     if kind == "post":
-        post_id = str(request.get("id", ""))
-        if not POST_ID.match(post_id):
+        post_id = request.get("id", "")
+        if not _is_id(post_id):
             raise BadRequest("id must be a numeric X post id")
         return (
             f"Use X search to look up the X post whose status id is {post_id}. If it exists, "
@@ -157,8 +171,9 @@ def build_prompt(kind: str, request: dict) -> str:
             "the text of any quoted post, engagement counts and media types. If it cannot be "
             "found, return found=false. Report only what X search returned."
         )
-    handle = str(request.get("handle", "")).lstrip("@")
-    if not HANDLE.match(handle):
+    handle = request.get("handle", "")
+    handle = handle.lstrip("@") if type(handle) is str else handle
+    if not _is_handle(handle):
         raise BadRequest("handle must be an X username")
     if kind == "user":
         return (
@@ -166,11 +181,11 @@ def build_prompt(kind: str, request: dict) -> str:
             "display name and bio, or exists=false. Report only what X search returned."
         )
     if kind == "recent":
-        since = str(request.get("since_id", "") or "")
-        if since and not POST_ID.match(since):
+        since = request.get("since_id", "") or ""
+        if since and not _is_id(since):
             raise BadRequest("since_id must be a numeric X post id")
         limit = request.get("limit", 10)
-        if not isinstance(limit, int) or not 1 <= limit <= 20:
+        if type(limit) is not int or not 1 <= limit <= 20:
             raise BadRequest("limit must be 1-20")
         newer = f" with a status id greater than {since}" if since else ""
         return (
@@ -197,6 +212,7 @@ def verify_stream(lines: list[str]) -> dict:
     The tool check keys on the tool *name*, which the CLI fills in; `input` is written by the
     model and is only checked in addition."""
     inits = 0
+    seen_other = False
     result = None
     for line in lines:
         if not line.strip():
@@ -213,6 +229,8 @@ def verify_stream(lines: list[str]) -> dict:
             raise Unsafe(f"unknown event {kind!r}/{subtype!r}")
         if kind == "system" and subtype == "init":
             inits += 1
+            if inits > 1 or seen_other:
+                raise Unsafe("the toolset was announced again mid-session")
             if event.get("tools") != []:
                 raise Unsafe(f"session started with client tools: {event.get('tools')!r}")
         elif kind in _BLOCKS:
@@ -221,17 +239,17 @@ def verify_stream(lines: list[str]) -> dict:
                 if block_type not in _BLOCKS[kind]:
                     raise Unsafe(f"unknown {kind} block {block_type!r}")
                 if block_type == "tool_use":
-                    tool_input = block.get("input") or {}
-                    if (
-                        block.get("name") != X_SEARCH_NAME
-                        or tool_input.get("variant") != "XSearch"
-                        or tool_input.get("backend") is not True
-                    ):
+                    if block.get("name") != X_SEARCH_NAME or block.get("input") != {
+                        "variant": "XSearch",
+                        "backend": True,
+                    }:
                         raise Unsafe(
                             f"session used a tool other than X search: {block.get('name')!r}"
                         )
         elif kind == "result":
             result = event
+        if kind != "system" or subtype != "init":
+            seen_other = True
     if not inits:
         raise Unsafe("session reported no toolset")
     if result is None or result.get("is_error") or result.get("subtype") != "success":
@@ -292,7 +310,7 @@ def _clean_post(post: object) -> dict | None:
         return None
     post_id = str(post.get("id", ""))
     created = _utc_iso(str(post.get("created_at", "")))
-    if created is None or not POST_ID.match(post_id) or not _id_matches_time(post_id, created):
+    if created is None or not _is_id(post_id) or not _id_matches_time(post_id, created):
         return None
     clean = {
         "id": post_id,
@@ -315,14 +333,14 @@ def shape(kind: str, request: dict, answer: dict) -> dict:
     """Re-check the model's answer against the request: ids, handles and ordering are facts
     the request fixes, so a post that contradicts them is dropped rather than trusted."""
     if kind == "post":
-        post = _clean_post(answer.get("post")) if answer.get("found") else None
+        post = _clean_post(answer.get("post")) if answer.get("found") is True else None
         if post and post["id"] != str(request["id"]):
             post = None
         return {"found": post is not None, "post": post}
     if kind == "user":
         handle = str(request["handle"]).lstrip("@")
         same = str(answer.get("handle", handle)).lstrip("@").lower() == handle.lower()
-        exists = bool(answer.get("exists")) and same
+        exists = answer.get("exists") is True and same
         return {
             "exists": exists,
             "handle": handle,
@@ -419,30 +437,60 @@ def _run(prompt: str, home_env: dict, cwd: str) -> list[str]:
     return stdout.splitlines()
 
 
-def lookup(kind: str, request: dict) -> dict:
+def lookup(kind: str, request: dict, still_wanted=lambda: True) -> dict:
     prompt = (
         f"{build_prompt(kind, request)}\n\nSearch first. Then reply with exactly one JSON object "
         f"and nothing else, matching this JSON Schema: {json.dumps(SCHEMAS[kind])}"
     )
-    if kind == "post":
-        cached = _POST_CACHE.get(str(request["id"]))
+    key = f"{kind}:{request.get('id') or request.get('handle')}"
+    if kind in ("post", "user"):
+        cached = _POST_CACHE.get(key)
         if cached and time.monotonic() - cached[0] < POST_CACHE_SECONDS:
             return cached[1]
     if not _LOCK.acquire(timeout=QUEUE_WAIT):
         raise Busy("another lookup is running")
     try:
+        if not still_wanted():  # the caller gave up while queued: do not spend a session on it
+            raise Gone("client went away")
         lines = run_grok(prompt)
     finally:
         _LOCK.release()
     answer = shape(kind, request, verify_stream(lines))
-    if kind == "post":
-        _POST_CACHE[str(request["id"])] = (time.monotonic(), answer)
+    if kind in ("post", "user"):  # found or not: repeats of the same question cost nothing
+        _POST_CACHE[key] = (time.monotonic(), answer)
         while len(_POST_CACHE) > 256:
             _POST_CACHE.popitem(last=False)
     return answer
 
 
+MAX_CONNECTIONS = 16
+_CONNECTIONS = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+
 class Handler(BaseHTTPRequestHandler):
+    timeout = 10  # a client that does not send its request promptly is dropped
+
+    def handle(self) -> None:
+        if not _CONNECTIONS.acquire(blocking=False):
+            return  # too many open connections: close this one at once
+        try:
+            super().handle()
+        finally:
+            _CONNECTIONS.release()
+
+    def _client_waiting(self) -> bool:
+        """False once the client has closed its end (a read would return EOF at once)."""
+        try:
+            self.connection.setblocking(False)
+            try:
+                return self.connection.recv(1, socket.MSG_PEEK) != b""
+            except BlockingIOError:
+                return True
+            finally:
+                self.connection.setblocking(True)
+        except OSError:
+            return False
+
     def _json(self, status: int, body: dict) -> None:
         data = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(status)
@@ -458,18 +506,23 @@ class Handler(BaseHTTPRequestHandler):
         kind = self.path.removeprefix("/x/")
         if kind not in SCHEMAS:
             return self._json(404, {"error": "not found"})
-        length = int(self.headers.get("Content-Length") or 0)
+        raw_length = self.headers.get("Content-Length", "")
+        if not raw_length.isdigit():
+            return self._json(411, {"error": "Content-Length required"})
+        length = int(raw_length)
         if length > MAX_BODY:
             return self._json(413, {"error": "request too large"})
         try:
             request = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(request, dict):
                 raise BadRequest("body must be a JSON object")
-            return self._json(200, lookup(kind, request))
+            return self._json(200, lookup(kind, request, self._client_waiting))
         except (json.JSONDecodeError, BadRequest) as error:
             return self._json(400, {"error": str(error)})
         except Busy:
             return self._json(429, {"error": "busy"})
+        except Gone:
+            return None
         except Unsafe as error:
             print(f"REFUSED unsafe grok session: {error}", flush=True)
             return self._json(503, {"error": "lookup refused"})
