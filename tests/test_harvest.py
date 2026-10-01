@@ -278,6 +278,37 @@ async def test_harvest_thread_ignores_a_malformed_key(tmp_path: Path, config: Co
     assert await harvest_thread(store, config, ThreadStore.key(1, 2, 3), "t1", runner) == 1
 
 
+async def test_harvest_logs_an_unreadable_transcript_apart_from_nothing_to_keep(
+    tmp_path: Path, config: Config, caplog
+) -> None:
+    config = replace(config, codex_home=tmp_path)
+    store = MemoryStore(tmp_path / "memory", LIMITS)
+    caplog.set_level("INFO", logger="discord_codex_bot.harvest")
+
+    async def nothing(prompt: str) -> str:
+        raise AssertionError("an unreadable thread must not reach the model")
+
+    assert await harvest_thread(store, config, "1:2:3", "missing", nothing) == 0
+    assert "no readable transcript for thread missing" in caplog.text
+    caplog.clear()
+
+    _rollout(tmp_path, "t1")
+
+    async def two_proposed(prompt: str) -> str:
+        return json.dumps(
+            {
+                "notes": [
+                    {"name": "n", "evidence": "我叫小美", "text": "叫小美"},
+                    {"name": "m", "evidence": "抹茶拿鐵好喝。", "text": "assistant 的話"},
+                ]
+            }
+        )
+
+    assert await harvest_thread(store, config, "1:2:3", "t1", two_proposed) == 1
+    assert "Harvest t1: 1 member / 2 assistant turns, 2 proposed, 1 kept" in caplog.text
+    assert "no readable transcript" not in caplog.text
+
+
 @pytest.mark.parametrize("evidence", [None, "", "  ", "抹茶拿鐵好喝。", "喜歡咖啡"])
 async def test_harvest_rejects_missing_or_non_user_evidence(tmp_path, config, evidence):
     config = replace(config, codex_home=tmp_path)
