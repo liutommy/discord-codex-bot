@@ -1154,3 +1154,21 @@ def test_track_at_and_track_every_read_attributes_in_any_order() -> None:
         '<track source="https://x.com/a" at="中午"/>'
     )
     assert adds == [("https://x.com/a", "", (), 0, None)]
+
+
+def test_a_failed_fixed_time_retries_within_an_hour_even_on_a_long_interval() -> None:
+    failed = int(taipei(2, 12, 2))
+    watch = Watch(
+        1,
+        1,
+        1,
+        1,
+        1,
+        "x",
+        interval_minutes=1440,
+        times=("12:01",),
+        classified_at=0,
+        failed_at=failed,
+    )
+    assert not watch_due(watch, taipei(2, 12, 30))
+    assert watch_due(watch, taipei(2, 13, 3))

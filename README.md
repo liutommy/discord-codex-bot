@@ -228,7 +228,8 @@ the next time. Fetching does not change: sources are still read every pass (X so
 after batch of `MAX_CLASSIFY_BATCH` (30) until nothing is left, up to `MAX_SLOT_BATCHES` (10)
 with a warning past it, so a busy shop is not cut to 30 a time and the rest left to expire. A
 failed judgement does not use the time up: the watch retries after its `interval_minutes`
-until it succeeds or the next time comes. A new or rescheduled watch starts from the next time;
+until it succeeds or the next time comes (at most an hour apart, whatever the interval). A new or
+rescheduled watch starts from the next time;
 `<track_every>` switches a watch back to an interval.
 
 Watches can also be managed by asking in words, the way reminders can: the model appends

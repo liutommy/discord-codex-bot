@@ -251,6 +251,9 @@ MAX_TRACK_TIMES = 6
 # busy source (a whole shop: ~20 items an hour) is not cut to MAX_CLASSIFY_BATCH a day and the
 # rest left to expire. Bounded, with a warning past it.
 MAX_SLOT_BATCHES = 10
+# A failed fixed-time judgement retries after its interval, but never later than this: a watch
+# that once ran every 1440 minutes must not wait a day to retry its time.
+RETRY_MAX_MINUTES = 60
 _TIME = re.compile(r"(?<!\d)([01]?\d|2[0-3])[:：]?([0-5]\d)(?!\d)")
 # Cancelling used to be slash-only, on the grounds that dropping a watch throws away its
 # baseline and rebuilding one costs a classification pass. That cost is the member's to spend —
@@ -313,13 +316,15 @@ def _slots(times: Sequence[str], now: float) -> tuple[float | None, float | None
 def watch_due(watch: Watch, now: float) -> bool:
     """May this watch spend a classification now? With fixed times: when one has come since the
     last completed judgement (late is fine — a Bot that slept through 12:01 judges at wake-up),
-    and, if it failed since that time, interval_minutes after the failure — a passing outage
-    costs a retry, not the whole day. Otherwise: interval_minutes after the last attempt."""
+    and, if it failed since that time, interval_minutes (at most RETRY_MAX_MINUTES) after the
+    failure — a passing outage costs a retry, not the whole day. Otherwise: interval_minutes
+    after the last attempt."""
     if watch.times:
         last, _next = _slots(watch.times, now)
         if last is None or last <= watch.classified_at:
             return False
-        return watch.failed_at < last or now - watch.failed_at >= watch.interval_minutes * 60
+        retry = min(watch.interval_minutes, RETRY_MAX_MINUTES) * 60
+        return watch.failed_at < last or now - watch.failed_at >= retry
     return now - watch.classified_at >= watch.interval_minutes * 60
 
 
