@@ -8,6 +8,7 @@ import pytest
 
 from discord_codex_bot.tracking import (
     INTEREST_POLICY,
+    MAX_CLASSIFY_BATCH,
     ContentItem,
     DecisionInput,
     FetchResult,
@@ -699,3 +700,64 @@ def test_classifier_prompt_quotes_malicious_social_text_and_parser_is_strict() -
     )
     with pytest.raises(ValueError, match="confidence"):
         parse_classifier_result(malformed, [item])
+
+
+def _flooded(tmp_path: Path, count: int):
+    path = tmp_path / "tracking.sqlite3"
+    store = TrackerStore(path)
+    source = store.add_source("web", "https://shop.test/list", "https://shop.test/list")
+    store.ingest(source, FetchResult((content(source.id, "seen"),), "seen"))  # the baseline
+    watch = store.add_watch(source.id, 1, 2, 3)
+    new = tuple(content(source.id, f"n{i:03d}") for i in range(count))
+    store.ingest(store.get_source(source.id), FetchResult(new, new[-1].external_id))
+    return path, store, watch
+
+
+def test_a_flooding_source_is_judged_in_capped_batches_newest_first(tmp_path: Path) -> None:
+    # A shop listing produced 1,400 pending items; all of them went into one prompt.
+    _, store, _ = _flooded(tmp_path, MAX_CLASSIFY_BATCH + 15)
+    [(_, items)] = store.pending_by_watch()
+    assert [i.external_id for i in items] == [f"n{i:03d}" for i in range(15, 45)]
+
+
+def test_items_seen_too_long_ago_leave_the_queue_unjudged(tmp_path: Path) -> None:
+    path, store, _ = _flooded(tmp_path, 3)
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "UPDATE items SET observed_at=? WHERE external_id='n000'",
+            ("2020-01-01T00:00:00+00:00",),
+        )
+    [(_, items)] = store.pending_by_watch()
+    assert [i.external_id for i in items] == ["n001", "n002"]
+
+
+async def test_an_answer_that_skips_an_item_keeps_the_rest(tmp_path: Path) -> None:
+    # One missing id used to throw the whole batch away, every hour, for good.
+    path, store, watch = _flooded(tmp_path, 3)
+
+    async def fetch(current):
+        return FetchResult((), current.cursor)
+
+    async def classify(prompt):
+        answer = json.loads(classifier_answer(prompt, notify=False))
+        answer["decisions"] = answer["decisions"][:2] + [
+            dict(answer["decisions"][0], external_item_id="never-shown")
+        ]
+        return json.dumps(answer)
+
+    async def deliver(message):
+        pass
+
+    stats = await run_tracking_once(store, fetch, classify, deliver)
+    assert stats.get("decisions") == 2 and "classifier_failures" not in stats
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE watches SET classified_at=0 WHERE id=?", (watch.id,))
+    [(_, items)] = store.pending_by_watch()
+    assert [i.external_id for i in items] == ["n002"]  # asked about again next time
+
+
+def test_an_answer_that_decides_nothing_it_was_given_fails() -> None:
+    items = (content(1, "v1"),)
+    answer = classifier_answer('UNTRUSTED_SOCIAL_CONTENT_JSON: [{"external_item_id": "other"}]')
+    with pytest.raises(ValueError, match="none of the pending items"):
+        parse_classifier_result(answer, items)
