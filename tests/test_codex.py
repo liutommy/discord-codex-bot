@@ -484,5 +484,5 @@ def test_the_instructions_say_x_accounts_can_be_tracked() -> None:
 def test_the_instructions_know_every_kind_of_source() -> None:
     # A source the model is not told about is a source it turns down (see the X case above).
     text = codex._prompt("q")
-    for source in ("YouTube", "Twitch", "https://x.com/<handle>", "ruten.com.tw/store/"):
+    for source in ("YouTube", "Twitch", "https://x.com/<handle>", "ruten.com.tw/store/", "find?q="):
         assert source in text, source
