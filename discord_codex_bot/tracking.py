@@ -649,6 +649,37 @@ class TrackerStore:
             )
         return [(watch, items[-MAX_CLASSIFY_BATCH:]) for watch, items in groups.values()]
 
+    def expire_stale(self) -> dict[int, int]:
+        """Close out items no watch judged within PENDING_MAX_HOURS: a decision with status
+        `expired` (never notified) instead of a silent drop, so the log behind a watch shows
+        them and the count reaches the container log. {watch id: items expired}."""
+        cutoff = (datetime.now(UTC) - timedelta(hours=PENDING_MAX_HOURS)).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT w.id AS watch_id, i.id AS item_id
+                   FROM watches w JOIN items i ON i.source_id=w.source_id
+                   LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
+                   WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id
+                     AND i.baseline=0 AND i.observed_at < ?""",
+                (cutoff,),
+            ).fetchall()
+            expired: dict[int, int] = defaultdict(int)
+            for row in rows:
+                connection.execute(
+                    """INSERT OR IGNORE INTO decisions(
+                         watch_id, item_id, notify, confidence, category, reason,
+                         matched_topics_json, status, message, created_at)
+                       VALUES (?, ?, 0, 0, '過期', ?, '[]', 'expired', '', ?)""",
+                    (
+                        row["watch_id"],
+                        row["item_id"],
+                        f"超過 {PENDING_MAX_HOURS} 小時沒輪到判斷",
+                        _utc_now(),
+                    ),
+                )
+                expired[row["watch_id"]] += 1
+        return dict(expired)
+
     def save_decisions(
         self, watch: Watch, items: Sequence[ContentItem], decisions: Sequence[DecisionInput]
     ) -> None:
@@ -1630,6 +1661,10 @@ async def run_tracking_once(
             LOGGER.exception("Social source %s/%s failed", source.provider, source.external_id)
         finally:
             stats["sources"] += 1
+    for watch_id, count in store.expire_stale().items():
+        # A watch whose source outpaces MAX_CLASSIFY_BATCH per interval loses the oldest items.
+        LOGGER.warning("Watch %s: %d item(s) expired unjudged", watch_id, count)
+        stats["expired"] += count
     for watch, items in store.pending_by_watch():
         try:
             source = store.get_source(watch.source_id)

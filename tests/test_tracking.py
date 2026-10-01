@@ -732,6 +732,11 @@ def test_items_seen_too_long_ago_leave_the_queue_unjudged(tmp_path: Path) -> Non
         )
     [(_, items)] = store.pending_by_watch()
     assert [i.external_id for i in items] == ["n001", "n002"]
+    # Not dropped silently: closed out as `expired`, counted, and never notified.
+    assert store.expire_stale() == {store.watches()[0].id: 1}
+    assert store.expire_stale() == {}
+    [decision] = store.decisions()
+    assert decision.status == "expired" and decision.notify is False
 
 
 async def test_an_answer_that_skips_an_item_keeps_the_rest(tmp_path: Path) -> None:
