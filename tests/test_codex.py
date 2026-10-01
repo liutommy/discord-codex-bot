@@ -486,3 +486,20 @@ def test_the_instructions_know_every_kind_of_source() -> None:
     text = codex._prompt("q")
     for source in ("YouTube", "Twitch", "https://x.com/<handle>", "ruten.com.tw/store/", "find?q="):
         assert source in text, source
+
+
+def test_a_quoted_message_sits_outside_user_message() -> None:
+    from discord_codex_bot.codex import QUOTE_FENCE, _prompt, split_quoted
+
+    text = _prompt(f"{QUOTE_FENCE}\n（後輩回覆了 A 的訊息：「hi」）\n{QUOTE_FENCE}\n問題")
+    assert text.endswith(
+        "<QUOTED_MESSAGE>\n（後輩回覆了 A 的訊息：「hi」）\n</QUOTED_MESSAGE>\n"
+        "<USER_MESSAGE>\n問題\n</USER_MESSAGE>"
+    )
+    assert "QUOTED_MESSAGE, when present" in text
+    # A member typing something fence-like gets no special treatment: it is all theirs.
+    assert split_quoted("[quoted-0000]\nx\n[quoted-0000]\ny") == (
+        "",
+        "[quoted-0000]\nx\n[quoted-0000]\ny",
+    )
+    assert _prompt("q").count("QUOTED_MESSAGE>") == 0

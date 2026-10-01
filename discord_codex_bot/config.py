@@ -222,6 +222,11 @@ class Config:
     consolidate_max_input_bytes: int
     consolidate_schema_path: Path
     harvest_schema_path: Path
+    digest_weekday: int
+    digest_hour: int
+    digest_days: int
+    digest_user_schema_path: Path
+    digest_guild_schema_path: Path
     tracking_enabled: bool
     tracking_db_path: Path
     tracking_interval_seconds: int
@@ -426,6 +431,18 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         ),
         harvest_schema_path=Path(
             values.get("HARVEST_SCHEMA_FILE", "/opt/discord-codex/harvest-schema.json")
+        ),
+        # Weekly digest (digest.py): inferred personal notes and server notes from the last
+        # DIGEST_DAYS of conversations, on DIGEST_WEEKDAY (0 = Monday … 6 = Sunday, -1 = off) at
+        # DIGEST_HOUR in CONSOLIDATE_TIMEZONE, before that night's consolidation.
+        digest_weekday=_bounded_int(values, "DIGEST_WEEKDAY", 6, -1, 6),
+        digest_hour=_bounded_int(values, "DIGEST_HOUR", 1, 0, 23),
+        digest_days=_bounded_int(values, "DIGEST_DAYS", 7, 1, 30),
+        digest_user_schema_path=Path(
+            values.get("DIGEST_USER_SCHEMA_FILE", "/opt/discord-codex/digest-user-schema.json")
+        ),
+        digest_guild_schema_path=Path(
+            values.get("DIGEST_GUILD_SCHEMA_FILE", "/opt/discord-codex/digest-guild-schema.json")
         ),
         # Optional social-source tracking. Provider credentials stay in the Bot process; Codex
         # child processes receive the allowlisted environment from codex._safe_environment.

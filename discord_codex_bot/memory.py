@@ -7,6 +7,23 @@ from datetime import date
 from pathlib import Path
 
 SCOPES = {"user": "個人", "guild": "伺服器"}
+# Name prefixes that say how a note was made: inferred by the weekly digest from several of a
+# member's conversations, or gathered from several members (digest.py). Reserved: only the
+# digest may set one (MemoryStore.add(marker=…)); a name from anyone else — /remember, a
+# <memory> tag, harvest — loses a leading marker, so nothing can pose as either.
+MARKERS = ("（推測）", "（多人提及）")
+
+
+def marker_of(name: str) -> str:
+    return next((marker for marker in MARKERS if name.startswith(marker)), "")
+
+
+def unmarked(name: str) -> str:
+    while marker := marker_of(name):
+        name = name[len(marker) :].lstrip()
+    return name
+
+
 INDEX_FILE = "MEMORY.md"
 ARCHIVE_FILE = "MEMORY-archive.md"
 TOPIC_DIR = "topics"
@@ -156,12 +173,21 @@ class MemoryStore:
     # ----- write -----------------------------------------------------------------------------
 
     def add(
-        self, scope: str, guild_id: int | None, user_id: int | None, name: str, text: str
+        self,
+        scope: str,
+        guild_id: int | None,
+        user_id: int | None,
+        name: str,
+        text: str,
+        *,
+        marker: str = "",
     ) -> str:
-        """Store one memory and return its index line. A full scope evicts its oldest notes."""
+        """Store one memory and return its index line. A full scope evicts its oldest notes.
+        A reserved marker on `name` is dropped; `marker` (digest only) is put in front."""
         text = text.strip()
         if not text:
             return "記憶內容不能是空的。"
+        name = marker + (unmarked(name.strip()) or "記憶")
         directory = self.scope_dir(scope, guild_id, user_id)
         body = f"# {name.strip()}\n\n{date.today().isoformat()}\n\n{text}\n"
         needed = len(body.encode("utf-8")) + 120

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from .backends import run_batch
 from .config import Config
-from .memory import SCOPES, MemoryStore, Note
+from .memory import MARKERS, SCOPES, MemoryStore, Note, marker_of, unmarked
 from .usage import probe_rate_limits
 
 LOGGER = logging.getLogger(__name__)
@@ -26,6 +26,10 @@ clean set:
 - Keep names short (≤ 30 characters) and texts concise but complete; keep the notes' language.
 - Order the result oldest first; give each merged note the date of its newest source.
 Return only JSON matching the schema."""
+
+# How a note was made (memory.MARKERS) is kept out of the model's hands: notes with different
+# markers are never consolidated together, so an inference cannot be merged into a stated fact
+# and come out unmarked, and every result carries exactly its group's marker.
 
 
 def _batches(notes: list[Note], max_bytes: int) -> list[list[Note]]:
@@ -63,13 +67,20 @@ async def consolidate_scope(
     if not notes:
         return 0, 0
     result: list[Note] = []
-    for batch in _batches(notes, max_input_bytes):
-        payload = json.dumps(
-            {"notes": [asdict(note) for note in batch]}, ensure_ascii=False, indent=1
-        )
-        result.extend(_parse(await runner(f"{INSTRUCTIONS}\n\n{payload}")))
-    if not result:
-        raise RuntimeError("consolidation returned no notes; keeping the current store")
+    for marker in ("", *MARKERS):
+        group = [note for note in notes if marker_of(note.name) == marker]
+        if not group:
+            continue
+        merged: list[Note] = []
+        for batch in _batches(group, max_input_bytes):
+            payload = json.dumps(
+                {"notes": [asdict(note) for note in batch]}, ensure_ascii=False, indent=1
+            )
+            merged.extend(_parse(await runner(f"{INSTRUCTIONS}\n\n{payload}")))
+        if not merged:
+            raise RuntimeError("consolidation returned no notes; keeping the current store")
+        result.extend(Note(marker + unmarked(n.name), n.date, n.text) for n in merged)
+    result.sort(key=lambda note: note.date)  # stable: each group's own order within a date
     store.rewrite(scope, guild_id, user_id, result)
     return len(notes), len(result)
 

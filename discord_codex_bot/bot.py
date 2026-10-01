@@ -49,15 +49,18 @@ from .backends import (
 )
 from .backup import backup_forever, export_memory_zip
 from .codex import (
+    QUOTE_FENCE,
     CodexResult,
     CodexServerOverloaded,
     CodexUnauthorized,
     CodexUsageLimit,
     codex_login_status,
+    defang,
     run_codex,
 )
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
+from .digest import digest_forever
 from .harvest import harvest_forever
 from .help import render_guide, render_sheet
 from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, is_link_only, plan, spoilered
@@ -273,7 +276,9 @@ def mentions_explicitly(content: str, bot_id: int) -> bool:
 
 
 def with_quoted_message(prompt: str, author: str, content: str, image_count: int) -> str:
-    """Fold a replied-to member message into the prompt so the model sees what was pointed at."""
+    """Fold a replied-to member message into the prompt so the model sees what was pointed at.
+    It is fenced (codex.QUOTE_FENCE): _prompt puts it in QUOTED_MESSAGE, never USER_MESSAGE, so
+    memory is never built from another member's words. Links in it are still fetched."""
     quoted = " ".join(content.split())
     parts = []
     if quoted:
@@ -282,7 +287,7 @@ def with_quoted_message(prompt: str, author: str, content: str, image_count: int
         parts.append(f"（那則訊息附了 {image_count} 張圖，已一併附上）")
     if not parts:
         return prompt
-    return "\n".join(parts + [prompt or "請看這則訊息。"])
+    return "\n".join([QUOTE_FENCE, *parts, QUOTE_FENCE, prompt or "請看這則訊息。"])
 
 
 def request_only(answer: str) -> bool:
@@ -562,6 +567,11 @@ class DiscordCodexClient(discord.Client):
         )
         self._consolidator = self.loop.create_task(
             consolidate_forever(self.memory, self.config, self.queue.run)
+        )
+        self._digester = self.loop.create_task(
+            digest_forever(
+                self.threads, self.memory, self.config, self.queue.run, self._public_channel
+            )
         )
         self._harvest_wakeup = asyncio.Event()
         self._harvester = self.loop.create_task(
@@ -1008,6 +1018,7 @@ class DiscordCodexClient(discord.Client):
                     blocks.append(f'<LINK url="{url}">\n{fetched}\n</LINK>')
                     extra.extend(shots)
                 recalled = "\n\n".join(blocks)
+                recalled = defang(recalled)  # results are not the member: no USER_MESSAGE in them
                 result = await self.queue.run(
                     lambda text=recalled, thread=result.thread_id, imgs=tuple(extra): turn(
                         text + "\n\nNow answer the member's question.",
@@ -2051,6 +2062,20 @@ class DiscordCodexClient(discord.Client):
         if kept:
             lines.append("備份：" + "、".join(path.name for path in kept))
         return "\n".join(lines)
+
+    def _public_channel(self, guild_id: int, channel_id: int) -> bool:
+        """True only when @everyone can read the channel, from the gateway cache. A channel the
+        Bot cannot see, a private thread, or anything unexpected counts as not public: server
+        memory written from it would reach every channel's prompt."""
+        guild = self.get_guild(guild_id)
+        channel = guild.get_channel_or_thread(channel_id) if guild else None
+        if isinstance(channel, discord.Thread):
+            if channel.is_private():
+                return False
+            channel = channel.parent
+        if guild is None or not isinstance(channel, discord.abc.GuildChannel):
+            return False
+        return bool(channel.permissions_for(guild.default_role).view_channel)
 
     def _is_guild_admin(self, interaction: discord.Interaction) -> bool:
         """Who may change operator settings: the server owner, a guild admin, or an id the
