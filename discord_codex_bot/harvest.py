@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from .backends import run_batch
 from .config import Config
+from .grok import THREAD_ID as GROK_THREAD_ID
+from .grok import load_transcript as load_grok_transcript
 from .memory import MemoryStore
 from .openrouter import load_transcript, message_text
 from .threads import ThreadStore
@@ -83,8 +85,25 @@ def _openrouter_turns(config: Config, thread_id: str) -> list[Turn]:
     return turns
 
 
+def _grok_turns(config: Config, thread_id: str) -> list[Turn]:
+    """Grok conversations are Bot-kept like the routers'. A user turn without USER_MESSAGE is a
+    follow-up the Bot sent itself (recall results), never the member."""
+    turns: list[Turn] = []
+    for message in load_grok_transcript(config, thread_id):
+        text = message_text(message.get("content"))
+        if message.get("role") == "user":
+            match = _USER_MESSAGE.search(text)
+            if match:
+                turns.append(Turn("user", match.group(1).strip()))
+        elif message.get("role") == "assistant" and text.strip():
+            turns.append(Turn("assistant", text.strip()))
+    return turns
+
+
 def transcript_turns(config: Config, thread_id: str) -> list[Turn]:
     """Keep provider roles structured; never recover roles from member-visible labels."""
+    if GROK_THREAD_ID.fullmatch(thread_id):
+        return _grok_turns(config, thread_id)
     path = rollout_path(config, thread_id)
     if path is None:
         return _openrouter_turns(config, thread_id) or _agy_turns(config, thread_id)
