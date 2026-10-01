@@ -105,8 +105,27 @@ def _grok_turns(config: Config, thread_id: str) -> list[Turn]:
     return turns
 
 
+# Before QUOTED_MESSAGE (2026-10-01) a message the member replied to was folded into their own
+# USER_MESSAGE as these leading lines (bot.with_quoted_message). Transcripts from then are still
+# read, so the lines are dropped there: they are someone else's words, not the member's.
+_LEGACY_QUOTE = re.compile(
+    r"\A(?:（後輩回覆了 .*? 的訊息：「.*」）\n|（那則訊息附了 \d+ 張圖，已一併附上）\n)+"
+)
+
+
+def _own_words(turns: list[Turn]) -> list[Turn]:
+    return [
+        Turn(turn.role, _LEGACY_QUOTE.sub("", turn.text)) if turn.role == "user" else turn
+        for turn in turns
+    ]
+
+
 def transcript_turns(config: Config, thread_id: str) -> list[Turn]:
     """Keep provider roles structured; never recover roles from member-visible labels."""
+    return _own_words(_provider_turns(config, thread_id))
+
+
+def _provider_turns(config: Config, thread_id: str) -> list[Turn]:
     if GROK_THREAD_ID.fullmatch(thread_id):
         return _grok_turns(config, thread_id)
     path = rollout_path(config, thread_id)
