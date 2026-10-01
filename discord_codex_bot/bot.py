@@ -565,7 +565,9 @@ class DiscordCodexClient(discord.Client):
             consolidate_forever(self.memory, self.config, self.queue.run)
         )
         self._digester = self.loop.create_task(
-            digest_forever(self.threads, self.memory, self.config, self.queue.run)
+            digest_forever(
+                self.threads, self.memory, self.config, self.queue.run, self._public_channel
+            )
         )
         self._harvest_wakeup = asyncio.Event()
         self._harvester = self.loop.create_task(
@@ -2055,6 +2057,20 @@ class DiscordCodexClient(discord.Client):
         if kept:
             lines.append("備份：" + "、".join(path.name for path in kept))
         return "\n".join(lines)
+
+    def _public_channel(self, guild_id: int, channel_id: int) -> bool:
+        """True only when @everyone can read the channel, from the gateway cache. A channel the
+        Bot cannot see, a private thread, or anything unexpected counts as not public: server
+        memory written from it would reach every channel's prompt."""
+        guild = self.get_guild(guild_id)
+        channel = guild.get_channel_or_thread(channel_id) if guild else None
+        if isinstance(channel, discord.Thread):
+            if channel.is_private():
+                return False
+            channel = channel.parent
+        if guild is None or not isinstance(channel, discord.abc.GuildChannel):
+            return False
+        return bool(channel.permissions_for(guild.default_role).view_channel)
 
     def _is_guild_admin(self, interaction: discord.Interaction) -> bool:
         """Who may change operator settings: the server owner, a guild admin, or an id the

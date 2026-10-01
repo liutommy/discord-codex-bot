@@ -25,10 +25,22 @@ clean set:
   old.
 - Keep names short (≤ 30 characters) and texts concise but complete; keep the notes' language.
 - Order the result oldest first; give each merged note the date of its newest source.
-- A name starting with （推測） (inferred from several conversations) or （多人提及） (gathered from
-  several members) says how the note was made: keep that marker on a note built only from such
-  notes. Merged with a note without the marker, the unmarked statement wins and the marker goes.
 Return only JSON matching the schema."""
+
+# How a note was made (digest.py), kept out of the model's hands: notes with different markers
+# are never consolidated together, so an inference cannot be merged into a stated fact and come
+# out unmarked, and every result carries exactly its group's marker.
+MARKERS = ("（推測）", "（多人提及）")
+
+
+def _marker(name: str) -> str:
+    return next((marker for marker in MARKERS if name.startswith(marker)), "")
+
+
+def _unmarked(name: str) -> str:
+    while marker := _marker(name):
+        name = name[len(marker) :].lstrip()
+    return name
 
 
 def _batches(notes: list[Note], max_bytes: int) -> list[list[Note]]:
@@ -66,13 +78,20 @@ async def consolidate_scope(
     if not notes:
         return 0, 0
     result: list[Note] = []
-    for batch in _batches(notes, max_input_bytes):
-        payload = json.dumps(
-            {"notes": [asdict(note) for note in batch]}, ensure_ascii=False, indent=1
-        )
-        result.extend(_parse(await runner(f"{INSTRUCTIONS}\n\n{payload}")))
-    if not result:
-        raise RuntimeError("consolidation returned no notes; keeping the current store")
+    for marker in ("", *MARKERS):
+        group = [note for note in notes if _marker(note.name) == marker]
+        if not group:
+            continue
+        merged: list[Note] = []
+        for batch in _batches(group, max_input_bytes):
+            payload = json.dumps(
+                {"notes": [asdict(note) for note in batch]}, ensure_ascii=False, indent=1
+            )
+            merged.extend(_parse(await runner(f"{INSTRUCTIONS}\n\n{payload}")))
+        if not merged:
+            raise RuntimeError("consolidation returned no notes; keeping the current store")
+        result.extend(Note(marker + _unmarked(n.name), n.date, n.text) for n in merged)
+    result.sort(key=lambda note: note.date)  # stable: each group's own order within a date
     store.rewrite(scope, guild_id, user_id, result)
     return len(notes), len(result)
 

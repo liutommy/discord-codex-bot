@@ -8,7 +8,9 @@ pass reads the last DIGEST_DAYS of conversations together:
   conversations. They are inferences, so their names start with USER_MARK and the model is told to
   treat them as hints (codex._prompt);
 - per server, facts about the server itself that at least two different members mention. Their
-  names start with GUILD_MARK. Nothing about an individual member goes there.
+  names start with GUILD_MARK. Nothing about an individual member goes there. Server notes reach
+  every channel's prompt, so only conversations in channels @everyone can read feed them; a
+  channel whose visibility cannot be established is left out.
 
 Every note must quote the members' own words: an exact substring of a message in each cited
 conversation (or by each cited member), from at least two different ones. Assistant text is never
@@ -28,15 +30,19 @@ from zoneinfo import ZoneInfo
 
 from .backends import run_batch
 from .config import Config
+from .consolidate import MARKERS
 from .harvest import _quota_ok, read_ledger, transcript_turns
 from .memory import MemoryStore
 from .threads import ThreadStore
 
 LOGGER = logging.getLogger(__name__)
 Runner = Callable[[str, str], Awaitable[str]]  # (prompt, "user" | "guild") -> JSON answer
+# (guild id, channel id) -> True only when @everyone can read that channel. The Bot supplies it;
+# without one (the operator CLI has no Discord connection) no server notes are written.
+Public = Callable[[int, int], bool]
+Conversation = tuple[int, list[str]]  # (channel id, the member's messages)
 
-USER_MARK = "（推測）"
-GUILD_MARK = "（多人提及）"
+USER_MARK, GUILD_MARK = MARKERS
 MAX_NOTES = 3  # per scope per run
 MIN_QUOTE_CHARS = 2
 MAX_MESSAGE_CHARS = 2_000
@@ -89,26 +95,26 @@ def seconds_until_weekly(
     return (target - current).total_seconds()
 
 
-def _parse_key(key: str) -> tuple[int, int] | None:
+def _parse_key(key: str) -> tuple[int, int, int] | None:
     try:
-        guild_id, _channel_id, user_id = (int(part) for part in key.split(":"))
+        guild_id, channel_id, user_id = (int(part) for part in key.split(":"))
     except ValueError:
         return None  # DMs ("None:…") and malformed keys have no server to belong to
-    return guild_id, user_id
+    return guild_id, channel_id, user_id
 
 
 def conversations(
     config: Config, threads: ThreadStore | None, since: float
-) -> dict[int, dict[int, list[list[str]]]]:
-    """{guild: {member: [[message, …] per conversation, oldest first]}} for threads used since
-    `since`: the harvest ledger plus each conversation's latest thread from the thread store."""
+) -> dict[int, dict[int, list[Conversation]]]:
+    """{guild: {member: [(channel, [message, …]) per conversation, oldest first]}} for threads
+    used since `since`: the harvest ledger plus each conversation's latest thread."""
     found: dict[str, tuple[str, float]] = {}
     for entry in read_ledger(config):
         if entry["at"] >= since:
             found[entry["thread_id"]] = (entry["key"], entry["at"])
     for key, thread_id, at in threads.recent(since) if threads else []:
         found.setdefault(thread_id, (key, at))
-    result: dict[int, dict[int, list[list[str]]]] = {}
+    result: dict[int, dict[int, list[Conversation]]] = {}
     for thread_id, (key, _at) in sorted(found.items(), key=lambda item: item[1][1]):
         ids = _parse_key(key)
         if ids is None:
@@ -119,7 +125,8 @@ def conversations(
             if turn.role == "user" and turn.text.strip()
         ]
         if messages:
-            result.setdefault(ids[0], {}).setdefault(ids[1], []).append(messages)
+            guild_id, channel_id, user_id = ids
+            result.setdefault(guild_id, {}).setdefault(user_id, []).append((channel_id, messages))
     return result
 
 
@@ -239,29 +246,49 @@ async def digest_guild(
     return len(notes)
 
 
-def _jobs(config, threads, store, runner, now):
-    """One job per member with ≥ 2 conversations and one per server with ≥ 2 members, each run
-    as its own queue item so members' questions are not held behind the whole digest."""
+def _jobs(config, threads, store, runner, now, public: Public | None):
+    """One job per member and one per server, each run as its own queue item so members'
+    questions are not held behind the whole digest. A member's own notes may come from any
+    channel they talked in (harvest already does); a server's only from public channels."""
     since = now - config.digest_days * 86400
     for guild_id, members in conversations(config, threads, since).items():
-        for user_id, groups in members.items():
+        for user_id, talks in members.items():
+            groups = [messages for _channel, messages in talks]
             yield (
                 f"{guild_id}/個人/…{str(user_id)[-4:]}",
                 (lambda g=guild_id, u=user_id, c=groups: digest_member(store, g, u, c, runner)),
             )
+        if public is None:
+            continue
+        shared = {
+            user_id: kept
+            for user_id, talks in members.items()
+            if (kept := [m for channel, m in talks if _is_public(public, guild_id, channel)])
+        }
         yield (
             f"{guild_id}/伺服器",
-            (lambda g=guild_id, m=members: digest_guild(store, g, m, runner)),
+            (lambda g=guild_id, m=shared: digest_guild(store, g, m, runner)),
         )
 
 
-async def digest_all(config, threads, store, runner, queue_run=None, now=None) -> str:
+def _is_public(public: Public, guild_id: int, channel_id: int) -> bool:
+    try:
+        return public(guild_id, channel_id) is True
+    except Exception:  # cannot tell -> not public
+        LOGGER.warning("Digest: visibility of channel %s unknown; left out", channel_id)
+        return False
+
+
+async def digest_all(
+    config, threads, store, runner, queue_run=None, now=None, public: Public | None = None
+) -> str:
     async def direct(job):
         return await job()
 
     queue_run = queue_run or direct
     lines = []
-    for label, job in _jobs(config, threads, store, runner, time.time() if now is None else now):
+    now = time.time() if now is None else now
+    for label, job in _jobs(config, threads, store, runner, now, public):
         try:
             added = await queue_run(job)
         except Exception as error:  # one bad scope must not stop the rest
@@ -284,7 +311,7 @@ def codex_runner(config: Config) -> Runner:
 
 
 async def digest_forever(
-    threads: ThreadStore, store: MemoryStore, config: Config, queue_run
+    threads: ThreadStore, store: MemoryStore, config: Config, queue_run, public: Public
 ) -> None:
     """Weekly at DIGEST_WEEKDAY / DIGEST_HOUR; DIGEST_WEEKDAY=-1 turns it off."""
     if config.digest_weekday < 0:
@@ -300,7 +327,7 @@ async def digest_forever(
             if not await _quota_ok(config):
                 LOGGER.info("Digest skipped this week: quota gate")
                 continue
-            summary = await digest_all(config, threads, store, runner, queue_run)
+            summary = await digest_all(config, threads, store, runner, queue_run, public=public)
             LOGGER.info("Digest done:\n%s", summary)
         except Exception:
             LOGGER.exception("Digest run failed")
@@ -308,7 +335,8 @@ async def digest_forever(
 
 async def run_once(config: Config, force: bool = False) -> str:
     """Operator entry point: `python -m discord_codex_bot.digest [--force]` inside the container.
-    Without --force the same quota gate as the weekly run applies."""
+    Without --force the same quota gate as the weekly run applies. Personal notes only: without
+    a Discord connection no channel's visibility can be checked, so no server notes."""
     from .bot import instructions_version
     from .memory import MemoryLimits
 

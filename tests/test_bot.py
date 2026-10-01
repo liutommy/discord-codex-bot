@@ -2074,3 +2074,37 @@ async def test_a_broken_ruten_source_reaches_the_operator(client, monkeypatch) -
     monkeypatch.setattr(client.ruten_tracker, "fetch", fine)
     await client._fetch_tracking_source(source)
     assert events == [("fail", "露天追蹤"), ("ok", "露天追蹤")]
+
+
+def test_public_channel_needs_everyone_to_read_it(client, monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    import discord
+
+    everyone = object()
+
+    def channel(kind, readable=True, private=False, parent=None):
+        made = MagicMock(spec=kind)
+        made.permissions_for.side_effect = lambda role: MagicMock(
+            view_channel=readable and role is everyone
+        )
+        if kind is discord.Thread:
+            made.is_private.return_value = private
+            made.parent = parent
+        return made
+
+    public, hidden = channel(discord.TextChannel), channel(discord.TextChannel, readable=False)
+    channels = {
+        1: public,
+        2: hidden,
+        3: channel(discord.Thread, parent=public),
+        4: channel(discord.Thread, parent=hidden),
+        5: channel(discord.Thread, private=True, parent=public),
+        6: channel(discord.Thread, parent=None),
+    }
+    guild = MagicMock(default_role=everyone)
+    guild.get_channel_or_thread.side_effect = channels.get
+    monkeypatch.setattr(client, "get_guild", lambda gid: guild if gid == GUILD else None)
+    verdicts = {cid: client._public_channel(GUILD, cid) for cid in [*channels, 99]}
+    assert verdicts == {1: True, 2: False, 3: True, 4: False, 5: False, 6: False, 99: False}
+    assert client._public_channel(GUILD + 1, 1) is False  # a guild the Bot does not see

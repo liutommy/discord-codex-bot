@@ -436,7 +436,10 @@ read, never the assistant's.
 - **Per server** with at least two members talking: facts about the server itself (recurring
   events, shared games, the server's own terms, running jokes, house rules) that at least two
   different members mention. The name starts with `（多人提及）`. Nothing about an individual
-  member goes there.
+  member goes there. Server notes reach every channel's prompt, so only conversations in
+  channels `@everyone` can read feed them (checked against the gateway cache; a private thread,
+  a channel the Bot cannot see or any doubt counts as private). The operator CLI below has no
+  Discord connection, so it writes personal notes only.
 
 Each note must quote the members' own words: one exact quote from each of at least two different
 conversations (personal) or members (server), every quote found character for character in the
@@ -444,7 +447,9 @@ message it cites, or the whole note is dropped. Sensitive traits (health, religi
 sexuality, finances, location, contact details), one-off questions, tracking/reminder operations
 and anything already noted are excluded; at most three notes per scope per week. The run uses
 `codex exec --output-schema` with no web search or other tools, shares the quota gate with
-consolidation, and logs only counts. Operators can run it now with
+consolidation, and logs only counts. Consolidation never puts a marked note in the same batch as
+a stated one: each marker is consolidated as its own group and every result is given its group's
+marker back, so an inference cannot be merged into a fact and lose its label. Operators can run it now with
 `python -m discord_codex_bot.digest [--force]`.
 
 Notes are consolidated once a day. At `CONSOLIDATE_HOUR` (`CONSOLIDATE_TIMEZONE`, default 02:00

@@ -90,7 +90,7 @@ def test_conversations_merges_ledger_and_live_threads_within_the_window(
     threads = ThreadStore(config.codex_home / "threads.json", 3600, "v1")
     threads.remember("1:5:3", "t2")
     found = conversations(config, threads, since=NOW - 7 * DAY)
-    assert found == {1: {3: [["遊戲王新卡"], ["今天抽卡"]]}}
+    assert found == {1: {3: [(2, ["遊戲王新卡"]), (5, ["今天抽卡"])]}}
     # Assistant text is never read, even when it repeats the member's words.
     assert "前輩說" not in json.dumps(found, ensure_ascii=False)
 
@@ -215,7 +215,7 @@ async def test_guild_digest_needs_two_members_and_writes_no_member_notes(
             }
         )
 
-    summary = await digest_all(config, None, store, runner, now=NOW)
+    summary = await digest_all(config, None, store, runner, now=NOW, public=lambda g, c: True)
     assert [e.name for e in store.entries("guild", 1, None)] == [f"{GUILD_MARK}週五開團"]
     assert store.entries("guild", 7, None) == []
     for user_id in (3, 4, 5):
@@ -253,13 +253,17 @@ async def test_one_failing_scope_does_not_stop_the_rest(tmp_path: Path, config: 
         queued.append(job)
         return await job()
 
-    summary = await digest_all(config, None, store, runner, queue_run, now=NOW)
+    summary = await digest_all(
+        config, None, store, runner, queue_run, now=NOW, public=lambda g, c: True
+    )
     assert summary == "1/個人/…3: failed (JSONDecodeError)\n1/伺服器: +1"
     assert len(queued) == 3  # each scope is its own queue item
 
 
 async def test_digest_forever_is_off_at_weekday_minus_one(config: Config) -> None:
-    await digest_forever(None, None, replace(config, digest_weekday=-1), None)  # returns at once
+    await digest_forever(
+        None, None, replace(config, digest_weekday=-1), None, None
+    )  # returns at once
 
 
 async def test_codex_runner_isolates_and_picks_the_scope_schema(config: Config, monkeypatch):
@@ -301,7 +305,7 @@ def test_the_model_and_the_consolidator_know_the_markers(config: Config) -> None
 
     prompt = _prompt("hi")
     assert USER_MARK in prompt and GUILD_MARK in prompt and "soft hint" in prompt
-    assert USER_MARK in INSTRUCTIONS and GUILD_MARK in INSTRUCTIONS
+    assert USER_MARK not in INSTRUCTIONS  # markers are handled in code, not by the model
     assert any(USER_MARK in line and GUILD_MARK in line for line in FEATURES)
 
 
@@ -317,3 +321,67 @@ async def test_harvesting_a_thread_records_it_in_the_ledger(tmp_path: Path, conf
 
     await _harvest_one(threads, store, config, "1:2:3", "t1", nothing)
     assert [(e["key"], e["thread_id"]) for e in read_ledger(config)] == [("1:2:3", "t1")]
+
+
+def _guild_note(*members: str) -> str:
+    evidence = [{"member": m, "quote": "週五開團"} for m in members]
+    return json.dumps({"notes": [{"name": "週五開團", "text": "週五開團", "evidence": evidence}]})
+
+
+async def test_server_notes_come_only_from_public_channels(tmp_path: Path, config: Config) -> None:
+    config, store = _setup(tmp_path, config)
+    for thread, key in (("a", "1:10:3"), ("b", "1:20:4"), ("c", "1:10:5")):
+        _thread(config, thread, ["週五開團"])
+        record_retired(config, key, thread, now=NOW - DAY)
+    seen = []
+
+    async def runner(prompt: str, scope: str) -> str:
+        seen.append(prompt)
+        return _guild_note("M1", "M2")
+
+    def public(guild_id: int, channel_id: int) -> bool:
+        if channel_id == 30:
+            raise RuntimeError("cache miss")
+        return channel_id == 10  # channel 20 is private
+
+    await digest_all(config, None, store, runner, now=NOW, public=public)
+    # Members 3 and 5 talked in public channel 10; member 4 only in private channel 20.
+    assert len(seen) == 1 and '{"M1": ["週五開團"], "M2": ["週五開團"]}' in seen[0]
+    assert [e.name for e in store.entries("guild", 1, None)] == [f"{GUILD_MARK}週五開團"]
+
+    # Only one member left in public channels: no server job reaches the model.
+    seen.clear()
+    await digest_all(config, None, store, runner, now=NOW, public=lambda g, c: c == 20)
+    assert seen == []
+
+    # A predicate that cannot answer counts as private; without one, no server notes at all.
+    await digest_all(config, None, store, runner, now=NOW, public=lambda g, c: public(g, 30))
+    await digest_all(config, None, store, runner, now=NOW)
+    assert seen == []
+
+
+async def test_consolidation_never_mixes_marked_and_stated_notes(tmp_path: Path) -> None:
+    from discord_codex_bot.consolidate import consolidate_scope
+
+    store = MemoryStore(tmp_path / "memory", LIMITS)
+    store.add("user", 1, 3, "喜歡貓", "說過喜歡貓")
+    store.add("user", 1, 3, f"{USER_MARK}喜歡貓", "似乎常聊貓")
+    store.add("user", 1, 3, f"{USER_MARK}遊戲王", "似乎常問遊戲王")
+    prompts = []
+
+    async def runner(prompt: str) -> str:
+        prompts.append(prompt)
+        if "說過喜歡貓" in prompt:
+            # The model tries to dress a stated fact up as an inference: the marker is removed.
+            return json.dumps(
+                {"notes": [{"name": f"{USER_MARK}貓", "date": "2026-10-01", "text": "喜歡貓"}]}
+            )
+        # Merging the inferences and dropping their marker: it is put back.
+        return json.dumps(
+            {"notes": [{"name": "貓與遊戲王", "date": "2026-10-02", "text": "似乎常聊"}]}
+        )
+
+    assert await consolidate_scope(store, "user", 1, 3, runner, 100_000) == (3, 2)
+    assert len(prompts) == 2
+    assert "說過喜歡貓" in prompts[0] and "似乎" not in prompts[0]  # never in the same batch
+    assert [e.name for e in store.entries("user", 1, 3)] == ["貓", f"{USER_MARK}貓與遊戲王"]
