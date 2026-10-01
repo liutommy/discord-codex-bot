@@ -471,3 +471,11 @@ def test_prompt_tells_the_model_the_current_taipei_time() -> None:
 
     pattern = r"Current time: \d{4}-\d{2}-\d{2} \d{2}:\d{2} \(\w+\) Asia/Taipei\."
     assert re.search(pattern, _prompt("q"))
+
+
+def test_the_instructions_say_x_accounts_can_be_tracked() -> None:
+    # X accounts are tracked through the xsearch sidecar since PR #2; an older line said they
+    # could not be, and the model turned a member's "追蹤 https://x.com/…" down because of it.
+    text = codex._prompt("追蹤 https://x.com/YuGiOh_OCG_INFO")
+    assert "cannot be tracked" not in text
+    assert "https://x.com/<handle>" in text

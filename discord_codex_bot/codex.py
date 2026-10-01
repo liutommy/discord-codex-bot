@@ -281,11 +281,12 @@ def _prompt(
             ' they ask to cancel one, append <cancel_reminder id="N"/> using an id from that'
             " section; never invent ids.",
             "MEMORY may end with a [社群追蹤] section: this member's watches — a YouTube"
-            " channel, a Twitch channel, or any public web page (an official news index, a blog)."
-            " Track a page when there is no channel to follow; the Bot reads it and treats a link"
-            " it has not seen before as new content. An X/Twitter profile is the one thing that"
-            " cannot be tracked: reading someone's posts needs the paid API, and the free mirrors"
-            " return profile figures without any posts."
+            " channel, a Twitch channel, an X account (its profile URL, https://x.com/<handle>),"
+            " or any public web page (an official news index, a blog). Track a page when there"
+            " is no channel to follow; the Bot reads it and treats a link it has not seen before"
+            " as new content. X accounts are read through the operator's X lookup service: use"
+            " the profile URL as the source, never a mirror or a substitute page, and if that"
+            " service is off the Bot says so itself."
             " (#id, mode, source). To start one, append"
             ' <track source="https://…" interest="what is worth pinging about"'
             ' who="<@user id> <@user id>"/> after your answer — omit who to ping only the'
