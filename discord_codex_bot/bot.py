@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime as _dt
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 import discord
@@ -173,6 +174,9 @@ PROVIDER_CHOICES = [
 FREE_MODEL_NOTE = "免費模型可能隨時不穩或下架，失敗時請換一個。"
 
 
+X_ITEM_KINDS = ("post", "reply", "repost")  # what XFetcher produces
+
+
 def tracking_provider(locator: str) -> str:
     """Return the provider for a supported locator without doing network I/O. The specific
     providers are tried first; anything else that is a public page is tracked as a page."""
@@ -210,6 +214,9 @@ def tracking_message(message: OutboxMessage, source_label: str = "") -> str:
     targets = [uid for uid in (watch.user_id, *watch.mention_ids) if uid]
     mention = " ".join(f"<@{uid}>" for uid in targets)
     body = f"{said}\n**{title}**\n{item.url}"
+    if item.kind in X_ITEM_KINDS and urlsplit(item.url).hostname == "x.com":
+        # Read out of X search by a model (xsearch sidecar), not from an API: say so.
+        body += "\n（X 搜尋取得，作者與內容未經驗證）"
     return truncate(f"{mention} {body}" if mention else body, 1900)
 
 
