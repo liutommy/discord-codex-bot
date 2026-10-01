@@ -2146,3 +2146,14 @@ async def test_tracking_tags_set_fixed_times(client, tmp_path, monkeypatch) -> N
         f'<track_every id="{watch.id}" minutes="120"/>', GUILD, 555, USER
     )
     assert "每 120 分鐘" in back and client.tracker.watches(user_id=USER)[0].times == ()
+
+
+async def test_an_unreadable_track_time_creates_nothing(client, tmp_path) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    said = await client._apply_tracking_tags(
+        '好。\n<track source="https://www.youtube.com/@HoushouMarine" at="中午"/>',
+        GUILD,
+        555,
+        USER,
+    )
+    assert "時間看不懂，沒有建立追蹤" in said and client.tracker.watches() == []

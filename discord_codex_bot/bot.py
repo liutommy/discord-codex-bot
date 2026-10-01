@@ -1679,6 +1679,11 @@ class DiscordCodexClient(discord.Client):
             return f"{clean}\n\n（社群追蹤尚未啟用。）"
         notes: list[str] = []
         for locator, interest, who, every, times in adds:
+            if times is None:
+                notes.append(
+                    f"（{locator[:80]} 的時間看不懂，沒有建立追蹤；請用像 12:01、20:01 這樣的寫法）"
+                )
+                continue
             note, watch = await self._add_watch(
                 locator, interest, who, guild_id, channel_id, user_id, every, times
             )

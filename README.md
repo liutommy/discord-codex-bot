@@ -224,8 +224,11 @@ on the first pass at or after it — the tracking loop wakes for the next fixed 
 waiting out `TRACKING_INTERVAL_MINUTES`, and a Bot that slept through one judges at wake-up. A
 time with nothing new to judge is used up all the same, so an item arriving afterwards waits for
 the next time. Fetching does not change: sources are still read every pass (X sources on
-`X_TRACKING_INTERVAL_MINUTES`), so a time judges whatever has arrived since the last one, the
-newest `MAX_CLASSIFY_BATCH` (30) at most; a new or rescheduled watch starts from the next time.
+`X_TRACKING_INTERVAL_MINUTES`), so a time judges whatever has arrived since the last one — batch
+after batch of `MAX_CLASSIFY_BATCH` (30) until nothing is left, up to `MAX_SLOT_BATCHES` (10)
+with a warning past it, so a busy shop is not cut to 30 a time and the rest left to expire. A
+failed judgement does not use the time up: the watch retries after its `interval_minutes`
+until it succeeds or the next time comes. A new or rescheduled watch starts from the next time;
 `<track_every>` switches a watch back to an interval.
 
 Watches can also be managed by asking in words, the way reminders can: the model appends

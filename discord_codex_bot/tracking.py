@@ -84,6 +84,9 @@ class Watch:
     # Fixed times of day ("HH:MM", Taiwan time) instead of an interval: the watch is judged once
     # per time, on the first pass at or after it. Empty = interval_minutes rules.
     times: tuple[str, ...] = ()
+    # Last failed classification of a fixed-time watch: the time is not used up by a failure,
+    # the watch retries after interval_minutes instead (see watch_due).
+    failed_at: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +185,7 @@ CREATE TABLE IF NOT EXISTS watches (
     interval_minutes INTEGER NOT NULL DEFAULT 60 CHECK (interval_minutes > 0),
     classified_at INTEGER NOT NULL DEFAULT 0,
     times TEXT NOT NULL DEFAULT '',
+    failed_at INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     UNIQUE(source_id, guild_id, channel_id, user_id, interest)
 );
@@ -234,15 +238,19 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, id);
 # Attributes are parsed by name rather than in a fixed order: a model that writes who= before
 # interest= would otherwise have the later attributes silently dropped.
 TRACK_TAG = re.compile(r'<track((?:\s+[a-z_]{1,10}="[^"]{0,2000}")+)\s*/?>(?:\s*</track>)?')
+# Like <track>, read by attribute name: the prompt says order does not matter, and a model that
+# wrote times= before id= would otherwise leave the tag unparsed after saying it was done.
 TRACK_EVERY_TAG = re.compile(
-    r'<track_every\s+id="([0-9]{1,9})"\s+minutes="([0-9]{1,5})"\s*/?>(?:\s*</track_every>)?'
+    r'<track_every((?:\s+[a-z_]{1,10}="[^"]{0,200}")+)\s*/?>(?:\s*</track_every>)?'
 )
-TRACK_AT_TAG = re.compile(
-    r'<track_at\s+id="([0-9]{1,9})"\s+times="([^"]{1,100})"\s*/?>(?:\s*</track_at>)?'
-)
+TRACK_AT_TAG = re.compile(r'<track_at((?:\s+[a-z_]{1,10}="[^"]{0,200}")+)\s*/?>(?:\s*</track_at>)?')
 # Members live on Taiwan time; a watch's fixed times are read there.
 TRACK_TZ = ZoneInfo("Asia/Taipei")
 MAX_TRACK_TIMES = 6
+# At its time a fixed-time watch judges everything that waited for it, batch after batch, so a
+# busy source (a whole shop: ~20 items an hour) is not cut to MAX_CLASSIFY_BATCH a day and the
+# rest left to expire. Bounded, with a warning past it.
+MAX_SLOT_BATCHES = 10
 _TIME = re.compile(r"(?<!\d)([01]?\d|2[0-3])[:：]?([0-5]\d)(?!\d)")
 # Cancelling used to be slash-only, on the grounds that dropping a watch throws away its
 # baseline and rebuilding one costs a classification pass. That cost is the member's to spend —
@@ -273,8 +281,8 @@ PENDING_MAX_HOURS = 48
 WEB_LINK = re.compile(r"<(https?://[^>\s]+)>\s{0,4}([^\n<>]{0,160})")
 
 # (source, interest, extra mentions, interval in minutes — 0 means "operator default",
-#  fixed times of day — () means "use the interval")
-TrackAdd = tuple[str, str, tuple[int, ...], int, tuple[str, ...]]
+#  fixed times of day — () means "use the interval", None means at= was given but unreadable)
+TrackAdd = tuple[str, str, tuple[int, ...], int, tuple[str, ...] | None]
 
 
 def parse_times(text: str) -> tuple[str, ...]:
@@ -304,11 +312,14 @@ def _slots(times: Sequence[str], now: float) -> tuple[float | None, float | None
 
 def watch_due(watch: Watch, now: float) -> bool:
     """May this watch spend a classification now? With fixed times: when one has come since the
-    last attempt (late is fine — a Bot that slept through 12:01 judges at wake-up). Otherwise:
-    when interval_minutes has passed since the last attempt."""
+    last completed judgement (late is fine — a Bot that slept through 12:01 judges at wake-up),
+    and, if it failed since that time, interval_minutes after the failure — a passing outage
+    costs a retry, not the whole day. Otherwise: interval_minutes after the last attempt."""
     if watch.times:
         last, _next = _slots(watch.times, now)
-        return last is not None and last > watch.classified_at
+        if last is None or last <= watch.classified_at:
+            return False
+        return watch.failed_at < last or now - watch.failed_at >= watch.interval_minutes * 60
     return now - watch.classified_at >= watch.interval_minutes * 60
 
 
@@ -340,15 +351,22 @@ def extract_track_tags(
                     :MAX_TRACK_MENTIONS
                 ],
                 int(every) if every.isdigit() else 0,
-                parse_times(attrs.get("at", "")),
+                (parse_times(attrs["at"]) or None) if "at" in attrs else (),
             )
         )
-    every_changes = [
-        (int(watch_id), int(minutes)) for watch_id, minutes in TRACK_EVERY_TAG.findall(answer)
-    ][:MAX_TRACK_TAGS]
-    time_changes = [
-        (int(watch_id), parse_times(times)) for watch_id, times in TRACK_AT_TAG.findall(answer)
-    ][:MAX_TRACK_TAGS]
+    every_changes = []
+    for body in TRACK_EVERY_TAG.findall(answer):
+        attrs = dict(_ATTR.findall(body))
+        watch_id, minutes = attrs.get("id", "").strip(), attrs.get("minutes", "").strip()
+        if watch_id.isdigit() and len(watch_id) <= 9 and minutes.isdigit() and len(minutes) <= 5:
+            every_changes.append((int(watch_id), int(minutes)))
+    time_changes = []
+    for body in TRACK_AT_TAG.findall(answer):
+        attrs = dict(_ATTR.findall(body))
+        watch_id = attrs.get("id", "").strip()
+        if watch_id.isdigit() and len(watch_id) <= 9:
+            time_changes.append((int(watch_id), parse_times(attrs.get("times", ""))))
+    every_changes, time_changes = every_changes[:MAX_TRACK_TAGS], time_changes[:MAX_TRACK_TAGS]
     cancels = [int(watch_id) for watch_id in CANCEL_TRACK_TAG.findall(answer)][:MAX_TRACK_TAGS]
     clean = answer
     for pattern in (CANCEL_TRACK_TAG, TRACK_EVERY_TAG, TRACK_AT_TAG, TRACK_TAG):
@@ -385,6 +403,7 @@ class TrackerStore:
                         ("interval_minutes", "INTEGER NOT NULL DEFAULT 60"),
                         ("classified_at", "INTEGER NOT NULL DEFAULT 0"),
                         ("times", "TEXT NOT NULL DEFAULT ''"),
+                        ("failed_at", "INTEGER NOT NULL DEFAULT 0"),
                     ),
                 ),
                 ("decisions", (("message", "TEXT NOT NULL DEFAULT ''"),)),
@@ -454,6 +473,7 @@ class TrackerStore:
             int(row["interval_minutes"] or 60),
             int(row["classified_at"] or 0),
             tuple(part for part in str(row["times"] or "").split(",") if part),
+            int(row["failed_at"] or 0),
         )
 
     @staticmethod
@@ -606,6 +626,13 @@ class TrackerStore:
             ).rowcount
         return bool(changed)
 
+    def mark_failed(self, watch_id: int) -> None:
+        """A fixed-time watch's judgement failed: keep its time owed, retry after its interval."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE watches SET failed_at=? WHERE id=?", (int(time.time()), watch_id)
+            )
+
     def mark_classified(self, watch_id: int) -> None:
         """Stamp a classification attempt — failures included, so a watch that keeps erroring
         waits out its interval instead of burning quota on every fetch pass."""
@@ -706,11 +733,14 @@ class TrackerStore:
             ).fetchall()
         return [self._item(row) for row in rows]
 
-    def pending_by_watch(self) -> list[tuple[Watch, list[ContentItem]]]:
+    def pending_by_watch(
+        self, watch_id: int | None = None
+    ) -> list[tuple[Watch, list[ContentItem]]]:
         """Undecided items published after the watch was created, at most MAX_CLASSIFY_BATCH per
         watch (the newest; oldest first within the batch), none seen more than PENDING_MAX_HOURS
         ago. The first sight of a source is its baseline and is never classified: a new watch is
-        about what happens from now on."""
+        about what happens from now on. Only watches due now, unless `watch_id` asks for the
+        next batch of one watch already being judged."""
         cutoff = (datetime.now(UTC) - timedelta(hours=PENDING_MAX_HOURS)).isoformat()
         with self._connect() as connection:
             rows = connection.execute(
@@ -722,14 +752,18 @@ class TrackerStore:
                    FROM watches w JOIN items i ON i.source_id=w.source_id
                    LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
                    WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id
-                     AND i.baseline=0 AND i.observed_at >= ?
+                     AND i.baseline=0 AND i.observed_at >= ? AND (? IS NULL OR w.id = ?)
                    ORDER BY w.id, i.published_at, i.id""",
-                (cutoff,),
+                (cutoff, watch_id, watch_id),
             ).fetchall()
         groups: dict[int, tuple[Watch, list[ContentItem]]] = {}
         now = time.time()
         for row in rows:
-            if row["id"] not in groups and not watch_due(self._watch(row), now):
+            if (
+                row["id"] not in groups
+                and watch_id is None
+                and not watch_due(self._watch(row), now)
+            ):
                 continue
             if row["id"] not in groups:
                 groups[row["id"]] = (self._watch(row), [])
@@ -1767,23 +1801,44 @@ async def run_tracking_once(
         LOGGER.warning("Watch %s: %d item(s) expired unjudged", watch_id, count)
         stats["expired"] += count
     for watch, items in store.pending_by_watch():
-        try:
-            source = store.get_source(watch.source_id)
-            label = ""
-            if source is not None:
-                label = str(
-                    source.state.get("title") or source.state.get("login") or source.external_id
-                )
-            answer = await classifier(build_classifier_prompt(watch, items, label))
-            decisions = parse_classifier_result(answer, items)
-            store.save_decisions(watch, items, decisions)
-        except Exception:
-            stats["classifier_failures"] += 1
-            LOGGER.exception("Social classifier failed for watch %s", watch.id)
-        else:
+        source = store.get_source(watch.source_id)
+        label = ""
+        if source is not None:
+            label = str(
+                source.state.get("title") or source.state.get("login") or source.external_id
+            )
+        failed = False
+        for _batch in range(MAX_SLOT_BATCHES if watch.times else 1):
+            try:
+                answer = await classifier(build_classifier_prompt(watch, items, label))
+                decisions = parse_classifier_result(answer, items)
+                store.save_decisions(watch, items, decisions)
+            except Exception:
+                stats["classifier_failures"] += 1
+                LOGGER.exception("Social classifier failed for watch %s", watch.id)
+                failed = True
+                break
+            finally:
+                stats["classifier_calls"] += 1
             stats["decisions"] += len(decisions)
-        finally:
-            stats["classifier_calls"] += 1
+            if not watch.times or not decisions:
+                break  # an interval watch takes one batch a pass; no progress, no next batch
+            more = store.pending_by_watch(watch.id)
+            if not more:
+                break
+            items = more[0][1]
+        else:
+            if watch.times and store.pending_by_watch(watch.id):
+                LOGGER.warning(
+                    "Watch %s: items still pending after %d batches at its time",
+                    watch.id,
+                    MAX_SLOT_BATCHES,
+                )
+        if watch.times and failed:
+            store.mark_failed(watch.id)  # the time stays owed; retried after the interval
+        else:
+            # Failures of an interval watch included, so a watch that keeps erroring waits out
+            # its interval instead of burning quota on every fetch pass.
             store.mark_classified(watch.id)
     store.consume_slots()
     for message in store.pending_outbox():

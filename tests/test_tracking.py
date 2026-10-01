@@ -1067,3 +1067,90 @@ async def test_the_loop_wakes_for_the_next_fixed_time(tmp_path: Path, monkeypatc
 
 
 import asyncio  # noqa: E402
+
+
+def _slot_store(tmp_path: Path, monkeypatch, count: int) -> tuple[TrackerStore, Watch, list]:
+    """A fixed-time (12:01) watch made at 11:00 with `count` items waiting for its time."""
+    clock = [taipei(2, 11)]
+    monkeypatch.setattr(tracking.time, "time", lambda: clock[0])
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("ruten", "1", "https://www.ruten.com.tw/store/x/")
+    store.ingest(source, FetchResult((content(source.id, "base"),), "base"))  # baseline
+    watch = store.add_watch(source.id, 1, 2, 3, times=("12:01",), interval_minutes=60)
+    items = tuple(content(source.id, f"i{n:03d}", "商品") for n in range(count))
+    store.ingest(store.get_source(source.id), FetchResult(items, "i"))
+    clock[0] = taipei(2, 12, 2)
+    return store, watch, clock
+
+
+async def _nothing_new(_source):
+    return FetchResult(())
+
+
+async def _no_delivery(_message):
+    return None
+
+
+async def test_a_fixed_time_judges_everything_that_waited_for_it(tmp_path, monkeypatch) -> None:
+    store, watch, _clock = _slot_store(tmp_path, monkeypatch, 70)
+    calls = []
+
+    async def classify(prompt):
+        calls.append(prompt)
+        return classifier_answer(prompt, notify=False)
+
+    stats = await tracking.run_tracking_once(store, _nothing_new, classify, _no_delivery)
+    assert stats["decisions"] == 70 and len(calls) == 3  # 30 + 30 + 10, all at 12:01
+    assert store.pending_by_watch(watch.id) == []
+    assert store.expire_stale() == {}
+
+
+async def test_the_batch_cap_warns_and_leaves_the_rest_for_later(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    store, watch, _clock = _slot_store(tmp_path, monkeypatch, 70)
+    monkeypatch.setattr(tracking, "MAX_SLOT_BATCHES", 2)
+
+    async def classify(prompt):
+        return classifier_answer(prompt, notify=False)
+
+    stats = await tracking.run_tracking_once(store, _nothing_new, classify, _no_delivery)
+    assert stats["decisions"] == 60
+    assert "items still pending after 2 batches" in caplog.text
+    assert len(store.pending_by_watch(watch.id)[0][1]) == 10
+
+
+async def test_a_failed_fixed_time_is_retried_after_the_interval(tmp_path, monkeypatch) -> None:
+    store, watch, clock = _slot_store(tmp_path, monkeypatch, 5)
+    outcome = ["fail"]
+
+    async def classify(prompt):
+        if outcome[0] == "fail":
+            raise RuntimeError("backend down")
+        return classifier_answer(prompt, notify=False)
+
+    stats = await tracking.run_tracking_once(store, _nothing_new, classify, _no_delivery)
+    assert stats["classifier_failures"] == 1
+    # Not used up: consume_slots left it owed, but it waits out the interval before retrying.
+    clock[0] = taipei(2, 12, 30)
+    assert store.pending_by_watch() == []
+    clock[0] = taipei(2, 13, 3)
+    outcome[0] = "ok"
+    stats = await tracking.run_tracking_once(store, _nothing_new, classify, _no_delivery)
+    assert stats["decisions"] == 5
+    # Judged: the time is used up until tomorrow's 12:01.
+    clock[0] = taipei(2, 14, 3)
+    assert not watch_due(store.watches()[0], clock[0])
+
+
+def test_track_at_and_track_every_read_attributes_in_any_order() -> None:
+    _c, _a, every, at, _x = tracking.extract_track_tags(
+        '<track_every minutes="90" id="4"/><track_at times="12:01" id="5"/>'
+        '<track_at id="6" times="中午"/><track_every id="x" minutes="5"/>'
+    )
+    assert every == [(4, 90)] and at == [(5, ("12:01",)), (6, ())]
+    # at= given but unreadable is not the same as no at=.
+    _c, adds, _e, _t, _x = tracking.extract_track_tags(
+        '<track source="https://x.com/a" at="中午"/>'
+    )
+    assert adds == [("https://x.com/a", "", (), 0, None)]
