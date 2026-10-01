@@ -6,15 +6,20 @@ fetch URLs and start background jobs, and the obvious flags do not all remove th
 `--disallowed-tools` entry spelled as the tool list spells it leaves the shell in place, and a
 `monitor` tool runs commands too). Nothing a member writes reaches the prompt here — the bot
 sends a post id or a handle, both validated below — but the posts Grok reads are untrusted
-text, so the agent must have nothing to act with. Three layers, any one of which suffices:
+text, so the agent must have nothing to act with. Two layers prevent, one detects:
 
-1. Every client tool is removed on the command line (`LOCKED_ARGS`), and permission rules
-   deny the rest.
-2. A root-owned enforced policy (/etc/grok/requirements.toml) denies every PreToolUse.
-3. Fail-closed verification of what actually happened (`verify_stream`): the session must
-   start with an empty client toolset and may only use the server-side X search. Anything
-   else and the answer is thrown away. Layers 1 and 2 are Grok's own machinery (its hooks
-   fail open on error); this one is ours and does not.
+1. Prevent: every client tool is removed on the command line (`LOCKED_ARGS`), and permission
+   rules deny the rest.
+2. Prevent: a root-owned enforced policy (/etc/grok/requirements.toml) denies every PreToolUse.
+3. Detect: fail-closed verification of what actually happened (`verify_stream`) — the session
+   must start with an empty client toolset, use nothing but the server-side X search and emit
+   only event shapes we know. Anything else and the answer is thrown away and logged. This
+   cannot undo a tool that already ran; it is what tells us 1 and 2 failed (Grok's hooks fail
+   open on error, this check does not).
+
+Each lookup also runs in a fresh, empty Grok home and working directory on tmpfs, holding only
+a copy of the login: nothing a session writes (config, hooks, skills, memory, project files)
+can reach the next one, so persistence through the writable login volume is not a question.
 """
 
 from __future__ import annotations
@@ -22,9 +27,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
+import time
+from collections import OrderedDict
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,10 +42,22 @@ PORT = int(os.environ.get("XSEARCH_PORT", "8090"))
 MODEL = os.environ.get("XSEARCH_MODEL", "grok-4.7")
 TIMEOUT = int(os.environ.get("XSEARCH_TIMEOUT_SECONDS", "180"))
 GROK = os.environ.get("XSEARCH_GROK_BIN", "grok")
-CWD = os.environ.get("XSEARCH_CWD", "/work")
+# The persistent volume holds only the login; every session gets a throwaway home under SCRATCH.
+AUTH_DIR = os.environ.get("XSEARCH_AUTH_DIR", "/var/lib/grok")
+SCRATCH = os.environ.get("XSEARCH_SCRATCH", "/tmp")
+QUEUE_WAIT = int(os.environ.get("XSEARCH_QUEUE_WAIT_SECONDS", "30"))
+POST_CACHE_SECONDS = int(os.environ.get("XSEARCH_POST_CACHE_SECONDS", "3600"))
+# Paths Grok 1.0.46 writes outside its home whatever HOME/GROK_HOME/TMPDIR say (it keeps a
+# per-session directory under /tmp/sessions). Removed after every session like the home itself.
+STRAY_PATHS = ("/tmp/sessions",)
 MAX_BODY = 4096
 MAX_TEXT = 4000
-_LOCK = threading.Lock()  # one Grok session at a time: each one spends subscription quota
+# One Grok session at a time: each spends subscription quota. A request that cannot get a turn
+# within QUEUE_WAIT is turned away (429) instead of queueing work its caller has given up on.
+_LOCK = threading.Lock()
+_POST_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+TWITTER_EPOCH_MS = 1288834974657
+SNOWFLAKE_MIN = 1 << 32  # ids below this predate snowflakes (2006-2010) and carry no time
 
 POST_ID = re.compile(r"^[0-9]{1,20}$")
 HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
@@ -116,6 +137,10 @@ class LookupFailed(RuntimeError):
     pass
 
 
+class Busy(RuntimeError):
+    pass
+
+
 class Unsafe(RuntimeError):
     """The session was not the locked-down one this service relies on."""
 
@@ -157,25 +182,49 @@ def build_prompt(kind: str, request: dict) -> str:
     raise BadRequest(f"unknown lookup {kind!r}")
 
 
+# Event and content-block shapes Grok 1.0.x emits in streaming-messages-json. Anything else
+# means the format moved under us, and an unknown shape is refused, not skipped.
+_EVENTS = {("system", "init"), ("system", "compact_boundary"), ("assistant", None),
+           ("user", None), ("result", None)}  # fmt: skip
+_BLOCKS = {"assistant": {"text", "thinking", "tool_use"}, "user": {"tool_result", "text"}}
+X_SEARCH_NAME = "X search:"
+
+
 def verify_stream(lines: list[str]) -> dict:
-    """The structured answer, but only from a session that had no client tools and used
-    nothing except server-side X search. Raises Unsafe or LookupFailed otherwise."""
-    init_tools = None
+    """The answer, but only from a session that had no client tools, used nothing except
+    server-side X search, and emitted only event shapes we know. Raises Unsafe or LookupFailed.
+
+    The tool check keys on the tool *name*, which the CLI fills in; `input` is written by the
+    model and is only checked in addition."""
+    inits = 0
     result = None
     for line in lines:
+        if not line.strip():
+            continue
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
-            continue
+            raise Unsafe("session emitted a line that is not JSON") from None
+        if not isinstance(event, dict):
+            raise Unsafe("session emitted a non-object event")
         kind = event.get("type")
-        if kind == "system" and event.get("subtype") == "init":
-            init_tools = event.get("tools")
-        elif kind == "assistant":
+        subtype = event.get("subtype") if kind == "system" else None
+        if (kind, subtype) not in _EVENTS:
+            raise Unsafe(f"unknown event {kind!r}/{subtype!r}")
+        if kind == "system" and subtype == "init":
+            inits += 1
+            if event.get("tools") != []:
+                raise Unsafe(f"session started with client tools: {event.get('tools')!r}")
+        elif kind in _BLOCKS:
             for block in (event.get("message") or {}).get("content") or []:
-                if block.get("type") in ("tool_use", "server_tool_use"):
+                block_type = block.get("type") if isinstance(block, dict) else None
+                if block_type not in _BLOCKS[kind]:
+                    raise Unsafe(f"unknown {kind} block {block_type!r}")
+                if block_type == "tool_use":
                     tool_input = block.get("input") or {}
                     if (
-                        tool_input.get("variant") != "XSearch"
+                        block.get("name") != X_SEARCH_NAME
+                        or tool_input.get("variant") != "XSearch"
                         or tool_input.get("backend") is not True
                     ):
                         raise Unsafe(
@@ -183,10 +232,8 @@ def verify_stream(lines: list[str]) -> dict:
                         )
         elif kind == "result":
             result = event
-    if init_tools is None:
+    if not inits:
         raise Unsafe("session reported no toolset")
-    if init_tools:
-        raise Unsafe(f"session started with client tools: {init_tools}")
     if result is None or result.get("is_error") or result.get("subtype") != "success":
         raise LookupFailed(f"grok did not finish: {(result or {}).get('subtype')}")
     answer = last_json_object(str(result.get("result") or ""))
@@ -226,12 +273,26 @@ def _utc_iso(value: str) -> str | None:
     return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _id_matches_time(post_id: str, created: str) -> bool:
+    """X post ids are snowflakes: the top bits are the creation time. A post whose id and time
+    disagree — or that claims to be from the future — was invented, e.g. by a post that talked
+    the model into reporting `id=99999999999999999999`, which would otherwise become the
+    tracking cursor and hide every real post behind it."""
+    value = int(post_id)
+    if value < SNOWFLAKE_MIN:
+        return True  # pre-2010 ids carry no time; too small to ever move a cursor forward
+    id_ms = (value >> 22) + TWITTER_EPOCH_MS
+    created_ms = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp() * 1000
+    now_ms = time.time() * 1000
+    return abs(id_ms - created_ms) <= 10 * 60_000 and id_ms <= now_ms + 5 * 60_000
+
+
 def _clean_post(post: object) -> dict | None:
     if not isinstance(post, dict):
         return None
     post_id = str(post.get("id", ""))
     created = _utc_iso(str(post.get("created_at", "")))
-    if created is None or not POST_ID.match(post_id):
+    if created is None or not POST_ID.match(post_id) or not _id_matches_time(post_id, created):
         return None
     clean = {
         "id": post_id,
@@ -279,9 +340,63 @@ def shape(kind: str, request: dict, answer: dict) -> dict:
     return {"posts": posts[: int(request.get("limit", 10))]}
 
 
+def _fresh_home() -> tuple[str, dict]:
+    """A throwaway Grok home and working directory holding only a copy of the login."""
+    scratch = tempfile.mkdtemp(prefix="xsearch-", dir=SCRATCH)
+    home, work = os.path.join(scratch, "home"), os.path.join(scratch, "work")
+    os.makedirs(os.path.join(home, ".grok"), mode=0o700)
+    os.makedirs(work, mode=0o700)
+    os.makedirs(os.path.join(scratch, "tmp"), mode=0o700)
+    source = os.path.join(AUTH_DIR, "auth.json")
+    if os.path.exists(source):
+        shutil.copyfile(source, os.path.join(home, ".grok", "auth.json"))
+        os.chmod(os.path.join(home, ".grok", "auth.json"), 0o600)
+    env = {
+        "HOME": home,
+        "GROK_HOME": os.path.join(home, ".grok"),
+        "XDG_CONFIG_HOME": os.path.join(home, ".config"),
+        "XDG_DATA_HOME": os.path.join(home, ".local", "share"),
+        "XDG_CACHE_HOME": os.path.join(home, ".cache"),
+        "XDG_STATE_HOME": os.path.join(home, ".local", "state"),
+        "TMPDIR": os.path.join(scratch, "tmp"),  # Grok keeps per-session dirs under $TMPDIR
+    }
+    return scratch, env
+
+
+def _keep_login(scratch: str) -> None:
+    """Carry a refreshed login back to the volume — the only thing that outlives a session —
+    and only if it is still a JSON object (a session must not be able to plant junk there)."""
+    fresh = os.path.join(scratch, "home", ".grok", "auth.json")
+    target = os.path.join(AUTH_DIR, "auth.json")
+    try:
+        with open(fresh, "rb") as handle:
+            data = handle.read()
+        if not isinstance(json.loads(data), dict):
+            return
+        with open(target, "rb") as handle:
+            if handle.read() == data:
+                return
+    except (OSError, ValueError):
+        return
+    staging = f"{target}.new"
+    with open(os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as handle:
+        handle.write(data)
+    os.replace(staging, target)
+
+
 def run_grok(prompt: str) -> list[str]:
+    scratch, home_env = _fresh_home()
+    try:
+        return _run(prompt, home_env, os.path.join(scratch, "work"))
+    finally:
+        _keep_login(scratch)
+        for path in (scratch, *STRAY_PATHS):
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _run(prompt: str, home_env: dict, cwd: str) -> list[str]:
     command = [
-        GROK, "-m", MODEL, "-p", prompt, "--cwd", CWD, *LOCKED_ARGS,
+        GROK, "-m", MODEL, "-p", prompt, "--cwd", cwd, *LOCKED_ARGS,
         *(("--sandbox", SANDBOX) if SANDBOX else ()),
     ]  # fmt: skip
     process = subprocess.Popen(
@@ -289,7 +404,8 @@ def run_grok(prompt: str) -> list[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env={**os.environ, **ENV},
+        cwd=cwd,
+        env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), **home_env, **ENV},
         start_new_session=True,
     )
     try:
@@ -308,9 +424,22 @@ def lookup(kind: str, request: dict) -> dict:
         f"{build_prompt(kind, request)}\n\nSearch first. Then reply with exactly one JSON object "
         f"and nothing else, matching this JSON Schema: {json.dumps(SCHEMAS[kind])}"
     )
-    with _LOCK:
+    if kind == "post":
+        cached = _POST_CACHE.get(str(request["id"]))
+        if cached and time.monotonic() - cached[0] < POST_CACHE_SECONDS:
+            return cached[1]
+    if not _LOCK.acquire(timeout=QUEUE_WAIT):
+        raise Busy("another lookup is running")
+    try:
         lines = run_grok(prompt)
-    return shape(kind, request, verify_stream(lines))
+    finally:
+        _LOCK.release()
+    answer = shape(kind, request, verify_stream(lines))
+    if kind == "post":
+        _POST_CACHE[str(request["id"])] = (time.monotonic(), answer)
+        while len(_POST_CACHE) > 256:
+            _POST_CACHE.popitem(last=False)
+    return answer
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -339,6 +468,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, lookup(kind, request))
         except (json.JSONDecodeError, BadRequest) as error:
             return self._json(400, {"error": str(error)})
+        except Busy:
+            return self._json(429, {"error": "busy"})
         except Unsafe as error:
             print(f"REFUSED unsafe grok session: {error}", flush=True)
             return self._json(503, {"error": "lookup refused"})

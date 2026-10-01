@@ -14,17 +14,19 @@ RUN apt-get update \
     && rm -rf /tmp/grok-install \
     && grok --version \
     && useradd --uid 1000 --create-home grok \
-    && mkdir -p /var/lib/grok /work && chown grok:grok /var/lib/grok /work
+    && mkdir -p /var/lib/grok && chown grok:grok /var/lib/grok
 
 # Root-owned, so Grok treats it as enforced organisation policy: a deny-all PreToolUse hook.
 COPY requirements.toml /etc/grok/requirements.toml
 COPY deny-all /usr/local/bin/deny-all
 COPY server.py /srv/server.py
+COPY smoke-layer2.sh /srv/smoke-layer2.sh
 RUN chmod 0644 /etc/grok/requirements.toml && chmod 0755 /usr/local/bin/deny-all
 
 USER grok
-WORKDIR /work
-# The login (auth.json) and session files live in the grok-home volume.
-ENV GROK_HOME=/var/lib/grok XSEARCH_PORT=8090
+WORKDIR /tmp
+# The volume at /var/lib/grok holds only the login (auth.json). Each lookup runs Grok in a
+# fresh home under /tmp (tmpfs) with a copy of it; see server.py.
+ENV XSEARCH_AUTH_DIR=/var/lib/grok XSEARCH_SCRATCH=/tmp XSEARCH_PORT=8090
 EXPOSE 8090
 CMD ["python3", "/srv/server.py"]

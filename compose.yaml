@@ -133,8 +133,7 @@ services:
     init: true
     read_only: true
     tmpfs:
-      - /tmp:rw,nosuid,size=64m,uid=1000,gid=1000
-      - /work:rw,nosuid,size=16m,uid=1000,gid=1000
+      - /tmp:rw,nosuid,size=128m,uid=1000,gid=1000
     volumes:
       - type: volume
         source: xsearch-home

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+from collections import deque
 
 import aiohttp
 
@@ -14,6 +16,12 @@ from .config import Config
 LOGGER = logging.getLogger(__name__)
 POST_ID = re.compile(r"^[0-9]{1,20}$")
 HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+
+
+# X links in chat fall back to a Grok session each, and members can paste many: at most this
+# many per rolling hour from the link path (tracking has its own interval).
+POST_LOOKUPS_PER_HOUR = 30
+_post_lookups: deque[float] = deque()
 
 
 class XSearchError(RuntimeError):
@@ -44,6 +52,12 @@ async def _ask(config: Config, kind: str, body: dict) -> dict:
 async def fetch_post(config: Config, post_id: str) -> dict | None:
     if not POST_ID.match(post_id):
         raise ValueError("not an X post id")
+    now = time.monotonic()
+    while _post_lookups and now - _post_lookups[0] > 3600:
+        _post_lookups.popleft()
+    if len(_post_lookups) >= POST_LOOKUPS_PER_HOUR:
+        raise XSearchError("X post lookups are rate limited")
+    _post_lookups.append(now)
     answer = await _ask(config, "post", {"id": post_id})
     post = answer.get("post")
     return post if answer.get("found") and isinstance(post, dict) else None
@@ -65,8 +79,10 @@ async def lookup_user(config: Config, handle: str) -> dict | None:
     return answer if answer.get("exists") else None
 
 
-def post_text(post: dict) -> str:
-    """One post as the same kind of text block the fxtwitter path produces."""
+def post_text(post: dict, url_handle: str = "") -> str:
+    """One post as the same kind of text block the fxtwitter path produces. Unlike fxtwitter's,
+    every field here was read out by a model from X search results — a post can talk it into
+    misreporting — so the block says so, and flags an author that differs from the link's."""
     flags = "（回覆）" if post.get("is_reply") else "（轉發）" if post.get("is_repost") else ""
     lines = [
         f"X 貼文 @{post.get('author_handle', '')}（{post.get('author_name', '')}）"
@@ -84,5 +100,8 @@ def post_text(post: dict) -> str:
     ]
     if counts:
         lines.append(" · ".join(counts))
-    lines.append("（經由 xAI X 搜尋取得）")
+    author = str(post.get("author_handle", ""))
+    if url_handle and author and author.lower() != url_handle.lower():
+        lines.append(f"（注意：連結裡的帳號是 @{url_handle}，X 搜尋回報的作者是 @{author}）")
+    lines.append("（經由 xAI X 搜尋取得；作者與內容由模型摘錄，未經驗證）")
     return "\n".join(lines)

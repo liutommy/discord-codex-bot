@@ -477,12 +477,20 @@ falls back to it, and `/codex-track source:https://x.com/<account>` tracks an X 
 10–100 s).
 
 Grok Build is a coding agent with a shell, files, web fetching and background jobs. In the
-sidecar it has none of them, and three independent layers keep it that way (`xsearch/server.py`):
-the command line removes every client tool and denies the rest; a root-owned enforced policy
-(`/etc/grok/requirements.toml`) denies every tool call; and each answer is used only if the
-session started with an empty toolset and used nothing but the server-side X search — anything
-else is refused and logged as `REFUSED unsafe grok session`. Members never write the prompt:
-the Bot sends a numeric post id or an account name, both validated. Grok's own `--sandbox`
+sidecar it has none of them (`xsearch/server.py`). Two layers prevent: the command line removes
+every client tool and denies the rest, and a root-owned enforced policy
+(`/etc/grok/requirements.toml`) denies every tool call. One layer detects: an answer is used
+only if the session started with an empty toolset, used nothing but the server-side X search
+(checked on the tool name the CLI fills in, not on model-written input) and emitted only event
+shapes we know — anything else is refused and logged as `REFUSED unsafe grok session`. That
+check cannot undo a tool that already ran; it is how a failure of the first two shows up.
+Every lookup runs in a fresh, empty Grok home and working directory on tmpfs holding only a copy
+of the login, and everything it wrote is deleted afterwards, so no session can shape the next.
+Members never write the prompt: the Bot sends a numeric post id or an account name, both
+validated. What comes back was read out by a model from X content, so it is re-checked: a post
+whose snowflake id disagrees with its time is dropped (otherwise one injected post with a huge
+id would become the tracking cursor and hide every real post), and posts read for a link are
+labelled unverified, with a note when the author differs from the link's account. Grok's own `--sandbox`
 needs user namespaces that the hardened container does not grant, so there the container is the
 sandbox (read-only rootfs, non-root, no capabilities, and the host firewall described in
 Operations). Note the gotcha that motivated layer 3: `--disallowed-tools run_terminal_command`,
@@ -500,7 +508,16 @@ docker run --rm --user 0 -v tommy_test_xsearch_home:/v -v ~/.grok/auth.json:/in/
 docker compose up -d xsearch
 ```
 
-Then set `XSEARCH_URL=http://xsearch:8090` and restart the Bot. The token refreshes itself in
+Then set `XSEARCH_URL=http://xsearch:8090` and restart the Bot. After changing `GROK_VERSION`,
+re-run the negative control for the enforced hook (one Grok session):
+`docker compose exec xsearch sh /srv/smoke-layer2.sh` must print `OK`.
+
+Cost and pace: one lookup at a time (others wait up to 30 s, then get a 429); a post is cached
+for an hour; the link fallback is capped at 30 lookups an hour; a failed account check waits the
+full interval before the next. Tracking passes run sources one after another, so each X account
+adds its 10–100 s to every pass that checks it, delaying the YouTube/Twitch/web sources behind
+it. The service has no authentication of its own: anything on the compose `default` network can
+spend the plan's quota through it (today: only this stack's containers). The token refreshes itself in
 the volume; if the machine you copied it from refreshes the same login, one of the two may have
 to sign in again.
 

@@ -1243,7 +1243,14 @@ class XFetcher:
         if now - float(source.state.get("fetched_at", 0)) < self.interval_seconds:
             return FetchResult((), source.cursor, dict(source.state))
         handle = str(source.state.get("handle") or source.external_id)
-        posts = await self.recent_posts(handle, source.cursor)
+        try:
+            posts = await self.recent_posts(handle, source.cursor)
+        except Exception as error:
+            # A failed check still spent its session (or the login is gone): wait the full
+            # interval before the next one, instead of retrying on every tracking pass.
+            LOGGER.warning("X source %s check failed: %s", handle, type(error).__name__)
+            state = {**source.state, "fetched_at": now, "last_error": type(error).__name__}
+            return FetchResult((), source.cursor, state)
         items = []
         for post in sorted(posts, key=lambda p: int(p["id"])):  # oldest first, like a feed
             text = str(post.get("text", ""))
@@ -1264,7 +1271,8 @@ class XFetcher:
                 )
             )
         cursor = items[-1].external_id if items else source.cursor
-        return FetchResult(tuple(items), cursor, {**source.state, "fetched_at": now})
+        state = {key: value for key, value in source.state.items() if key != "last_error"}
+        return FetchResult(tuple(items), cursor, {**state, "fetched_at": now})
 
 
 def parse_web_locator(locator: str) -> str:
