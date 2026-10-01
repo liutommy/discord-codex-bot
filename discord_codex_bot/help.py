@@ -111,8 +111,8 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
     ),
     "-track": (
         "追蹤 YouTube 頻道、Twitch 頻道、X 帳號、露天賣場，或任何網頁（網頁會以「出現沒看過的連結」"
-        "當作新內容，例如官網的最新消息頁）。露天賣場會逐件讀商品名；只想看部分商品就用賣場內搜尋後的"
-        "網址（…/find?q=關鍵字），追蹤條件寫商品名裡會出現的字。建立後就開始運作：只看建立之後的新內容，"
+        "當作新內容，例如官網的最新消息頁）。露天賣場會逐件讀商品名；直接追蹤整個賣場，"
+        "追蹤條件寫想要的東西和它在品名裡可能的各種寫法（例：rurudo／るるど／露露多），比賣場搜尋準。建立後就開始運作：只看建立之後的新內容，"
         "符合條件才在頻道 @你，不符合的完全安靜。"
         "留空列出你的追蹤，cancel 加編號取消，log 加編號看它最近判斷了什麼、為什麼——"
         "判斷紀錄只有你自己看得到，不會貼到頻道。"
@@ -123,7 +123,8 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             "/{p}-track source:https://www.youtube.com/@HoushouMarine",
             "/{p}-track source:https://www.twitch.tv/chibidoki interest:重大公告或特別企劃",
             "/{p}-track source:https://x.com/YuGiOh_OCG_INFO interest:新卡情報",
-            "/{p}-track source:https://www.ruten.com.tw/store/ykohmkphilip/find?q=rurudo",
+            "/{p}-track source:https://www.ruten.com.tw/store/ykohmkphilip/"
+            " interest:rurudo（るるど）的新品",
             "/{p}-track（留空：列出你的追蹤）",
             "/{p}-track log:1",
             "/{p}-track cancel:1",

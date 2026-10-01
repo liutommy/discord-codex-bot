@@ -287,11 +287,13 @@ def _prompt(
             " it has not seen before as new content. X accounts are read through the operator's"
             " X lookup service: use the profile URL as the source, never a mirror or a substitute"
             " page, and if that service is off the Bot says so itself. A Ruten store is read"
-            " listing by listing with product names: use https://www.ruten.com.tw/store/<account>/"
-            " (any URL of that store works), and when the member wants only some products add the"
-            " store's own search keyword, https://www.ruten.com.tw/store/<account>/find?q=<keyword>"
-            " — far fewer listings to judge. Only product names are judged (no images), so put"
-            " words a product name would contain into interest."
+            " listing by listing with product names: track the whole store,"
+            " https://www.ruten.com.tw/store/<account>/ (any URL of that store works), and put"
+            " what the member wants into interest with every spelling a product name might use"
+            " (e.g. rurudo / るるど / 露露多) — the store's search matches only the exact word"
+            " typed, so a keyword source misses other spellings. Use the search form"
+            " https://www.ruten.com.tw/store/<account>/find?q=<keyword> only when the member gives"
+            " that URL or asks for a keyword search. Only product names are judged (no images)."
             " (#id, mode, source). To start one, append"
             ' <track source="https://…" interest="what is worth pinging about"'
             ' who="<@user id> <@user id>"/> after your answer — omit who to ping only the'

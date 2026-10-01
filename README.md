@@ -190,10 +190,11 @@ links labelled only 「預購」 — the classifier had no product name to judge
 about twenty listings an hour. `https://www.ruten.com.tw/store/<account>/` is resolved once to the
 seller's numeric id (`rapi.ruten.com.tw/api/users/v1/index.php/<account>/storeinfo`); each pass then
 reads the newest 30 listing ids (`rtapi.ruten.com.tw/api/search/v3/index.php/core/seller/<id>/prod`)
-and their names, prices and pre-order months (`rapi.ruten.com.tw/api/items/v2/list`). The store's
-own search narrows it: `…/store/<account>/find?q=rurudo` is a separate source that lists only the
-matching products, often none in an hour. Only names are judged, not images, so an interest should
-use words a product name contains. The API is undocumented: an answer of an unknown shape, or a
+and their names, prices and pre-order months (`rapi.ruten.com.tw/api/items/v2/list`). Track the
+whole store and let the interest carry every spelling a name might use (rurudo / るるど / 露露多):
+the model matches those, while the store's own search (`…/store/<account>/find?q=rurudo`, a
+separate source) matches only the word typed — るるど finds 3 of the 7 rurudo listings. The search
+form stays available for a store too busy to judge whole. Only names are judged, not images. The API is undocumented: an answer of an unknown shape, or a
 store without a keyword that suddenly lists nothing, raises instead of looking like "nothing new",
 and `ALERT_AFTER_FAILURES` such passes in a row DM the operator (`露天追蹤`).
 
