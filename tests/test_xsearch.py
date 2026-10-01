@@ -95,11 +95,14 @@ def test_each_session_gets_a_fresh_home_holding_only_the_login(monkeypatch, tmp_
             return "\n".join(_stream(INIT_EMPTY)), ""
 
     monkeypatch.setattr(server.subprocess, "Popen", FakePopen)
-    server.run_grok("prompt")
+    monkeypatch.setattr(server, "login_expires_in", lambda: 10_000.0)
+    server._session(server.threading.Lock(), lambda: True, prompt="prompt")
     command, env = seen["command"], seen["env"]
     start = command.index("--disallowed-tools")
     assert tuple(command[start : start + len(server.LOCKED_ARGS)]) == server.LOCKED_ARGS
     assert seen["files"] == ["auth.json"] and seen["work"] == []
+    prompt_file = command[command.index("--prompt-file") + 1]
+    assert not prompt_file.startswith(seen["cwd"])  # the prompt never sits where config is read
     for key in ("GROK_HOME", "HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
         assert env[key].startswith(str(scratch)), key
     assert env["GROK_DISABLE_AUTOUPDATER"] == "1" and "XSEARCH_AUTH_DIR" not in env
@@ -583,3 +586,238 @@ async def test_x_fetcher_waits_a_full_interval_after_a_failed_check() -> None:
     now[0] += 15 * 60  # the next tracking pass: no new session
     await fetcher.fetch(replace(source, state=result.state))
     assert len(attempts) == 1
+
+
+# ----------------------------------------------------------------- concurrency and the login
+
+
+def test_shared_session_dirs_go_only_when_the_last_session_ends(monkeypatch, tmp_path) -> None:
+    stray = tmp_path / "sessions"
+    monkeypatch.setattr(server, "STRAY_PATHS", (str(stray),))
+    gate = server._SessionGate(3)
+    assert gate.enter(False, 1) and gate.enter(False, 1)  # A and B running
+    stray.mkdir()
+    (stray / "a").mkdir(), (stray / "b").mkdir()
+    gate.leave()  # A ends first: B's directory must survive
+    assert (stray / "b").exists()
+    gate.leave()  # B ends: nobody is left
+    assert not stray.exists()
+
+
+def test_a_session_that_may_refresh_the_login_runs_alone() -> None:
+    import threading as threading_
+
+    gate = server._SessionGate(3)
+    assert gate.enter(False, 1)
+    assert gate.enter(True, 0.05) is False  # waits for the running one, then gives up
+    gate.leave()
+    assert gate.enter(True, 1)  # now alone
+    assert gate.enter(False, 0.05) is False  # nobody joins it
+    released = []
+    threading_.Timer(0.1, lambda: (released.append(1), gate.leave())).start()
+    assert gate.enter(False, 2) and released  # admitted once it finished
+    gate.leave()
+
+
+def test_sessions_near_token_expiry_are_exclusive(monkeypatch) -> None:
+    seen = []
+
+    class Gate:
+        def enter(self, exclusive, timeout):
+            seen.append(exclusive)
+            return True
+
+        def leave(self):
+            pass
+
+    monkeypatch.setattr(server, "_GATE", Gate())
+    monkeypatch.setattr(server, "run_grok", lambda **kw: [])
+    for remaining in (10_000.0, 60.0, 0.0):
+        monkeypatch.setattr(server, "login_expires_in", lambda r=remaining: r)
+        server._session(server.threading.Lock(), lambda: True, prompt="p")
+    assert seen == [False, True, True]
+
+
+def test_login_expiry_reads_nanosecond_timestamps(monkeypatch, tmp_path) -> None:
+    from datetime import timedelta
+
+    soon = (server.datetime.now(server.UTC) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"https://auth.x.ai::x": {"key": "k", "expires_at": f"{soon}.755739224Z"}})
+    )
+    monkeypatch.setattr(server, "AUTH_DIR", str(tmp_path))
+    assert 3500 < server.login_expires_in() <= 3601
+    (tmp_path / "auth.json").write_text("{}")
+    assert server.login_expires_in() == 0.0  # unreadable: treated as due
+
+
+# ----------------------------------------------------------------------------------- chat
+
+CATALOG = {
+    "models": {
+        # what models_cache.json really holds (snake_case) ...
+        "grok-4.7": {"info": {"name": "Grok 4.7", "reasoning_effort": "high", "reasoning_efforts": [
+            {"id": "xhigh", "value": "xhigh", "default": False},
+            {"id": "high", "value": "high", "default": True},
+            {"id": "medium", "value": "medium", "default": False},
+            {"id": "low", "value": "low", "default": False}]}},
+        # ... and the camelCase the same catalog uses over ACP
+        "grok-4.5": {"info": {"name": "Grok 4.5", "_meta": {"reasoningEfforts": [
+            {"id": "high", "default": True}, {"id": "medium"}, {"id": "low"}]}}},
+        "secret-model": {"info": {"name": "x", "hidden": True}},
+        "bad id!": {"info": {"name": "x"}},
+    }
+}  # fmt: skip
+
+
+def test_parse_models_keeps_visible_models_and_their_effort_menus() -> None:
+    parsed = server.parse_models(CATALOG)
+    assert [m["id"] for m in parsed] == ["grok-4.7", "grok-4.5"]
+    assert parsed[0]["efforts"] == ["xhigh", "high", "medium", "low"]
+    assert (
+        parsed[1]["efforts"] == ["high", "medium", "low"] and parsed[1]["default_effort"] == "high"
+    )
+
+
+@pytest.mark.parametrize(
+    "request_",
+    [
+        {"prompt": "", "model": "grok-4.7"},
+        {"prompt": 5, "model": "grok-4.7"},
+        {"prompt": "x" * (server.MAX_PROMPT_CHARS + 1), "model": "grok-4.7"},
+        {"prompt": "hi", "model": "grok-9"},  # not in the catalog
+        {"prompt": "hi", "model": "grok-4.5", "effort": "xhigh"},  # not on this model's menu
+        {"prompt": "hi", "model": "grok-4.7", "effort": True},
+        {"prompt": "hi", "model": "grok-4.7", "system": ["x"]},
+        {"prompt": "hi", "model": "../grok"},
+    ],
+)
+def test_chat_validates_before_spending_a_session(monkeypatch, request_) -> None:
+    monkeypatch.setattr(server, "models", lambda *a: server.parse_models(CATALOG))
+    monkeypatch.setattr(server, "_session", lambda *a, **k: pytest.fail("session started"))
+    with pytest.raises(server.BadRequest):
+        server.chat(request_)
+
+
+def test_chat_returns_the_text_of_a_clean_session_and_refuses_a_dirty_one(monkeypatch) -> None:
+    monkeypatch.setattr(server, "models", lambda *a: server.parse_models(CATALOG))
+    seen = {}
+
+    def clean(slot, still_wanted, **kw):
+        seen.update(kw)
+        return _stream(INIT_EMPTY, _assistant(X_SEARCH), _result("  前輩看過了。  "))
+
+    monkeypatch.setattr(server, "_session", clean)
+    out = server.chat(
+        {"prompt": "hi", "model": "grok-4.7", "effort": "medium", "system": "persona"}
+    )
+    assert out == {"text": "前輩看過了。", "model": "grok-4.7", "effort": "medium"}
+    assert seen["system"] == "persona" and seen["timeout"] == server.CHAT_TIMEOUT
+
+    shell = {"type": "tool_use", "name": "run_terminal_cmd", "input": {"command": "id"}}
+    monkeypatch.setattr(
+        server, "_session", lambda *a, **k: _stream(INIT_EMPTY, _assistant(shell), _result("ok"))
+    )
+    with pytest.raises(server.Unsafe):  # chat mode runs exactly the same checks as lookups
+        server.chat({"prompt": "hi", "model": "grok-4.7"})
+
+
+@pytest.mark.parametrize(
+    ("summary", "detail", "kind"),
+    [
+        ("grok exited 1", "Error: rate limit exceeded for your plan", "QuotaExhausted"),
+        ("grok exited 1", "HTTP 429 Too Many Requests", "QuotaExhausted"),
+        ("grok exited 1", "401 Unauthorized: please sign in again", "LoginFailed"),
+        ("grok exited 1", "unknown model 'grok-9'", "LookupFailed"),
+    ],
+)
+def test_failures_are_classified(summary, detail, kind) -> None:
+    assert type(server.classify_failure(summary, detail)).__name__ == kind
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        ("BadRequest", 400),
+        ("QuotaExhausted", 402),
+        ("LoginFailed", 401),
+        ("Busy", 429),
+        ("LookupFailed", 502),
+        ("Unsafe", 503),
+    ],
+)
+def test_chat_errors_map_to_statuses_the_bot_can_act_on(monkeypatch, error, status) -> None:
+    import http.client
+    import threading as threading_
+
+    def fail(request, still_wanted):
+        raise getattr(server, error)("x")
+
+    monkeypatch.setattr(server, "chat", fail)
+    httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading_.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+        conn.request("POST", "/chat", body=b'{"prompt": "hi"}')
+        assert conn.getresponse().status == status
+        conn.close()
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+        conn.request("POST", "/chat", body=b"x" * (server.MAX_CHAT_BODY + 1))
+        assert conn.getresponse().status == 413
+    finally:
+        httpd.shutdown()
+
+
+# ---------------------------------------------------------------------------------- usage
+
+
+def test_parse_billing_reads_only_the_weekly_window() -> None:
+    reset = "2026-10-07T01:44:40Z"
+    period = {"type": "USAGE_PERIOD_TYPE_WEEKLY", "end": reset}
+    body = {
+        "config": {"currentPeriod": period, "creditUsagePercent": 8.0, "billingPeriodEnd": reset}
+    }
+    assert server.parse_billing(body, "DYNAMIC") == {
+        "weekly_percent": 8.0,
+        "reset_at": "2026-10-07T01:44:40Z",
+        "live": True,
+    }
+    assert server.parse_billing(body, "HIT")["live"] is False
+    other = {"config": {"currentPeriod": {"type": "USAGE_PERIOD_TYPE_MONTHLY"},
+                        "creditUsagePercent": 3}}  # fmt: skip
+    assert server.parse_billing(other, "DYNAMIC") is None  # not the window we gate on
+    assert server.parse_billing({"config": {"creditUsagePercent": "8"}}, "") is None
+    assert server.parse_billing([], "") is None
+
+
+def test_usage_keeps_a_live_reading_over_a_cached_one(monkeypatch, tmp_path) -> None:
+    (tmp_path / "auth.json").write_text(json.dumps({"iss::1": {"key": "tok"}}))
+    monkeypatch.setattr(server, "AUTH_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "USAGE_CACHE_SECONDS", 0)
+    monkeypatch.setattr(server, "_USAGE", {})
+    replies = [(8.0, "DYNAMIC"), (2.0, "HIT")]
+    seen_auth = []
+
+    class Response:
+        def __init__(self, percent, status):
+            config = {"currentPeriod": {"type": "X_WEEKLY"}, "creditUsagePercent": percent}
+            self.body = json.dumps({"config": config}).encode()
+            self.headers = {"cf-cache-status": status}
+
+        def read(self, n):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(request, timeout):
+        seen_auth.append(request.headers.get("Authorization"))
+        return Response(*replies.pop(0))
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", fake_urlopen)
+    assert server.usage()["weekly_percent"] == 8.0
+    assert server.usage()["weekly_percent"] == 8.0  # the CDN copy (2 %) does not win
+    assert seen_auth == ["Bearer tok", "Bearer tok"]

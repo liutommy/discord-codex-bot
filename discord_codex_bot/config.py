@@ -188,6 +188,11 @@ class Config:
     xsearch_url: str
     xsearch_timeout_seconds: int
     x_tracking_interval_minutes: int
+    default_model: str
+    model_chain: tuple[str, ...]
+    grok_dir: Path
+    grok_history_chars: int
+    grok_chat_max_weekly_percent: int
     apis_path: Path | None
     apis_max_chars: int
     openrouter_dir: Path
@@ -341,6 +346,25 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Each check of an X account is one Grok session on the subscription, so X sources are
         # fetched on their own, slower clock than TRACKING_INTERVAL_MINUTES.
         x_tracking_interval_minutes=_positive_int(values, "X_TRACKING_INTERVAL_MINUTES", 60),
+        # The model a member gets until they pick one, written like a stored choice
+        # ("<backend>:<model>|<effort>"). Empty = Codex at CODEX_REASONING_EFFORT, as before.
+        default_model=values.get("DEFAULT_MODEL", "").strip(),
+        # Where a turn goes when its backend cannot answer (quota, overload, login, outage): the
+        # entries after the member's backend, in order. Empty = the single CODEX_FALLBACK_MODEL.
+        model_chain=tuple(
+            part.strip() for part in values.get("MODEL_CHAIN", "").split(",") if part.strip()
+        ),
+        grok_dir=Path(
+            values.get("GROK_DIR", "").strip()
+            or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "grok")
+        ),
+        # Grok spends plan quota per session, and replayed history is part of every session.
+        grok_history_chars=_positive_int(values, "GROK_HISTORY_CHARS", 60_000),
+        # Chat and X lookups share Grok's weekly quota: past this share, chat skips Grok and the
+        # rest is left to X lookups. 100 = no reserve.
+        grok_chat_max_weekly_percent=_bounded_int(
+            values, "GROK_CHAT_MAX_WEEKLY_PERCENT", 80, 1, 100
+        ),
         # Registered data APIs the model may call with <api/> (config/apis.json baked in).
         apis_path=Path(values.get("APIS_FILE", "/opt/discord-codex/apis.json")),
         apis_max_chars=_positive_int(values, "APIS_MAX_CHARS", 60_000),  # schedules are long
