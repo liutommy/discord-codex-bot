@@ -735,6 +735,17 @@ def test_chat_returns_the_text_of_a_clean_session_and_refuses_a_dirty_one(monkey
         server.chat({"prompt": "hi", "model": "grok-4.7"})
 
 
+def test_a_fullwidth_at_the_model_copied_comes_back_as_ascii(monkeypatch) -> None:
+    # The model saw `＠dataclass` (defuse_mentions); code it writes back must still run.
+    monkeypatch.setattr(server, "models", lambda *a: server.parse_models(CATALOG))
+    answer = "from dataclasses import dataclass\n\n\uff20dataclass\nclass P: ..."
+    monkeypatch.setattr(
+        server, "_session", lambda *a, **k: _stream(INIT_EMPTY, _assistant(), _result(answer))
+    )
+    out = server.chat({"prompt": "fix @dataclass", "model": "grok-4.7"})
+    assert "\uff20" not in out["text"] and "\n@dataclass\n" in out["text"]
+
+
 @pytest.mark.parametrize(
     ("summary", "detail", "kind"),
     [
@@ -873,14 +884,24 @@ def test_a_stale_catalog_is_served_while_one_thread_refreshes_it(monkeypatch) ->
     release.set()
 
 
-def test_a_failed_refresh_keeps_the_old_list_and_waits_before_retrying(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [
+        server.LookupFailed("grok models broke"),
+        FileNotFoundError("grok models wrote no models_cache.json"),  # exited 0, no file
+        server.Unsafe("not the locked-down session"),
+    ],
+)
+def test_a_failed_refresh_keeps_the_old_list_and_waits_before_retrying(
+    monkeypatch, failure
+) -> None:
     old = server.parse_models(CATALOG)
     monkeypatch.setattr(server, "_MODELS", (0.0, old))
     calls = []
 
     def broken(*a, **k):
         calls.append(1)
-        raise server.LookupFailed("grok models broke")
+        raise failure
 
     monkeypatch.setattr(server, "_session", broken)
     assert server._refresh_models() == old

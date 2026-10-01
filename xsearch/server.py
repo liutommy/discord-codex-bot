@@ -564,41 +564,49 @@ def defuse_mentions(text: str) -> str:
     return WORD_JOINER + text.replace("@", FULLWIDTH_AT)
 
 
+def _strings(value: object):
+    """Every string inside a JSON value."""
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+    elif isinstance(value, str):
+        yield value
+
+
 def _login_secrets(*paths: str) -> set[str]:
     """Every long string in these login files: the tokens, whatever the file calls them."""
     found: set[str] = set()
-
-    def walk(value: object) -> None:
-        if isinstance(value, dict):
-            for item in value.values():
-                walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                walk(item)
-        elif isinstance(value, str) and len(value) >= MIN_SECRET_CHARS:
-            found.add(value)
-
     for path in paths:
         try:
             with open(path, encoding="utf-8") as handle:
-                walk(json.load(handle))
+                data = json.load(handle)
         except (OSError, ValueError):
             continue
+        found.update(s for s in _strings(data) if len(s) >= MIN_SECRET_CHARS)
     return found
 
 
 def refuse_login_echo(lines: list[str], scratch: str) -> None:
     """Raise Unsafe if the session's stream (answer or reasoning) carries the login: whatever
-    got it into the context, it must not reach a Discord channel."""
+    got it into the context, it must not reach a Discord channel. Compared against the raw
+    lines and against the strings they decode to, with whitespace dropped as well."""
     secrets = _login_secrets(
         os.path.join(scratch, _ORIGINAL_LOGIN), os.path.join(scratch, "home", ".grok", "auth.json")
     )
     if not secrets:
         return
-    stream = "\n".join(lines)
-    squeezed = re.sub(r"\s+", "", stream)
-    # json.dumps: a token as it appears inside the JSON event lines (escaped `/`, `+`, ...)
-    if any(s in stream or s in squeezed or json.dumps(s)[1:-1] in stream for s in secrets):
+    decoded = []
+    for line in lines:
+        try:
+            decoded.extend(_strings(json.loads(line)))
+        except ValueError:
+            continue
+    texts = ["\n".join(lines), "\n".join(decoded)]
+    texts += [re.sub(r"\s+", "", text) for text in texts]
+    if any(secret in text for secret in secrets for text in texts):
         raise Unsafe("the session's output contains the login")
 
 
@@ -760,7 +768,7 @@ def _refresh_models(still_wanted=lambda: True) -> list[dict]:
         catalog = parse_models(json.loads(lines[-1]))
         if not catalog:
             raise LookupFailed("the model catalog is empty")
-    except (LookupFailed, Busy, ValueError, IndexError, AttributeError) as error:
+    except Exception as error:  # whatever broke (a missing cache file too): back off the same
         print(f"model catalog refresh failed ({error}); keeping {len(cached)} models", flush=True)
         if not cached:
             raise LookupFailed("could not read the model catalog") from None
@@ -827,7 +835,10 @@ def chat(request: dict, still_wanted=lambda: True) -> dict:
         system=system,
         timeout=CHAT_TIMEOUT,
     )
-    return {"text": verify_stream(lines, mode="chat"), "model": model, "effort": effort}
+    # The model only ever saw `＠`; code it writes back (`＠dataclass`) must still run. The answer
+    # never returns to the CLI as is: a replayed transcript is defused again.
+    text = verify_stream(lines, mode="chat").replace(FULLWIDTH_AT, "@")
+    return {"text": text, "model": model, "effort": effort}
 
 
 # ------------------------------------------------------------------------------------- usage

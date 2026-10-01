@@ -24,6 +24,7 @@ COPY requirements.toml /etc/grok/requirements.toml
 COPY deny-all /usr/local/bin/deny-all
 COPY server.py /srv/server.py
 COPY smoke-layer2.sh /srv/smoke-layer2.sh
+COPY smoke-mentions.py /srv/smoke-mentions.py
 RUN chmod 0644 /etc/grok/requirements.toml && chmod 0755 /usr/local/bin/deny-all
 
 USER grok

@@ -597,7 +597,8 @@ class DiscordCodexClient(discord.Client):
         await self.warm_emojis()
         LOGGER.info("%s", await codex_login_status(self.config))
         if grok.enabled(self.config):  # the model list /model offers and effort mapping uses
-            asyncio.create_task(self._load_grok_models())  # never hold up startup on the sidecar
+            # never hold up startup on the sidecar; kept so the task is not garbage-collected
+            self._grok_models_task = asyncio.create_task(self._load_grok_models())
         if self.config.default_model.startswith(f"{GROK}:") and not self.config.model_chain:
             LOGGER.warning(
                 "DEFAULT_MODEL is Grok but MODEL_CHAIN is empty: turns Grok cannot take (images, "

@@ -534,7 +534,11 @@ docker compose up -d xsearch
 
 Then set `XSEARCH_URL=http://xsearch:8090` and restart the Bot. After changing `GROK_VERSION`,
 re-run the negative control for the enforced hook (one Grok session):
-`docker compose exec xsearch sh /srv/smoke-layer2.sh` must print `OK`. A new version may also store its
+`docker compose exec xsearch sh /srv/smoke-layer2.sh` must print `OK`. Then the file-mention check
+(8 sessions): `docker compose exec xsearch python /srv/smoke-mentions.py` must print `OK`. The CLI
+expands `@ /path` (any whitespace after the `@`) into the file even with `--verbatim`, and runs a
+leading slash command; that it ignores a fullwidth `＠` and a word-joined `/` was measured, not
+documented, so a new version must be checked before it serves members. A new version may also store its
 login differently: a refreshed login is only kept when its fields match the old file, so if the
 xsearch log shows `login file changed shape; not kept`, sign in again and copy the new
 `auth.json` into the volume as above before the old token expires.
