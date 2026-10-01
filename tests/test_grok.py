@@ -321,3 +321,46 @@ async def test_status_shows_grok_weekly_usage_and_the_reserve(grok_client) -> No
         bot_module.probe_rate_limits, bot_module.codex_login_status = saved, saved_login
     assert "Grok：可選 · 額度 7d 85%" in text and "留給 X 查詢" in text
     assert "模型：Grok · Grok 4.7 · 強度 Medium（預設）" in text
+
+
+async def test_requests_go_out_as_utf8_not_escaped_ascii(sidecar, config, tmp_path) -> None:
+    sizes = []
+    original = sidecar.app.router  # noqa: F841 (kept for clarity)
+
+    cfg = _cfg(config, sidecar, tmp_path)
+    prompt = "前" * 30_000
+    await grok.run_grok(prompt, cfg, "grok-4.7", raw=True)
+    sent = sidecar.state["calls"][0]["prompt"]
+    assert sent == prompt
+    sizes.append(len(prompt.encode("utf-8")))
+    assert sizes[0] < 100_000  # 90 KB as UTF-8; `json=` would have made it 180 KB
+
+
+def test_transcript_ids_are_only_the_bots_own(config, tmp_path) -> None:
+    cfg = replace(config, grok_dir=tmp_path)
+    assert grok.load_transcript(cfg, "gk-../../etc/passwd") == []
+    with pytest.raises(ValueError):
+        grok.transcript_path(cfg, "gk-../x")
+    assert grok.transcript_path(cfg, "gk-0123456789abcdef").name == "gk-0123456789abcdef.json"
+
+
+async def test_a_retired_grok_model_falls_to_the_default_grok_model(grok_client) -> None:
+    bot, calls, _replies, _codex, _agy = grok_client
+    bot.memory.set_model(GUILD, USER, "grok:grok-3-retired|high")
+    await bot._answer("q", [], GUILD, USER)
+    assert calls["grok"][0][0] == "grok-4.7"
+
+
+async def test_a_chain_listing_grok_after_codex_still_never_sends_codex_users_to_grok(
+    grok_client, monkeypatch
+) -> None:
+    bot, calls, _replies, _codex, agy = grok_client
+    bot.config = replace(bot.config, model_chain=("codex", CHAIN[0], CHAIN[2]))
+    bot.memory.set_model(GUILD, USER, "codex:" + bot.config.codex_model)
+
+    async def spent(*_a, **_kw):
+        raise CodexUsageLimit("spent")
+
+    monkeypatch.setattr(bot_module, "run_codex", spent)
+    result = await bot._answer("q", [], GUILD, USER)
+    assert result.text == "agy 的答案" and calls["grok"] == []

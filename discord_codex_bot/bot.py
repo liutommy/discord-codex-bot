@@ -816,6 +816,16 @@ class DiscordCodexClient(discord.Client):
             self.config.codex_reasoning_effort,
             self.config.codex_fallback_model,
         )
+        if (
+            target.backend == GROK
+            and grok.cached_models()
+            and grok.cached_model(target.model) is None
+        ):
+            # A stored Grok model the plan no longer offers: the default Grok model, not an error
+            # on every message until the member notices and runs /model.
+            fallback = self._choice(self.config.default_model)
+            if fallback.backend == GROK and grok.cached_model(fallback.family) is not None:
+                target = resolve(fallback, target.effort)
         has_images = any((a.content_type or "").startswith("image/") for a in attachments)
         if target.backend == GROK and spares and not await self._grok_usable(has_images):
             # Straight to the next backend: an image, the reserve for X lookups, or the breaker.

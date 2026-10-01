@@ -58,7 +58,7 @@ MAX_TEXT = 4000
 # Chat: one member turn per session, its prompt (persona, history, the message) from the Bot.
 CHAT_PARALLEL = int(os.environ.get("XSEARCH_CHAT_PARALLEL", "2"))
 CHAT_TIMEOUT = int(os.environ.get("XSEARCH_CHAT_TIMEOUT_SECONDS", "300"))
-MAX_CHAT_BODY = 256 * 1024
+MAX_CHAT_BODY = 1024 * 1024  # 200k characters of CJK are 600 KB of UTF-8
 MAX_PROMPT_CHARS = 200_000
 MAX_SYSTEM_BYTES = 100_000  # passed as one argv value: Linux caps a single argument at 128 KiB
 MODELS_CACHE_SECONDS = 6 * 3600
@@ -68,7 +68,9 @@ LIVE_CACHE_STATUS = {"DYNAMIC", "MISS", "EXPIRED", "BYPASS", "REVALIDATED"}
 # A session that might refresh the login runs alone (see _SessionGate): this far from expiry.
 REFRESH_MARGIN_SECONDS = max(TIMEOUT, CHAT_TIMEOUT) + 600
 EFFORT = re.compile(r"[a-z]{1,16}")
-MODEL_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# Second line behind --verbatim: an `@` that would start a path mention is broken up.
+_PATH_MENTION = re.compile(r"@(?=[/~.\\])")
 # Lookups run one at a time and chat turns CHAT_PARALLEL at a time (each session spends plan
 # quota). A request that cannot get a turn within QUEUE_WAIT is turned away (429) instead of
 # queueing work its caller has given up on.
@@ -92,6 +94,10 @@ _TOOLS = (
     "enter_plan_mode,exit_plan_mode,ask_user_question,send_feedback"
 )
 LOCKED_ARGS = (
+    # The prompt goes to the model exactly as written. Without this the CLI expands `@<path>`
+    # mentions into file contents (the login, /proc/self/environ, other sessions' prompts) and
+    # runs leading slash commands — on the client, with no tool call for anything below to see.
+    "--verbatim",
     "--disallowed-tools", _TOOLS,
     "--deny", "Bash", "--deny", "Read", "--deny", "Edit", "--deny", "Write", "--deny", "Grep",
     "--disable-web-search", "--no-subagents", "--no-plan",
@@ -478,6 +484,9 @@ def login_expires_in() -> float:
     return moment.timestamp() - time.time()
 
 
+_ORIGINAL_LOGIN = "original-auth.json"  # in the scratch, outside the session's home
+
+
 def _fresh_home() -> tuple[str, dict]:
     """A throwaway Grok home and working directory holding only a copy of the login."""
     scratch = tempfile.mkdtemp(prefix="xsearch-", dir=SCRATCH)
@@ -491,6 +500,7 @@ def _fresh_home() -> tuple[str, dict]:
         if os.path.exists(source):
             shutil.copyfile(source, os.path.join(home, ".grok", "auth.json"))
             os.chmod(os.path.join(home, ".grok", "auth.json"), 0o600)
+            shutil.copyfile(source, os.path.join(scratch, _ORIGINAL_LOGIN))
     env = {
         "HOME": home,
         "GROK_HOME": os.path.join(home, ".grok"),
@@ -504,19 +514,30 @@ def _fresh_home() -> tuple[str, dict]:
 
 
 def _keep_login(scratch: str) -> None:
-    """Carry a refreshed login back to the volume — the only thing that outlives a session —
-    and only if it is still a JSON object with the same keys as before: a refresh changes token
-    values, never the shape, so anything else (say, an extra endpoint field) is not kept."""
+    """Carry a refreshed login back to the volume — the only thing that outlives a session.
+
+    Compare-and-swap: only if this session changed its copy, and the stored login is still the
+    one this session started from. A session that refreshed nothing must not overwrite one that
+    another session just refreshed (that would bring back a used refresh token). And only a JSON
+    object with the same keys: a refresh changes values, never the shape."""
     fresh = os.path.join(scratch, "home", ".grok", "auth.json")
+    original = os.path.join(scratch, _ORIGINAL_LOGIN)
     target = os.path.join(AUTH_DIR, "auth.json")
     with _AUTH_LOCK:
         try:
             with open(fresh, "rb") as handle:
                 data = handle.read()
+            with open(original, "rb") as handle:
+                started_from = handle.read()
             with open(target, "rb") as handle:
                 current = handle.read()
+            if data == started_from:
+                return  # this session did not refresh
+            if current != started_from:
+                print("login changed under this session; its refresh is not kept", flush=True)
+                return
             new, old = json.loads(data), json.loads(current)
-            if data == current or not isinstance(new, dict) or not isinstance(old, dict):
+            if not isinstance(new, dict) or not isinstance(old, dict):
                 return
             if set(new) != set(old):
                 print("login file changed shape; not kept", flush=True)
@@ -527,6 +548,11 @@ def _keep_login(scratch: str) -> None:
         with open(os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
             out.write(data)
         os.replace(staging, target)
+
+
+def defuse_mentions(text: str) -> str:
+    """`@/x`, `@~/x`, `@./x` become `@\u2060/x`: still readable, never a file mention."""
+    return _PATH_MENTION.sub("@\u2060", text)
 
 
 def run_grok(
@@ -551,12 +577,12 @@ def run_grok(
             return lines
         prompt_file = os.path.join(scratch, "in", "prompt.txt")
         with open(prompt_file, "w", encoding="utf-8") as handle:
-            handle.write(prompt)
+            handle.write(defuse_mentions(prompt))
         tail = ["--prompt-file", prompt_file]
         if effort:
             tail += ["--reasoning-effort", effort]
-        if system:
-            tail += ["--system-prompt-override", system]
+        if system:  # `=` form: a value can never be read as another flag
+            tail += [f"--system-prompt-override={defuse_mentions(system)}"]
         lines = _run(model, tail, home_env, os.path.join(scratch, "work"), timeout)
         if collect:
             with open(os.path.join(home_env["GROK_HOME"], collect), encoding="utf-8") as handle:
@@ -586,7 +612,7 @@ def _run_command(command: list[str], home_env: dict, cwd: str, timeout: int) -> 
             env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), **home_env, **ENV},
             start_new_session=True,
         )
-    except OSError as error:  # e.g. an argument too long for execve
+    except (OSError, ValueError) as error:  # an argument too long for execve, or with a NUL
         raise LookupFailed(f"could not start grok: {type(error).__name__}") from None
     try:
         stdout, stderr = process.communicate(timeout=timeout)
@@ -791,13 +817,9 @@ def usage() -> dict:
         if not token:
             raise LoginFailed("no login")
         req = urllib.request.Request(
-            BILLING_URL,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-                "Cache-Control": "no-cache",
-            },
+            BILLING_URL, headers={"Accept": "application/json", "Cache-Control": "no-cache"}
         )
+        req.add_unredirected_header("Authorization", f"Bearer {token}")  # never to a redirect
         try:
             with urllib.request.urlopen(req, timeout=8) as response:
                 body = json.loads(response.read(65536).decode())
@@ -809,8 +831,12 @@ def usage() -> dict:
         reading = parse_billing(body, status)
         if reading is None:
             raise LookupFailed("billing shape not understood")
-        if not reading["live"] and _USAGE.get("live"):
-            reading = {k: v for k, v in _USAGE.items() if not k.startswith("_")}
+        previous_live = _USAGE.get("live") and time.monotonic() - _USAGE["_at"] < 3600
+        if not reading["live"] and previous_live:
+            # A CDN copy does not replace a recent live reading — unless it shows *more* usage:
+            # the reserve errs towards protecting the quota, not towards spending it.
+            if reading["weekly_percent"] <= _USAGE["weekly_percent"]:
+                reading = {k: v for k, v in _USAGE.items() if not k.startswith("_")}
         _USAGE = {**reading, "_at": time.monotonic()}
         return reading
 

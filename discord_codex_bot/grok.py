@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Sequence
@@ -26,6 +27,7 @@ from .openrouter import _system_prompt, message_text, trim_history
 
 LOGGER = logging.getLogger(__name__)
 THREAD_PREFIX = "gk-"
+THREAD_ID = re.compile(r"gk-[0-9a-f]{16}")
 CATALOG_SECONDS = 6 * 3600
 USAGE_SECONDS = 60
 
@@ -84,8 +86,13 @@ async def _call(config: Config, method: str, path: str, body: dict | None, limit
         raise GrokUnavailable("Grok is not configured (XSEARCH_URL)")
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=limit)) as session:
+            # UTF-8, not `json=` (which escapes every CJK character into six ASCII bytes)
+            data = None if body is None else json.dumps(body, ensure_ascii=False).encode()
             async with session.request(
-                method, f"{config.xsearch_url.rstrip('/')}{path}", json=body
+                method,
+                f"{config.xsearch_url.rstrip('/')}{path}",
+                data=data,
+                headers={"Content-Type": "application/json"},
             ) as response:
                 payload = await response.json(content_type=None)
                 status = response.status
@@ -152,11 +159,13 @@ async def usage(config: Config) -> dict | None:
 
 
 def transcript_path(config: Config, thread_id: str) -> Path:
+    if not THREAD_ID.fullmatch(thread_id):
+        raise ValueError("not a Grok thread id")
     return config.grok_dir / f"{thread_id}.json"
 
 
 def load_transcript(config: Config, thread_id: str) -> list[dict]:
-    if not thread_id.startswith(THREAD_PREFIX):
+    if not THREAD_ID.fullmatch(thread_id):
         return []
     try:
         data = json.loads(transcript_path(config, thread_id).read_text("utf-8"))
