@@ -1189,6 +1189,84 @@ class TwitchFetcher:
         return FetchResult(tuple(items), cursor, state)
 
 
+X_PROFILE_HOSTS = {
+    "x.com", "www.x.com", "mobile.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com",
+}  # fmt: skip
+# First path segments on x.com that are pages, not accounts.
+X_RESERVED = {
+    "home", "explore", "search", "i", "settings", "messages", "notifications", "compose",
+    "intent", "share", "hashtag", "login", "signup", "tos", "privacy", "jobs",
+}  # fmt: skip
+
+
+def parse_x_locator(locator: str) -> str:
+    """An X account's profile URL (x.com or twitter.com) as its handle. A bare @name is left to
+    the other providers on purpose: it already means a YouTube handle here."""
+    parsed = urlparse(locator.strip() if "://" in locator else f"https://{locator.strip()}")
+    parts = [part for part in parsed.path.split("/") if part]
+    if (parsed.hostname or "").lower() not in X_PROFILE_HOSTS or len(parts) != 1:
+        raise ValueError("not an X profile URL")
+    handle = parts[0].lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle) or handle.lower() in X_RESERVED:
+        raise ValueError("not an X account")
+    return handle
+
+
+class XFetcher:
+    """An X account as a source, read through the X lookup sidecar (Grok's X search on the
+    operator's subscription). Every check is a Grok session, so it runs on its own clock —
+    `interval_minutes` — and skips the shared tracking pass in between."""
+
+    def __init__(
+        self,
+        lookup_user: Callable[[str], Awaitable[Mapping[str, Any] | None]],
+        recent_posts: Callable[[str, str], Awaitable[Sequence[Mapping[str, Any]]]],
+        interval_minutes: int,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.lookup_user = lookup_user
+        self.recent_posts = recent_posts
+        self.interval_seconds = interval_minutes * 60
+        self.clock = clock
+
+    async def resolve(self, locator: str) -> tuple[str, Mapping[str, Any]]:
+        handle = parse_x_locator(locator)
+        user = await self.lookup_user(handle)
+        if not user:
+            raise ProviderError("找不到這個 X 帳號")
+        handle = str(user.get("handle") or handle)
+        name = str(user.get("name") or handle)
+        return handle.lower(), {"title": f"{name} (@{handle})", "handle": handle}
+
+    async def fetch(self, source: Source) -> FetchResult:
+        now = self.clock()
+        if now - float(source.state.get("fetched_at", 0)) < self.interval_seconds:
+            return FetchResult((), source.cursor, dict(source.state))
+        handle = str(source.state.get("handle") or source.external_id)
+        posts = await self.recent_posts(handle, source.cursor)
+        items = []
+        for post in sorted(posts, key=lambda p: int(p["id"])):  # oldest first, like a feed
+            text = str(post.get("text", ""))
+            kind = (
+                "reply" if post.get("is_reply") else "repost" if post.get("is_repost") else "post"
+            )
+            items.append(
+                ContentItem(
+                    None,
+                    source.id,
+                    str(post["id"]),
+                    f"https://x.com/{handle}/status/{post['id']}",
+                    text[:300] or "（無文字）",
+                    text,
+                    str(post.get("created_at", "")),
+                    kind,
+                    raw=dict(post),
+                )
+            )
+        cursor = items[-1].external_id if items else source.cursor
+        return FetchResult(tuple(items), cursor, {**source.state, "fetched_at": now})
+
+
 def parse_web_locator(locator: str) -> str:
     """A public http(s) page, normalised so the same page is one source."""
     parts = urlsplit(locator.strip())

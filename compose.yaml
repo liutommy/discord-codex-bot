@@ -120,6 +120,39 @@ services:
     networks:
       - sandbox_net
 
+  # X lookup sidecar: Grok Build signed in with the operator's SuperGrok / X Premium+ plan,
+  # answering "this post", "this account's recent posts" and "does this account exist" through
+  # xAI's server-side X search. Optional: the Bot only calls it when XSEARCH_URL is set. Grok
+  # Build is a coding agent; server.py strips every tool from it and refuses any session that
+  # had one. It needs the internet (xAI) but holds nothing except its own login.
+  xsearch:
+    build: ./xsearch
+    image: discord-codex-bot-xsearch:local
+    container_name: ${BOT_CONTAINER_NAME:-tommy_test}_xsearch
+    restart: always
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=64m,uid=1000,gid=1000
+      - /work:rw,nosuid,size=16m,uid=1000,gid=1000
+    volumes:
+      - type: volume
+        source: xsearch-home
+        target: /var/lib/grok
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - default
+
 networks:
   default:
   sandbox_net:
@@ -130,3 +163,5 @@ volumes:
     name: ${BOT_CONTAINER_NAME:-tommy_test}_codex_home
   agy-home:
     name: ${BOT_CONTAINER_NAME:-tommy_test}_agy_home
+  xsearch-home:
+    name: ${BOT_CONTAINER_NAME:-tommy_test}_xsearch_home

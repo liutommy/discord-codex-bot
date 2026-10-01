@@ -17,7 +17,7 @@ import aiohttp
 from aiohttp.resolver import ThreadedResolver
 from yarl import URL
 
-from . import clearurls, gemini
+from . import clearurls, gemini, xsearch
 from .config import Config, IPNetwork
 from .fetchproxy import FilterProxy
 
@@ -1001,6 +1001,14 @@ async def fetch_or_render(
         post = await fetch_x_status(url, config, out_dir)
         if post is not None:
             return post
+        if xsearch.enabled(config):  # fxtwitter could not serve it: ask X search instead
+            try:
+                found = await xsearch.fetch_post(config, post_id)
+            except xsearch.XSearchError as error:
+                LOGGER.warning("X lookup of %s failed: %s", post_id, error)
+            else:
+                if found is not None:
+                    return xsearch.post_text(found), []
         url = f"https://x.com/{user}/status/{post_id}"  # mirrors serve browsers a redirect shell
     if not render:
         text = await fetch_link(url, config)

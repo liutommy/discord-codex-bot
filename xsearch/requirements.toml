@@ -1,0 +1,7 @@
+# Enforced policy for the X lookup sidecar. Server-side X search does not pass through
+# PreToolUse; every client tool (shell, files, web, background commands, ...) does, and is denied.
+[[hooks.PreToolUse]]
+hooks = [{ type = "command", command = "/usr/local/bin/deny-all", timeout = 5 }]
+
+[cli]
+auto_update = false
