@@ -510,7 +510,10 @@ docker compose up -d xsearch
 
 Then set `XSEARCH_URL=http://xsearch:8090` and restart the Bot. After changing `GROK_VERSION`,
 re-run the negative control for the enforced hook (one Grok session):
-`docker compose exec xsearch sh /srv/smoke-layer2.sh` must print `OK`.
+`docker compose exec xsearch sh /srv/smoke-layer2.sh` must print `OK`. A new version may also store its
+login differently: a refreshed login is only kept when its fields match the old file, so if the
+xsearch log shows `login file changed shape; not kept`, sign in again and copy the new
+`auth.json` into the volume as above before the old token expires.
 
 Cost and pace: one lookup at a time (others wait up to 30 s, then get a 429); a post is cached
 for an hour; the link fallback is capped at 30 lookups an hour; a failed account check waits the
