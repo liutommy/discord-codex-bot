@@ -4,14 +4,17 @@
 # layers keep it that way (see server.py), and compose adds read-only rootfs, no caps, no root.
 FROM python:3.12-slim-bookworm
 
+# The binary itself, pinned by checksum (the official installer verifies nothing beyond TLS).
+# Changing the version: update both, then re-run /srv/smoke-layer2.sh (see README).
 ARG GROK_VERSION=1.0.46
+ARG GROK_SHA256=41626a53292324140b92556b9d42ff5542e3dcd04aff85eafb8689dd4adb44fc
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && HOME=/tmp/grok-install bash -c "curl -fsSL https://x.ai/cli/install.sh | bash -s ${GROK_VERSION}" \
-    && install -m 0755 "$(readlink -f /tmp/grok-install/.grok/bin/grok)" /usr/local/bin/grok \
-    && rm -rf /tmp/grok-install \
+    && curl -fsSL "https://x.ai/cli/grok-${GROK_VERSION}-linux-x86_64" -o /usr/local/bin/grok \
+    && echo "${GROK_SHA256}  /usr/local/bin/grok" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/grok \
     && grok --version \
     && useradd --uid 1000 --create-home grok \
     && mkdir -p /var/lib/grok && chown grok:grok /var/lib/grok

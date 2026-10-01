@@ -321,7 +321,7 @@ async def test_fetch_or_render_falls_back_only_when_blocked_or_asked(
 async def test_link_blocks_wraps_each_page_and_collects_screenshots(
     monkeypatch, config: Config, tmp_path: Path
 ) -> None:
-    async def fake(url: str, config: Config, out_dir, render: bool = False, preview=None):
+    async def fake(url: str, config: Config, out_dir, render: bool = False, preview=None, **kwargs):
         return f"body of {url}", [out_dir / "page.jpg"] if "shot" in url else []
 
     monkeypatch.setattr(links, "fetch_or_render", fake)
