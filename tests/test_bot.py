@@ -311,11 +311,14 @@ def test_codex_command_offers_every_verified_effort(config: Config, tmp_path) ->
 
 
 def test_with_quoted_message_folds_reply_target_into_prompt() -> None:
+    from discord_codex_bot.codex import QUOTE_FENCE, split_quoted
+
     folded = with_quoted_message("這是什麼", "ryanlo", "看看這張\n圖", 1)
-    assert folded == (
-        "（後輩回覆了 ryanlo 的訊息：「看看這張 圖」）\n"
-        "（那則訊息附了 1 張圖，已一併附上）\n這是什麼"
+    assert split_quoted(folded) == (
+        "（後輩回覆了 ryanlo 的訊息：「看看這張 圖」）\n（那則訊息附了 1 張圖，已一併附上）",
+        "這是什麼",
     )
+    assert folded.startswith(QUOTE_FENCE + "\n")
     assert with_quoted_message("", "kimo", "", 2).endswith("請看這則訊息。")
     assert with_quoted_message("q", "kimo", "", 0) == "q"
 

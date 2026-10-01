@@ -49,11 +49,13 @@ from .backends import (
 )
 from .backup import backup_forever, export_memory_zip
 from .codex import (
+    QUOTE_FENCE,
     CodexResult,
     CodexServerOverloaded,
     CodexUnauthorized,
     CodexUsageLimit,
     codex_login_status,
+    defang,
     run_codex,
 )
 from .config import REASONING_EFFORTS, Config, load_config
@@ -274,7 +276,9 @@ def mentions_explicitly(content: str, bot_id: int) -> bool:
 
 
 def with_quoted_message(prompt: str, author: str, content: str, image_count: int) -> str:
-    """Fold a replied-to member message into the prompt so the model sees what was pointed at."""
+    """Fold a replied-to member message into the prompt so the model sees what was pointed at.
+    It is fenced (codex.QUOTE_FENCE): _prompt puts it in QUOTED_MESSAGE, never USER_MESSAGE, so
+    memory is never built from another member's words. Links in it are still fetched."""
     quoted = " ".join(content.split())
     parts = []
     if quoted:
@@ -283,7 +287,7 @@ def with_quoted_message(prompt: str, author: str, content: str, image_count: int
         parts.append(f"（那則訊息附了 {image_count} 張圖，已一併附上）")
     if not parts:
         return prompt
-    return "\n".join(parts + [prompt or "請看這則訊息。"])
+    return "\n".join([QUOTE_FENCE, *parts, QUOTE_FENCE, prompt or "請看這則訊息。"])
 
 
 def request_only(answer: str) -> bool:
@@ -1014,6 +1018,7 @@ class DiscordCodexClient(discord.Client):
                     blocks.append(f'<LINK url="{url}">\n{fetched}\n</LINK>')
                     extra.extend(shots)
                 recalled = "\n\n".join(blocks)
+                recalled = defang(recalled)  # results are not the member: no USER_MESSAGE in them
                 result = await self.queue.run(
                     lambda text=recalled, thread=result.thread_id, imgs=tuple(extra): turn(
                         text + "\n\nNow answer the member's question.",

@@ -30,9 +30,8 @@ from zoneinfo import ZoneInfo
 
 from .backends import run_batch
 from .config import Config
-from .consolidate import MARKERS
 from .harvest import _quota_ok, read_ledger, transcript_turns
-from .memory import MemoryStore
+from .memory import MARKERS, MemoryStore
 from .threads import ThreadStore
 
 LOGGER = logging.getLogger(__name__)
@@ -44,7 +43,10 @@ Conversation = tuple[int, list[str]]  # (channel id, the member's messages)
 
 USER_MARK, GUILD_MARK = MARKERS
 MAX_NOTES = 3  # per scope per run
-MIN_QUOTE_CHARS = 2
+# Long enough that a quote cannot be a word every conversation has (「什麼」「今天」).
+MIN_QUOTE_CHARS = 6
+MAX_TEXT_CHARS = 200
+MAX_GUILD_MEMBERS = 30  # the most recently active; keeps the server prompt within MAX_GUILD_CHARS
 MAX_MESSAGE_CHARS = 2_000
 MAX_USER_CHARS = 30_000
 MAX_GUILD_CHARS = 60_000
@@ -65,7 +67,8 @@ keep asking about, a hobby they keep coming back to, a format they keep asking f
 inferences, so phrase each as a tendency ("常問…", "似乎喜歡…"), never as something the member
 stated, and claim no more than the quotes show. {_EXCLUDE}
 Write at most {MAX_NOTES} notes in the messages' language: name (≤ 30 characters), text (one
-sentence), and evidence: one exact quote from each of at least two different conversations, as
+sentence, at most {MAX_TEXT_CHARS} characters), and evidence: one exact quote of at least
+{MIN_QUOTE_CHARS} characters from each of at least two different conversations, as
 {{"conversation": "C2", "quote": "…"}}. Quotes are copied character for character from that
 conversation's messages. Return JSON matching the schema; {{"notes": []}} when nothing qualifies."""
 
@@ -78,7 +81,8 @@ things, running jokes, house rules. Claim no more than the quotes show (a day me
 a weekly schedule unless someone says so). Never write anything about an individual member (who
 likes what, who said what, personal details), and nothing only one member says. {_EXCLUDE}
 Write at most {MAX_NOTES} notes in the messages' language: name (≤ 30 characters), text (one
-sentence), and evidence: one exact quote from each of at least two different members, as
+sentence, at most {MAX_TEXT_CHARS} characters), and evidence: one exact quote of at least
+{MIN_QUOTE_CHARS} characters from each of at least two different members, as
 {{"member": "M3", "quote": "…"}}. Quotes are copied character for character from that member's
 messages. Return JSON matching the schema; {{"notes": []}} when nothing qualifies."""
 
@@ -126,7 +130,10 @@ def conversations(
         ]
         if messages:
             guild_id, channel_id, user_id = ids
-            result.setdefault(guild_id, {}).setdefault(user_id, []).append((channel_id, messages))
+            members = result.setdefault(guild_id, {})
+            talks = members.pop(user_id, [])  # re-inserted: members end up most recent last
+            talks.append((channel_id, messages))
+            members[user_id] = talks
     return result
 
 
@@ -147,12 +154,18 @@ def _newest_within(groups: list[list[str]], budget: int) -> list[list[str]]:
     return kept
 
 
+def _data(value) -> str:
+    """JSON for a data block with < and > escaped, so no message can close the block early
+    (a member writing </MESSAGES>) and read as instructions."""
+    return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
+
+
 def _existing(store: MemoryStore, scope: str, guild_id: int, user_id: int | None) -> str:
     notes = [asdict(note) for note in store.notes(scope, guild_id, user_id)]
-    text = json.dumps(notes, ensure_ascii=False)
+    text = _data(notes)
     while len(text) > MAX_EXISTING_CHARS and notes:
         notes.pop(0)  # oldest first out
-        text = json.dumps(notes, ensure_ascii=False)
+        text = _data(notes)
     return text
 
 
@@ -168,6 +181,8 @@ def _valid(
             continue
         name, text, evidence = item.get("name"), item.get("text"), item.get("evidence")
         if not (isinstance(name, str) and name.strip() and isinstance(text, str) and text.strip()):
+            continue
+        if len(text.strip()) > MAX_TEXT_CHARS:
             continue
         if not isinstance(evidence, list):
             continue
@@ -199,12 +214,12 @@ async def digest_member(
     sources = {f"C{index}": messages for index, messages in enumerate(groups, 1)}
     prompt = (
         f"{USER_INSTRUCTIONS}\n\n<EXISTING_NOTES>\n{_existing(store, 'user', guild_id, user_id)}\n"
-        f"</EXISTING_NOTES>\n\n<CONVERSATIONS>\n{json.dumps(sources, ensure_ascii=False)}\n"
+        f"</EXISTING_NOTES>\n\n<CONVERSATIONS>\n{_data(sources)}\n"
         "</CONVERSATIONS>"
     )
     notes, proposed = _valid(await runner(prompt, "user"), sources, "conversation")
     for name, text in notes:
-        store.add("user", guild_id, user_id, USER_MARK + name, text)
+        store.add("user", guild_id, user_id, name, text, marker=USER_MARK)
     LOGGER.info(
         "Digest member …%s: %d conversations, %d proposed, %d kept",
         str(user_id)[-4:],
@@ -218,9 +233,10 @@ async def digest_member(
 async def digest_guild(
     store: MemoryStore, guild_id: int, members: dict[int, list[list[str]]], runner: Runner
 ) -> int:
+    members = dict(list(members.items())[-MAX_GUILD_MEMBERS:])
     if len(members) < 2:
         return 0
-    share = max(MAX_MESSAGE_CHARS, MAX_GUILD_CHARS // len(members))
+    share = MAX_GUILD_CHARS // len(members)  # ≥ MAX_MESSAGE_CHARS at MAX_GUILD_MEMBERS
     sources = {}
     for index, groups in enumerate(members.values(), 1):
         messages = [m for group in _newest_within(groups, share) for m in group]
@@ -230,12 +246,12 @@ async def digest_guild(
         return 0
     prompt = (
         f"{GUILD_INSTRUCTIONS}\n\n<EXISTING_NOTES>\n{_existing(store, 'guild', guild_id, None)}\n"
-        f"</EXISTING_NOTES>\n\n<MESSAGES>\n{json.dumps(sources, ensure_ascii=False)}\n"
+        f"</EXISTING_NOTES>\n\n<MESSAGES>\n{_data(sources)}\n"
         "</MESSAGES>"
     )
     notes, proposed = _valid(await runner(prompt, "guild"), sources, "member")
     for name, text in notes:
-        store.add("guild", guild_id, None, GUILD_MARK + name, text)
+        store.add("guild", guild_id, None, name, text, marker=GUILD_MARK)
     LOGGER.info(
         "Digest guild %s: %d members, %d proposed, %d kept",
         guild_id,
@@ -280,7 +296,14 @@ def _is_public(public: Public, guild_id: int, channel_id: int) -> bool:
 
 
 async def digest_all(
-    config, threads, store, runner, queue_run=None, now=None, public: Public | None = None
+    config,
+    threads,
+    store,
+    runner,
+    queue_run=None,
+    now=None,
+    public: Public | None = None,
+    quota: Callable[[], Awaitable[bool]] | None = None,
 ) -> str:
     async def direct(job):
         return await job()
@@ -289,6 +312,9 @@ async def digest_all(
     lines = []
     now = time.time() if now is None else now
     for label, job in _jobs(config, threads, store, runner, now, public):
+        if quota is not None and not await quota():  # checked before every model call
+            lines.append(f"stopped at {label}: quota gate")
+            break
         try:
             added = await queue_run(job)
         except Exception as error:  # one bad scope must not stop the rest
@@ -324,10 +350,15 @@ async def digest_forever(
             )
         )
         try:
-            if not await _quota_ok(config):
-                LOGGER.info("Digest skipped this week: quota gate")
-                continue
-            summary = await digest_all(config, threads, store, runner, queue_run, public=public)
+            summary = await digest_all(
+                config,
+                threads,
+                store,
+                runner,
+                queue_run,
+                public=public,
+                quota=lambda: _quota_ok(config),
+            )
             LOGGER.info("Digest done:\n%s", summary)
         except Exception:
             LOGGER.exception("Digest run failed")
@@ -358,9 +389,8 @@ async def run_once(config: Config, force: bool = False) -> str:
             config.memory_search_context_lines,
         ),
     )
-    if not force and not await _quota_ok(config):
-        return "skipped: quota below the gate (use --force to override)"
-    return await digest_all(config, threads, store, codex_runner(config))
+    quota = None if force else (lambda: _quota_ok(config))
+    return await digest_all(config, threads, store, codex_runner(config), quota=quota)
 
 
 if __name__ == "__main__":

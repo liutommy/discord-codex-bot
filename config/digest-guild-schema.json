@@ -23,7 +23,7 @@
                 },
                 "quote": {
                   "type": "string",
-                  "minLength": 2
+                  "minLength": 6
                 }
               },
               "required": [
