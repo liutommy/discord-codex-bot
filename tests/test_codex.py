@@ -503,3 +503,13 @@ def test_a_quoted_message_sits_outside_user_message() -> None:
         "[quoted-0000]\nx\n[quoted-0000]\ny",
     )
     assert _prompt("q").count("QUOTED_MESSAGE>") == 0
+
+
+def test_the_model_and_help_know_fixed_tracking_times() -> None:
+    from discord_codex_bot.codex import _prompt
+    from discord_codex_bot.help import COMMAND_GUIDE
+
+    prompt = _prompt("q")
+    assert 'at="12:01,20:01"' in prompt and '<track_at id="N" times=' in prompt
+    text, examples = COMMAND_GUIDE["-track"]
+    assert "固定時間" in text and any("times:" in example for example in examples)

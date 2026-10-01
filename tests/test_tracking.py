@@ -256,7 +256,7 @@ def test_track_tags_are_parsed_like_reminder_tags() -> None:
         '<track source="https://www.youtube.com/@HoushouMarine" interest="重大公告"'
         ' who="<@111111111111111111> <@222222222222222222>"/>'
     )
-    clean, adds, intervals, cancels = extract_track_tags(answer)
+    clean, adds, intervals, schedules, cancels = extract_track_tags(answer)
     assert clean == "好，幫你追起來。"
     assert adds == [
         (
@@ -264,16 +264,17 @@ def test_track_tags_are_parsed_like_reminder_tags() -> None:
             "重大公告",
             (111111111111111111, 222222222222222222),
             0,  # no every= : the operator default applies
+            (),  # no at= : judged on the interval
         )
     ]
-    assert intervals == []
+    assert intervals == [] and schedules == []
     assert cancels == []
     # interest and who are optional: the default policy applies and only the owner is pinged.
-    _clean, bare, _every, _cancels = extract_track_tags(
+    _clean, bare, _every, _at, _cancels = extract_track_tags(
         '<track source="https://www.twitch.tv/chibidoki"/>'
     )
-    assert bare == [("https://www.twitch.tv/chibidoki", "", (), 0)]
-    assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [], [])
+    assert bare == [("https://www.twitch.tv/chibidoki", "", (), 0, ())]
+    assert extract_track_tags("沒有標籤的答案") == ("沒有標籤的答案", [], [], [], [])
 
 
 def test_a_decision_without_wording_is_rejected(tmp_path: Path) -> None:
@@ -302,16 +303,18 @@ def test_a_decision_without_wording_is_rejected(tmp_path: Path) -> None:
 
 def test_track_tag_attributes_are_read_by_name_not_by_order() -> None:
     # A model that writes the attributes in another order must not lose the later ones.
-    _clean, adds, _every, _cancels = extract_track_tags(
+    _clean, adds, _every, _at, _cancels = extract_track_tags(
         '<track every="30" who="<@111111111111111111>" source="https://www.twitch.tv/x"/>'
     )
-    assert adds == [("https://www.twitch.tv/x", "", (111111111111111111,), 30)]
+    assert adds == [("https://www.twitch.tv/x", "", (111111111111111111,), 30, ())]
     # A <track> with no source is not an instruction we can carry out.
     assert extract_track_tags('<track interest="whatever"/>')[1] == []
-    _clean, _adds, intervals, _cancels = extract_track_tags('<track_every id="7" minutes="120"/>')
+    _clean, _adds, intervals, _at, _cancels = extract_track_tags(
+        '<track_every id="7" minutes="120"/>'
+    )
     assert intervals == [(7, 120)]
     # Cancelling by tag: the member's own ids are in the prompt, so none has to be invented.
-    clean, _adds, _every, cancels = extract_track_tags('好，取消了。\n<cancel_track id="1"/>')
+    clean, _adds, _every, _at, cancels = extract_track_tags('好，取消了。\n<cancel_track id="1"/>')
     assert clean == "好，取消了。" and cancels == [1]
 
 
@@ -955,3 +958,217 @@ async def test_the_first_pass_of_a_store_reads_one_page(monkeypatch) -> None:
     fetcher = RutenFetcher(batch=2, session_factory=lambda **kw: EmptySession())
     await fetcher.fetch(Source(7, "ruten", "x", "x", state={"user_id": "1", "keyword": ""}))
     assert len(calls) == 1  # the baseline: nothing in it is judged anyway
+
+
+# ----- fixed times of day ----------------------------------------------------------------------
+
+from datetime import datetime as _dt  # noqa: E402
+
+from discord_codex_bot import tracking  # noqa: E402
+from discord_codex_bot.tracking import (  # noqa: E402
+    TRACK_TZ,
+    cadence,
+    parse_times,
+    watch_due,
+)
+
+
+def taipei(day: int, hour: int, minute: int = 0) -> float:
+    return _dt(2026, 10, day, hour, minute, tzinfo=TRACK_TZ).timestamp()
+
+
+def test_times_of_day_are_read_in_the_ways_members_write_them() -> None:
+    assert parse_times("12:01,20:01") == ("12:01", "20:01")
+    assert parse_times("每天 1201 和 2001") == ("12:01", "20:01")
+    assert parse_times("21:00、9:30、9:30") == ("09:30", "21:00")
+    assert parse_times("12：01") == ("12:01",)  # full-width colon
+    assert parse_times("25:00 12:60 下午") == ()
+    assert len(parse_times(" ".join(f"{h}:00" for h in range(10)))) == 6
+
+
+def test_a_fixed_time_watch_is_due_once_per_time() -> None:
+    watch = Watch(1, 1, 1, 1, 1, "x", times=("12:01", "20:01"), classified_at=int(taipei(2, 11)))
+    assert not watch_due(watch, taipei(2, 12, 0))
+    assert watch_due(watch, taipei(2, 12, 1))
+    judged = Watch(1, 1, 1, 1, 1, "x", times=watch.times, classified_at=int(taipei(2, 12, 5)))
+    assert not watch_due(judged, taipei(2, 19, 59))
+    assert watch_due(judged, taipei(2, 20, 1))
+    # Asleep through 12:01 and 20:01: one judgement at wake-up, not two.
+    assert watch_due(watch, taipei(3, 9))
+    assert cadence(watch) == "每天 12:01、20:01 判斷"
+    assert cadence(Watch(1, 1, 1, 1, 1, "x", interval_minutes=90)) == "每 90 分鐘判斷一次"
+
+
+def test_fixed_times_gate_judging_and_a_quiet_time_is_used_up(tmp_path: Path, monkeypatch) -> None:
+    clock = [taipei(2, 11)]
+    monkeypatch.setattr(tracking.time, "time", lambda: clock[0])
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("youtube", "UC1", "@one")
+    store.ingest(source, FetchResult((content(source.id, "a"),), "a"))  # baseline
+    # 11:00: created on fixed times — the 20:01 of yesterday does not count, the next time does.
+    watch = store.add_watch(source.id, 1, 2, 3, times=("12:01", "20:01"))
+    assert watch.times == ("12:01", "20:01")
+    assert store.seconds_to_next_slot() == 61 * 60
+    store.ingest(store.get_source(source.id), FetchResult((content(source.id, "b"),), "b"))
+    assert store.pending_by_watch() == []
+    clock[0] = taipei(2, 12, 2)
+    assert [w.id for w, _items in store.pending_by_watch()] == [watch.id]
+    store.mark_classified(watch.id)
+    assert store.pending_by_watch() == []
+    # 20:01 with nothing new: the time is used up, so an item at 21:00 waits for 12:01.
+    clock[0] = taipei(2, 20, 2)
+    store.consume_slots()
+    clock[0] = taipei(2, 21)
+    store.ingest(store.get_source(source.id), FetchResult((content(source.id, "c"),), "c"))
+    assert store.pending_by_watch() == []
+    clock[0] = taipei(3, 12, 1)
+    assert [w.id for w, _items in store.pending_by_watch()] == [watch.id]
+    # Back to an interval: the times are dropped and the interval rules again.
+    assert store.set_watch_interval(watch.id, 1, user_id=3)
+    assert store.watches(user_id=3)[0].times == ()
+    assert store.seconds_to_next_slot() is None
+    # Rescheduling waits for the next time; someone else's watch is not theirs to change.
+    assert store.set_watch_times(watch.id, ("1201",), user_id=3)
+    assert not store.set_watch_times(watch.id, ("1201",), user_id=999)
+    assert store.pending_by_watch() == []
+    with pytest.raises(ValueError):
+        store.set_watch_times(watch.id, ("not a time",), user_id=3)
+
+
+def test_an_old_database_gains_the_times_column(tmp_path: Path) -> None:
+    path = tmp_path / "tracking.sqlite3"
+    store = TrackerStore(path)
+    source = store.add_source("youtube", "UC1", "@one")
+    store.add_watch(source.id, 1, 2, 3)
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE watches DROP COLUMN times")
+    reopened = TrackerStore(path)
+    assert reopened.watches()[0].times == ()
+
+
+async def test_the_loop_wakes_for_the_next_fixed_time(tmp_path: Path, monkeypatch) -> None:
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("youtube", "UC1", "@one")
+    store.add_watch(source.id, 1, 2, 3, times=("12:01",))
+    monkeypatch.setattr(store, "seconds_to_next_slot", lambda: 30.0)
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+        raise asyncio.CancelledError
+
+    async def nothing(*_args):
+        return FetchResult(())
+
+    monkeypatch.setattr(tracking.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await tracking.tracking_loop(store, nothing, nothing, nothing, 900)
+    assert slept == [32.0]
+
+
+import asyncio  # noqa: E402
+
+
+def _slot_store(tmp_path: Path, monkeypatch, count: int) -> tuple[TrackerStore, Watch, list]:
+    """A fixed-time (12:01) watch made at 11:00 with `count` items waiting for its time."""
+    clock = [taipei(2, 11)]
+    monkeypatch.setattr(tracking.time, "time", lambda: clock[0])
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("ruten", "1", "https://www.ruten.com.tw/store/x/")
+    store.ingest(source, FetchResult((content(source.id, "base"),), "base"))  # baseline
+    watch = store.add_watch(source.id, 1, 2, 3, times=("12:01",), interval_minutes=60)
+    items = tuple(content(source.id, f"i{n:03d}", "商品") for n in range(count))
+    store.ingest(store.get_source(source.id), FetchResult(items, "i"))
+    clock[0] = taipei(2, 12, 2)
+    return store, watch, clock
+
+
+async def _nothing_new(_source):
+    return FetchResult(())
+
+
+async def _no_delivery(_message):
+    return None
+
+
+async def test_a_fixed_time_judges_everything_that_waited_for_it(tmp_path, monkeypatch) -> None:
+    store, watch, _clock = _slot_store(tmp_path, monkeypatch, 70)
+    calls = []
+
+    async def classify(prompt):
+        calls.append(prompt)
+        return classifier_answer(prompt, notify=False)
+
+    stats = await tracking.run_tracking_once(store, _nothing_new, classify, _no_delivery)
+    assert stats["decisions"] == 70 and len(calls) == 3  # 30 + 30 + 10, all at 12:01
+    assert store.pending_by_watch(watch.id) == []
+    assert store.expire_stale() == {}
+
+
+async def test_the_batch_cap_warns_and_leaves_the_rest_for_later(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    store, watch, _clock = _slot_store(tmp_path, monkeypatch, 70)
+    monkeypatch.setattr(tracking, "MAX_SLOT_BATCHES", 2)
+
+    async def classify(prompt):
+        return classifier_answer(prompt, notify=False)
+
+    stats = await tracking.run_tracking_once(store, _nothing_new, classify, _no_delivery)
+    assert stats["decisions"] == 60
+    assert "items still pending after 2 batches" in caplog.text
+    assert len(store.pending_by_watch(watch.id)[0][1]) == 10
+
+
+async def test_a_failed_fixed_time_is_retried_after_the_interval(tmp_path, monkeypatch) -> None:
+    store, watch, clock = _slot_store(tmp_path, monkeypatch, 5)
+    outcome = ["fail"]
+
+    async def classify(prompt):
+        if outcome[0] == "fail":
+            raise RuntimeError("backend down")
+        return classifier_answer(prompt, notify=False)
+
+    stats = await tracking.run_tracking_once(store, _nothing_new, classify, _no_delivery)
+    assert stats["classifier_failures"] == 1
+    # Not used up: consume_slots left it owed, but it waits out the interval before retrying.
+    clock[0] = taipei(2, 12, 30)
+    assert store.pending_by_watch() == []
+    clock[0] = taipei(2, 13, 3)
+    outcome[0] = "ok"
+    stats = await tracking.run_tracking_once(store, _nothing_new, classify, _no_delivery)
+    assert stats["decisions"] == 5
+    # Judged: the time is used up until tomorrow's 12:01.
+    clock[0] = taipei(2, 14, 3)
+    assert not watch_due(store.watches()[0], clock[0])
+
+
+def test_track_at_and_track_every_read_attributes_in_any_order() -> None:
+    _c, _a, every, at, _x = tracking.extract_track_tags(
+        '<track_every minutes="90" id="4"/><track_at times="12:01" id="5"/>'
+        '<track_at id="6" times="中午"/><track_every id="x" minutes="5"/>'
+    )
+    assert every == [(4, 90)] and at == [(5, ("12:01",)), (6, ())]
+    # at= given but unreadable is not the same as no at=.
+    _c, adds, _e, _t, _x = tracking.extract_track_tags(
+        '<track source="https://x.com/a" at="中午"/>'
+    )
+    assert adds == [("https://x.com/a", "", (), 0, None)]
+
+
+def test_a_failed_fixed_time_retries_within_an_hour_even_on_a_long_interval() -> None:
+    failed = int(taipei(2, 12, 2))
+    watch = Watch(
+        1,
+        1,
+        1,
+        1,
+        1,
+        "x",
+        interval_minutes=1440,
+        times=("12:01",),
+        classified_at=0,
+        failed_at=failed,
+    )
+    assert not watch_due(watch, taipei(2, 12, 30))
+    assert watch_due(watch, taipei(2, 13, 3))

@@ -117,13 +117,16 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "符合條件才在頻道 @你，不符合的完全安靜。"
         "留空列出你的追蹤，cancel 加編號取消，log 加編號看它最近判斷了什麼、為什麼——"
         "判斷紀錄只有你自己看得到，不會貼到頻道。"
-        "新增、查看、改判斷頻率都可以直接跟 Bot 說（@Bot 用講的就行）；"
-        "預設只 @ 你，明講要一起通知誰就會加上那些人。取消只能用指令。"
-        "來源本身照常定期抓，但每個追蹤預設每 60 分鐘才讓 AI 判斷一次，說一聲就能改。",
+        "新增、查看、改判斷頻率、取消都可以直接跟 Bot 說（@Bot 用講的就行）；"
+        "預設只 @ 你，明講要一起通知誰就會加上那些人。"
+        "來源本身照常定期抓，但每個追蹤預設每 60 分鐘才讓 AI 判斷一次，說一聲就能改；"
+        "也可以改成每天固定時間判斷（台灣時間，最多 6 個，例如 12:01 和 20:01），"
+        "通知就集中在那幾個時間。",
         [
             "/{p}-track source:https://www.youtube.com/@HoushouMarine",
             "/{p}-track source:https://www.twitch.tv/chibidoki interest:重大公告或特別企劃",
             "/{p}-track source:https://x.com/YuGiOh_OCG_INFO interest:新卡情報",
+            "/{p}-track source:https://x.com/YuGiOh_OCG_INFO times:12:01,20:01",
             "/{p}-track source:https://www.ruten.com.tw/store/ykohmkphilip/"
             " interest:rurudo（るるど）的新品",
             "/{p}-track（留空：列出你的追蹤）",

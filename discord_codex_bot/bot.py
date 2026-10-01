@@ -111,8 +111,10 @@ from .tracking import (
     WebFetcher,
     XFetcher,
     YouTubeFetcher,
+    cadence,
     extract_track_tags,
     parse_ruten_locator,
+    parse_times,
     parse_twitch_locator,
     parse_web_locator,
     parse_x_locator,
@@ -1594,6 +1596,7 @@ class DiscordCodexClient(discord.Client):
         channel_id: int | None,
         user_id: int,
         interval_minutes: int = 0,
+        times: Sequence[str] = (),
     ) -> tuple[str, object | None]:
         """Resolve one source and start watching it. Returns (message, watch or None);
         shared by the slash command and the <track> tag so both enforce the same limits."""
@@ -1639,6 +1642,7 @@ class DiscordCodexClient(discord.Client):
                 policy,
                 mention_ids=mention_ids,
                 interval_minutes=interval_minutes or self.config.tracking_classify_interval_minutes,
+                times=times,
             )
         except (
             ProviderError,
@@ -1657,7 +1661,7 @@ class DiscordCodexClient(discord.Client):
         )
         return (
             f"已新增追蹤 #{watch.id}：{provider} · {label}{also}\n"
-            f"從現在起有符合的新內容就會通知（每 {watch.interval_minutes} 分鐘判斷一次，"
+            f"從現在起有符合的新內容就會通知（{cadence(watch)}，"
             "建立之前的舊內容不算）。判斷過程用 "
             f"/{self.config.command_prefix}-track log:{watch.id} 查，只有你看得到。",
             watch,
@@ -1667,16 +1671,21 @@ class DiscordCodexClient(discord.Client):
         self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
     ) -> str:
         """Create / retime / cancel the watches the model asked for and append a confirmation."""
-        clean, adds, intervals, cancels = extract_track_tags(text)
-        if not adds and not intervals and not cancels:
+        clean, adds, intervals, schedules, cancels = extract_track_tags(text)
+        if not adds and not intervals and not schedules and not cancels:
             return text
         store = self.tracker
         if store is None:
             return f"{clean}\n\n（社群追蹤尚未啟用。）"
         notes: list[str] = []
-        for locator, interest, who, every in adds:
+        for locator, interest, who, every, times in adds:
+            if times is None:
+                notes.append(
+                    f"（{locator[:80]} 的時間看不懂，沒有建立追蹤；請用像 12:01、20:01 這樣的寫法）"
+                )
+                continue
             note, watch = await self._add_watch(
-                locator, interest, who, guild_id, channel_id, user_id, every
+                locator, interest, who, guild_id, channel_id, user_id, every, times
             )
             # A refusal only ever reached the member as text: the log recorded that a tag had
             # been parsed and nothing more, so a watch that was never created looked exactly
@@ -1697,6 +1706,17 @@ class DiscordCodexClient(discord.Client):
                 if done
                 else f"（找不到你的追蹤 #{watch_id}）"
             )
+        for watch_id, times in schedules:
+            if not times:
+                notes.append(f"（追蹤 #{watch_id} 的時間看不懂，請用像 12:01、20:01 這樣的寫法）")
+                continue
+            done = store.set_watch_times(watch_id, times, user_id)
+            notes.append(
+                f"⏱️ 追蹤 #{watch_id} 改成每天 {'、'.join(times)}（台灣時間）判斷，"
+                "從下一個時間開始。"
+                if done
+                else f"（找不到你的追蹤 #{watch_id}）"
+            )
         for watch_id in cancels:
             # Scoped to the asking member, exactly like the slash command: one member can never
             # talk the Bot into dropping someone else's watch.
@@ -1713,12 +1733,13 @@ class DiscordCodexClient(discord.Client):
                 f"⛔ 已取消追蹤 #{watch_id}。" if done else f"（找不到你的追蹤 #{watch_id}）"
             )
         LOGGER.info(
-            "Tracking tags guild=%s channel=%s user=%s adds=%d every=%d cancels=%d",
+            "Tracking tags guild=%s channel=%s user=%s adds=%d every=%d at=%d cancels=%d",
             guild_id,
             channel_id,
             user_id,
             len(adds),
             len(intervals),
+            len(schedules),
             len(cancels),
         )
         return f"{clean}\n\n" + "\n".join(notes)
@@ -1807,6 +1828,7 @@ class DiscordCodexClient(discord.Client):
     @app_commands.describe(
         source="YouTube／Twitch 頻道、X 帳號、露天賣場（可帶 ?q=關鍵字）或網頁網址；留空列出",
         interest="選填：你特別想知道的內容；留空使用預設重大事件政策",
+        times="選填：每天固定判斷的時間（台灣時間），例如 12:01,20:01；留空依間隔判斷",
         cancel="取消你的追蹤編號",
         log="看判斷紀錄：這個追蹤最近判斷了什麼、為什麼提醒或不提醒（只有你看得到）",
     )
@@ -1815,6 +1837,7 @@ class DiscordCodexClient(discord.Client):
         interaction: discord.Interaction,
         source: str | None = None,
         interest: str | None = None,
+        times: str | None = None,
         cancel: int | None = None,
         log: int | None = None,
     ) -> None:
@@ -1832,10 +1855,16 @@ class DiscordCodexClient(discord.Client):
         actions = (
             int(bool(source and source.strip())) + int(cancel is not None) + int(log is not None)
         )
-        if actions > 1 or (interest and not source):
+        if actions > 1 or ((interest or times) and not source):
             await interaction.response.send_message(
-                "新增、取消、看判斷紀錄一次只能做一件；interest 必須和 source 一起使用。",
+                "新增、取消、看判斷紀錄一次只能做一件；interest 和 times 必須和 source 一起使用。",
                 ephemeral=True,
+            )
+            return
+        slots = parse_times(times or "")
+        if times and not slots:
+            await interaction.response.send_message(
+                "times 看不懂，請用像 12:01,20:01 這樣的寫法（台灣時間）。", ephemeral=True
             )
             return
         if cancel is not None:
@@ -1860,8 +1889,7 @@ class DiscordCodexClient(discord.Client):
                     if tracked is None:
                         continue
                     lines.append(
-                        f"#{watch.id} {tracked.provider} · {tracked.locator}"
-                        f"（每 {watch.interval_minutes} 分鐘判斷一次）"
+                        f"#{watch.id} {tracked.provider} · {tracked.locator}（{cadence(watch)}）"
                     )
                 text = "你的社群追蹤：\n" + "\n".join(lines)
             await interaction.response.send_message(truncate(text, 1900), ephemeral=True)
@@ -1876,6 +1904,7 @@ class DiscordCodexClient(discord.Client):
             interaction.guild_id,
             interaction.channel_id,
             interaction.user.id,
+            times=slots,
         )
         await interaction.followup.send(text, ephemeral=True)
 
