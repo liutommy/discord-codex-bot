@@ -282,11 +282,16 @@ def _prompt(
             " section; never invent ids.",
             "MEMORY may end with a [社群追蹤] section: this member's watches — a YouTube"
             " channel, a Twitch channel, an X account (its profile URL, https://x.com/<handle>),"
-            " or any public web page (an official news index, a blog). Track a page when there"
-            " is no channel to follow; the Bot reads it and treats a link it has not seen before"
-            " as new content. X accounts are read through the operator's X lookup service: use"
-            " the profile URL as the source, never a mirror or a substitute page, and if that"
-            " service is off the Bot says so itself."
+            " a Ruten (露天) store, or any public web page (an official news index, a blog)."
+            " Track a page when there is no channel to follow; the Bot reads it and treats a link"
+            " it has not seen before as new content. X accounts are read through the operator's"
+            " X lookup service: use the profile URL as the source, never a mirror or a substitute"
+            " page, and if that service is off the Bot says so itself. A Ruten store is read"
+            " listing by listing with product names: use https://www.ruten.com.tw/store/<account>/"
+            " (any URL of that store works), and when the member wants only some products add the"
+            " store's own search keyword, https://www.ruten.com.tw/store/<account>/find?q=<keyword>"
+            " — far fewer listings to judge. Only product names are judged (no images), so put"
+            " words a product name would contain into interest."
             " (#id, mode, source). To start one, append"
             ' <track source="https://…" interest="what is worth pinging about"'
             ' who="<@user id> <@user id>"/> after your answer — omit who to ping only the'

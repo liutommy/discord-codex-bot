@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, urlparse, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -1289,6 +1289,133 @@ class XFetcher:
         cursor = items[-1].external_id if items else source.cursor
         state = {key: value for key, value in source.state.items() if key != "last_error"}
         return FetchResult(tuple(items), cursor, {**state, "fetched_at": now})
+
+
+RUTEN_HOSTS = {"www.ruten.com.tw", "ruten.com.tw", "m.ruten.com.tw"}
+_RUTEN_ACCOUNT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")
+_RUTEN_ID = re.compile(r"[0-9]{6,20}")  # a listing
+_RUTEN_SELLER = re.compile(r"[0-9]{1,20}")
+
+
+def parse_ruten_locator(locator: str) -> tuple[str, str]:
+    """A Ruten (露天) store URL as (seller account, search keyword). The keyword is the store's
+    own search (`/store/<account>/find?q=rurudo`): with it only matching listings are read."""
+    parts = urlsplit(locator.strip() if "://" in locator else f"https://{locator.strip()}")
+    segments = [segment for segment in parts.path.split("/") if segment]
+    if (parts.hostname or "").lower() not in RUTEN_HOSTS or len(segments) < 2:
+        raise ValueError("not a Ruten store URL")
+    if segments[0] != "store" or not _RUTEN_ACCOUNT.fullmatch(segments[1]):
+        raise ValueError("not a Ruten store URL")
+    keyword = " ".join(parse_qs(parts.query).get("q", [""])[0].split())[:60]
+    return segments[1], keyword
+
+
+def ruten_source_url(account: str, keyword: str) -> str:
+    """The canonical form of a store source: one source per store and keyword."""
+    if keyword:
+        return f"https://www.ruten.com.tw/store/{account}/find?q={quote(keyword)}"
+    return f"https://www.ruten.com.tw/store/{account}/"
+
+
+class RutenFetcher:
+    """A Ruten (露天) store as a source, newest listings first, read through the JSON API the
+    store's own web app uses. The store page itself is a script shell: as a web source it gave
+    links labelled only 「預購」, so the classifier never saw a product name to judge.
+
+    The API has no public documentation. A response of an unexpected shape raises (it must not
+    look like "nothing new"), and so does a store without a keyword that suddenly lists nothing:
+    the Bot alerts the operator after a few failures in a row (see bot._fetch_tracking_source)."""
+
+    USERS = "https://rapi.ruten.com.tw/api/users/v1/index.php"
+    SEARCH = "https://rtapi.ruten.com.tw/api/search/v3/index.php/core/seller"
+    ITEMS = "https://rapi.ruten.com.tw/api/items/v2/list"
+    HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; discord-codex-bot)"}
+
+    def __init__(
+        self,
+        *,
+        batch: int = MAX_CLASSIFY_BATCH,
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
+        session_factory: Callable[..., aiohttp.ClientSession] = aiohttp.ClientSession,
+    ) -> None:
+        self.batch = batch
+        self.timeout_seconds = timeout_seconds
+        self.max_response_bytes = max_response_bytes
+        self.session_factory = session_factory
+
+    def _session(self) -> aiohttp.ClientSession:
+        return self.session_factory(
+            timeout=aiohttp.ClientTimeout(total=self.timeout_seconds), headers=self.HEADERS
+        )
+
+    async def _get(self, session: aiohttp.ClientSession, url: str, **params: str) -> dict:
+        return await _json_request(
+            session, "GET", url, params=params, limit=self.max_response_bytes
+        )
+
+    async def resolve(self, locator: str) -> tuple[str, Mapping[str, Any]]:
+        """Looked up once: the seller's numeric id, which every later call is keyed on."""
+        account, keyword = parse_ruten_locator(locator)
+        async with self._session() as session:
+            info = await self._get(session, f"{self.USERS}/{quote(account)}/storeinfo")
+        data = info.get("data")
+        user_id = str(data.get("user_id", "")) if isinstance(data, dict) else ""
+        if info.get("status") != "success" or not _RUTEN_SELLER.fullmatch(user_id):
+            raise ProviderError("找不到這個露天賣場")
+        name = str(data.get("store_name") or account).strip()[:60]
+        title = f"露天 {name}" + (f"（搜尋：{keyword}）" if keyword else "")
+        state = {"title": title, "account": account, "user_id": user_id, "keyword": keyword}
+        return ruten_source_url(account, keyword), state
+
+    async def fetch(self, source: Source) -> FetchResult:
+        user_id = str(source.state.get("user_id", ""))
+        keyword = str(source.state.get("keyword", ""))
+        if not _RUTEN_SELLER.fullmatch(user_id):
+            raise ProviderError("Ruten source has no seller id")
+        params = {"sort": "new/dc", "limit": str(self.batch), "offset": "1"}
+        if keyword:
+            params["q"] = keyword
+        async with self._session() as session:
+            listing = await self._get(session, f"{self.SEARCH}/{user_id}/prod", **params)
+            rows = listing.get("Rows")
+            if not isinstance(listing.get("TotalRows"), int) or not isinstance(rows, list):
+                raise ProviderError("露天商品清單的格式看不懂（介面可能改了）")
+            ids = [str(row.get("Id", "")) for row in rows if isinstance(row, dict)]
+            if not all(_RUTEN_ID.fullmatch(item_id) for item_id in ids) or len(ids) != len(rows):
+                raise ProviderError("露天商品清單的格式看不懂（介面可能改了）")
+            if not ids:
+                if keyword:  # nothing matches the keyword right now: an ordinary answer
+                    return FetchResult((), source.cursor, dict(source.state))
+                raise ProviderError("露天賣場回了 0 件商品（介面可能改了，或賣場已關閉）")
+            detail = await self._get(session, self.ITEMS, gno=",".join(ids), level="simple")
+        products = detail.get("data")
+        if detail.get("status") != "success" or not isinstance(products, list):
+            raise ProviderError("露天商品資料的格式看不懂（介面可能改了）")
+        by_id = {str(p.get("id")): p for p in products if isinstance(p, dict)}
+        items = []
+        for item_id in reversed(ids):  # oldest first, like a feed
+            product = by_id.get(item_id, {})
+            name = " ".join(str(product.get("name") or "").split())
+            price = product.get("goods_price")
+            ship = str(product.get("pre_order_ship_date") or "").strip()
+            facts = [
+                f"NT${price}" if isinstance(price, int) else "",
+                f"預購 {ship}" if ship else "",
+            ]
+            items.append(
+                ContentItem(
+                    None,
+                    source.id,
+                    item_id,
+                    f"https://www.ruten.com.tw/item/{item_id}/",
+                    name[:300] or "（沒有商品名）",
+                    "，".join(fact for fact in facts if fact),
+                    _utc_now(),
+                    "product",
+                )
+            )
+        return FetchResult(tuple(items), items[-1].external_id, dict(source.state))
 
 
 def parse_web_locator(locator: str) -> str:

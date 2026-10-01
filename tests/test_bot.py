@@ -276,6 +276,11 @@ def test_tracking_provider_prefers_the_specific_source_over_a_plain_page() -> No
     assert tracking_provider("https://www.youtube.com/@HoushouMarine") == "youtube"
     assert tracking_provider("https://www.twitch.tv/chibidoki") == "twitch"
     assert tracking_provider("https://yu-gi-oh.jp/news/") == "web"
+    # A Ruten store read as a page gave links labelled only 「預購」: no product name to judge.
+    assert tracking_provider("https://www.ruten.com.tw/store/ykohmkphilip/list?sort=new/dc") == (
+        "ruten"
+    )
+    assert tracking_provider("https://www.ruten.com.tw/item/22640792418162/") == "web"
     with pytest.raises(ValueError, match="追蹤需要"):
         tracking_provider("ftp://example.com/person")
 
@@ -334,7 +339,10 @@ from discord_codex_bot.queue import SerialQueue  # noqa: E402
 from discord_codex_bot.tracking import (  # noqa: E402
     ContentItem,
     Decision,
+    FetchResult,
     OutboxMessage,
+    ProviderError,
+    Source,
     TrackerStore,
     Watch,
 )
@@ -2037,3 +2045,32 @@ async def test_uploading_a_persona_retires_every_live_thread_and_keeps_the_old_o
     assert (client.config.codex_workspace / "AGENTS.md").read_text(
         "utf-8"
     ) == "RULES\n\n\nimage persona\n"
+
+
+async def test_a_broken_ruten_source_reaches_the_operator(client, monkeypatch) -> None:
+    # The Ruten API is undocumented: a change there must not look like a quiet store.
+    events = []
+
+    async def failure(backend, error):
+        events.append(("fail", backend))
+
+    async def success(backend):
+        events.append(("ok", backend))
+
+    monkeypatch.setattr(client.alerts, "record_failure", failure)
+    monkeypatch.setattr(client.alerts, "record_success", success)
+    source = Source(1, "ruten", "https://www.ruten.com.tw/store/a/", "", state={"user_id": "1"})
+
+    async def broken(_source):
+        raise ProviderError("露天商品清單的格式看不懂")
+
+    monkeypatch.setattr(client.ruten_tracker, "fetch", broken)
+    with pytest.raises(ProviderError):
+        await client._fetch_tracking_source(source)
+
+    async def fine(_source):
+        return FetchResult((), "", {})
+
+    monkeypatch.setattr(client.ruten_tracker, "fetch", fine)
+    await client._fetch_tracking_source(source)
+    assert events == [("fail", "露天追蹤"), ("ok", "露天追蹤")]
