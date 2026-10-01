@@ -67,12 +67,28 @@ def test_every_client_tool_is_removed_under_every_spelling() -> None:
     assert server.ENV["GROK_MEMORY"] == "0"
 
 
-def test_run_grok_uses_the_locked_command_line(monkeypatch, tmp_path) -> None:
+def test_each_session_gets_a_fresh_home_holding_only_the_login(monkeypatch, tmp_path) -> None:
+    auth_dir, scratch = tmp_path / "volume", tmp_path / "scratch"
+    auth_dir.mkdir(), scratch.mkdir()
+    (auth_dir / "auth.json").write_text('{"token": "old"}')
+    (auth_dir / "config.toml").write_text("planted = true")  # never copied into a session
+    monkeypatch.setattr(server, "AUTH_DIR", str(auth_dir))
+    monkeypatch.setattr(server, "SCRATCH", str(scratch))
+    stray = tmp_path / "stray-sessions"
+    monkeypatch.setattr(server, "STRAY_PATHS", (str(stray),))
     seen = {}
 
     class FakePopen:
         def __init__(self, command, **kwargs):
-            seen["command"], seen["env"] = command, kwargs["env"]
+            seen["command"], seen["env"], seen["cwd"] = command, kwargs["env"], kwargs["cwd"]
+            home = Path(kwargs["env"]["GROK_HOME"])
+            seen["files"] = sorted(p.name for p in home.iterdir())
+            seen["work"] = sorted(Path(kwargs["cwd"]).iterdir())
+            # what a session leaves behind: a refreshed login, and junk that must not persist
+            (home / "auth.json").write_text('{"token": "refreshed"}')
+            (home / "config.toml").write_text("evil = true")
+            (Path(kwargs["cwd"]) / "AGENTS.md").write_text("evil")
+            stray.mkdir()  # Grok's fixed /tmp/sessions
             self.returncode, self.pid = 0, 0
 
         def communicate(self, timeout=None):
@@ -80,11 +96,28 @@ def test_run_grok_uses_the_locked_command_line(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(server.subprocess, "Popen", FakePopen)
     server.run_grok("prompt")
-    command = seen["command"]
-    assert command[:4] == [server.GROK, "-m", server.MODEL, "-p"]
+    command, env = seen["command"], seen["env"]
     start = command.index("--disallowed-tools")
     assert tuple(command[start : start + len(server.LOCKED_ARGS)]) == server.LOCKED_ARGS
-    assert seen["env"]["GROK_DISABLE_AUTOUPDATER"] == "1"
+    assert seen["files"] == ["auth.json"] and seen["work"] == []
+    for key in ("GROK_HOME", "HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+        assert env[key].startswith(str(scratch)), key
+    assert env["GROK_DISABLE_AUTOUPDATER"] == "1" and "XSEARCH_AUTH_DIR" not in env
+    assert list(scratch.iterdir()) == []  # the whole session home is gone
+    assert not stray.exists()
+    assert (auth_dir / "auth.json").read_text() == '{"token": "refreshed"}'
+    assert (auth_dir / "config.toml").read_text() == "planted = true"
+
+
+def test_a_session_cannot_plant_junk_as_the_login(monkeypatch, tmp_path) -> None:
+    (tmp_path / "auth.json").write_text('{"token": "good"}')
+    scratch = tmp_path / "s" / "home" / ".grok"
+    scratch.mkdir(parents=True)
+    monkeypatch.setattr(server, "AUTH_DIR", str(tmp_path))
+    for junk in ("not json", "[1, 2]"):
+        (scratch / "auth.json").write_text(junk)
+        server._keep_login(str(tmp_path / "s"))
+        assert (tmp_path / "auth.json").read_text() == '{"token": "good"}'
 
 
 # ------------------------------------------------------------- layer 2: the enforced hook
@@ -97,7 +130,7 @@ def test_enforced_policy_denies_every_tool() -> None:
     (handler,) = group["hooks"]
     assert handler["command"] == "/usr/local/bin/deny-all"
     hook = ROOT / "deny-all"
-    assert hook.stat().st_mode & stat.S_IXUSR or True  # the Dockerfile chmods it
+    assert hook.stat().st_mode & stat.S_IXUSR  # committed executable (the Dockerfile chmods too)
     out = subprocess.run(["sh", str(hook)], input='{"tool_name":"Bash"}', capture_output=True,
                          text=True, check=True)  # fmt: skip
     assert json.loads(out.stdout)["decision"] == "deny"
@@ -145,11 +178,35 @@ def test_verify_stream_accepts_only_a_toolless_x_search_session() -> None:
             _assistant({"type": "tool_use", "name": "X search:", "input": {"variant": "XSearch"}}),
             _result("{}"),
         ),  # fmt: skip
+        # a client tool whose model-written input imitates X search: the CLI-set name decides
+        (
+            INIT_EMPTY,
+            _assistant(
+                {
+                    "type": "tool_use",
+                    "name": "run_terminal_cmd",
+                    "input": {"variant": "XSearch", "backend": True, "command": "id"},
+                }
+            ),
+            _result("{}"),
+        ),
+        # a second init with tools
+        (INIT_EMPTY, dict(INIT_EMPTY, tools=["read_file"]), _result("{}")),
+        # shapes we do not know are refused, not skipped
+        (INIT_EMPTY, {"type": "stream_event"}, _result("{}")),
+        (INIT_EMPTY, _assistant({"type": "server_tool_use", "name": "X search:"}), _result("{}")),
+        (INIT_EMPTY, {"type": "system", "subtype": "hook_started"}, _result("{}")),
     ],
 )
 def test_verify_stream_refuses_anything_else(events) -> None:
     with pytest.raises(server.Unsafe):
         server.verify_stream(_stream(*events))
+
+
+def test_verify_stream_refuses_a_line_that_is_not_json() -> None:
+    lines = [json.dumps(INIT_EMPTY), "warning: something", json.dumps(_result("{}"))]
+    with pytest.raises(server.Unsafe):
+        server.verify_stream(lines)
 
 
 def test_verify_stream_reports_failed_or_empty_answers() -> None:
@@ -188,6 +245,21 @@ def test_only_validated_fields_reach_the_prompt(kind, request_) -> None:
         server.build_prompt(kind, request_)
 
 
+@pytest.mark.parametrize(
+    ("post_id", "created", "kept"),
+    [
+        ("2105070184717262858", "2026-09-29T23:00:17Z", True),  # a real post
+        ("2105070184717262858", "2026-09-30T23:00:17Z", False),  # a day off its id
+        ("99999999999999999999", "2026-10-01T00:00:00Z", False),  # the cursor-poisoning id
+        ("9999999999999999999", "2026-10-01T00:00:00Z", False),  # a far-future snowflake
+        ("20", "2006-03-21T20:50:14Z", True),  # pre-snowflake ids carry no time
+    ],
+)
+def test_post_ids_must_agree_with_their_time(post_id, created, kept) -> None:
+    post = {"id": post_id, "author_handle": "a", "created_at": created, "text": "t"}
+    assert (server._clean_post(post) is not None) is kept
+
+
 def test_shape_drops_what_contradicts_the_request() -> None:
     post = {"id": "200", "author_handle": "Riot", "created_at": "Tue, 29 Sep 2026 23:00:17 GMT",
             "text": "hi"}  # fmt: skip
@@ -212,6 +284,33 @@ def test_shape_drops_what_contradicts_the_request() -> None:
     assert [p["id"] for p in recent["posts"]] == ["200"]
     user = server.shape("user", {"handle": "riot"}, {"exists": True, "handle": "someone_else"})
     assert user["exists"] is False
+
+
+def test_post_lookups_are_cached_and_a_busy_queue_is_refused(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(prompt):
+        calls.append(prompt)
+        post = {
+            "id": "2105070184717262858",
+            "author_handle": "a",
+            "text": "t",
+            "created_at": "2026-09-29T23:00:17Z",
+        }
+        return _stream(INIT_EMPTY, _result(json.dumps({"found": True, "post": post})))
+
+    monkeypatch.setattr(server, "run_grok", fake_run)
+    monkeypatch.setattr(server, "_POST_CACHE", server.OrderedDict())
+    first = server.lookup("post", {"id": "2105070184717262858"})
+    assert first["found"] and server.lookup("post", {"id": "2105070184717262858"}) == first
+    assert len(calls) == 1
+    monkeypatch.setattr(server, "QUEUE_WAIT", 0)
+    server._LOCK.acquire()
+    try:
+        with pytest.raises(server.Busy):
+            server.lookup("user", {"handle": "a"})
+    finally:
+        server._LOCK.release()
 
 
 # -------------------------------------------------------------------------- the bot's side
@@ -265,7 +364,26 @@ async def sidecar():
         yield server_
 
 
-async def test_client_round_trips(sidecar, config: Config) -> None:
+async def test_link_lookups_are_rate_limited(sidecar, monkeypatch, config: Config) -> None:
+    cfg = replace(config, xsearch_url=f"http://127.0.0.1:{sidecar.port}")
+    monkeypatch.setattr(xsearch, "_post_lookups", xsearch.deque())
+    monkeypatch.setattr(xsearch, "POST_LOOKUPS_PER_HOUR", 2)
+    await xsearch.fetch_post(cfg, "200")
+    await xsearch.fetch_post(cfg, "200")
+    with pytest.raises(xsearch.XSearchError):
+        await xsearch.fetch_post(cfg, "200")
+    assert len(sidecar.calls) == 2
+
+
+def test_post_text_flags_unverified_fields_and_a_different_author() -> None:
+    post = {"author_handle": "elonmusk", "text": "hi", "created_at": "t"}
+    text = xsearch.post_text(post, url_handle="someone")
+    assert "未經驗證" in text and "@someone" in text and "@elonmusk" in text
+    assert "注意" not in xsearch.post_text(post, url_handle="ElonMusk")
+
+
+async def test_client_round_trips(sidecar, monkeypatch, config: Config) -> None:
+    monkeypatch.setattr(xsearch, "_post_lookups", xsearch.deque())
     cfg = replace(config, xsearch_url=f"http://127.0.0.1:{sidecar.port}")
     post = await xsearch.fetch_post(cfg, "200")
     assert "hello" in xsearch.post_text(post) and "讚 3" in xsearch.post_text(post)
@@ -285,6 +403,7 @@ async def test_x_link_falls_back_to_x_search_when_fxtwitter_fails(
         return None
 
     monkeypatch.setattr(links, "fetch_x_status", fxtwitter_down)
+    monkeypatch.setattr(xsearch, "_post_lookups", xsearch.deque())
     cfg = replace(config, xsearch_url=f"http://127.0.0.1:{sidecar.port}")
     text, images = await links.fetch_or_render("https://x.com/Riot/status/20000", cfg, None)
     assert "hello" in text and "經由 xAI X 搜尋取得" in text and images == []
@@ -355,3 +474,24 @@ async def test_x_fetcher_resolves_and_fetches_on_its_own_clock() -> None:
     now[0] += 31 * 60
     await fetcher.fetch(later)
     assert asked[-1] == ("Riot", "300")
+
+
+async def test_x_fetcher_waits_a_full_interval_after_a_failed_check() -> None:
+    now = [10_000.0]
+    attempts = []
+
+    async def failing(handle, since_id):
+        attempts.append(now[0])
+        raise xsearch.XSearchError("refused")
+
+    async def no_user(handle):
+        return None
+
+    fetcher = XFetcher(no_user, failing, interval_minutes=60, clock=lambda: now[0])
+    source = Source(1, "x", "riot", "https://x.com/riot", "123", {"handle": "Riot"})
+    result = await fetcher.fetch(source)
+    assert result.items == () and result.cursor == "123"
+    assert result.state["fetched_at"] == 10_000.0 and result.state["last_error"] == "XSearchError"
+    now[0] += 15 * 60  # the next tracking pass: no new session
+    await fetcher.fetch(replace(source, state=result.state))
+    assert len(attempts) == 1

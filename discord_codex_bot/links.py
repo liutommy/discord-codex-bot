@@ -1008,7 +1008,7 @@ async def fetch_or_render(
                 LOGGER.warning("X lookup of %s failed: %s", post_id, error)
             else:
                 if found is not None:
-                    return xsearch.post_text(found), []
+                    return xsearch.post_text(found, user), []
         url = f"https://x.com/{user}/status/{post_id}"  # mirrors serve browsers a redirect shell
     if not render:
         text = await fetch_link(url, config)
