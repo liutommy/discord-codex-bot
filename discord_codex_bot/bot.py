@@ -619,8 +619,8 @@ class DiscordCodexClient(discord.Client):
             self._grok_models_task = asyncio.create_task(self._load_grok_models())
         if self.config.default_model.startswith(f"{GROK}:") and not self.config.model_chain:
             LOGGER.warning(
-                "DEFAULT_MODEL is Grok but MODEL_CHAIN is empty: turns Grok cannot take (images, "
-                "past the weekly reserve, sidecar down) will fail instead of falling back"
+                "DEFAULT_MODEL is Grok but MODEL_CHAIN is empty: turns Grok cannot take (GIF/WebP "
+                "images, past the weekly reserve, sidecar down) will fail instead of falling back"
             )
         LOGGER.info("Alerts go to user %s", await self.alerts.resolve_owner() or "(none)")
         if not getattr(self, "_login_watch", None):
@@ -856,9 +856,8 @@ class DiscordCodexClient(discord.Client):
             fallback = self._choice(self.config.default_model)
             if fallback.backend == GROK and grok.cached_model(fallback.family) is not None:
                 target = resolve(fallback, target.effort)
-        has_images = any((a.content_type or "").startswith("image/") for a in attachments)
-        if target.backend == GROK and spares and not await self._grok_usable(has_images):
-            # Straight to the next backend: an image, the reserve for X lookups, or the breaker.
+        if target.backend == GROK and spares and not await self._grok_usable():
+            # Straight to the next backend: the reserve for X lookups, or the breaker.
             LOGGER.info("Skipping Grok for this turn; answering with %s", spares[0].model)
             target, spares = spares[0], spares[1:]
         spares = [spare for spare in spares if spare.backend != GROK]  # never fall *into* Grok
@@ -1279,11 +1278,11 @@ class DiscordCodexClient(discord.Client):
         catalog = await grok.models(self.config)
         LOGGER.info("Grok models: %s", ", ".join(m.id for m in catalog) or "(unavailable)")
 
-    async def _grok_usable(self, images: bool) -> bool:
-        """Whether a turn may go to Grok right now. Not when it carries images (Grok's headless
-        mode cannot read them), not past the weekly share reserved for X lookups, and not while
-        the circuit breaker is open after repeated refused sessions."""
-        if images or not grok.enabled(self.config) or time.time() < self._grok_off_until:
+    async def _grok_usable(self) -> bool:
+        """Whether a turn may go to Grok right now. Not past the weekly share reserved for X
+        lookups, and not while the circuit breaker is open after repeated refused sessions.
+        (Images it cannot take — GIF, WebP, too many — fall back from run_grok itself.)"""
+        if not grok.enabled(self.config) or time.time() < self._grok_off_until:
             return False
         reading = await grok.usage(self.config)
         percent = (reading or {}).get("weekly_percent")

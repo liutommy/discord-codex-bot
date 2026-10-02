@@ -176,8 +176,9 @@ FEATURES: list[str] = [
     "伺服器主人或管理員可用 `/{p}-embedfix` 開關。",
     "**貼影片連結**會看影片再回答：YouTube 直接看（長片也行），X、TikTok、Instagram、Bilibili、"
     "Reddit、Streamable 等會抓下來看；長片會先回「🎬 處理中」再改成正式答案。",
-    "**模型來源**：Grok（預設，會自己用 X 搜尋查貼文與帳號；看不到圖，附圖的訊息改由 Codex 回答）、"
-    "Codex、Antigravity（Gemini／Claude）、OpenRouter 與 OrcaRouter 的免費模型；"
+    "**模型來源**：Grok（預設，會自己用 X 搜尋查貼文與帳號；看得到 PNG／JPEG 圖，"
+    "GIF／WebP 改由 Codex 回答）、Codex、Antigravity（Gemini／Claude）、"
+    "OpenRouter 與 OrcaRouter 的免費模型；"
     "免費模型可能不穩或下架，回錯就換一個。",
     "**記憶**分個人與伺服器兩層，另有管理者維護的永久記憶；Bot 會在需要時自己查閱。"
     "每週還會從你最近幾段對話推測出「（推測）」開頭的個人記憶，從多位成員都提到的事整理出"

@@ -189,9 +189,50 @@ async def test_turns_carry_the_persona_and_replay_the_transcript(sidecar, config
     assert "第一個問題" in replayed and "前輩的回答" in replayed and replayed.endswith("第二個")
 
 
-async def test_grok_never_gets_images(config, tmp_path) -> None:
-    with pytest.raises(grok.GrokUnavailable):
-        await grok.run_grok("hi", config, "grok-4.7", images=[tmp_path / "a.png"])
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
+JPEG = b"\xff\xd8\xff\xe0" + b"\0" * 16
+
+
+async def test_png_and_jpeg_images_go_along_to_the_sidecar(sidecar, config, tmp_path) -> None:
+    import base64
+
+    cfg = _cfg(config, sidecar, tmp_path)
+    (tmp_path / "a.png").write_bytes(PNG)
+    (tmp_path / "b.jpg").write_bytes(JPEG)
+    result = await grok.run_grok(
+        "這兩張是什麼", cfg, "grok-4.7", images=[tmp_path / "a.png", tmp_path / "b.jpg"], raw=True
+    )
+    sent = sidecar.state["calls"][0]
+    assert sent["images"] == [base64.b64encode(PNG).decode(), base64.b64encode(JPEG).decode()]
+    stored = grok.load_transcript(cfg, result.thread_id)
+    assert stored[0]["content"] == "這兩張是什麼\n\n[附圖 2 張]"  # the bytes are not kept
+
+    await grok.run_grok("沒有圖", cfg, "grok-4.7", raw=True)
+    assert "images" not in sidecar.state["calls"][1]
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"a.gif": b"GIF89a" + b"\0" * 16},
+        {"a.webp": b"RIFF\0\0\0\0WEBPVP8 "},
+        {"a.png": PNG, "b.webp": b"RIFF\0\0\0\0WEBPVP8 "},  # one unreadable image: none sent
+        {f"{i}.png": PNG for i in range(grok.MAX_IMAGES + 1)},
+        {"big.png": PNG + b"\0" * 64},
+    ],
+)
+async def test_images_grok_cannot_take_send_the_turn_down_the_chain(
+    sidecar, config, tmp_path, monkeypatch, files
+) -> None:
+    monkeypatch.setattr(grok, "MAX_IMAGE_BYTES", 60)
+    paths = []
+    for name, data in files.items():
+        (tmp_path / name).write_bytes(data)
+        paths.append(tmp_path / name)
+    with pytest.raises(grok.GrokImages) as raised:
+        await grok.run_grok("hi", _cfg(config, sidecar, tmp_path), "grok-4.7", images=paths)
+    assert isinstance(raised.value, BackendUnavailable)  # the chain answers it elsewhere
+    assert sidecar.state["calls"] == []
 
 
 # ------------------------------------------------------------------- a member's turn
@@ -249,18 +290,20 @@ async def test_grok_quota_falls_to_codex_then_agy(grok_client, monkeypatch) -> N
     assert result.text == "agy 的答案" and agy.calls[-1][1] == ("gemini-3.8-flash-medium",)
 
 
-async def test_turns_with_images_or_past_the_reserve_skip_grok(grok_client, monkeypatch) -> None:
-    bot, calls, _replies, codex, _agy = grok_client
+async def test_turns_past_the_reserve_skip_grok_but_turns_with_images_do_not(
+    grok_client, monkeypatch
+) -> None:
+    bot, calls, replies, codex, _agy = grok_client
     picture = type("A", (), {"content_type": "image/png", "filename": "a.png", "size": 10})()
-
-    async def no_download(*_a, **_kw):
-        raise AssertionError("not reached")
-
     monkeypatch.setattr(bot_module, "validate_attachment", lambda *a: ("skip", ""))
     await bot._answer("q", [picture], GUILD, USER)
-    assert calls["grok"] == [] and codex.calls  # Grok cannot read images
+    assert len(calls["grok"]) == 1 and codex.calls == []  # Grok sees PNG and JPEG now
+    replies["grok"] = grok.GrokImages("a GIF")  # one it cannot take: the chain answers it
+    result = await bot._answer("q", [picture], GUILD, USER)
+    assert result.text == "Codex 的答案" and isinstance(bot._last_fallback[1], grok.GrokImages)
+    replies["grok"] = "Grok 的答案"
     calls["usage"] = 85.0  # past GROK_CHAT_MAX_WEEKLY_PERCENT (80): the rest is for X lookups
-    codex.calls.clear()
+    calls["grok"].clear(), codex.calls.clear()
     await bot._answer("q", [], GUILD, USER)
     assert calls["grok"] == [] and codex.calls
 

@@ -1,0 +1,18 @@
+#!/usr/local/bin/python3 -I
+# PreToolUse hook (enforced policy): no client-side tool may run in the X lookup sidecar,
+# whatever its name — except the one that hands a chat turn's attached images to the model
+# (image_mcp.py). For that one the hook states no opinion; the session's own `--allow` rule,
+# given only on turns with images, is what lets it run. Anything unreadable is denied.
+import json
+import sys
+
+IMAGE_TOOL = "images__get_image"
+try:
+    event = json.load(sys.stdin)
+    image = isinstance(event, dict) and event.get("toolName") == IMAGE_TOOL
+except Exception:
+    image = False
+if image:
+    print(json.dumps({"decision": "defer"}))
+else:
+    print(json.dumps({"decision": "deny", "reason": "tools are disabled in the X lookup service"}))

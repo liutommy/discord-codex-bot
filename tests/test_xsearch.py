@@ -2,7 +2,8 @@
 
 The sidecar's job is to turn Grok Build — a coding agent with a shell — into something that can
 only read X. These tests pin the three layers: the command line it is started with, the
-enforced deny-all hook it ships, and the fail-closed check of what a session actually did.
+enforced hook it ships, and the fail-closed check of what a session actually did — and the one
+exception, the image tool a chat turn with images gets.
 """
 
 from __future__ import annotations
@@ -128,10 +129,15 @@ def test_a_session_cannot_plant_junk_as_the_login(monkeypatch, tmp_path) -> None
 
 
 def test_policy_allows_no_hooks_or_mcp_servers_from_anywhere_else() -> None:
-    # Hooks and MCP servers run commands without a tool call: invisible to the deny-all hook
-    # and to the stream check, so nothing outside this file may add them.
+    # Hooks and MCP servers run commands without a tool call: invisible to the hook and to the
+    # stream check, so nothing outside this file may add them. The one MCP server allowed is
+    # the sidecar's own image server, matched by its exact command.
     policy = tomllib.loads((ROOT / "requirements.toml").read_text())
-    assert policy["allow_managed_hooks_only"] is True and policy["allowed_mcp_servers"] == []
+    assert policy["allow_managed_hooks_only"] is True
+    assert policy["allow_managed_mcp_servers_only"] is True
+    assert policy["enable_all_project_mcp_servers"] is False
+    assert policy["allowed_mcp_servers"] == [{"server_command": list(server.IMAGE_SERVER)}]
+    assert "denied_mcp_servers" not in policy
     for vendor in ("claude", "cursor"):
         assert all(policy["compat"][vendor][key] is False for key in ("hooks", "mcps", "skills"))
 
@@ -143,20 +149,33 @@ def test_image_runs_a_pinned_binary_as_an_unprivileged_user() -> None:
     assert "\nUSER grok\n" in dockerfile
 
 
-def test_enforced_policy_denies_every_tool() -> None:
+def _gate(event: str) -> str:
+    out = subprocess.run([sys.executable, str(ROOT / "tool-gate")], input=event,
+                         capture_output=True, text=True, check=True)  # fmt: skip
+    return json.loads(out.stdout)["decision"]
+
+
+def test_enforced_policy_denies_every_tool_but_the_image_one() -> None:
     policy = tomllib.loads((ROOT / "requirements.toml").read_text())
     (group,) = policy["hooks"]["PreToolUse"]
     assert "matcher" not in group  # no matcher: every tool, whatever its name
     (handler,) = group["hooks"]
-    assert handler["command"] == "/usr/local/bin/deny-all"
-    hook = ROOT / "deny-all"
+    assert handler["command"] == "/usr/local/bin/tool-gate"
+    hook = ROOT / "tool-gate"
     assert hook.stat().st_mode & stat.S_IXUSR  # committed executable (the Dockerfile chmods too)
-    out = subprocess.run(["sh", str(hook)], input='{"tool_name":"Bash"}', capture_output=True,
-                         text=True, check=True)  # fmt: skip
-    assert json.loads(out.stdout)["decision"] == "deny"
+    assert hook.read_text().startswith("#!/usr/local/bin/python3 -I\n")
+    for name in ("Bash", "run_terminal_cmd", "read_file", "use_tool", "search_tool", "get_image",
+                 "images__get_image ", "Images__get_image", "other__get_image"):  # fmt: skip
+        assert _gate(json.dumps({"toolName": name})) == "deny", name
+    for junk in ("", "not json", "[]", '{"tool_name": "images__get_image"}', '{"toolName": 1}'):
+        assert _gate(junk) == "deny", junk
+    # the image tool: no opinion — the session's own --allow rule is what lets it run
+    assert _gate(json.dumps({"toolName": server.IMAGE_TOOL, "toolInput": {}})) == "defer"
     assert policy["cli"]["auto_update"] is False
     dockerfile = (ROOT / "Dockerfile").read_text()
     assert "COPY requirements.toml /etc/grok/requirements.toml" in dockerfile
+    assert "COPY tool-gate /usr/local/bin/tool-gate" in dockerfile
+    assert "COPY server.py image_mcp.py /srv/" in dockerfile
 
 
 # --------------------------------------------------------- layer 3: fail-closed verification
@@ -1058,3 +1077,297 @@ def test_a_cdn_copy_may_raise_the_reading_but_never_lower_it(monkeypatch, tmp_pa
     monkeypatch.setattr(server.urllib.request, "urlopen", fake_urlopen)
     assert [server.usage()["weekly_percent"] for _ in range(3)] == [8.0, 8.0, 90.0]
     assert seen[0][0] == "Bearer tok" and "Authorization" not in seen[0][1]  # not on redirects
+
+
+# ------------------------------------------------------------- the image tool (chat turns)
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
+JPEG = b"\xff\xd8\xff\xe0" + b"\0" * 32
+INIT_IMAGES = {"type": "system", "subtype": "init", "tools": ["use_tool", "images__get_image"]}
+
+
+def _use(tool: str, tool_input: dict) -> dict:
+    return {"type": "tool_use", "name": "use_tool",
+            "input": {"tool_name": tool, "tool_input": tool_input}}  # fmt: skip
+
+
+def _b64(data: bytes) -> str:
+    import base64
+
+    return base64.b64encode(data).decode()
+
+
+def test_an_image_session_gets_use_tool_back_and_nothing_else() -> None:
+    def removed(args):
+        return set(args[args.index("--disallowed-tools") + 1].split(","))
+
+    assert removed(server.IMAGE_ARGS) == removed(server.LOCKED_ARGS) - {"use_tool"}
+    assert "search_tool" in removed(server.IMAGE_ARGS)
+    assert server.IMAGE_ARGS[-2:] == ("--allow", server.IMAGE_TOOL)
+    assert "--allow" not in server.LOCKED_ARGS  # a turn without images keeps the full lockdown
+    rest = [a for a in server.IMAGE_ARGS if "," not in a][:-2]
+    assert rest == [a for a in server.LOCKED_ARGS if "," not in a]  # every other flag kept
+
+
+def test_verify_stream_accepts_the_image_tool_only_on_an_image_turn() -> None:
+    by_name = {"type": "tool_use", "name": server.IMAGE_TOOL, "input": {"index": 2}}
+    for init in (INIT_IMAGES, dict(INIT_IMAGES, tools=["use_tool"]), INIT_EMPTY):
+        lines = _stream(init, _assistant(_use(server.IMAGE_TOOL, {"index": 1}), by_name),
+                        _assistant(X_SEARCH), _result("看到了"))  # fmt: skip
+        assert server.verify_stream(lines, mode="chat", images=2) == "看到了"
+    with pytest.raises(server.Unsafe):  # no images: no image tool, offered or called
+        server.verify_stream(_stream(INIT_IMAGES, _result("x")), mode="chat")
+    with pytest.raises(server.Unsafe):
+        lines = _stream(INIT_EMPTY, _assistant(_use(server.IMAGE_TOOL, {"index": 1})), _result("x"))
+        server.verify_stream(lines, mode="chat")
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        (dict(INIT_IMAGES, tools=["use_tool", "read_file"]), _result("x")),
+        (dict(INIT_IMAGES, tools=["use_tool", "search_tool"]), _result("x")),
+        (dict(INIT_IMAGES, tools="use_tool"), _result("x")),
+        (INIT_IMAGES, _assistant(_use("run_terminal_cmd", {"command": "id"})), _result("x")),
+        (INIT_IMAGES, _assistant(_use("images__get_image ", {"index": 1})), _result("x")),
+        (INIT_IMAGES, _assistant(_use(server.IMAGE_TOOL, {"index": 1, "path": "/"})), _result("x")),
+        (INIT_IMAGES, _assistant(_use(server.IMAGE_TOOL, ["index"])), _result("x")),
+        (
+            INIT_IMAGES,
+            _assistant(
+                {
+                    "type": "tool_use",
+                    "name": "use_tool",
+                    "input": {
+                        "tool_name": server.IMAGE_TOOL,
+                        "tool_input": {},
+                        "then": "read_file",
+                    },
+                }
+            ),
+            _result("x"),
+        ),  # fmt: skip
+        (
+            INIT_IMAGES,
+            _assistant({"type": "tool_use", "name": "search_tool", "input": {}}),
+            _result("x"),
+        ),  # fmt: skip
+    ],
+)
+def test_verify_stream_refuses_anything_else_on_an_image_turn(events) -> None:
+    with pytest.raises(server.Unsafe):
+        server.verify_stream(_stream(*events), mode="chat", images=1)
+
+
+@pytest.mark.parametrize(
+    "images",
+    [
+        "not a list",
+        [PNG],  # bytes, not base64 text
+        [_b64(PNG)] * (server.MAX_IMAGES + 1),
+        ["!!!not base64!!!"],
+        [_b64(b"GIF89a" + b"\0" * 16)],
+        [_b64(b"RIFF\0\0\0\0WEBPVP8 ")],
+        [_b64(b"\x89PNG" + b"\0" * 16)],  # a truncated signature
+        [_b64(b"\x89PNG\r\n\x1a\n" + b"\0" * server.MAX_IMAGE_BYTES)],
+    ],
+)
+def test_chat_refuses_images_it_cannot_hand_on(monkeypatch, images) -> None:
+    monkeypatch.setattr(server, "models", lambda *a: server.parse_models(CATALOG))
+    monkeypatch.setattr(server, "_session", lambda *a, **k: pytest.fail("session started"))
+    with pytest.raises(server.BadRequest):
+        server.chat({"prompt": "hi", "model": "grok-4.7", "images": images})
+
+
+def test_images_are_bounded_in_total_too(monkeypatch) -> None:
+    monkeypatch.setattr(server, "MAX_IMAGES_BYTES", 100)
+    with pytest.raises(server.BadRequest):
+        server.decode_images([_b64(PNG + b"\0" * 40), _b64(JPEG + b"\0" * 40)])
+    assert server.decode_images([_b64(PNG), _b64(JPEG)]) == [(".png", PNG), (".jpg", JPEG)]
+
+
+def test_chat_with_images_tells_the_model_how_to_see_them(monkeypatch) -> None:
+    monkeypatch.setattr(server, "models", lambda *a: server.parse_models(CATALOG))
+    seen = {}
+
+    def session(slot, still_wanted, **kw):
+        seen.update(kw)
+        return _stream(INIT_IMAGES, _assistant(_use(server.IMAGE_TOOL, {"index": 1})),
+                       _result("紅色"))  # fmt: skip
+
+    monkeypatch.setattr(server, "_session", session)
+    out = server.chat(
+        {
+            "prompt": "這是什麼顏色",
+            "model": "grok-4.7",
+            "system": "persona",
+            "images": [_b64(PNG), _b64(JPEG)],
+        }  # fmt: skip
+    )
+    assert out["text"] == "紅色"
+    assert seen["images"] == [(".png", PNG), (".jpg", JPEG)]
+    assert seen["system"].startswith("persona\n\n") and server.IMAGE_TOOL in seen["system"]
+    assert "numbered 1 to 2" in seen["system"]
+
+    seen.clear()
+    monkeypatch.setattr(server, "_session", lambda *a, **kw: seen.update(kw) or
+                        _stream(INIT_EMPTY, _result("ok")))  # fmt: skip
+    server.chat({"prompt": "hi", "model": "grok-4.7", "system": "persona"})
+    assert "images" not in seen and seen["system"] == "persona"
+
+
+def test_an_image_session_gets_the_image_server_and_the_images_alone(monkeypatch, tmp_path) -> None:
+    (tmp_path / "auth.json").write_text("{}")
+    monkeypatch.setattr(server, "AUTH_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "SCRATCH", str(tmp_path))
+    seen = {}
+
+    def fake_run(model, tail, home_env, cwd, timeout, locked=server.LOCKED_ARGS):
+        seen["locked"] = locked
+        home = Path(home_env["GROK_HOME"])
+        if not (home / "config.toml").exists():
+            return []
+        seen["config"] = tomllib.loads((home / "config.toml").read_text())
+        folder = Path(seen["config"]["mcp_servers"]["images"]["env"]["IMAGE_DIR"])
+        seen["files"] = {p.name: (p.read_bytes(), stat.S_IMODE(p.stat().st_mode))
+                         for p in folder.iterdir()}  # fmt: skip
+        seen["outside_cwd"] = not str(folder).startswith(cwd)
+        return []
+
+    monkeypatch.setattr(server, "_run", fake_run)
+    server.run_grok("hi", model="grok-4.7", images=[(".png", PNG), (".jpg", JPEG)])
+    assert seen["locked"] == server.IMAGE_ARGS
+    entry = seen["config"]["mcp_servers"]["images"]
+    assert [entry["command"], *entry["args"]] == list(server.IMAGE_SERVER)
+    assert entry["env"]["IMAGE_COUNT"] == "2" and set(seen["config"]) == {"mcp_servers"}
+    assert seen["files"] == {"1.png": (PNG, 0o400), "2.jpg": (JPEG, 0o400)}
+    assert seen["outside_cwd"]
+    assert [p.name for p in tmp_path.iterdir()] == ["auth.json"]  # the scratch is gone
+
+    server.run_grok("hi", model="grok-4.7")
+    assert seen["locked"] == server.LOCKED_ARGS
+
+
+def _image_server(monkeypatch, folder: Path, count: int):
+    monkeypatch.setenv("IMAGE_DIR", str(folder))
+    monkeypatch.setenv("IMAGE_COUNT", str(count))
+    spec = importlib.util.spec_from_file_location("image_mcp", ROOT / "image_mcp.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _call(module, request_id, method, params=None):
+    return module.handle({"jsonrpc": "2.0", "id": request_id, "method": method,
+                          "params": params or {}})  # fmt: skip
+
+
+def test_the_image_server_hands_out_numbered_images_and_nothing_else(monkeypatch, tmp_path):
+    folder = tmp_path / "images"
+    folder.mkdir()
+    (folder / "1.png").write_bytes(PNG)
+    (folder / "2.jpg").write_bytes(JPEG)
+    (tmp_path / "secret.png").write_bytes(b"login")
+    (folder / "3.png").symlink_to(tmp_path / "secret.png")
+    mcp = _image_server(monkeypatch, folder, 3)
+
+    init = _call(mcp, 1, "initialize", {"protocolVersion": "2025-06-18"})["result"]
+    assert init["capabilities"] == {"tools": {}} and init["protocolVersion"] == "2025-06-18"
+    assert mcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    (tool,) = _call(mcp, 2, "tools/list")["result"]["tools"]
+    assert tool["name"] == "get_image" and set(tool["inputSchema"]["properties"]) == {"index"}
+
+    def get(index, name="get_image"):
+        return _call(mcp, 3, "tools/call", {"name": name, "arguments": {"index": index}})["result"]
+
+    assert get(1)["content"] == [{"type": "image", "data": _b64(PNG), "mimeType": "image/png"}]
+    assert get(2)["content"][0]["mimeType"] == "image/jpeg"
+    for bad in (0, 4, -1, True, "1", "../secret", None, 1.0):
+        assert get(bad)["isError"] is True, bad
+    assert get(3)["isError"] is True  # a symlink is not followed
+    assert get(1, name="read_file")["isError"] is True
+    assert _call(mcp, 4, "resources/read", {"uri": "file:///etc/passwd"})["error"]["code"] == -32601
+
+
+def test_the_image_server_speaks_newline_delimited_json_rpc(tmp_path) -> None:
+    (tmp_path / "1.png").write_bytes(PNG)
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "get_image", "arguments": {"index": 1}},
+        },  # fmt: skip
+    ]
+    stdin = "\n".join(json.dumps(r) for r in requests) + "\nnot json\n"
+    out = subprocess.run(
+        [sys.executable, str(ROOT / "image_mcp.py")], input=stdin, capture_output=True,
+        text=True, check=True, env={"IMAGE_DIR": str(tmp_path), "IMAGE_COUNT": "1"},
+    )  # fmt: skip
+    replies = [json.loads(line) for line in out.stdout.splitlines()]
+    assert [r["id"] for r in replies] == [1, 2]
+    assert replies[1]["result"]["content"][0]["data"] == _b64(PNG)
+
+
+def test_the_chat_body_limit_leaves_room_for_the_images() -> None:
+    assert server.MAX_CHAT_BODY > server.MAX_IMAGES_BYTES * 4 // 3 + 600_000
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert "/srv/image_mcp.py" in dockerfile and "smoke-images.py" in dockerfile
+
+
+def test_images_that_cannot_be_staged_fail_the_turn_cleanly(monkeypatch, tmp_path) -> None:
+    # A full tmpfs (ENOSPC) must come back as a failed turn (502), not a dropped connection.
+    (tmp_path / "auth.json").write_text("{}")
+    monkeypatch.setattr(server, "AUTH_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "SCRATCH", str(tmp_path))
+
+    def full(*_a):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(server, "_offer_images", full)
+    monkeypatch.setattr(server, "_run", lambda *a, **k: pytest.fail("session started"))
+    with pytest.raises(server.LookupFailed):
+        server.run_grok("hi", model="grok-4.7", images=[(".png", PNG)])
+    assert [p.name for p in tmp_path.iterdir()] == ["auth.json"]
+
+
+def test_chat_drops_the_base64_once_decoded(monkeypatch) -> None:
+    monkeypatch.setattr(server, "models", lambda *a: server.parse_models(CATALOG))
+    monkeypatch.setattr(server, "_session", lambda *a, **k: _stream(INIT_IMAGES, _result("ok")))
+    request = {"prompt": "hi", "model": "grok-4.7", "images": [_b64(PNG)]}
+    server.chat(request)
+    assert "images" not in request  # the handler's copy of the body does not hold them too
+
+
+def test_image_bodies_are_buffered_a_few_at_a_time(monkeypatch) -> None:
+    import http.client
+    import threading as threading_
+
+    monkeypatch.setattr(server, "chat", lambda request, still_wanted: {"text": "ok"})
+    gate = threading_.BoundedSemaphore(1)
+    monkeypatch.setattr(server, "_IMAGE_BODIES", gate)
+    httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading_.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def post(length: int, body: bytes = b"") -> int:
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+        conn.putrequest("POST", "/chat")
+        conn.putheader("Content-Length", str(length))
+        conn.endheaders(body)
+        status = conn.getresponse().status
+        conn.close()
+        return status
+
+    try:
+        gate.acquire()  # every slot for image bodies taken
+        assert post(2 * 1024 * 1024) == 429  # refused before its body is read
+        small = json.dumps({"prompt": "hi"}).encode()
+        assert post(len(small), small) == 200  # a text turn is not held up by it
+        gate.release()
+        big = json.dumps({"prompt": "hi", "pad": "x" * (1024 * 1024)}).encode()
+        assert post(len(big), big) == 200
+        assert gate.acquire(blocking=False)  # and the slot came back afterwards
+    finally:
+        httpd.shutdown()

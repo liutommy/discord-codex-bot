@@ -1,10 +1,16 @@
 # Enforced policy for the X lookup sidecar (root-owned, so Grok treats it as organisation policy).
 
 # Nothing outside this file may add hooks or MCP servers: those run commands without a tool
-# call, i.e. where neither the hook below nor server.py's stream check can see them.
+# call, i.e. where neither the hook below nor server.py's stream check can see them. The one
+# MCP server allowed is the sidecar's own image server (image_mcp.py, root-owned, matched by
+# its exact command): server.py configures it only for a chat turn that carries images.
 # (Top-level keys must come before the first table header, or TOML files them under it.)
 allow_managed_hooks_only = true
-allowed_mcp_servers = []
+allow_managed_mcp_servers_only = true
+enable_all_project_mcp_servers = false
+
+[[allowed_mcp_servers]]
+server_command = ["/usr/local/bin/python3", "-I", "/srv/image_mcp.py"]
 
 [cli]
 auto_update = false
@@ -22,6 +28,6 @@ skills = false
 rules = false
 
 # Server-side X search does not pass through PreToolUse; every client tool (shell, files, web,
-# background commands, ...) does, and is denied.
+# background commands, ...) does, and is denied — all but the image tool (see tool-gate).
 [[hooks.PreToolUse]]
-hooks = [{ type = "command", command = "/usr/local/bin/deny-all", timeout = 5 }]
+hooks = [{ type = "command", command = "/usr/local/bin/tool-gate", timeout = 5 }]

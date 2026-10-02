@@ -536,19 +536,32 @@ below it. `DEFAULT_MODEL=grok:grok-4.7|medium` makes it what members get until t
 
 A member's message becomes the prompt of a Grok session, so prompt injection is a given: turns
 run in the same sidecar and under the same rules as X lookups — no client tools, the enforced
-deny-all hook, a fresh home per session, and an answer is used only if the session's stream is
+tool-gate hook, a fresh home per session, and an answer is used only if the session's stream is
 the locked-down one. The Bot's own `<web>`/`<fetch>`/`<run>` loop, memory and persona work as
 for every backend; Grok's server-side X search is available to the model. Grok keeps no
 conversation, so the Bot keeps a transcript (`gk-…`) and replays up to `GROK_HISTORY_CHARS`.
 
 When Grok cannot answer, the turn moves down `MODEL_CHAIN` (grok → codex → agy), the same way
 Codex already fell back to agy, and `/status` shows the last fallback. A turn skips Grok
-outright when it carries an image (Grok's headless mode cannot read images), when the plan's
-weekly usage is past `GROK_CHAT_MAX_WEEKLY_PERCENT` (chat and X lookups share one weekly quota;
+outright when the plan's weekly usage is past `GROK_CHAT_MAX_WEEKLY_PERCENT` (chat and X lookups share one weekly quota;
 the rest is left for X), or for an hour after three refused sessions in ten minutes (one alert,
 not one per message). A request the sidecar rejects as malformed is reported, not hidden by a
 fallback. Background jobs (memory consolidation, tracking classification) stay on Codex → agy:
 they need structured output, and their quota is not the members'.
+
+**Images on Grok.** Grok Build takes an image only inline on its command line, where Linux caps
+one argument at 128 KiB, or as a tool result. So a chat turn with images gets exactly one tool:
+`images__get_image` from `xsearch/image_mcp.py`, a stdio MCP server that returns attached image
+N from the session's scratch and can reach nothing else. The enforced policy allows that one MCP
+server by its exact command; `tool-gate` denies every other tool (it only stays out of the image
+tool's way); the session's `--allow` rule and the dispatcher (`use_tool`) are given on image
+turns only; and the stream check accepts calls to that tool alone. PNG and JPEG are sent (up to
+8 images, 10 MiB each, 16 MiB together — an image turn costs about 7× its images in the
+sidecar's memory); a GIF or WebP, or anything past those limits, makes the
+turn fall back down the chain as before. After changing `GROK_VERSION`, also run
+`docker compose exec xsearch python3 /srv/smoke-images.py` (three sessions: both images must
+be seen; a shell attempt in an image session must be denied and refused; and with the shell put
+back on the command line, the hook alone must deny it when dispatched through `use_tool`).
 
 ### X lookup and X accounts (optional, Grok subscription)
 
