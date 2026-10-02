@@ -1315,3 +1315,59 @@ def test_the_chat_body_limit_leaves_room_for_the_images() -> None:
     assert server.MAX_CHAT_BODY > server.MAX_IMAGES_BYTES * 4 // 3 + 600_000
     dockerfile = (ROOT / "Dockerfile").read_text()
     assert "/srv/image_mcp.py" in dockerfile and "smoke-images.py" in dockerfile
+
+
+def test_images_that_cannot_be_staged_fail_the_turn_cleanly(monkeypatch, tmp_path) -> None:
+    # A full tmpfs (ENOSPC) must come back as a failed turn (502), not a dropped connection.
+    (tmp_path / "auth.json").write_text("{}")
+    monkeypatch.setattr(server, "AUTH_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "SCRATCH", str(tmp_path))
+
+    def full(*_a):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(server, "_offer_images", full)
+    monkeypatch.setattr(server, "_run", lambda *a, **k: pytest.fail("session started"))
+    with pytest.raises(server.LookupFailed):
+        server.run_grok("hi", model="grok-4.7", images=[(".png", PNG)])
+    assert [p.name for p in tmp_path.iterdir()] == ["auth.json"]
+
+
+def test_chat_drops_the_base64_once_decoded(monkeypatch) -> None:
+    monkeypatch.setattr(server, "models", lambda *a: server.parse_models(CATALOG))
+    monkeypatch.setattr(server, "_session", lambda *a, **k: _stream(INIT_IMAGES, _result("ok")))
+    request = {"prompt": "hi", "model": "grok-4.7", "images": [_b64(PNG)]}
+    server.chat(request)
+    assert "images" not in request  # the handler's copy of the body does not hold them too
+
+
+def test_image_bodies_are_buffered_a_few_at_a_time(monkeypatch) -> None:
+    import http.client
+    import threading as threading_
+
+    monkeypatch.setattr(server, "chat", lambda request, still_wanted: {"text": "ok"})
+    gate = threading_.BoundedSemaphore(1)
+    monkeypatch.setattr(server, "_IMAGE_BODIES", gate)
+    httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    threading_.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def post(length: int, body: bytes = b"") -> int:
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+        conn.putrequest("POST", "/chat")
+        conn.putheader("Content-Length", str(length))
+        conn.endheaders(body)
+        status = conn.getresponse().status
+        conn.close()
+        return status
+
+    try:
+        gate.acquire()  # every slot for image bodies taken
+        assert post(2 * 1024 * 1024) == 429  # refused before its body is read
+        small = json.dumps({"prompt": "hi"}).encode()
+        assert post(len(small), small) == 200  # a text turn is not held up by it
+        gate.release()
+        big = json.dumps({"prompt": "hi", "pad": "x" * (1024 * 1024)}).encode()
+        assert post(len(big), big) == 200
+        assert gate.acquire(blocking=False)  # and the slot came back afterwards
+    finally:
+        httpd.shutdown()

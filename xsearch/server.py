@@ -67,10 +67,12 @@ MAX_TEXT = 4000
 CHAT_PARALLEL = int(os.environ.get("XSEARCH_CHAT_PARALLEL", "2"))
 CHAT_TIMEOUT = int(os.environ.get("XSEARCH_CHAT_TIMEOUT_SECONDS", "300"))
 # Images a chat turn may carry (sent base64 in the body, written to the session's tmpfs scratch;
-# CHAT_PARALLEL of them at once must fit there). xAI takes PNG and JPEG, up to 20 MiB each.
+# CHAT_PARALLEL of them at once must fit there). xAI takes PNG and JPEG, up to 20 MiB each. An
+# image turn costs about 7x its images in memory (measured: two chats at 23 MiB each plus a lookup
+# peaked at 533 of 768 MiB, against 212 without images), hence a total well under xAI's.
 MAX_IMAGES = 8
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_IMAGES_BYTES = 24 * 1024 * 1024
+MAX_IMAGES_BYTES = 16 * 1024 * 1024
 IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": ".png", b"\xff\xd8\xff": ".jpg"}  # by content, not by name
 # 200k characters of CJK are 600 KB of UTF-8; images grow by a third in base64
 MAX_CHAT_BODY = 1024 * 1024 + MAX_IMAGES_BYTES * 4 // 3 + 64 * 1024
@@ -128,7 +130,7 @@ LOCKED_ARGS = (
 # through its `use_tool` dispatcher, so an image session gets `use_tool` back; the hook sees the
 # dispatched name, and the permission rules still deny every built-in tool behind it.
 IMAGE_TOOL = "images__get_image"
-IMAGE_SERVER = ("/usr/local/bin/python3", "/srv/image_mcp.py")  # pinned in requirements.toml
+IMAGE_SERVER = ("/usr/local/bin/python3", "-I", "/srv/image_mcp.py")  # pinned in requirements.toml
 IMAGE_ARGS = (
     *(",".join(t for t in _TOOLS.split(",") if t != "use_tool") if a == _TOOLS else a
       for a in LOCKED_ARGS),
@@ -685,7 +687,10 @@ def run_grok(
         if system:  # `=` form: a value can never be read as another flag
             tail += [f"--system-prompt-override={defuse_mentions(system)}"]
         if images:
-            _offer_images(images, scratch, home_env)
+            try:
+                _offer_images(images, scratch, home_env)
+            except OSError as error:  # the tmpfs full (ENOSPC): a failed turn, not a dropped line
+                raise LookupFailed(f"could not stage the images: {type(error).__name__}") from None
             lines = _run(model, tail, home_env, os.path.join(scratch, "work"), timeout, IMAGE_ARGS)
         else:
             lines = _run(model, tail, home_env, os.path.join(scratch, "work"), timeout)
@@ -914,7 +919,7 @@ def chat(request: dict, still_wanted=lambda: True) -> dict:
         raise BadRequest("model must be a model id")
     if type(effort) is not str or (effort and not EFFORT.fullmatch(effort)):
         raise BadRequest("effort must be an effort level")
-    images = decode_images(request.get("images", []))
+    images = decode_images(request.pop("images", []))  # popped: the base64 is not kept alongside
     if images:
         system = f"{system}\n\n{IMAGE_NOTE.format(count=len(images))}".strip()
     entry = _catalog_entry(model)
@@ -999,6 +1004,9 @@ def usage() -> dict:
 
 MAX_CONNECTIONS = 16
 _CONNECTIONS = threading.BoundedSemaphore(MAX_CONNECTIONS)
+# Chat bodies carrying images are read (and held, decoded, until the turn ends) only this many at a
+# time — the sessions plus one waiting — not one per open connection. Past that: busy, at once.
+_IMAGE_BODIES = threading.BoundedSemaphore(CHAT_PARALLEL + 1)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1055,15 +1063,23 @@ class Handler(BaseHTTPRequestHandler):
         length = int(raw_length)
         if length > limit:
             return self._json(413, {"error": "request too large"})
+        large = kind == "chat" and length > 1024 * 1024  # text alone stays under 1 MiB
+        if large and not _IMAGE_BODIES.acquire(blocking=False):
+            self.close_connection = True  # the body is not read
+            return self._json(429, {"error": "busy"})
         try:
-            request = json.loads(self.rfile.read(length) or b"{}")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return self._json(400, {"error": "body must be JSON"})
-        if not isinstance(request, dict):
-            return self._json(400, {"error": "body must be a JSON object"})
-        if kind == "chat":
-            return self._answer(lambda: chat(request, self._client_waiting))
-        return self._answer(lambda: lookup(kind, request, self._client_waiting))
+            try:
+                request = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return self._json(400, {"error": "body must be JSON"})
+            if not isinstance(request, dict):
+                return self._json(400, {"error": "body must be a JSON object"})
+            if kind == "chat":
+                return self._answer(lambda: chat(request, self._client_waiting))
+            return self._answer(lambda: lookup(kind, request, self._client_waiting))
+        finally:
+            if large:
+                _IMAGE_BODIES.release()
 
     def _answer(self, work) -> None:
         """Run `work` and map what happened onto a status the Bot can act on: 400 its own

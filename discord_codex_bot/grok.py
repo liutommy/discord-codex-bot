@@ -40,7 +40,7 @@ USAGE_SECONDS = 60
 IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
 MAX_IMAGES = 8
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_IMAGES_BYTES = 24 * 1024 * 1024
+MAX_IMAGES_BYTES = 16 * 1024 * 1024
 
 
 class GrokUnavailable(BackendUnavailable):

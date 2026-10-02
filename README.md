@@ -556,10 +556,12 @@ N from the session's scratch and can reach nothing else. The enforced policy all
 server by its exact command; `tool-gate` denies every other tool (it only stays out of the image
 tool's way); the session's `--allow` rule and the dispatcher (`use_tool`) are given on image
 turns only; and the stream check accepts calls to that tool alone. PNG and JPEG are sent (up to
-8 images, 10 MiB each, 24 MiB together); a GIF or WebP, or anything past those limits, makes the
+8 images, 10 MiB each, 16 MiB together — an image turn costs about 7× its images in the
+sidecar's memory); a GIF or WebP, or anything past those limits, makes the
 turn fall back down the chain as before. After changing `GROK_VERSION`, also run
-`docker compose exec xsearch python3 /srv/smoke-images.py` (two sessions: both images must be
-seen, and a shell attempt in an image session must be denied and refused).
+`docker compose exec xsearch python3 /srv/smoke-images.py` (three sessions: both images must
+be seen; a shell attempt in an image session must be denied and refused; and with the shell put
+back on the command line, the hook alone must deny it when dispatched through `use_tool`).
 
 ### X lookup and X accounts (optional, Grok subscription)
 

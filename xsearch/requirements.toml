@@ -10,7 +10,7 @@ allow_managed_mcp_servers_only = true
 enable_all_project_mcp_servers = false
 
 [[allowed_mcp_servers]]
-server_command = ["/usr/local/bin/python3", "/srv/image_mcp.py"]
+server_command = ["/usr/local/bin/python3", "-I", "/srv/image_mcp.py"]
 
 [cli]
 auto_update = false
