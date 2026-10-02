@@ -44,7 +44,8 @@ async def _already_posted(client: discord.Client, channel, text: str) -> bool | 
     me = getattr(client.user, "id", None)
     try:
         async for message in channel.history(limit=HISTORY_LIMIT):
-            if message.author.id == me and message.content == text:
+            # Discord trims a message's edges, which a cut at 2000 characters can expose.
+            if message.author.id == me and message.content.strip() == text.strip():
                 return True
     except discord.HTTPException:
         return None

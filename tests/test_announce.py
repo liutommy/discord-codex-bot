@@ -22,7 +22,7 @@ class FakeChannel:
 
     async def send(self, text):
         self.sent.append(text)
-        self.messages.append(FakeMessage(BOT_ID, text))
+        self.messages.append(FakeMessage(BOT_ID, text.strip()))  # Discord trims the edges
 
     async def history(self, limit):
         if not self.readable:
@@ -101,3 +101,15 @@ async def test_announce_only_to_configured_channels_once(tmp_path: Path, config:
     assert await announce_once(client, cfg) == 0  # new content, old approval -> nothing
     cfg = replace(cfg, announce_approved=pending_announcement(cfg)[0])
     assert await announce_once(client, cfg) == 1 and good.sent[-1] == "第二版"
+
+
+async def test_announce_cut_on_whitespace_is_still_recognised(
+    tmp_path: Path, config: Config
+) -> None:
+    good = FakeChannel(10, next(iter(config.allowed_guild_ids)))
+    client = FakeClient([good])
+    cfg = _approved(tmp_path, config, "字" * 1999 + " 之後被截掉", {10})
+    assert await announce_once(client, cfg) == 1
+    (tmp_path / "announced.json").unlink()
+    assert await announce_once(client, cfg) == 0
+    assert len(good.sent) == 1
