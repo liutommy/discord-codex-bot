@@ -1420,7 +1420,7 @@ class XFetcher:
         handle = parse_x_locator(locator)
         user = await self.lookup_user(handle)
         if not user:
-            raise ProviderError("找不到這個 X 帳號")
+            raise ProviderError("找不到這個 X 帳號（也可能是帳號不公開）")
         handle = str(user.get("handle") or handle)
         name = str(user.get("name") or handle)
         return handle.lower(), {"title": f"{name} (@{handle})", "handle": handle}
