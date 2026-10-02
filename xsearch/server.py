@@ -1065,7 +1065,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(413, {"error": "request too large"})
         large = kind == "chat" and length > 1024 * 1024  # text alone stays under 1 MiB
         if large and not _IMAGE_BODIES.acquire(blocking=False):
-            self.close_connection = True  # the body is not read
+            # The body is not read. A client still uploading may see the connection drop rather
+            # than this 429 — the Bot logs that as "unreachable", and falls back all the same.
+            self.close_connection = True
             return self._json(429, {"error": "busy"})
         try:
             try:

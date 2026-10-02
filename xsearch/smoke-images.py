@@ -74,9 +74,29 @@ def shell_attempt(label: str) -> list[str]:
     lines = turn(SHELL_PROMPT, [(".png", small)], INVITE)
     if any("uid=" in line for line in lines):
         sys.exit(f"FAIL ({label}): a shell command ran in an image session")
-    if not any('"run_terminal_cmd"' in line for line in lines):
+    if not tried_shell(lines):
         sys.exit(f"INCONCLUSIVE ({label}): the model did not try the shell; run this again")
     return lines
+
+
+def tried_shell(lines: list[str]) -> bool:
+    """A tool_use event that calls the shell, directly or through use_tool — parsed, since the
+    prompt itself names run_terminal_cmd and the stream may echo it."""
+    shell = {"run_terminal_cmd", "run_terminal_command"}
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            continue
+        for block in (event.get("message") or {}).get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            given = block.get("input") if isinstance(block.get("input"), dict) else {}
+            if block.get("name") in shell or given.get("tool_name") in shell:
+                return True
+    return False
 
 
 # 2. Every lock in place: the attempt must not run, and layer 3 must refuse the session.
