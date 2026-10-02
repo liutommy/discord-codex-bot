@@ -1369,6 +1369,8 @@ def test_image_bodies_are_buffered_a_few_at_a_time(monkeypatch) -> None:
         gate.release()
         big = json.dumps({"prompt": "hi", "pad": "x" * (1024 * 1024)}).encode()
         assert post(len(big), big) == 200
-        assert gate.acquire(blocking=False)  # and the slot came back afterwards
+        # The handler answers inside its try and releases in its finally, so the slot may come
+        # back a moment after the 200 arrives.
+        assert gate.acquire(timeout=2)  # and the slot came back afterwards
     finally:
         httpd.shutdown()
