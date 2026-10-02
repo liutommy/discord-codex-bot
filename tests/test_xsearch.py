@@ -577,7 +577,8 @@ async def test_x_fetcher_resolves_and_fetches_on_its_own_clock() -> None:
     fetcher = XFetcher(user, recent, interval_minutes=60, clock=lambda: now[0])
     external_id, state = await fetcher.resolve("https://x.com/riot")
     assert external_id == "riot" and state == {"title": "Riot Games (@Riot)", "handle": "Riot"}
-    with pytest.raises(ProviderError):
+    with pytest.raises(ProviderError, match="不公開"):
+        # X search cannot see a protected account either (e.g. @xai, parked "Now at @SpaceXAI")
         await fetcher.resolve("https://x.com/nobody")
 
     source = Source(1, "x", "riot", "https://x.com/riot", "", state)
