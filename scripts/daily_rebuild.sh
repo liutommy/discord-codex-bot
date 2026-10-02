@@ -4,14 +4,15 @@
 # changed. A new champion arrives with a patch and upstream rules move monthly, so most runs
 # end at "unchanged" and the Bot is not restarted for nothing.
 #
-#   crontab: 0 5 * * * /home/tommy_liu/tommy/discord-codex-bot/scripts/daily_rebuild.sh \
-#              >> /home/tommy_liu/tommy/discord-codex-bot/logs/daily-rebuild.log 2>&1
+#   crontab: 0 5 * * * <repo>/scripts/daily_rebuild.sh >> <repo>/logs/daily-rebuild.log 2>&1
+#
+# Paths come from the script's own location and $HOME (cron sets it), not a fixed home directory.
 #
 # 05:00 Taipei is after the 02:00 memory consolidation (CONSOLIDATE_HOUR). On a change the
 # regenerated config/lol-names.json is committed locally (never pushed) so the tree stays clean;
 # permanent/topics/*.md are gitignored and only baked. DRY_RUN=1 prints what would happen.
 set -euo pipefail
-export PATH="/home/tommy_liu/.local/bin:/usr/bin:/bin"
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 cd "$(dirname "$0")/.."
 stamp() { date '+%F %T'; }
 digest() { cat config/lol-names.json config/clearurls.json permanent/topics/*譯名對照.md 2>/dev/null | md5sum | cut -c1-12; }
@@ -35,6 +36,12 @@ if [ "${DRY_RUN:-0}" = 1 ]; then
 fi
 git add config/lol-names.json config/clearurls.json
 git commit -q -m "chore(data): 每日重產譯名表／ClearURLs 規則（$(date +%F)）" -- config/lol-names.json config/clearurls.json || true
+# .hold means the operator keeps the stack down on purpose: refresh the image, start nothing.
+if [ -e .hold ]; then
+    docker compose build bot >/dev/null
+    echo "$(stamp) data changed -> image rebuilt, not started (.hold); ${summary##*$'\n'}; ${rules##*$'\n'}"
+    exit 0
+fi
 docker compose up -d --build bot >/dev/null
 cid=$(docker compose ps -q bot)
 for _ in $(seq 1 40); do

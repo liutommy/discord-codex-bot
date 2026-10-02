@@ -18,3 +18,8 @@ announce/*
 !announce/README.md
 backups/
 logs/
+# Host-local: the bind-mounted homes (DB, memory, sign-ins), the override that mounts them, and
+# the "keep the stack down" flag.
+state/
+compose.override.yaml
+.hold
