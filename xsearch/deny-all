@@ -1,4 +1,0 @@
-#!/bin/sh
-# PreToolUse hook: no client-side tool may run in the X lookup sidecar, whatever its name.
-cat >/dev/null
-printf '%s\n' '{"decision":"deny","reason":"tools are disabled in the X lookup service"}'

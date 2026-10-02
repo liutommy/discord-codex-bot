@@ -1,7 +1,8 @@
 # The X lookup sidecar: Grok Build (signed in with the operator's SuperGrok / X Premium+ plan)
 # answering three fixed questions about X through xAI's server-side X search. Grok Build is a
-# coding agent with a shell, file and web tools; here it gets none of them. Three independent
-# layers keep it that way (see server.py), and compose adds read-only rootfs, no caps, no root.
+# coding agent with a shell, file and web tools; here it gets none of them (a chat turn with
+# images gets one tool that returns those images, nothing else). Three independent layers keep
+# it that way (see server.py), and compose adds read-only rootfs, no caps, no root.
 FROM python:3.12-slim-bookworm
 
 # The binary itself, pinned by checksum (the official installer verifies nothing beyond TLS).
@@ -19,13 +20,14 @@ RUN apt-get update \
     && useradd --uid 1000 --create-home grok \
     && mkdir -p /var/lib/grok && chown grok:grok /var/lib/grok
 
-# Root-owned, so Grok treats it as enforced organisation policy: a deny-all PreToolUse hook.
+# Root-owned, so Grok treats it as enforced organisation policy: a PreToolUse hook that denies
+# every tool but the image one, and the image MCP server that policy pins by command.
 COPY requirements.toml /etc/grok/requirements.toml
-COPY deny-all /usr/local/bin/deny-all
-COPY server.py /srv/server.py
+COPY tool-gate /usr/local/bin/tool-gate
+COPY server.py image_mcp.py /srv/
 COPY smoke-layer2.sh /srv/smoke-layer2.sh
-COPY smoke-mentions.py /srv/smoke-mentions.py
-RUN chmod 0644 /etc/grok/requirements.toml && chmod 0755 /usr/local/bin/deny-all
+COPY smoke-mentions.py smoke-images.py /srv/
+RUN chmod 0644 /etc/grok/requirements.toml /srv/image_mcp.py && chmod 0755 /usr/local/bin/tool-gate
 
 USER grok
 WORKDIR /tmp

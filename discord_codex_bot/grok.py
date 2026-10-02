@@ -5,10 +5,16 @@ and Grok's server-side X search is available to the model directly.
 
 The sidecar starts every session from an empty home, so Grok keeps no conversation: like the
 routers, the Bot keeps a transcript (thread id `gk-…`) and replays it within GROK_HISTORY_CHARS.
+
+Images go along with the turn (base64 in the request); the sidecar hands them to Grok through
+the one tool such a session gets. It takes PNG and JPEG within its size limits — anything else
+makes the turn unavailable here, so the chain answers it on the next backend as before.
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import logging
 import re
@@ -30,6 +36,11 @@ THREAD_PREFIX = "gk-"
 THREAD_ID = re.compile(r"gk-[0-9a-f]{16}")
 CATALOG_SECONDS = 6 * 3600
 USAGE_SECONDS = 60
+# What the sidecar accepts (xsearch/server.py): PNG or JPEG by content, bounded in count and size.
+IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
+MAX_IMAGES = 8
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGES_BYTES = 24 * 1024 * 1024
 
 
 class GrokUnavailable(BackendUnavailable):
@@ -48,6 +59,12 @@ class GrokLogin(GrokUnavailable):
 
 class GrokBusy(GrokUnavailable):
     label = "忙碌"
+
+
+class GrokImages(GrokUnavailable):
+    """Images Grok is not handed: a format other than PNG/JPEG, or past the sidecar's limits."""
+
+    label = "圖片格式或大小不支援"
 
 
 class GrokRefused(GrokUnavailable):
@@ -201,10 +218,8 @@ async def run_grok(
     files: str = "",
     on_delta=None,
 ) -> CodexResult:
-    """One turn on Grok with the same contract as run_codex. Grok cannot see images (its
-    headless mode reports image input unsupported): the caller routes such turns elsewhere."""
-    if images:
-        raise GrokUnavailable("Grok cannot read images")
+    """One turn on Grok with the same contract as run_codex."""
+    encoded = await asyncio.to_thread(_encode_images, images) if images else []
     prompt = (
         user_prompt
         if raw
@@ -225,12 +240,31 @@ async def run_grok(
         "model": model,
         "effort": effort,
     }
+    if encoded:
+        body["images"] = encoded
     answer = await _call(config, "POST", "/chat", body, config.xsearch_timeout_seconds + 120)
     text = str(answer.get("text") or "").strip()
     if not text:
         raise GrokUnavailable("Grok returned no text")
-    _save_transcript_to(config, thread_id, model, history, prompt, text)
+    stored = prompt + (f"\n\n[附圖 {len(images)} 張]" if images else "")
+    _save_transcript_to(config, thread_id, model, history, stored, text)
     return CodexResult(text, (), None, thread_id, resumed)
+
+
+def _encode_images(images: Sequence[Path]) -> list[str]:
+    """The images as the sidecar takes them, or GrokImages when it would not take them all."""
+    if len(images) > MAX_IMAGES:
+        raise GrokImages(f"{len(images)} images; Grok takes at most {MAX_IMAGES}")
+    encoded, total = [], 0
+    for path in images:
+        data = path.read_bytes()
+        total += len(data)
+        if not data.startswith(IMAGE_MAGIC):
+            raise GrokImages(f"{path.suffix or 'image'} is not PNG or JPEG")
+        if len(data) > MAX_IMAGE_BYTES or total > MAX_IMAGES_BYTES:
+            raise GrokImages("images too large for Grok")
+        encoded.append(base64.b64encode(data).decode("ascii"))
+    return encoded
 
 
 def _save_transcript_to(

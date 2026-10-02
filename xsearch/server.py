@@ -17,6 +17,13 @@ text, so the agent must have nothing to act with. Two layers prevent, one detect
    cannot undo a tool that already ran; it is what tells us 1 and 2 failed (Grok's hooks fail
    open on error, this check does not).
 
+One exception, only on a chat turn that carries images: the CLI takes an image only inline on
+its command line (capped at 128 KiB per argument by Linux) or as a tool result, so such a session
+gets exactly one tool, `images__get_image` from image_mcp.py, which returns attached image N and
+can reach nothing else. Each layer admits that one name and nothing more: layer 1 keeps every
+other tool removed and adds an `--allow` rule for it, layer 2's hook stays out of its way, and
+layer 3 accepts calls to it alone.
+
 Each lookup also runs in a fresh, empty Grok home and working directory on tmpfs, holding only
 a copy of the login: nothing a session writes (config, hooks, skills, memory, project files)
 can reach the next one, so persistence through the writable login volume is not a question.
@@ -24,6 +31,7 @@ can reach the next one, so persistence through the writable login volume is not 
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -58,7 +66,14 @@ MAX_TEXT = 4000
 # Chat: one member turn per session, its prompt (persona, history, the message) from the Bot.
 CHAT_PARALLEL = int(os.environ.get("XSEARCH_CHAT_PARALLEL", "2"))
 CHAT_TIMEOUT = int(os.environ.get("XSEARCH_CHAT_TIMEOUT_SECONDS", "300"))
-MAX_CHAT_BODY = 1024 * 1024  # 200k characters of CJK are 600 KB of UTF-8
+# Images a chat turn may carry (sent base64 in the body, written to the session's tmpfs scratch;
+# CHAT_PARALLEL of them at once must fit there). xAI takes PNG and JPEG, up to 20 MiB each.
+MAX_IMAGES = 8
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGES_BYTES = 24 * 1024 * 1024
+IMAGE_TYPES = {b"\x89PNG\r\n\x1a\n": ".png", b"\xff\xd8\xff": ".jpg"}  # by content, not by name
+# 200k characters of CJK are 600 KB of UTF-8; images grow by a third in base64
+MAX_CHAT_BODY = 1024 * 1024 + MAX_IMAGES_BYTES * 4 // 3 + 64 * 1024
 MAX_PROMPT_CHARS = 200_000
 MAX_SYSTEM_BYTES = 100_000  # passed as one argv value: Linux caps a single argument at 128 KiB
 MODELS_CACHE_SECONDS = 6 * 3600
@@ -109,6 +124,23 @@ LOCKED_ARGS = (
     "--max-turns", "8",
     "--output-format", "streaming-messages-json",
 )  # fmt: skip
+# The image tool (image_mcp.py, server `images`, tool `get_image`). The CLI offers MCP tools
+# through its `use_tool` dispatcher, so an image session gets `use_tool` back; the hook sees the
+# dispatched name, and the permission rules still deny every built-in tool behind it.
+IMAGE_TOOL = "images__get_image"
+IMAGE_SERVER = ("/usr/local/bin/python3", "/srv/image_mcp.py")  # pinned in requirements.toml
+IMAGE_ARGS = (
+    *(",".join(t for t in _TOOLS.split(",") if t != "use_tool") if a == _TOOLS else a
+      for a in LOCKED_ARGS),
+    "--allow", IMAGE_TOOL,
+)  # fmt: skip
+IMAGE_NOTE = (
+    "The member's message comes with {count} attached image(s), numbered 1 to {count}. You "
+    "cannot see them until you fetch them: before answering, call the tool `use_tool` with "
+    '{{"tool_name": "' + IMAGE_TOOL + '", "tool_input": {{"index": N}}}} once for each N from 1 '
+    "to {count}. That is the only tool you may call; any other tool call ends the session "
+    "without an answer."
+)
 # Grok's own `--sandbox` needs bubblewrap, i.e. unprivileged user namespaces, which the hardened
 # container (no capabilities, no-new-privileges, Docker's seccomp profile) does not allow — and
 # Grok refuses to start rather than run unsandboxed. In the container the container is the
@@ -269,12 +301,23 @@ _BLOCKS = {"assistant": {"text", "thinking", "tool_use"}, "user": {"tool_result"
 X_SEARCH_NAME = "X search:"
 
 
-def verify_stream(lines: list[str], mode: str = "lookup") -> dict | str:
+def _image_call(block: dict) -> bool:
+    """A call of the image tool and nothing else: through the `use_tool` dispatcher, or by its
+    own name should the CLI list it directly. The index itself is image_mcp.py's to check."""
+    name, given = block.get("name"), block.get("input")
+    if name == "use_tool" and isinstance(given, dict) and set(given) == {"tool_name", "tool_input"}:
+        name, given = given["tool_name"], given["tool_input"]
+    return name == IMAGE_TOOL and isinstance(given, dict) and set(given) <= {"index"}
+
+
+def verify_stream(lines: list[str], mode: str = "lookup", images: int = 0) -> dict | str:
     """The answer, but only from a session that had no client tools, used nothing except
     server-side X search, and emitted only event shapes we know. Raises Unsafe or LookupFailed.
+    A chat turn with `images` may also have had, and called, the image tool — that one only.
 
     The tool check keys on the tool *name*, which the CLI fills in; `input` is written by the
     model and is only checked in addition."""
+    toolset = {"use_tool", IMAGE_TOOL} if images else set()
     inits = 0
     seen_other = False
     result = None
@@ -295,14 +338,15 @@ def verify_stream(lines: list[str], mode: str = "lookup") -> dict | str:
             inits += 1
             if inits > 1 or seen_other:
                 raise Unsafe("the toolset was announced again mid-session")
-            if event.get("tools") != []:
-                raise Unsafe(f"session started with client tools: {event.get('tools')!r}")
+            tools = event.get("tools")
+            if not isinstance(tools, list) or not set(map(str, tools)) <= toolset:
+                raise Unsafe(f"session started with client tools: {tools!r}")
         elif kind in _BLOCKS:
             for block in (event.get("message") or {}).get("content") or []:
                 block_type = block.get("type") if isinstance(block, dict) else None
                 if block_type not in _BLOCKS[kind]:
                     raise Unsafe(f"unknown {kind} block {block_type!r}")
-                if block_type == "tool_use":
+                if block_type == "tool_use" and not (images and _image_call(block)):
                     if block.get("name") != X_SEARCH_NAME or block.get("input") != {
                         "variant": "XSearch",
                         "backend": True,
@@ -618,10 +662,12 @@ def run_grok(
     system: str = "",
     timeout: int = TIMEOUT,
     collect: str = "",
+    images: list[tuple[str, bytes]] | tuple = (),
 ) -> list[str]:
     """One locked-down Grok session in a fresh home; its stream as lines. `prompt=None` runs
     `grok models` instead of a turn; `collect` names a file in the session's Grok home whose
-    content is appended as the last line (the model catalog that command writes)."""
+    content is appended as the last line (the model catalog that command writes). `images`
+    (suffix, bytes) are what the image tool hands the model, the only tool it then has."""
     scratch, home_env = _fresh_home()
     try:
         if prompt is None:
@@ -638,7 +684,11 @@ def run_grok(
             tail += ["--reasoning-effort", effort]
         if system:  # `=` form: a value can never be read as another flag
             tail += [f"--system-prompt-override={defuse_mentions(system)}"]
-        lines = _run(model, tail, home_env, os.path.join(scratch, "work"), timeout)
+        if images:
+            _offer_images(images, scratch, home_env)
+            lines = _run(model, tail, home_env, os.path.join(scratch, "work"), timeout, IMAGE_ARGS)
+        else:
+            lines = _run(model, tail, home_env, os.path.join(scratch, "work"), timeout)
         refuse_login_echo(lines, scratch)
         if collect:
             with open(os.path.join(home_env["GROK_HOME"], collect), encoding="utf-8") as handle:
@@ -649,9 +699,29 @@ def run_grok(
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _run(model: str, tail: list[str], home_env: dict, cwd: str, timeout: int) -> list[str]:
+def _offer_images(images, scratch: str, home_env: dict) -> None:
+    """Write the images where image_mcp.py serves them from (outside cwd, read-only files) and give
+    this session's fresh home the one MCP server the enforced policy allows."""
+    folder = os.path.join(scratch, "in", "images")
+    os.makedirs(folder, mode=0o700)
+    for number, (suffix, data) in enumerate(images, 1):
+        with open(os.open(os.path.join(folder, f"{number}{suffix}"),
+                          os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400), "wb") as out:  # fmt: skip
+            out.write(data)
+    command, *args = IMAGE_SERVER
+    with open(os.path.join(home_env["GROK_HOME"], "config.toml"), "w", encoding="utf-8") as cfg:
+        # JSON strings are valid TOML basic strings
+        cfg.write(f"[mcp_servers.images]\ncommand = {json.dumps(command)}\n"
+                  f"args = {json.dumps(args)}\n"
+                  f"env = {{ IMAGE_DIR = {json.dumps(folder)}, "
+                  f"IMAGE_COUNT = {json.dumps(str(len(images)))} }}\n")  # fmt: skip
+
+
+def _run(
+    model: str, tail: list[str], home_env: dict, cwd: str, timeout: int, locked=LOCKED_ARGS
+) -> list[str]:
     command = [
-        GROK, "-m", model, "--cwd", cwd, *tail, *LOCKED_ARGS,
+        GROK, "-m", model, "--cwd", cwd, *tail, *locked,
         *(("--sandbox", SANDBOX) if SANDBOX else ()),
     ]  # fmt: skip
     return _run_command(command, home_env, cwd, timeout)
@@ -808,9 +878,32 @@ def _catalog_entry(model_id: str) -> dict | None:
 # -------------------------------------------------------------------------------------- chat
 
 
+def decode_images(given: object) -> list[tuple[str, bytes]]:
+    """A chat request's images (base64 strings) as (suffix, bytes); PNG or JPEG by content."""
+    if not isinstance(given, list) or len(given) > MAX_IMAGES:
+        raise BadRequest(f"images must be a list of at most {MAX_IMAGES}")
+    images, total = [], 0
+    for item in given:
+        if type(item) is not str or len(item) > (MAX_IMAGE_BYTES + 2) // 3 * 4:
+            raise BadRequest(f"each image must be base64 of at most {MAX_IMAGE_BYTES} bytes")
+        try:
+            data = base64.b64decode(item, validate=True)
+        except ValueError:
+            raise BadRequest("an image is not valid base64") from None
+        suffix = next((s for magic, s in IMAGE_TYPES.items() if data.startswith(magic)), None)
+        if suffix is None:
+            raise BadRequest("images must be PNG or JPEG")
+        total += len(data)
+        if total > MAX_IMAGES_BYTES:
+            raise BadRequest(f"images may total at most {MAX_IMAGES_BYTES} bytes")
+        images.append((suffix, data))
+    return images
+
+
 def chat(request: dict, still_wanted=lambda: True) -> dict:
     """One member turn: the Bot's whole prompt in, Grok's answer out — from a session that had
-    no client tools (server-side X search is the only thing it may use)."""
+    no client tools (server-side X search is the only thing it may use), or, when the turn
+    carries images, the image tool alone."""
     prompt, system = request.get("prompt"), request.get("system", "")
     model, effort = request.get("model"), request.get("effort", "")
     if type(prompt) is not str or not prompt.strip() or len(prompt) > MAX_PROMPT_CHARS:
@@ -821,6 +914,9 @@ def chat(request: dict, still_wanted=lambda: True) -> dict:
         raise BadRequest("model must be a model id")
     if type(effort) is not str or (effort and not EFFORT.fullmatch(effort)):
         raise BadRequest("effort must be an effort level")
+    images = decode_images(request.get("images", []))
+    if images:
+        system = f"{system}\n\n{IMAGE_NOTE.format(count=len(images))}".strip()
     entry = _catalog_entry(model)
     if entry is None:
         raise BadRequest(f"unknown model {model!r}")
@@ -834,10 +930,11 @@ def chat(request: dict, still_wanted=lambda: True) -> dict:
         effort=effort,
         system=system,
         timeout=CHAT_TIMEOUT,
+        **({"images": images} if images else {}),
     )
     # The model only ever saw `＠`; code it writes back (`＠dataclass`) must still run. The answer
     # never returns to the CLI as is: a replayed transcript is defused again.
-    text = verify_stream(lines, mode="chat").replace(FULLWIDTH_AT, "@")
+    text = verify_stream(lines, mode="chat", images=len(images)).replace(FULLWIDTH_AT, "@")
     return {"text": text, "model": model, "effort": effort}
 
 

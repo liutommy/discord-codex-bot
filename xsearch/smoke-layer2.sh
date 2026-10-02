@@ -1,5 +1,5 @@
 #!/bin/sh
-# Negative control for layer 2 (the enforced deny-all hook), to re-run after changing
+# Negative control for layer 2 (the enforced tool-gate hook), to re-run after changing
 # GROK_VERSION: Grok with its full default toolset — none of server.py's flags — is asked to
 # run a command and read a file. Both must be denied. Spends one Grok session.
 #   docker compose exec xsearch sh /srv/smoke-layer2.sh
