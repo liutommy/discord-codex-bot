@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .backends import run_batch
+from .clock import sleep_for
 from .config import Config
 from .harvest import _quota_ok, read_ledger, transcript_turns
 from .memory import MARKERS, MemoryStore
@@ -359,7 +360,7 @@ async def digest_forever(
         return
     runner = codex_runner(config)
     while True:
-        await asyncio.sleep(
+        await sleep_for(
             seconds_until_weekly(
                 config.digest_weekday, config.digest_hour, config.consolidate_timezone
             )
