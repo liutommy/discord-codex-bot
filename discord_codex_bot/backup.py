@@ -17,6 +17,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+from .clock import sleep_for
 from .config import Config
 from .consolidate import seconds_until
 
@@ -87,7 +88,7 @@ async def backup_forever(config: Config) -> None:
         LOGGER.info("Backups disabled (no BACKUP_DIR)")
         return
     while True:
-        await asyncio.sleep(seconds_until(config.backup_hour, config.consolidate_timezone))
+        await sleep_for(seconds_until(config.backup_hour, config.consolidate_timezone))
         try:
             LOGGER.info("%s", await asyncio.to_thread(run_backup, config))
         except Exception:

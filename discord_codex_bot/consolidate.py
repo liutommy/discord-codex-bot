@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .backends import run_batch
+from .clock import sleep_for
 from .config import Config
 from .memory import MARKERS, SCOPES, MemoryStore, Note, marker_of, unmarked
 from .usage import probe_rate_limits
@@ -151,7 +152,7 @@ async def consolidate_forever(store: MemoryStore, config: Config, queue_run) -> 
     """Daily at CONSOLIDATE_HOUR local time: if enough 5h quota remains, rewrite every scope."""
     runner = codex_runner(config)
     while True:
-        await asyncio.sleep(seconds_until(config.consolidate_hour, config.consolidate_timezone))
+        await sleep_for(seconds_until(config.consolidate_hour, config.consolidate_timezone))
         try:
             remaining = 100.0
             if config.consolidate_min_remaining_percent > 0:
