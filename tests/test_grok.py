@@ -363,7 +363,7 @@ async def test_status_shows_grok_weekly_usage_and_the_reserve(grok_client) -> No
     finally:
         bot_module.probe_rate_limits, bot_module.codex_login_status = saved, saved_login
     assert "Grok：可選 · 額度 7d 85%" in text and "留給 X 查詢" in text
-    assert "模型：Grok · Grok 4.7 · 強度 Medium（預設）" in text
+    assert "模型：Grok · Grok 4.7（伺服器預設）· 強度 Medium" in text
 
 
 async def test_requests_go_out_as_utf8_not_escaped_ascii(sidecar, config, tmp_path) -> None:

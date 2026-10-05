@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime as _dt
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -32,11 +33,13 @@ from .attachments import (
 )
 from .backends import (
     AGY,
+    BACKEND_LABELS,
     GROK,
     OPENROUTER,
     ORCAROUTER,
     ROUTER_BACKENDS,
     BackendUnavailable,
+    Resolved,
     choices,
     fallback_chain,
     fallback_target,
@@ -166,6 +169,18 @@ EFFORT_CHOICES = [app_commands.Choice(name=v, value=k) for k, v in REASONING_EFF
 VIDEO_INTERIM = "🎬 影片較長，前輩正在看，稍等…"
 THINKING = "🤔 思考中…"
 STREAM_EDIT_SECONDS = 1.5  # Discord edits per placeholder while an answer streams in
+
+
+class Fallback(NamedTuple):
+    """The last time a turn left its backend: when, why, which backend failed, and what
+    answered instead. Shown on /status; with MODEL_CHAIN any backend can be the failed one."""
+
+    at: float
+    why: BackendUnavailable
+    failed: str
+    spare: Resolved
+
+
 # Why the last request fell back, for /status only. type() match, not isinstance: these are
 # sibling subclasses, and anything not listed (CodexServiceError, future kinds) reads as generic.
 _FALLBACK_LABEL = {
@@ -417,9 +432,9 @@ class DiscordCodexClient(discord.Client):
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.alerts = Alerter(self, config)
-        # The most recent request answered on the spare backend: (when, why, which model).
+        # The most recent request answered on a spare backend: (at, why, failed backend, spare).
         # Shown by /status only; the answer itself carries no notice.
-        self._last_fallback: tuple[float, BackendUnavailable, str] | None = None
+        self._last_fallback: Fallback | None = None
         # Grok sessions the sidecar refused, for the circuit breaker in _grok_usable.
         self._grok_refusals: list[float] = []
         self._grok_off_until = 0.0
@@ -616,7 +631,10 @@ class DiscordCodexClient(discord.Client):
         LOGGER.info("%s", await codex_login_status(self.config))
         if grok.enabled(self.config):  # the model list /model offers and effort mapping uses
             # never hold up startup on the sidecar; kept so the task is not garbage-collected
-            self._grok_models_task = asyncio.create_task(self._load_grok_models())
+            # on_ready fires again on every re-identify: one loader at a time.
+            task = getattr(self, "_grok_models_task", None)
+            if task is None or task.done():
+                self._grok_models_task = asyncio.create_task(self._load_grok_models())
         if self.config.default_model.startswith(f"{GROK}:") and not self.config.model_chain:
             LOGGER.warning(
                 "DEFAULT_MODEL is Grok but MODEL_CHAIN is empty: turns Grok cannot take (GIF/WebP "
@@ -776,13 +794,23 @@ class DiscordCodexClient(discord.Client):
     def help_sheet(self) -> str:
         """What this Bot can do, generated from the registered commands so it never drifts from
         the code; injected as HELP so the model can explain itself truthfully."""
-        sheet = render_sheet(self.config.command_prefix, self._command_rows())
+        sheet = render_sheet(
+            self.config.command_prefix, self._command_rows(), self._default_label()
+        )
         doc = apis.render_doc(self.apis)
         return f"{sheet}\n{doc}" if doc else sheet
 
     def help_guide(self) -> str:
         """The detailed member guide behind /<prefix>-help (same source as the model's sheet)."""
-        return render_guide(self.config.command_prefix, [row[0] for row in self._command_rows()])
+        return render_guide(
+            self.config.command_prefix,
+            [row[0] for row in self._command_rows()],
+            self._default_label(),
+        )
+
+    def _default_label(self) -> str:
+        """DEFAULT_MODEL as members read it (\"Grok · Grok 4.7\"), for the help texts."""
+        return self._choice(self.config.default_model).label
 
     async def _understand_videos(
         self,
@@ -902,8 +930,9 @@ class DiscordCodexClient(discord.Client):
                         unavailable,
                         spares[0].model,
                     )
+                    failed = target.backend
                     target, spares, fell_back = spares[0], spares[1:], True
-                    self._last_fallback = (time.time(), unavailable, target.model)
+                    self._last_fallback = Fallback(time.time(), unavailable, failed, target)
                     if isinstance(unavailable, CodexUnauthorized):
                         # Quota comes back by itself; a lost login does not. Tell the operator
                         # now rather than let the spare hide it until the next login check.
@@ -1274,8 +1303,14 @@ class DiscordCodexClient(discord.Client):
         stored = self._stored(guild_id, user_id)
         return split_stored(stored)[1] or self.config.codex_reasoning_effort
 
-    async def _load_grok_models(self) -> None:
-        catalog = await grok.models(self.config)
+    async def _load_grok_models(self, attempts: int = 30, wait: float = 60.0) -> None:
+        """Load the catalog; after a reboot the sidecar may still be starting, and an empty
+        catalog leaves /status and /help showing model ids instead of names, so retry."""
+        for attempt in range(attempts):
+            catalog = await grok.models(self.config)
+            if catalog or attempt == attempts - 1:
+                break
+            await asyncio.sleep(wait)
         LOGGER.info("Grok models: %s", ", ".join(m.id for m in catalog) or "(unavailable)")
 
     async def _grok_usable(self) -> bool:
@@ -2153,8 +2188,8 @@ class DiscordCodexClient(discord.Client):
         chosen = self._choice(stored)
         level = split_stored(stored)[1]
         target = resolve(chosen, level or self.config.codex_reasoning_effort)
-        origin = "你設定" if own else "預設"
-        model_line = f"模型：{chosen.label} · 強度 {self._effort_label(target)}（{origin}）"
+        origin = "你設定" if own else "伺服器預設"
+        model_line = f"模型：{chosen.label}（{origin}）· 強度 {self._effort_label(target)}"
         if chosen.backend in ROUTER_BACKENDS:
             info = self.catalogs[chosen.backend].get(chosen.family)
             if info is not None and not info.image:
@@ -2217,11 +2252,6 @@ class DiscordCodexClient(discord.Client):
                 )
         else:
             codex += " · 額度讀不到"
-        if self._last_fallback is not None:
-            when, why, model = self._last_fallback
-            mins = max(0, int((time.time() - when) // 60))
-            label = _FALLBACK_LABEL.get(type(why)) or getattr(why, "label", "服務異常")
-            codex += f"\n　└ 最近一次備援：{mins} 分鐘前{label}，改用 {model} 回答"
         routers = []
         for backend, catalog in self.catalogs.items():
             if ROUTERS[backend].api_key(self.config):
@@ -2244,6 +2274,15 @@ class DiscordCodexClient(discord.Client):
             if time.time() < self._grok_off_until:
                 line += "\n　└ 安全檢查連續失敗，暫停中"
             system.append(line)
+        if self._last_fallback is not None:
+            # Any backend in MODEL_CHAIN can be the one that failed, so the line names it.
+            when, why, failed, spare = self._last_fallback
+            mins = max(0, int((time.time() - when) // 60))
+            label = _FALLBACK_LABEL.get(type(why)) or getattr(why, "label", "服務異常")
+            system.append(
+                f"最近一次備援：{mins} 分鐘前 {BACKEND_LABELS.get(failed, failed)} {label}，"
+                f"改用 {BACKEND_LABELS.get(spare.backend, spare.backend)}（{spare.model}）回答"
+            )
         system += [
             "Antigravity：可選（Gemini／Claude）",
             " · ".join(routers) if routers else "OpenRouter／OrcaRouter：未設定",
