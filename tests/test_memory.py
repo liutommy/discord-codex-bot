@@ -300,3 +300,31 @@ def test_parse_style_upload_accepts_markdown_and_names_every_rejection() -> None
     assert len(parse_style_upload("style.md", limit)) == STYLE_MAX_CHARS  # the bound itself passes
     with pytest.raises(ValueError, match=f"{STYLE_MAX_CHARS + 1} 字"):
         parse_style_upload("style.md", ("字" * (STYLE_MAX_CHARS + 1)).encode())
+
+
+def test_memory_writes_are_atomic(tmp_path: Path, monkeypatch) -> None:
+    from discord_codex_bot import memory
+
+    target = tmp_path / "a" / "MEMORY.md"
+    memory.atomic_write(target, "old\n")
+    assert target.read_text("utf-8") == "old\n"
+
+    def crash(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(memory.os, "replace", crash)
+    try:
+        memory.atomic_write(target, "new\n")
+    except OSError:
+        pass
+    assert target.read_text("utf-8") == "old\n"  # a failed write leaves the old file whole
+    assert [p.name for p in target.parent.iterdir()] == ["MEMORY.md"]  # and no scratch behind
+
+
+def test_usage_ignores_scratch_files(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path, LIMITS)
+    store.add("user", 1, 2, "x", "body")
+    before = store.usage_bytes("user", 1, 2)
+    directory = store.scope_dir("user", 1, 2)
+    (directory / ".MEMORY.md.0a1b2c3d.tmp").write_text("x" * 1000, "utf-8")
+    assert store.usage_bytes("user", 1, 2) == before

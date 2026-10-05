@@ -20,6 +20,7 @@ from pathlib import Path
 from .clock import sleep_for
 from .config import Config
 from .consolidate import seconds_until
+from .memory import is_scratch
 
 LOGGER = logging.getLogger(__name__)
 # Relative to codex_home: everything the Bot itself wrote and would miss after a lost volume.
@@ -32,6 +33,21 @@ BACKUP_MEMBERS = (
 )
 TRACKING_DB = "tracking.sqlite3"
 ARCHIVE_PREFIX = "discord-codex-bot-"
+
+
+def _add_tree(tar: tarfile.TarFile, path: Path, arcname: str) -> None:
+    """tar.add, but a file replaced or removed while the archive is written is skipped instead
+    of failing the whole backup, and memory's scratch files are left out. Consolidation may be
+    rewriting memory/ when a long VM pause makes both nightly jobs start together."""
+    paths = [path, *sorted(path.rglob("*"))] if path.is_dir() else [path]
+    for item in paths:
+        if is_scratch(item):
+            continue
+        name = arcname if item == path else f"{arcname}/{item.relative_to(path).as_posix()}"
+        try:
+            tar.add(item, arcname=name, recursive=False)
+        except FileNotFoundError:
+            continue
 
 
 def make_backup(config: Config, now: float | None = None) -> Path | None:
@@ -53,7 +69,7 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
                 source.backup(destination)
         with tarfile.open(partial, "w:gz") as tar:
             for name in present:
-                tar.add(config.codex_home / name, arcname=name)
+                _add_tree(tar, config.codex_home / name, name)
             if snapshot.exists():
                 tar.add(snapshot, arcname=TRACKING_DB)
     partial.replace(target)
@@ -103,9 +119,13 @@ def export_memory_zip(root: Path, label: str) -> bytes | None:
     count = 0
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(root.rglob("*")):
-            if path.is_file() and ".backup" not in path.parts:
+            if ".backup" in path.parts or is_scratch(path) or not path.is_file():
+                continue
+            try:
                 archive.write(path, arcname=f"{label}/{path.relative_to(root)}")
-                count += 1
+            except FileNotFoundError:  # replaced or removed while zipping
+                continue
+            count += 1
     return buffer.getvalue() if count else None
 
 
