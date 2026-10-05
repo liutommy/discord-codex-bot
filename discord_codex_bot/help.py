@@ -30,9 +30,9 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         ["/{p}-status"],
     ),
     "-model": (
-        "選你要用的模型：provider（Codex／Antigravity／OpenRouter／OrcaRouter）→ model（打字會自動"
-        "篩選；OpenRouter、OrcaRouter 只列免費模型）→ effort（這個模型的預設強度）。留空＝查看目前"
-        "設定；clear 回到預設 Codex。換模型後下一題會新開對話。",
+        "選你要用的模型：provider（Grok／Codex／Antigravity／OpenRouter／OrcaRouter）→ "
+        "model（打字會自動篩選；OpenRouter、OrcaRouter 只列免費模型）→ effort（這個模型的預設"
+        "強度）。留空＝查看目前設定；clear 回到伺服器預設（{default}）。換模型後下一題會新開對話。",
         [
             "/{p}-model provider:Antigravity model:gemini-3.8-flash effort:Medium",
             "/{p}-model provider:OpenRouter model:gemma（打幾個字就會出現候選）",
@@ -176,9 +176,9 @@ FEATURES: list[str] = [
     "伺服器主人或管理員可用 `/{p}-embedfix` 開關。",
     "**貼影片連結**會看影片再回答：YouTube 直接看（長片也行），X、TikTok、Instagram、Bilibili、"
     "Reddit、Streamable 等會抓下來看；長片會先回「🎬 處理中」再改成正式答案。",
-    "**模型來源**：Grok（預設，會自己用 X 搜尋查貼文與帳號；看得到 PNG／JPEG 圖，"
+    "**模型來源**：Grok（會自己用 X 搜尋查貼文與帳號；看得到 PNG／JPEG 圖，"
     "GIF／WebP 改由 Codex 回答）、Codex、Antigravity（Gemini／Claude）、"
-    "OpenRouter 與 OrcaRouter 的免費模型；"
+    "OpenRouter 與 OrcaRouter 的免費模型；伺服器預設用 {default}。"
     "免費模型可能不穩或下架，回錯就換一個。",
     "**記憶**分個人與伺服器兩層，另有管理者維護的永久記憶；Bot 會在需要時自己查閱。"
     "每週還會從你最近幾段對話推測出「（推測）」開頭的個人記憶，從多位成員都提到的事整理出"
@@ -195,23 +195,30 @@ FEATURES: list[str] = [
 ]
 
 
-def render_guide(prefix: str, registered: Iterable[str]) -> str:
-    """The member-facing guide for /<prefix>-help, in registered-command order."""
+def _fill(text: str, prefix: str, default: str) -> str:
+    return text.replace("{p}", prefix).replace("{default}", default)
+
+
+def render_guide(prefix: str, registered: Iterable[str], default: str = "Codex") -> str:
+    """The member-facing guide for /<prefix>-help, in registered-command order. `default`
+    is DEFAULT_MODEL as members read it; it is configuration, so never written in the text."""
     p = prefix
     blocks = [f"**/{p} 指令說明**"]
     for name in registered:
         suffix = name.removeprefix(prefix)
         summary, examples = COMMAND_GUIDE[suffix]
-        lines = [f"**/{name}**", summary.replace("{p}", p)]
-        lines += [f"　`{example.replace('{p}', p)}`" for example in examples]
+        lines = [f"**/{name}**", _fill(summary, p, default)]
+        lines += [f"　`{_fill(example, p, default)}`" for example in examples]
         blocks.append("\n".join(lines))
     blocks.append(
-        "**不用指令也能做的事**\n" + "\n".join(f"・{f.replace('{p}', p)}" for f in FEATURES)
+        "**不用指令也能做的事**\n" + "\n".join(f"・{_fill(f, p, default)}" for f in FEATURES)
     )
     return "\n\n".join(blocks)
 
 
-def render_sheet(prefix: str, commands: Iterable[tuple[str, str, list[str]]]) -> str:
+def render_sheet(
+    prefix: str, commands: Iterable[tuple[str, str, list[str]]], default: str = "Codex"
+) -> str:
     """The compact sheet injected into the model's prompt: one line per command plus the
     feature list, Markdown stripped so it reads as facts rather than formatting."""
     lines = [f"這個 Bot 的斜線指令（前綴 /{prefix}）："]
@@ -219,6 +226,6 @@ def render_sheet(prefix: str, commands: Iterable[tuple[str, str, list[str]]]) ->
         suffix = f"（參數：{'、'.join(params)}）" if params else ""
         lines.append(f"/{name} — {description}{suffix}")
     lines.append(
-        "其他用法：" + " ".join(f.replace("{p}", prefix).replace("**", "") for f in FEATURES)
+        "其他用法：" + " ".join(_fill(f, prefix, default).replace("**", "") for f in FEATURES)
     )
     return "\n".join(lines)

@@ -14,6 +14,8 @@ ORCAROUTER = "orcarouter"
 # what the autocomplete offers. Members store "<backend>:<model id>".
 ROUTER_BACKENDS = (OPENROUTER, ORCAROUTER)
 ROUTER_LABELS = {OPENROUTER: "OpenRouter", ORCAROUTER: "OrcaRouter"}
+# What a member reads for each backend (/status, the fallback line).
+BACKEND_LABELS = {CODEX: "Codex", GROK: "Grok", AGY: "Antigravity", **ROUTER_LABELS}
 
 # Verified 2026-09-12 against `agy models` and a full model × --effort matrix: agy bakes the
 # reasoning effort into the model slug (`-high/-medium/-low`), `--effort` is only accepted when

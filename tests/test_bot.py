@@ -9,8 +9,10 @@ from pathlib import Path
 import discord
 
 from discord_codex_bot import embedfix
+from discord_codex_bot.backends import Resolved
 from discord_codex_bot.bot import (
     DiscordCodexClient,
+    Fallback,
     strip_mention,
     tracking_message,
     tracking_provider,
@@ -568,8 +570,9 @@ async def test_answer_falls_back_to_the_spare_backend_when_codex_quota_is_spent(
     result = await client._answer("q", [], GUILD, USER, resume="t-old")
     assert result.text == "備援答案"  # no notice: the member gains nothing from it (owner ruling)
     assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)  # CODEX_FALLBACK_MODEL default
-    when, why, model = client._last_fallback  # /status is where the fallback shows
-    assert isinstance(why, CodexUsageLimit) and model == "gemini-3.8-flash-medium"
+    when, why, failed, spare = client._last_fallback  # /status is where the fallback shows
+    assert isinstance(why, CodexUsageLimit) and failed == "codex"
+    assert (spare.backend, spare.model) == ("agy", "gemini-3.8-flash-medium")
     assert "resume" not in agy.calls[0][2]  # a Codex thread id means nothing to agy
     assert result.thread_id == "" and not result.resumed  # nothing to resume back on Codex
 
@@ -1004,7 +1007,7 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
 
     # defaults: nothing set, no thread
     text = await client._status_text(GUILD, 555, USER)
-    assert "模型：Codex · gpt-5.6-luna · 強度 High（預設）" in text
+    assert "模型：Codex · gpt-5.6-luna（伺服器預設）· 強度 High" in text
     assert "風格：無（用預設）；人設：保留" in text and "續接：無，下一句會新開對話" in text
     assert "記憶：個人 0 條 / 0 KB（上限 50 MB） · 伺服器 0 條" in text
     assert "永久 0 主題" in text
@@ -1021,7 +1024,7 @@ async def test_status_text_reports_member_settings_and_system(client, monkeypatc
     client.memory.set_persona_off(GUILD, USER, True)
     client.threads.remember(key, "oc-abc", None, plain=True, model="orcarouter:tencent/hy3-free")
     text = await client._status_text(GUILD, 555, USER)
-    assert "模型：OrcaRouter · tencent/hy3-free · 強度 無（你設定） · 看不到圖" in text
+    assert "模型：OrcaRouter · tencent/hy3-free（你設定）· 強度 無 · 看不到圖" in text
     assert "風格：條列、少於 50 字；人設：關閉" in text
     assert "續接：會接續 0 分鐘前的對話（OrcaRouter · tencent/hy3-free）" in text
     assert "個人 1 條" in text
@@ -1052,17 +1055,22 @@ async def test_status_shows_the_live_quota_and_the_last_fallback(client, monkeyp
     )
     monkeypatch.setattr(bot_module, "codex_login_status", login)
     monkeypatch.setattr(bot_module, "probe_rate_limits", usage)
-    client._last_fallback = (
+    client._last_fallback = Fallback(
         time.time() - 120,
         CodexUsageLimit("spent", "usage_limit_exceeded"),
-        "gemini-3.8-flash-medium",
+        "codex",
+        Resolved("agy", "gemini-3.8-flash-medium", "medium"),
     )
     text = await client._status_text(GUILD, 555, USER)
     assert "額度 5h 100% / 7d 40%" in text
     # "right now" comes from the probe alone, so a fresh process (no _last_fallback yet) and
     # batch-only fallbacks still show it; the last-fallback line is the evidence trail.
     assert "額度已達上限，現在的請求改用 gemini-3.8-flash-medium 回答" in text
-    assert "最近一次備援：2 分鐘前額度用完，改用 gemini-3.8-flash-medium 回答" in text
+    assert (
+        "最近一次備援：2 分鐘前 Codex 額度用完，改用 Antigravity（gemini-3.8-flash-medium）回答"
+        in text
+    )
+    assert "　└ 最近一次備援" not in text  # its own line now, not hung under Codex
     client._last_fallback = None
     text = await client._status_text(GUILD, 555, USER)
     assert "額度已達上限，現在的請求改用" in text and "最近一次備援" not in text
@@ -2157,3 +2165,61 @@ async def test_an_unreadable_track_time_creates_nothing(client, tmp_path) -> Non
         USER,
     )
     assert "時間看不懂，沒有建立追蹤" in said and client.tracker.watches() == []
+
+
+async def test_status_names_the_backend_that_failed(client, monkeypatch) -> None:
+    # 2026-10-05: Grok refused, Codex answered, and /status hung the line under Codex, so it
+    # read as if Codex had failed its safety check.
+    from discord_codex_bot import grok
+
+    async def login(config):
+        return "ChatGPT 訂閱登入有效"
+
+    async def no_probe(config):
+        return None
+
+    client.config = replace(
+        client.config, openrouter_api_key="", orcarouter_api_key="", gemini_api_key=""
+    )
+    monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", no_probe)
+    client._last_fallback = Fallback(
+        time.time() - 300, grok.GrokRefused("refused"), "grok", Resolved("codex", "gpt-6-luna", "")
+    )
+    text = await client._status_text(GUILD, 555, USER)
+    assert "最近一次備援：5 分鐘前 Grok 安全檢查未通過，改用 Codex（gpt-6-luna）回答" in text
+    codex_line = next(line for line in text.splitlines() if line.startswith("Codex："))
+    assert "安全檢查" not in codex_line
+
+
+def test_help_takes_the_default_model_from_config(client) -> None:
+    client.config = replace(client.config, default_model="grok:grok-4.7")
+    for text in (client.help_guide(), client.help_sheet()):
+        assert "伺服器預設用 Grok · grok-4.7" in text
+        assert "Codex 回答）、Codex" in text  # Grok is listed among the sources
+        assert "{default}" not in text and "回到預設 Codex" not in text
+    assert "clear 回到伺服器預設（Grok · grok-4.7）" in client.help_guide()
+    assert "provider（Grok／Codex／" in client.help_guide()
+    client.config = replace(client.config, default_model="")
+    assert "clear 回到伺服器預設（Codex · " in client.help_guide()
+
+
+async def test_grok_catalog_is_retried_until_the_sidecar_answers(client, monkeypatch) -> None:
+    # After the 2026-10-05 reboot the sidecar was still starting: the single load got nothing
+    # and /status showed "grok-4.7" instead of "Grok 4.7" until the next restart.
+    from discord_codex_bot import grok
+
+    answers = [[], [], [grok.GrokModel("grok-4.7", "Grok 4.7", ("medium",), "medium")]]
+    calls = []
+
+    async def models(config):
+        calls.append(1)
+        return answers[len(calls) - 1]
+
+    async def no_wait(seconds):
+        return None
+
+    monkeypatch.setattr(grok, "models", models)
+    monkeypatch.setattr(bot_module.asyncio, "sleep", no_wait)
+    await client._load_grok_models(attempts=5, wait=0)
+    assert len(calls) == 3  # stops as soon as the catalog arrives
