@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import secrets
 import shutil
 from dataclasses import dataclass
 from datetime import date
@@ -53,6 +55,29 @@ RECALL_TAG = re.compile(
     r'<recall\s+scope="(user|guild|permanent)"\s+name="([^"]{1,80})"'
     r'(?:\s+offset="(\d+)")?(?:\s+lines="(\d+)")?\s*/?>(?:\s*</recall>)?'
 )
+
+
+# Scratch files of atomic_write: hidden, and skipped by everything that walks a memory tree.
+SCRATCH_SUFFIX = ".tmp"
+
+
+def is_scratch(path: Path) -> bool:
+    return path.name.startswith(".") and path.name.endswith(SCRATCH_SUFFIX)
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Write through a scratch file and os.replace. A reader -- the nightly backup tars memory/
+    while consolidation may be rewriting it -- sees the old file or the new one, never half of
+    one, and a crash mid-write leaves the old file. The scratch name is unique per write, so two
+    writers of the same path never share one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scratch = path.with_name(f".{path.name}.{secrets.token_hex(4)}{SCRATCH_SUFFIX}")
+    try:
+        scratch.write_text(text, "utf-8")
+        os.replace(scratch, path)
+    except BaseException:
+        scratch.unlink(missing_ok=True)
+        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,11 +160,16 @@ class MemoryStore:
 
     def usage_bytes(self, scope: str, guild_id: int | None, user_id: int | None) -> int:
         directory = self.scope_dir(scope, guild_id, user_id)
-        return sum(
-            p.stat().st_size
-            for p in directory.rglob("*")
-            if p.is_file() and ".backup" not in p.parts
-        )
+        total = 0
+        for p in directory.rglob("*"):
+            if ".backup" in p.parts or is_scratch(p):
+                continue
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except FileNotFoundError:  # replaced or removed while walking
+                continue
+        return total
 
     # ----- index -----------------------------------------------------------------------------
 
@@ -204,7 +234,7 @@ class MemoryStore:
             file = f"{slug}-{counter}.md"
             counter += 1
         (directory / TOPIC_DIR).mkdir(parents=True, exist_ok=True)
-        (directory / TOPIC_DIR / file).write_text(body, "utf-8")
+        atomic_write(directory / TOPIC_DIR / file, body)
         entries.append(Entry(name.strip(), file, _hook(text)))
         self._write_index(directory, entries)
         return entries[-1].line()
@@ -265,7 +295,7 @@ class MemoryStore:
                 counter += 1
             used.add(file)
             body = f"# {note.name}\n\n{note.date}\n\n{note.text}\n"
-            (directory / TOPIC_DIR / file).write_text(body, "utf-8")
+            atomic_write(directory / TOPIC_DIR / file, body)
             entries.append(Entry(note.name, file, _hook(note.text)))
         self._write_index(directory, entries)
 
@@ -352,7 +382,7 @@ class MemoryStore:
     def set_style(self, guild_id: int | None, user_id: int, text: str) -> None:
         path = self.style_path(guild_id, user_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text.strip() + "\n", "utf-8")
+        atomic_write(path, text.strip() + "\n")
 
     def clear_style(self, guild_id: int | None, user_id: int) -> bool:
         path = self.style_path(guild_id, user_id)
@@ -374,7 +404,7 @@ class MemoryStore:
         path = self.persona_off_path(guild_id, user_id)
         if off:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("1\n", "utf-8")
+            atomic_write(path, "1\n")
         else:
             path.unlink(missing_ok=True)
 
@@ -390,7 +420,7 @@ class MemoryStore:
     def set_model(self, guild_id: int | None, user_id: int, value: str) -> None:
         path = self.scope_dir("user", guild_id, user_id) / MODEL_FILE
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(value.strip() + "\n", "utf-8")
+        atomic_write(path, value.strip() + "\n")
 
     def clear_model(self, guild_id: int | None, user_id: int) -> bool:
         path = self.scope_dir("user", guild_id, user_id) / MODEL_FILE
@@ -444,7 +474,7 @@ class MemoryStore:
     @staticmethod
     def _write_file(path: Path, lines: list[str]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines) + ("\n" if lines else ""), "utf-8")
+        atomic_write(path, "\n".join(lines) + ("\n" if lines else ""))
 
 
 class PermanentMemory:
