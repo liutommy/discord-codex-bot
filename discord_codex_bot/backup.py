@@ -45,7 +45,13 @@ def _add_tree(tar: tarfile.TarFile, path: Path, arcname: str) -> None:
             continue
         name = arcname if item == path else f"{arcname}/{item.relative_to(path).as_posix()}"
         try:
-            tar.add(item, arcname=name, recursive=False)
+            if item.is_file() and not item.is_symlink():
+                # Size and bytes from one open file: tar.add stats the name and opens it again,
+                # so an os.replace in between fails the archive (shorter) or truncates (longer).
+                with open(item, "rb") as handle:
+                    tar.addfile(tar.gettarinfo(arcname=name, fileobj=handle), handle)
+            else:
+                tar.add(item, arcname=name, recursive=False)
         except FileNotFoundError:
             continue
 
@@ -122,9 +128,10 @@ def export_memory_zip(root: Path, label: str) -> bytes | None:
             if ".backup" in path.parts or is_scratch(path) or not path.is_file():
                 continue
             try:
-                archive.write(path, arcname=f"{label}/{path.relative_to(root)}")
+                data = path.read_bytes()  # one read: stat-then-open could mix two versions
             except FileNotFoundError:  # replaced or removed while zipping
                 continue
+            archive.writestr(f"{label}/{path.relative_to(root)}", data)
             count += 1
     return buffer.getvalue() if count else None
 

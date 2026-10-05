@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sqlite3
 import tarfile
 import time
@@ -113,14 +114,14 @@ def test_backup_survives_memory_being_rewritten_meanwhile(
         backup_dir=tmp_path / "backups",
         tracking_db_path=home / "tracking.sqlite3",
     )
-    real_add = tarfile.TarFile.add
+    from discord_codex_bot import backup
 
-    def add(self, name, *args, **kwargs):
+    def opener(name, *args, **kwargs):  # gone.md is replaced after the walk listed it
         if Path(name).name == "gone.md":
             raise FileNotFoundError(name)
-        return real_add(self, name, *args, **kwargs)
+        return open(name, *args, **kwargs)
 
-    monkeypatch.setattr(tarfile.TarFile, "add", add)
+    monkeypatch.setattr(backup, "open", opener, raising=False)
     target = make_backup(cfg, now=1_700_000_000)
     assert target is not None
     with tarfile.open(target) as tar:
@@ -136,3 +137,30 @@ def test_memory_export_leaves_out_scratch_files(tmp_path: Path) -> None:
     (root / "topics" / ".x.md.0a1b2c3d.tmp").write_text("half", "utf-8")
     with zipfile.ZipFile(io.BytesIO(export_memory_zip(root, "me"))) as archive:
         assert archive.namelist() == ["me/MEMORY.md"]
+
+
+def test_backup_takes_size_and_bytes_from_the_same_file(
+    tmp_path: Path, config, monkeypatch
+) -> None:
+    # os.replace between tarfile's stat of the name and its open: the old code archived the
+    # new file under the old size ("unexpected end of data", or a truncated copy).
+    home = _home(tmp_path)
+    topic = home / "memory" / "1" / "users" / "2" / "topics" / "x.md"
+    longer = tmp_path / "longer.md"
+    longer.write_text("# x\n\nbody rewritten by consolidation, longer than before", "utf-8")
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):  # the name still pointed at the old, shorter file
+        return real_lstat(longer if Path(path) == topic else path, *args, **kwargs)
+
+    monkeypatch.setattr(tarfile.os, "lstat", lstat)
+    cfg = replace(
+        config,
+        codex_home=home,
+        backup_dir=tmp_path / "backups",
+        tracking_db_path=home / "tracking.sqlite3",
+    )
+    target = make_backup(cfg, now=1_700_000_000)
+    with tarfile.open(target) as tar:
+        member = tar.extractfile("memory/1/users/2/topics/x.md").read()
+    assert member == topic.read_bytes()
