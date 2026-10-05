@@ -171,8 +171,6 @@ THINKING = "🤔 思考中…"
 STREAM_EDIT_SECONDS = 1.5  # Discord edits per placeholder while an answer streams in
 
 
-# Why the last request fell back, for /status only. type() match, not isinstance: these are
-# sibling subclasses, and anything not listed (CodexServiceError, future kinds) reads as generic.
 class Fallback(NamedTuple):
     """The last time a turn left its backend: when, why, which backend failed, and what
     answered instead. Shown on /status; with MODEL_CHAIN any backend can be the failed one."""
@@ -183,6 +181,8 @@ class Fallback(NamedTuple):
     spare: Resolved
 
 
+# Why the last request fell back, for /status only. type() match, not isinstance: these are
+# sibling subclasses, and anything not listed (CodexServiceError, future kinds) reads as generic.
 _FALLBACK_LABEL = {
     CodexUsageLimit: "額度用完",
     CodexServerOverloaded: "模型滿載",
@@ -432,7 +432,7 @@ class DiscordCodexClient(discord.Client):
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.alerts = Alerter(self, config)
-        # The most recent request answered on the spare backend: (when, why, which model).
+        # The most recent request answered on a spare backend: (at, why, failed backend, spare).
         # Shown by /status only; the answer itself carries no notice.
         self._last_fallback: Fallback | None = None
         # Grok sessions the sidecar refused, for the circuit breaker in _grok_usable.
@@ -631,7 +631,10 @@ class DiscordCodexClient(discord.Client):
         LOGGER.info("%s", await codex_login_status(self.config))
         if grok.enabled(self.config):  # the model list /model offers and effort mapping uses
             # never hold up startup on the sidecar; kept so the task is not garbage-collected
-            self._grok_models_task = asyncio.create_task(self._load_grok_models())
+            # on_ready fires again on every re-identify: one loader at a time.
+            task = getattr(self, "_grok_models_task", None)
+            if task is None or task.done():
+                self._grok_models_task = asyncio.create_task(self._load_grok_models())
         if self.config.default_model.startswith(f"{GROK}:") and not self.config.model_chain:
             LOGGER.warning(
                 "DEFAULT_MODEL is Grok but MODEL_CHAIN is empty: turns Grok cannot take (GIF/WebP "
