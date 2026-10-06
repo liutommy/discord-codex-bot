@@ -535,6 +535,15 @@ async def test_judge_reads_a_good_answer_and_sends_the_key_only_in_the_header(
         (200, None, 0.0, "error-ContentTypeError"),
         (200, {"answers": {"type": {"choice": "poetry"}}}, 0.0, "bad-format"),
         (200, answer(score=42.0), 0.0, "bad-format"),
+        (  # no confidence and probabilities that are not a mapping (Codex on #33)
+            200,
+            {"answers": {"type": {"choice": "code", "probabilities": [0.9]},
+                         "difficulty": {"score": 3}}},
+            0.0,
+            "bad-format",
+        ),  # fmt: skip
+        (200, {"answers": {"type": "code", "difficulty": 3}}, 0.0, "bad-format"),
+        (200, ["not", "an", "object"], 0.0, "bad-format"),
         (200, answer(confidence=0.29), 0.0, "low-confidence"),
         (200, answer(), 0.5, "timeout"),
     ],

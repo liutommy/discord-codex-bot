@@ -325,7 +325,9 @@ def parse_answer(data: object) -> tuple[str, float, float]:
         kind = answers["type"]["choice"]
         score = float(answers["difficulty"]["score"])
         confidence = _confidence(answers["type"])
-    except (KeyError, TypeError, ValueError) as error:
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        # Any shape Jev's schema did not promise is a bad verdict, never an exception that
+        # leaves the member's request unanswered.
         raise ValueError(f"malformed answer: {type(error).__name__}") from None
     if kind not in TYPES or not 0.0 <= score <= len(LEVELS) - 1 or not 0.0 <= confidence <= 1.0:
         raise ValueError("answer out of range")
