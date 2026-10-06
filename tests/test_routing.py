@@ -827,5 +827,6 @@ def test_help_tells_members_and_the_model_about_routing(client) -> None:
     assert "/codex-model" in client.help_sheet().split("自動挑模型")[1]
     assert "進行中的對話維持原本的模型" in client.help_sheet()
     assert "effort 只改這一則的強度" in client.help_sheet()
+    assert "難度只升不降" in client.help_sheet() and "不會換弱" not in client.help_sheet()
     client.routing = None
     assert "自動挑模型" not in client.help_guide() and "自動挑模型" not in client.help_sheet()

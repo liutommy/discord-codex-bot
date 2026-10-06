@@ -1465,9 +1465,9 @@ class DiscordCodexClient(discord.Client):
     ) -> RoutePlan | None:
         """Where this request goes when the router picks the model; None when it does not (Jev
         off, or the member chose a model with /model). Every message is judged; a conversation
-        only moves up (routing.decide). No judgement — an image, a Jev timeout, error, odd
-        answer or low confidence — keeps a routed conversation where it is and sends a new one
-        to DEFAULT_MODEL, without retrying Jev."""
+        never drops a band and follows its latest message of substance (routing.decide). No
+        judgement — an image, a Jev timeout, error, odd answer or low confidence — keeps a routed
+        conversation where it is and sends a new one to DEFAULT_MODEL, without retrying Jev."""
         table = self.routing
         if table is None or self.memory.get_model(guild_id, user_id):
             return None
