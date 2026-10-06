@@ -1282,6 +1282,9 @@ def test_a_date_is_not_read_as_a_time() -> None:
     assert parse_times("930/2130") == ("09:30", "21:30")
     assert parse_times("每天 0930.") == ("09:30",)
     assert parse_times("10/01 0930") == ("09:30",)  # a month/day date is still not a time
+    # Colon times separated by a slash are times, not a month/day (hub review on PR #26).
+    assert parse_times("12:01/20:01") == ("12:01", "20:01")
+    assert parse_times("12:05/18:00") == ("12:05", "18:00")
 
 
 async def test_a_failed_fetch_does_not_use_up_a_fixed_time(tmp_path, monkeypatch) -> None:
