@@ -143,7 +143,8 @@ Twitch Helix with an app access token, X accounts through the xsearch sidecar (s
 Ruten (露天) stores through the JSON API their own web app uses, and any other public page as a
 web source. Instagram and TikTok are not tracked. A source is fetched once even when several
 members watch it; the model runs only when a new item has no saved decision for that watch, at
-most 30 items per call (the newest), and items not judged within 48 hours leave the queue.
+most 30 items per call (the newest), and items not judged within 48 hours (two intervals, for a
+watch judged less often than daily) leave the queue.
 
 For YouTube, create a Google Cloud project, enable **YouTube Data API v3**, create an API key, and
 restrict that key to the YouTube Data API. For Twitch, register an application in the Twitch

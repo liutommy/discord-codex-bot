@@ -1078,6 +1078,32 @@ async def test_status_shows_the_live_quota_and_the_last_fallback(client, monkeyp
     assert "額度已達上限，且沒有設定備援模型" in await client._status_text(GUILD, 555, USER)
 
 
+async def test_status_names_the_spare_from_model_chain(client, monkeypatch) -> None:
+    # /status read CODEX_FALLBACK_MODEL while requests follow MODEL_CHAIN, so at 100% it could
+    # name the wrong spare or claim there was none (Codex on PR #3).
+    async def login(config):
+        return "ChatGPT 訂閱登入有效"
+
+    async def usage(config):
+        return RateLimits(100.0, 40.0, "test")
+
+    client.config = replace(
+        client.config,
+        openrouter_api_key="",
+        orcarouter_api_key="",
+        gemini_api_key="",
+        codex_fallback_model="",
+        model_chain=("grok:grok-4.7|medium", "codex", "agy:gemini-3.8-flash|high"),
+    )
+    monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", usage)
+    text = await client._status_text(GUILD, 555, USER)
+    assert "額度已達上限，現在的請求改用 gemini-3.8-flash-high 回答" in text
+    client.config = replace(client.config, model_chain=("codex", "grok:grok-4.7|medium"))
+    # Codex never falls *into* Grok, so this chain has no spare for it.
+    assert "額度已達上限，且沒有設定備援模型" in await client._status_text(GUILD, 555, USER)
+
+
 async def test_status_says_when_the_quota_is_unreadable(client, monkeypatch) -> None:
     async def login(config):
         return "ChatGPT 訂閱登入有效"
@@ -2084,7 +2110,37 @@ async def test_a_broken_ruten_source_reaches_the_operator(client, monkeypatch) -
 
     monkeypatch.setattr(client.ruten_tracker, "fetch", fine)
     await client._fetch_tracking_source(source)
-    assert events == [("fail", "露天追蹤"), ("ok", "露天追蹤")]
+    key = "露天追蹤 https://www.ruten.com.tw/store/a/"
+    assert events == [("fail", key), ("ok", key)]
+
+
+async def test_each_ruten_source_keeps_its_own_failure_count(client, monkeypatch) -> None:
+    # One shared key: a healthy store's success reset a broken store's streak every pass, so
+    # it never reached the threshold (Codex on PR #7).
+    from discord_codex_bot.alerts import Alerter
+
+    sent: list[str] = []
+
+    async def send(text: str) -> None:
+        sent.append(text)
+
+    owner = types.SimpleNamespace(send=send)
+    discord_stub = types.SimpleNamespace(get_user=lambda uid: owner)
+    client.alerts = Alerter(discord_stub, replace(client.config, alert_user_id=7))
+    broken = Source(1, "ruten", "https://www.ruten.com.tw/store/a/", "", state={"user_id": "1"})
+    healthy = Source(2, "ruten", "https://www.ruten.com.tw/store/b/", "", state={"user_id": "2"})
+
+    async def fetch(source):
+        if source.id == broken.id:
+            raise ProviderError("露天商品清單的格式看不懂")
+        return FetchResult((), "", {})
+
+    monkeypatch.setattr(client.ruten_tracker, "fetch", fetch)
+    for _pass in range(client.config.alert_after_failures):
+        with pytest.raises(ProviderError):
+            await client._fetch_tracking_source(broken)
+        await client._fetch_tracking_source(healthy)
+    assert len(sent) == 1 and "store/a" in sent[0]
 
 
 def test_public_channel_needs_everyone_to_read_it(client, monkeypatch) -> None:

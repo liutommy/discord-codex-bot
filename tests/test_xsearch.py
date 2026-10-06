@@ -329,6 +329,35 @@ def test_post_ids_must_agree_with_their_time(post_id, created, kept) -> None:
     assert (server._clean_post(post) is not None) is kept
 
 
+@pytest.mark.parametrize(
+    ("post_id", "created"),
+    [
+        ("5000000000", "2009-11-20T00:00:00Z"),  # past 2**32, still sequential
+        ("29548970348", "2010-11-03T00:00:00Z"),  # among the last sequential ids
+    ],
+)
+def test_legacy_ids_past_2_to_the_32_are_not_read_as_snowflakes(post_id, created) -> None:
+    # Sequential ids passed 2**32 in 2009 and ran to ~29.7 billion; read as snowflakes they
+    # decode to November 2010 and a real 2009-2010 post came back found=false (Codex on PR #2).
+    post = {"id": post_id, "author_handle": "a", "created_at": created, "text": "t"}
+    assert server._clean_post(post) is not None
+
+
+def test_the_user_schema_asks_for_the_handle_it_now_depends_on() -> None:
+    # A missing handle now means "not confirmed", so the model must be told to always send it;
+    # an optional field let a real account come back as missing, cached for an hour.
+    assert "handle" in server.SCHEMAS["user"]["required"]
+    assert "always return handle" in server.build_prompt("user", {"handle": "riot"}).lower()
+
+
+def test_a_user_answer_without_a_handle_confirms_nothing() -> None:
+    # {"exists": true} with no handle defaulted to the requested one and counted as a match,
+    # so an account the lookup never identified could be watched (Codex on PR #2).
+    assert server.shape("user", {"handle": "riot"}, {"exists": True})["exists"] is False
+    found = server.shape("user", {"handle": "riot"}, {"exists": True, "handle": "@Riot"})
+    assert found["exists"] is True
+
+
 def test_shape_drops_what_contradicts_the_request() -> None:
     post = {"id": "200", "author_handle": "Riot", "created_at": "Tue, 29 Sep 2026 23:00:17 GMT",
             "text": "hi"}  # fmt: skip

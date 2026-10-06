@@ -69,6 +69,14 @@ def test_effort_follows_each_models_own_menu(model, asked, applied) -> None:
     assert (target.backend, target.model, target.effort) == (GROK, model, applied)
 
 
+def test_a_model_without_an_effort_menu_is_sent_no_effort(monkeypatch) -> None:
+    # The sidecar refuses any effort for such a model, and that 400 has no fallback: every
+    # turn on it failed (Codex on PR #3). Unknown models still pass the effort through.
+    bare = grok.GrokModel("grok-fast", "Grok Fast", (), "")
+    monkeypatch.setattr(grok, "_catalog", (time.monotonic(), [*CATALOG, bare]))
+    assert resolve(grok_choice("grok-fast"), "medium").effort == ""
+
+
 # --------------------------------------------------------------------------- the chain
 
 
