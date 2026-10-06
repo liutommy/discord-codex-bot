@@ -410,13 +410,31 @@ def test_recent_can_page_back_below_until_id() -> None:
     )
     assert [p["id"] for p in shaped["posts"]] == ["250"]
     # "full" counts what the model returned before filtering: a full page with one post dropped
-    # (wrong author, out of range) is still full, or the bot stops paging too early.
+    # (wrong author, at or above until_id) is still full, or the bot stops paging too early.
     request = {"handle": "riot", "since_id": "150", "limit": 3}
     answer = {"posts": [dict(post, id=i) for i in ("253", "252", "251")]}
     answer["posts"][1]["author_handle"] = "someone_else"
     shaped = server.shape("recent", request, answer)
     assert [p["id"] for p in shaped["posts"]] == ["253", "251"] and shaped["full"] is True
     assert server.shape("recent", request, {"posts": answer["posts"][:2]})["full"] is False
+
+
+def test_recent_page_that_reaches_since_id_is_not_full() -> None:
+    # The model ignored since_id and padded the page with older posts (hub on PR #28): one valid
+    # post by the account at or below since_id means the page already reached the cursor, so
+    # the bot must not page back — a further Grok session would only find nothing new.
+    post = {"id": "200", "author_handle": "Riot", "created_at": "2026-09-29T23:00:17Z",
+            "text": "hi"}  # fmt: skip
+    request = {"handle": "riot", "since_id": "150", "limit": 3}
+    shaped = server.shape(
+        "recent", request, {"posts": [dict(post, id=i) for i in ("253", "252", "150")]}
+    )
+    assert [p["id"] for p in shaped["posts"]] == ["253", "252"] and shaped["full"] is False
+    # A post below the cursor that is not the account's, or not a valid post, proves nothing.
+    for bad in ({"author_handle": "someone_else"}, {"created_at": "garbage"}):
+        answer = {"posts": [dict(post, id=i) for i in ("253", "252", "140")]}
+        answer["posts"][2].update(bad)
+        assert server.shape("recent", request, answer)["full"] is True
 
 
 def test_a_caller_that_gave_up_while_queued_costs_no_session(monkeypatch) -> None:

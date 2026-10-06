@@ -487,18 +487,24 @@ def shape(kind: str, request: dict, answer: dict) -> dict:
     since = int(request.get("since_id") or 0)
     until = int(request.get("until_id") or 0)
     posts = []
+    reached = False
     for raw in answer.get("posts") or []:
         post = _clean_post(raw)
         if not post or post["author_handle"].lower() != handle:
             continue
-        if since < int(post["id"]) and (not until or int(post["id"]) < until):
+        if int(post["id"]) <= since:
+            reached = True
+        elif not until or int(post["id"]) < until:
             posts.append(post)
     posts.sort(key=lambda p: int(p["id"]), reverse=True)
     limit = int(request.get("limit", 10))
     # Whether the model filled the page, counted before the filtering above: the caller pages
-    # back on it, and a dropped post must not make a full page look like the end.
+    # back on it, and a dropped post must not make a full page look like the end. A post of
+    # the account's at or below since_id ends it though: the page already reached the cursor
+    # (hub on PR #28).
     raw = answer.get("posts")
-    return {"posts": posts[:limit], "full": isinstance(raw, list) and len(raw) >= limit}
+    full = isinstance(raw, list) and len(raw) >= limit and not reached
+    return {"posts": posts[:limit], "full": full}
 
 
 class _SessionGate:
