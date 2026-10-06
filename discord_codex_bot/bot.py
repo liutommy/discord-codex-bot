@@ -972,7 +972,16 @@ class DiscordCodexClient(discord.Client):
                 return await grok.run_grok(text, self.config, via.model, effort=via.effort, **kw)
             if via.backend == AGY:
                 kw.pop("effort", None)
-                return await run_agy(text, self.config, via.model, **kw)
+                try:
+                    return await run_agy(text, self.config, via.model, **kw)
+                except BackendUnavailable:
+                    raise
+                except RuntimeError as error:
+                    if routed is None:
+                        raise  # a member's own agy: reported as before
+                    # agy reports a timeout, a failed exit or an empty reply as a plain error;
+                    # on a routed turn that must reach the stand-ins and the chain, not end it.
+                    raise BackendUnavailable(f"agy failed: {error}") from error
             if via.backend in ROUTER_BACKENDS:
                 catalog = self.catalogs[via.backend]
                 await catalog.free_models()  # image / effort capability lookup
@@ -2481,6 +2490,12 @@ class DiscordCodexClient(discord.Client):
         target = resolve(chosen, level or self.config.codex_reasoning_effort)
         origin = "你設定" if own else "伺服器預設"
         model_line = f"模型：{chosen.label}（{origin}）· 強度 {self._effort_label(target)}"
+        auto = self.routing is not None and not own
+        if auto:
+            model_line = (
+                f"模型：自動挑選（依每則問題的類型與難度）；附圖或判斷不出來的新對話用 "
+                f"{chosen.label} · 強度 {self._effort_label(target)}"
+            )
         if chosen.backend in ROUTER_BACKENDS:
             info = self.catalogs[chosen.backend].get(chosen.family)
             if info is not None and not info.image:
@@ -2492,7 +2507,15 @@ class DiscordCodexClient(discord.Client):
 
         key = ThreadStore.key(guild_id, channel_id, user_id)
         entry = self.threads.live_entry(key)
-        if entry is None:
+        routed = self.threads.routed(key, None, persona_off) if auto else None
+        if routed is not None and entry is not None:
+            minutes = max(0, int((time.time() - float(entry["at"])) // 60))
+            thread_line = (
+                f"續接：會接續 {minutes} 分鐘前的對話（目前用 "
+                f"{self._choice(routed['model']).label}，更難的問題會換更強的模型）"
+                f"；/{self.config.command_prefix} 的 new 可重來"
+            )
+        elif entry is None:
             thread_line = "續接：無，下一句會新開對話"
         else:
             minutes = max(0, int((time.time() - float(entry["at"])) // 60))

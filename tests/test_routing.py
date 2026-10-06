@@ -418,7 +418,9 @@ async def test_grok_refusing_an_x_question_falls_to_flash_medium_with_the_note(
 async def test_a_failed_claude_turn_takes_its_types_stand_in(
     client, backends, monkeypatch, kind, degree, stand_in
 ) -> None:
-    claude = Backend("agy", error=BackendUnavailable("claude is out"))
+    # A real agy failure is a plain RuntimeError (timeout, failed exit, empty reply), not
+    # BackendUnavailable; on a routed turn it must still reach the stand-in (Codex on #33).
+    claude = Backend("agy", error=RuntimeError("agy exited with code 1: overloaded"))
     calls: list[tuple] = []
 
     async def run_agy(prompt, config, model, **kw):
@@ -431,6 +433,35 @@ async def test_a_failed_claude_turn_takes_its_types_stand_in(
     verdicts(monkeypatch, ok(kind, degree))
     plan, result = await ask(client)
     assert calls[0] == "claude-sonnet-4-6" and result.via == stand_in
+
+
+async def test_a_plain_agy_failure_still_ends_a_members_own_agy_turn(
+    client, backends, monkeypatch
+) -> None:
+    backends["agy"].error = RuntimeError("agy request timed out")
+    client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == bot_module.FAILURE_MESSAGE.format(prefix=client.config.command_prefix)
+    assert backends["grok"].calls == [] and backends["codex"].calls == []
+
+
+async def test_status_describes_the_routed_conversation(client, backends, monkeypatch) -> None:
+    async def login(config):
+        return "ok"
+
+    async def usage(config):
+        return None
+
+    monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", usage)
+    client.config = replace(
+        client.config, openrouter_api_key="", orcarouter_api_key="", gemini_api_key=""
+    )
+    verdicts(monkeypatch, ok("code", 8))
+    await ask(client, "修 bug")
+    text = await client._status_text(GUILD, None, USER)
+    assert "模型：自動挑選" in text
+    assert "會接續" in text and "目前用 Codex" in text and "下一句會新開" not in text
 
 
 async def test_after_the_stand_ins_the_chain_takes_over(client, backends, monkeypatch) -> None:
@@ -646,6 +677,7 @@ async def test_a_routed_mention_names_the_model_that_answered(
 def test_help_tells_members_and_the_model_about_routing(client) -> None:
     assert "自動挑模型" in client.help_guide() and "自動挑模型" in client.help_sheet()
     assert "/codex-model" in client.help_sheet().split("自動挑模型")[1]
+    assert "進行中的對話維持原本的模型" in client.help_sheet()
     client.routing = None
     assert "自動挑模型" not in client.help_guide() and "自動挑模型" not in client.help_sheet()
 
