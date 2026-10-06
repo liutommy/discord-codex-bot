@@ -1447,22 +1447,33 @@ def parse_x_locator(locator: str) -> str:
     return handle
 
 
+X_PAGE_SIZE = 10  # posts per Grok session (the sidecar takes 1-20)
+X_MAX_EXTRA_PAGES = 2  # older pages read back per check when an account posted more than a page
+
+
 class XFetcher:
     """An X account as a source, read through the X lookup sidecar (Grok's X search on the
     operator's subscription). Every check is a Grok session, so it runs on its own clock —
-    `interval_minutes` — and skips the shared tracking pass in between."""
+    `interval_minutes` — and skips the shared tracking pass in between.
+
+    `recent_posts(handle, since_id, limit=, until_id=)` returns the newest posts after since_id
+    (and before until_id when paging back)."""
 
     def __init__(
         self,
         lookup_user: Callable[[str], Awaitable[Mapping[str, Any] | None]],
-        recent_posts: Callable[[str, str], Awaitable[Sequence[Mapping[str, Any]]]],
+        recent_posts: Callable[..., Awaitable[Sequence[Mapping[str, Any]]]],
         interval_minutes: int,
         clock: Callable[[], float] = time.time,
+        page_size: int = X_PAGE_SIZE,
+        max_extra_pages: int = X_MAX_EXTRA_PAGES,
     ) -> None:
         self.lookup_user = lookup_user
         self.recent_posts = recent_posts
         self.interval_seconds = interval_minutes * 60
         self.clock = clock
+        self.page_size = page_size
+        self.max_extra_pages = max_extra_pages
 
     async def resolve(self, locator: str) -> tuple[str, Mapping[str, Any]]:
         handle = parse_x_locator(locator)
@@ -1478,16 +1489,59 @@ class XFetcher:
         if now - float(source.state.get("fetched_at", 0)) < self.interval_seconds:
             return FetchResult((), source.cursor, dict(source.state), checked=False)
         handle = str(source.state.get("handle") or source.external_id)
+        since = source.cursor
         try:
-            posts = await self.recent_posts(handle, source.cursor)
+            page = await self.recent_posts(handle, since, limit=self.page_size)
         except Exception as error:
             # A failed check still spent its session (or the login is gone): wait the full
             # interval before the next one, instead of retrying on every tracking pass.
             LOGGER.warning("X source %s check failed: %s", handle, type(error).__name__)
             state = {**source.state, "fetched_at": now, "last_error": type(error).__name__}
             return FetchResult((), source.cursor, state, checked=False)
+        posts = {str(post["id"]): post for post in page}
+        # A full page may not reach back to the cursor: the account posted more than a page
+        # since the last check, and jumping the cursor to the newest post would lose the rest
+        # for good (Codex on PR #2). Read back older pages, each one more Grok session, until a
+        # page comes back short (it reached the cursor) — at most `max_extra_pages`. With no
+        # cursor (first sight) there is no gap: the baseline is one page.
+        extra = 0
+        while since and len(page) >= self.page_size and posts:
+            oldest = min(posts, key=int)
+            if int(oldest) <= int(since) + 1:  # nothing can lie between: the gap is closed
+                break
+            if extra == self.max_extra_pages:
+                LOGGER.warning(
+                    "X source %s: more than %d posts since the last check; posts after %s "
+                    "and before %s were not read",
+                    handle, len(posts), since, oldest,
+                )  # fmt: skip
+                break
+            extra += 1
+            try:
+                older = await self.recent_posts(
+                    handle, since, limit=self.page_size, until_id=oldest
+                )
+            except Exception as error:
+                # What is in hand is kept and the cursor still moves on: retrying would spend
+                # the newest page's session again, and a spent quota would only fail again.
+                LOGGER.warning(
+                    "X source %s: reading older posts failed (%s); posts after %s and before %s "
+                    "were not read",
+                    handle, type(error).__name__, since, oldest,
+                )  # fmt: skip
+                break
+            # By id, not by trust: a sidecar not yet rebuilt ignores until_id and sends the
+            # newest page again, which must neither repeat posts nor loop.
+            page = [p for p in older if int(since) < int(p["id"]) < int(oldest)]
+            posts.update((str(post["id"]), post) for post in page)
+        if extra:
+            LOGGER.info(
+                "X source %s: first page full; %d more Grok session(s) for older posts, "
+                "%d posts in all",
+                handle, extra, len(posts),
+            )  # fmt: skip
         items = []
-        for post in sorted(posts, key=lambda p: int(p["id"])):  # oldest first, like a feed
+        for post in sorted(posts.values(), key=lambda p: int(p["id"])):  # oldest first, like a feed
             text = str(post.get("text", ""))
             kind = (
                 "reply" if post.get("is_reply") else "repost" if post.get("is_repost") else "post"

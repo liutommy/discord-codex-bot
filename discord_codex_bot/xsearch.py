@@ -68,11 +68,17 @@ async def fetch_post(config: Config, post_id: str) -> dict | None:
 
 
 async def recent_posts(
-    config: Config, handle: str, since_id: str = "", limit: int = 10
+    config: Config, handle: str, since_id: str = "", limit: int = 10, until_id: str = ""
 ) -> list[dict]:
-    if not HANDLE.fullmatch(handle) or (since_id and not is_post_id(since_id)):
+    """Up to `limit` of the account's newest posts after `since_id` — and, paging back, before
+    `until_id`. A sidecar built before until_id existed ignores it, so callers filter by id too."""
+    ids = (since_id, until_id)
+    if not HANDLE.fullmatch(handle) or any(i and not is_post_id(i) for i in ids):
         raise ValueError("not an X handle / post id")
-    answer = await _ask(config, "recent", {"handle": handle, "since_id": since_id, "limit": limit})
+    body = {"handle": handle, "since_id": since_id, "limit": limit}
+    if until_id:
+        body["until_id"] = until_id
+    answer = await _ask(config, "recent", body)
     return [post for post in answer.get("posts") or [] if isinstance(post, dict)]
 
 
