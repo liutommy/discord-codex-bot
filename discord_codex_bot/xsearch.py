@@ -4,6 +4,7 @@ Grok subscription. Everything that comes back is X content, i.e. untrusted text.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -49,9 +50,27 @@ def enabled(config: Config) -> bool:
     return bool(config.xsearch_url)
 
 
+# The sidecar runs one lookup session at a time and turns away a request that waited past its
+# own 30 s queue (429). This bot's lookups — several X links in one message, a tracking check —
+# take turns here instead, each waiting no longer than its own deadline (Codex on PR #2).
+_TURN = asyncio.Semaphore(1)
+
+
 async def _ask(config: Config, kind: str, body: dict) -> dict:
     if not config.xsearch_url:
         raise XSearchError("X lookup is not configured")
+    try:
+        async with asyncio.timeout(config.xsearch_timeout_seconds):
+            await _TURN.acquire()
+    except TimeoutError:
+        raise XSearchBusy(f"X lookup {kind} failed: still queued behind this bot's own") from None
+    try:
+        return await _post(config, kind, body)
+    finally:
+        _TURN.release()
+
+
+async def _post(config: Config, kind: str, body: dict) -> dict:
     timeout = aiohttp.ClientTimeout(total=config.xsearch_timeout_seconds)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:

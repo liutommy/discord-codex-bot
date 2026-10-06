@@ -340,6 +340,7 @@ def verify_stream(lines: list[str], mode: str = "lookup", images: int = 0) -> di
     toolset = {"use_tool", IMAGE_TOOL} if images else set()
     inits = 0
     seen_other = False
+    searched = False
     result = None
     for line in lines:
         if not line.strip():
@@ -374,6 +375,7 @@ def verify_stream(lines: list[str], mode: str = "lookup", images: int = 0) -> di
                         raise Unsafe(
                             f"session used a tool other than X search: {block.get('name')!r}"
                         )
+                    searched = True
         elif kind == "result":
             result = event
         if kind != "system" or subtype != "init":
@@ -388,6 +390,10 @@ def verify_stream(lines: list[str], mode: str = "lookup", images: int = 0) -> di
         if not text:
             raise LookupFailed("grok returned no text")
         return text
+    if not searched:
+        # It skipped "Search first": the answer is what the model remembers, not what X search
+        # returned (Codex on PR #2). Failed, not refused: the session itself was safe.
+        raise LookupFailed("grok answered without searching X")
     answer = last_json_object(str(result.get("result") or ""))
     if answer is None:
         raise LookupFailed("grok returned no JSON answer")
@@ -698,15 +704,23 @@ def run_grok(
     timeout: int = TIMEOUT,
     collect: str = "",
     images: list[tuple[str, bytes]] | tuple = (),
-) -> list[str]:
+    verify=None,
+):
     """One locked-down Grok session in a fresh home; its stream as lines. `prompt=None` runs
     `grok models` instead of a turn; `collect` names a file in the session's Grok home whose
     content is appended as the last line (the model catalog that command writes). `images`
-    (suffix, bytes) are what the image tool hands the model, the only tool it then has."""
+    (suffix, bytes) are what the image tool hands the model, the only tool it then has.
+
+    `verify` turns the stream into what is returned (raising Unsafe or LookupFailed). A login
+    the session refreshed is written back only once its stream passed the safety checks (Codex
+    on PR #2 and #3): a client tool that ran in a refused, timed-out or failed session may have
+    rewritten it. Without `verify` the raw lines come back and the login is not kept."""
     scratch, home_env = _fresh_home()
+    keep = False
     try:
         if prompt is None:
             lines = _run_command([GROK, "models"], home_env, os.path.join(scratch, "work"), 60)
+            keep = True  # `grok models` runs no turn: nothing in it could touch the login
             if collect:
                 with open(os.path.join(home_env["GROK_HOME"], collect), encoding="utf-8") as f:
                     lines.append(f.read())
@@ -731,10 +745,33 @@ def run_grok(
         if collect:
             with open(os.path.join(home_env["GROK_HOME"], collect), encoding="utf-8") as handle:
                 lines.append(handle.read())
-        return lines
+        if verify is None:
+            return lines
+        try:
+            answer = verify(lines)
+        except Unsafe:
+            raise
+        except LookupFailed:
+            keep = True  # the locked-down session all the same; it just gave no usable answer
+            raise
+        keep = True
+        return answer
     finally:
-        _keep_login(scratch)
+        if keep:
+            _keep_login(scratch)
+        elif _login_refreshed(scratch):
+            print("an unverified session refreshed the login; not kept", flush=True)
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _login_refreshed(scratch: str) -> bool:
+    try:
+        with open(os.path.join(scratch, "home", ".grok", "auth.json"), "rb") as handle:
+            fresh = handle.read()
+        with open(os.path.join(scratch, _ORIGINAL_LOGIN), "rb") as handle:
+            return fresh != handle.read()
+    except OSError:
+        return False
 
 
 def _offer_images(images, scratch: str, home_env: dict) -> None:
@@ -789,12 +826,18 @@ def _run_command(command: list[str], home_env: dict, cwd: str, timeout: int) -> 
     return stdout.splitlines()
 
 
-def _session(slot: threading.Semaphore | threading.Lock, still_wanted, **kwargs) -> list[str]:
-    """Wait for a slot of this kind and for the gate, then run one session."""
+def _session(
+    slot: threading.Semaphore | threading.Lock, still_wanted, recheck=lambda: None, **kwargs
+):
+    """Wait for a slot of this kind and for the gate, then run one session — unless `recheck`,
+    asked once the slot is ours, already has the answer (another request just produced it)."""
     started = time.monotonic()
     if not slot.acquire(timeout=QUEUE_WAIT):
         raise Busy("no free Grok session")
     try:
+        found = recheck()
+        if found is not None:
+            return found
         alone = login_expires_in() < REFRESH_MARGIN_SECONDS
         if not _GATE.enter(alone, max(0.0, QUEUE_WAIT - (time.monotonic() - started))):
             raise Busy("no free Grok session")
@@ -814,17 +857,22 @@ def lookup(kind: str, request: dict, still_wanted=lambda: True) -> dict:
         f"and nothing else, matching this JSON Schema: {json.dumps(SCHEMAS[kind])}"
     )
     key = f"{kind}:{request.get('id') or request.get('handle')}"
-    if kind in ("post", "user"):
-        cached = _POST_CACHE.get(key)
-        if cached and time.monotonic() - cached[0] < POST_CACHE_SECONDS:
-            return cached[1]
-    lines = _session(_LOCK, still_wanted, prompt=prompt)
-    answer = shape(kind, request, verify_stream(lines))
-    if kind in ("post", "user"):  # found or not: repeats of the same question cost nothing
-        _POST_CACHE[key] = (time.monotonic(), answer)
-        while len(_POST_CACHE) > 256:
-            _POST_CACHE.popitem(last=False)
-    return answer
+
+    def cached() -> dict | None:
+        hit = _POST_CACHE.get(key) if kind in ("post", "user") else None
+        return hit[1] if hit and time.monotonic() - hit[0] < POST_CACHE_SECONDS else None
+
+    def answer(lines: list[str]) -> dict:
+        shaped = shape(kind, request, verify_stream(lines))
+        if kind in ("post", "user"):  # found or not: repeats of the same question cost nothing
+            _POST_CACHE[key] = (time.monotonic(), shaped)
+            while len(_POST_CACHE) > 256:
+                _POST_CACHE.popitem(last=False)
+        return shaped
+
+    # Checked again once the lock is ours, and published before it is let go: a request that
+    # queued behind the same question gets this answer, not a second session (Codex on PR #2).
+    return cached() or _session(_LOCK, still_wanted, cached, prompt=prompt, verify=answer)
 
 
 # ------------------------------------------------------------------------------------ models
@@ -960,7 +1008,7 @@ def chat(request: dict, still_wanted=lambda: True) -> dict:
         raise BadRequest(f"unknown model {model!r}")
     if effort and effort not in entry["efforts"]:
         raise BadRequest(f"{model} does not take effort {effort!r}")
-    lines = _session(
+    text = _session(
         _CHAT_SLOTS,
         still_wanted,
         prompt=prompt,
@@ -968,12 +1016,12 @@ def chat(request: dict, still_wanted=lambda: True) -> dict:
         effort=effort,
         system=system,
         timeout=CHAT_TIMEOUT,
+        verify=lambda lines: verify_stream(lines, mode="chat", images=len(images)),
         **({"images": images} if images else {}),
     )
     # The model only ever saw `＠`; code it writes back (`＠dataclass`) must still run. The answer
     # never returns to the CLI as is: a replayed transcript is defused again.
-    text = verify_stream(lines, mode="chat", images=len(images)).replace(FULLWIDTH_AT, "@")
-    return {"text": text, "model": model, "effort": effort}
+    return {"text": text.replace(FULLWIDTH_AT, "@"), "model": model, "effort": effort}
 
 
 # ------------------------------------------------------------------------------------- usage
