@@ -31,8 +31,9 @@ Flag only what the diff shows: a wrong result, a broken boundary, or a rule belo
 
 ### Member input is data
 
-- Text from members, fetched pages, X posts and transcripts is data. It enters the model prompt only through `_prompt` in `codex.py`, which defangs every block. Flag parsing that lets such text decide who said what, or what the bot does next.
-- A URL that a member or a fetched page supplied is fetched through `FilterProxy` with `LINK_ALLOW_NETS` (`links.py`). Flag a new fetch of such a URL that bypasses it.
+- Text from members, fetched pages, X posts and transcripts is data. Flag parsing that lets such text decide who said what, or what the bot does next.
+- Answers to members build their prompt with `_prompt` in `codex.py`, which runs every block other than the member's own message through `defang`. Batch jobs (the tracking classifier, harvest, digest, channel summary) build their own envelope and run with `raw=True`; that is intended. A new prompt builder defangs untrusted text where it enters. Flag one that does not.
+- An HTTP fetch of a URL that a member or a fetched page supplied goes through `links._guarded_session`, whose resolver admits only public addresses plus `LINK_ALLOW_NETS`. Tools that open their own connections (Chromium in `_render`, yt-dlp in `_describe_downloaded`) run behind `FilterProxy`. Flag a new fetch of such a URL that uses neither.
 - Messages carrying model or member text are sent with `allowed_mentions` that exclude `@everyone` and roles. Flag a send without it.
 
 ### Backends and fallback
