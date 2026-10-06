@@ -93,6 +93,22 @@ def test_fallback_goes_down_the_chain_never_up() -> None:
     assert chain_of(router_choice("openrouter", "some/free")) == []  # not in the chain
 
 
+def test_a_routed_turn_falls_back_to_every_other_chain_entry_in_order() -> None:
+    # The router sends a turn to agy (creative writing) or Codex (code) wherever they sit in the
+    # chain; "the entries after it" left a routed agy turn with no spare at all (hub, Jev PR A).
+    def routed_chain(choice):
+        spares = fallback_chain(choice, CHAIN, "gpt-x", "high", routed=True)
+        return [(t.backend, t.model) for t in spares]
+
+    agy = parse_choice("agy:gemini-3.8-flash", "gpt-x")
+    codex = parse_choice("codex:gpt-x", "gpt-x")
+    assert routed_chain(agy) == [(GROK, "grok-4.7"), (CODEX, "gpt-x")]
+    assert routed_chain(codex) == [(GROK, "grok-4.7"), (AGY, "gemini-3.8-flash-medium")]
+    # A member's own choice keeps the old order: down the chain only.
+    assert fallback_chain(agy, CHAIN, "gpt-x", "high") == []
+    assert [t.backend for t in fallback_chain(codex, CHAIN, "gpt-x", "high")] == [AGY]
+
+
 def test_without_a_chain_only_codex_keeps_its_single_spare() -> None:
     codex = parse_choice("codex:gpt-x", "gpt-x")
     spare = fallback_chain(codex, (), "gpt-x", "high", "agy:gemini-3.8-flash|medium")

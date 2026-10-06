@@ -9,7 +9,7 @@ from pathlib import Path
 import discord
 
 from discord_codex_bot import embedfix
-from discord_codex_bot.backends import Resolved
+from discord_codex_bot.backends import BackendUnavailable, Resolved
 from discord_codex_bot.bot import (
     DiscordCodexClient,
     Fallback,
@@ -2348,6 +2348,85 @@ async def test_skipping_grok_before_the_turn_is_a_fallback_too(client, monkeypat
     agy.replies = ['<search scope="user" query="綠茶"/>', "答案"]
     await client._answer("q", [], GUILD, USER, resume="gk-old")
     assert "resume" not in agy.calls[1][2] and agy.calls[2][2]["resume"] == "t2"
+
+
+ROUTED_CHAIN = ("grok:grok-4.7|medium", "codex", "agy:gemini-3.8-flash|medium")
+
+
+async def test_a_routed_agy_turn_falls_back_to_grok_then_codex(client, monkeypatch) -> None:
+    # A turn the Bot routed to agy may fall *into* Grok (owner: X lookups may use the whole
+    # weekly quota now), down the whole chain in order; a member's own agy has no spare.
+    grok_spare, codex = FakeBackend("Grok 備援"), FakeBackend("Codex 備援")
+
+    async def down(*_args, **_kw):
+        raise BackendUnavailable("agy is out")
+
+    async def usable() -> bool:
+        return True
+
+    monkeypatch.setattr(bot_module, "run_agy", down)
+    monkeypatch.setattr(bot_module.grok, "run_grok", grok_spare)
+    monkeypatch.setattr(bot_module, "run_codex", codex)
+    monkeypatch.setattr(client, "_grok_usable", usable)
+    client.config = replace(client.config, model_chain=ROUTED_CHAIN)
+    routed = Resolved("agy", "claude-sonnet-4-6", "")
+    result = await client._answer("q", [], GUILD, USER, routed=routed)
+    assert result.text == "Grok 備援" and grok_spare.calls[0][1] == ("grok-4.7",)
+    assert codex.calls == [] and result.thread_id == ""
+
+    async def grok_down(*_args, **_kw):
+        raise BackendUnavailable("grok is out")
+
+    monkeypatch.setattr(bot_module.grok, "run_grok", grok_down)
+    result = await client._answer("q", [], GUILD, USER, routed=routed)
+    assert result.text == "Codex 備援" and len(codex.calls) == 1
+
+    client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == FAILURE_MESSAGE.format(prefix=client.config.command_prefix)
+    assert len(codex.calls) == 1  # the member chose agy: no spare, as before
+
+
+async def test_a_routed_turn_skips_grok_as_a_spare_when_grok_is_not_usable(
+    client, monkeypatch
+) -> None:
+    # Past the weekly chat share or with the breaker open, Grok is no spare for a routed turn
+    # either: it goes on to the next entry.
+    grok_spare, agy = FakeBackend("Grok 備援"), FakeBackend("agy 備援")
+
+    async def down(*_args, **_kw):
+        raise CodexUsageLimit("You've hit your usage limit.")
+
+    async def not_now() -> bool:
+        return False
+
+    monkeypatch.setattr(bot_module, "run_codex", down)
+    monkeypatch.setattr(bot_module.grok, "run_grok", grok_spare)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    monkeypatch.setattr(client, "_grok_usable", not_now)
+    client.config = replace(client.config, model_chain=ROUTED_CHAIN)
+    result = await client._answer("q", [], GUILD, USER, routed=Resolved("codex", "gpt-x", "high"))
+    assert result.text == "agy 備援" and grok_spare.calls == []
+    assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)
+
+
+async def test_a_members_own_codex_still_never_falls_into_grok(client, monkeypatch) -> None:
+    grok_spare, agy = FakeBackend("Grok 備援"), FakeBackend("agy 備援")
+
+    async def down(*_args, **_kw):
+        raise CodexUsageLimit("You've hit your usage limit.")
+
+    async def usable() -> bool:
+        return True
+
+    monkeypatch.setattr(bot_module, "run_codex", down)
+    monkeypatch.setattr(bot_module.grok, "run_grok", grok_spare)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    monkeypatch.setattr(client, "_grok_usable", usable)
+    client.config = replace(client.config, model_chain=ROUTED_CHAIN)
+    client.memory.set_model(GUILD, USER, f"codex:{client.config.codex_model}|high")
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "agy 備援" and grok_spare.calls == []
 
 
 async def test_one_refused_session_is_not_followed_by_a_recovery_notice(client) -> None:

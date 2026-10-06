@@ -40,6 +40,7 @@ from .backends import (
     ORCAROUTER,
     ROUTER_BACKENDS,
     BackendUnavailable,
+    ModelChoice,
     Resolved,
     choices,
     fallback_chain,
@@ -865,20 +866,27 @@ class DiscordCodexClient(discord.Client):
         on_video_slow: Callable[[], Awaitable[None]] | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
         channel_id: int | None = None,
+        routed: Resolved | None = None,
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
-        `on_delta` receives the accumulated answer while a backend streams it (agy, routers)."""
+        `on_delta` receives the accumulated answer while a backend streams it (agy, routers).
+        `routed` is a target the Bot picked for a member who chose no model: it replaces the
+        member's backend and falls back along the whole chain (see `fallback_chain`)."""
         stored = self._stored(guild_id, user_id)
         choice = self._choice(stored)
         target = resolve(
             choice, effort or split_stored(stored)[1] or self.config.codex_reasoning_effort
         )
+        if routed is not None:
+            target = routed
+            choice = ModelChoice("", "", routed.backend, routed.model)  # only its backend counts
         spares = fallback_chain(
             choice,
             self.config.model_chain,
             self.config.codex_model,
             self.config.codex_reasoning_effort,
             self.config.codex_fallback_model,
+            routed=routed is not None,
         )
         if (
             target.backend == GROK
@@ -897,8 +905,22 @@ class DiscordCodexClient(discord.Client):
             # under the Grok model (Grok would later resume a foreign id and start over).
             LOGGER.info("Skipping Grok for this turn; answering with %s", spares[0].model)
             target, spares, fell_back = spares[0], spares[1:], True
-        spares = [spare for spare in spares if spare.backend != GROK]  # never fall *into* Grok
+        if routed is None:
+            # A member's own model never falls *into* Grok: the weekly quota it would spend is
+            # shared with X lookups. A routed turn may (owner, 2026-10-06: X lookups may now
+            # use the whole weekly quota, so the reserve is no longer absolute), but only past
+            # the same `_grok_usable` gate the Grok default turn goes through (`next_spare`).
+            spares = [spare for spare in spares if spare.backend != GROK]
         drop_resume = fell_back  # only the caller's id is foreign; later recall rounds chain
+
+        async def next_spare():
+            nonlocal spares
+            while spares:
+                spare, spares = spares[0], spares[1:]
+                if spare.backend != GROK or await self._grok_usable():
+                    return spare
+                LOGGER.info("Skipping Grok as a spare for this turn")
+            return None
 
         async def run_on(via, text: str, **kw) -> CodexResult:
             if via.backend == GROK:
@@ -930,7 +952,8 @@ class DiscordCodexClient(discord.Client):
                 try:
                     return await run_on(target, text, **kw)
                 except BackendUnavailable as unavailable:
-                    if not spares:
+                    spare = await next_spare()
+                    if spare is None:
                         raise
                     # Answer on the next backend for the rest of this request. Switching
                     # mid-request keeps the recall loop's resume ids on one backend, since a
@@ -940,10 +963,10 @@ class DiscordCodexClient(discord.Client):
                         target.backend,
                         type(unavailable).__name__,
                         unavailable,
-                        spares[0].model,
+                        spare.model,
                     )
                     failed = target.backend
-                    target, spares, fell_back = spares[0], spares[1:], True
+                    target, fell_back = spare, True
                     self._last_fallback = Fallback(time.time(), unavailable, failed, target)
                     if isinstance(unavailable, CodexUnauthorized):
                         # Quota comes back by itself; a lost login does not. Tell the operator
