@@ -10,7 +10,7 @@ import sqlite3
 import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -257,7 +257,12 @@ MAX_SLOT_BATCHES = 10
 # A failed fixed-time judgement retries after its interval, but never later than this: a watch
 # that once ran every 1440 minutes must not wait a day to retry its time.
 RETRY_MAX_MINUTES = 60
-_TIME = re.compile(r"(?<!\d)([01]?\d|2[0-3])[:：]?([0-5]\d)(?!\d)")
+# A compact "1201" must stand on its own: touching - / . or 年 it is part of a date, and
+# 「2026-10-01 12:01」 would otherwise also schedule 20:26 (Codex on PR #15).
+_TIME = re.compile(
+    r"(?<!\d)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)"
+    r"|(?<![\d\-/.])([01]?\d|2[0-3])([0-5]\d)(?![\d\-/.年])"
+)
 # Cancelling used to be slash-only, on the grounds that dropping a watch throws away its
 # baseline and rebuilding one costs a classification pass. That cost is the member's to spend —
 # the slash command already lets them spend it — and the asymmetry had a price of its own:
@@ -278,7 +283,8 @@ MAX_MESSAGE_CHARS = 600
 # backlog in one prompt, and one item missing from the answer threw every judgement away.
 MAX_CLASSIFY_BATCH = 30
 # Items the Bot first saw longer ago than this are no longer worth a notification: they leave
-# the queue unjudged instead of piling up behind a watch that cannot keep pace.
+# the queue unjudged instead of piling up behind a watch that cannot keep pace. An interval
+# watch keeps its items for twice its interval when that is longer (see _pending_minutes).
 PENDING_MAX_HOURS = 48
 # How the Bot's page reader hands back a link. Measured on a real index rather than assumed:
 # the URL sits alone on its own line and the headline is on the next one, so the gap between
@@ -291,10 +297,31 @@ WEB_LINK = re.compile(r"<(https?://[^>\s]+)>\s{0,4}([^\n<>]{0,160})")
 TrackAdd = tuple[str, str, tuple[int, ...], int, tuple[str, ...] | None]
 
 
+def _pending_minutes() -> str:
+    """How long an item may wait for its watch `w`, in minutes, as SQL. "Every 3 days" against
+    a flat 48 hours expired everything before the watch was ever judged (Codex on PR #6): an
+    interval watch keeps its items for two intervals, one missed pass of slack. Unchanged up to
+    a daily interval, and for fixed-time watches, which are judged every day."""
+    floor = PENDING_MAX_HOURS * 60
+    return f"(CASE WHEN w.times != '' THEN {floor} ELSE MAX({floor}, 2 * w.interval_minutes) END)"
+
+
+def _prune_floor(keep_days: int) -> str:
+    """Nothing observed before the prune horizon is pending or expirable: its decision may have
+    been pruned, and it would be judged or logged as `expired` all over again (Codex on PR #9).
+    A decision is never older than its item, so this keeps every pruned one gone."""
+    if keep_days <= 0:
+        return ""
+    return (datetime.now(UTC) - timedelta(days=keep_days)).isoformat()
+
+
 def parse_times(text: str) -> tuple[str, ...]:
     """Times of day as sorted "HH:MM": 「12:01,20:01」, 「1201 2001」 and 「9:30、21:00」 all work.
     Anything that is not a time is ignored; at most MAX_TRACK_TIMES are kept."""
-    found = {f"{int(hour):02d}:{minute}" for hour, minute in _TIME.findall(text)}
+    found = {
+        f"{int(hour or compact_hour):02d}:{minute or compact_minute}"
+        for hour, minute, compact_hour, compact_minute in _TIME.findall(text)
+    }
     return tuple(sorted(found))[:MAX_TRACK_TIMES]
 
 
@@ -674,12 +701,14 @@ class TrackerStore:
         with self._connect() as connection:
             return bool(connection.execute(query, params).rowcount)
 
-    def consume_slots(self, now: float | None = None) -> None:
+    def consume_slots(self, now: float | None = None, unread: Collection[int] = ()) -> None:
         """A fixed time that came and went with nothing to judge is used up all the same:
-        otherwise an item arriving at 13:00 would find 12:01 still owed and be judged at once."""
+        otherwise an item arriving at 13:00 would find 12:01 still owed and be judged at once.
+        Not when the watch's source (in `unread`) could not be read this pass: nothing to judge
+        then says nothing, and what the next pass finds would wait a day (Codex on PR #15)."""
         now = time.time() if now is None else now
         for watch in self.watches(active_only=True):
-            if watch.times and watch_due(watch, now):
+            if watch.times and watch.source_id not in unread and watch_due(watch, now):
                 self.mark_classified(watch.id)
 
     def seconds_to_next_slot(self, now: float | None = None) -> float | None:
@@ -748,27 +777,28 @@ class TrackerStore:
         return [self._item(row) for row in rows]
 
     def pending_by_watch(
-        self, watch_id: int | None = None
+        self, watch_id: int | None = None, keep_days: int = 0
     ) -> list[tuple[Watch, list[ContentItem]]]:
         """Undecided items published after the watch was created, at most MAX_CLASSIFY_BATCH per
-        watch (the newest; oldest first within the batch), none seen more than PENDING_MAX_HOURS
-        ago. The first sight of a source is its baseline and is never classified: a new watch is
-        about what happens from now on. Only watches due now, unless `watch_id` asks for the
-        next batch of one watch already being judged."""
-        cutoff = (datetime.now(UTC) - timedelta(hours=PENDING_MAX_HOURS)).isoformat()
+        watch (the newest; oldest first within the batch), none seen longer ago than the watch
+        keeps them (_pending_minutes) or before the prune horizon. The first sight of a source
+        is its baseline and is never classified: a new watch is about what happens from now on.
+        Only watches due now, unless `watch_id` asks for the next batch of one watch already
+        being judged."""
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT w.*, i.id AS item_id, i.external_id AS item_external_id,
+                f"""SELECT w.*, i.id AS item_id, i.external_id AS item_external_id,
                           i.url AS item_url, i.title AS item_title,
                           i.description AS item_description, i.published_at AS item_published_at,
                           i.kind AS item_kind, i.live_status AS item_live_status,
                           i.baseline AS item_baseline, i.raw_json AS item_raw_json
                    FROM watches w JOIN items i ON i.source_id=w.source_id
                    LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
-                   WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id
-                     AND i.baseline=0 AND i.observed_at >= ? AND (? IS NULL OR w.id = ?)
+                   WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id AND i.baseline=0
+                     AND julianday(i.observed_at) >= julianday(?) - {_pending_minutes()} / 1440.0
+                     AND i.observed_at >= ? AND (? IS NULL OR w.id = ?)
                    ORDER BY w.id, i.published_at, i.id""",
-                (cutoff, watch_id, watch_id),
+                (_utc_now(), _prune_floor(keep_days), watch_id, watch_id),
             ).fetchall()
         groups: dict[int, tuple[Watch, list[ContentItem]]] = {}
         now = time.time()
@@ -798,19 +828,20 @@ class TrackerStore:
             )
         return [(watch, items[-MAX_CLASSIFY_BATCH:]) for watch, items in groups.values()]
 
-    def expire_stale(self) -> dict[int, int]:
-        """Close out items no watch judged within PENDING_MAX_HOURS: a decision with status
+    def expire_stale(self, keep_days: int = 0) -> dict[int, int]:
+        """Close out items no watch judged in time (_pending_minutes): a decision with status
         `expired` (never notified) instead of a silent drop, so the log behind a watch shows
-        them and the count reaches the container log. {watch id: items expired}."""
-        cutoff = (datetime.now(UTC) - timedelta(hours=PENDING_MAX_HOURS)).isoformat()
+        them and the count reaches the container log. Items from before the prune horizon are
+        left alone. {watch id: items expired}."""
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT w.id AS watch_id, i.id AS item_id
+                f"""SELECT w.id AS watch_id, i.id AS item_id, {_pending_minutes()} AS minutes
                    FROM watches w JOIN items i ON i.source_id=w.source_id
                    LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
-                   WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id
-                     AND i.baseline=0 AND i.observed_at < ?""",
-                (cutoff,),
+                   WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id AND i.baseline=0
+                     AND julianday(i.observed_at) < julianday(?) - {_pending_minutes()} / 1440.0
+                     AND i.observed_at >= ?""",
+                (_utc_now(), _prune_floor(keep_days)),
             ).fetchall()
             expired: dict[int, int] = defaultdict(int)
             for row in rows:
@@ -822,7 +853,7 @@ class TrackerStore:
                     (
                         row["watch_id"],
                         row["item_id"],
-                        f"超過 {PENDING_MAX_HOURS} 小時沒輪到判斷",
+                        f"超過 {row['minutes'] // 60} 小時沒輪到判斷",
                         _utc_now(),
                     ),
                 )
@@ -1800,23 +1831,29 @@ async def run_tracking_once(
     fetcher: Fetcher,
     classifier: Classifier,
     deliverer: Deliverer,
+    keep_days: int = 0,
 ) -> dict[str, int]:
-    """Fetch unique sources, batch each watch once, persist, then drain the durable outbox."""
+    """Fetch unique sources, batch each watch once, persist, then drain the durable outbox.
+    `keep_days` is the prune horizon: nothing older is judged or expired again."""
     stats = defaultdict(int)
+    unread: set[int] = set()  # failed, or not checked (an X source between its own checks)
     for source in store.active_sources():
         try:
             result = await fetcher(source)
             stats["new_items"] += len(store.ingest(source, result))
+            if not result.checked:
+                unread.add(source.id)
         except Exception:
+            unread.add(source.id)
             stats["source_failures"] += 1
             LOGGER.exception("Social source %s/%s failed", source.provider, source.external_id)
         finally:
             stats["sources"] += 1
-    for watch_id, count in store.expire_stale().items():
+    for watch_id, count in store.expire_stale(keep_days).items():
         # A watch whose source outpaces MAX_CLASSIFY_BATCH per interval loses the oldest items.
         LOGGER.warning("Watch %s: %d item(s) expired unjudged", watch_id, count)
         stats["expired"] += count
-    for watch, items in store.pending_by_watch():
+    for watch, items in store.pending_by_watch(keep_days=keep_days):
         source = store.get_source(watch.source_id)
         label = ""
         if source is not None:
@@ -1839,12 +1876,12 @@ async def run_tracking_once(
             stats["decisions"] += len(decisions)
             if not watch.times or not decisions:
                 break  # an interval watch takes one batch a pass; no progress, no next batch
-            more = store.pending_by_watch(watch.id)
+            more = store.pending_by_watch(watch.id, keep_days)
             if not more:
                 break
             items = more[0][1]
         else:
-            if watch.times and store.pending_by_watch(watch.id):
+            if watch.times and store.pending_by_watch(watch.id, keep_days):
                 LOGGER.warning(
                     "Watch %s: items still pending after %d batches at its time",
                     watch.id,
@@ -1856,7 +1893,7 @@ async def run_tracking_once(
             # Failures of an interval watch included, so a watch that keeps erroring waits out
             # its interval instead of burning quota on every fetch pass.
             store.mark_classified(watch.id)
-    store.consume_slots()
+    store.consume_slots(unread=unread)
     for message in store.pending_outbox():
         try:
             await deliverer(message)
@@ -1881,7 +1918,7 @@ async def tracking_loop(
     pruned_at = 0.0
     while True:
         try:
-            stats = await run_tracking_once(store, fetcher, classifier, deliverer)
+            stats = await run_tracking_once(store, fetcher, classifier, deliverer, keep_days)
             # A silent success is how a total provider outage went unnoticed for half a day:
             # only failures were ever written down, so the only way to tell the pass had run
             # was to read the database. Idle passes stay quiet; anything that actually happened

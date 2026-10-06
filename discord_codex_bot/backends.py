@@ -195,8 +195,11 @@ def resolve(choice: ModelChoice, effort: str) -> Resolved:
         from . import grok
 
         model = grok.cached_model(choice.family)
-        if model is None or not model.efforts:
+        if model is None:
             return Resolved(GROK, choice.family, effort)  # the sidecar validates it
+        if not model.efforts:
+            # No menu: the sidecar refuses any effort, with a 400 that does not fall back.
+            return Resolved(GROK, choice.family, "")
         return Resolved(
             GROK,
             choice.family,

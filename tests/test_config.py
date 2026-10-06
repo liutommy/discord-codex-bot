@@ -143,3 +143,12 @@ def test_link_allow_nets_default_empty_and_never_open_a_lan() -> None:
             load_config({**base, "LINK_ALLOW_NETS": bad})
     with pytest.raises(ValueError, match="invalid network"):
         load_config({**base, "LINK_ALLOW_NETS": "not-a-net"})
+
+
+def test_env_example_does_not_promise_a_shadow_mode() -> None:
+    # Watches are live from the moment they are made; the example told operators each new
+    # watch started review-only until a /track live:<id> that does not exist (Codex on PR #4).
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / ".env.example").read_text("utf-8")
+    assert "shadow" not in text.lower() and "live:" not in text

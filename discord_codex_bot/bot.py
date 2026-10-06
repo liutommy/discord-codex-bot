@@ -34,6 +34,7 @@ from .attachments import (
 from .backends import (
     AGY,
     BACKEND_LABELS,
+    CODEX,
     GROK,
     OPENROUTER,
     ORCAROUTER,
@@ -42,7 +43,6 @@ from .backends import (
     Resolved,
     choices,
     fallback_chain,
-    fallback_target,
     grok_choice,
     parse_choice,
     resolve,
@@ -687,13 +687,15 @@ class DiscordCodexClient(discord.Client):
         if source.provider != "ruten":
             return await fetcher.fetch(source)
         # Ruten is read through an undocumented API: a change there must reach the operator,
-        # not just the log, or a broken source looks exactly like a quiet store.
+        # not just the log, or a broken source looks exactly like a quiet store. Counted per
+        # source: one shared streak was reset by any healthy store (Codex on PR #7).
+        alert_key = f"露天追蹤 {source.external_id}"
         try:
             result = await fetcher.fetch(source)
         except (ProviderError, aiohttp.ClientError, TimeoutError) as error:
-            await self.alerts.record_failure("露天追蹤", str(error) or type(error).__name__)
+            await self.alerts.record_failure(alert_key, str(error) or type(error).__name__)
             raise
-        await self.alerts.record_success("露天追蹤")
+        await self.alerts.record_success(alert_key)
         return result
 
     async def _classify_tracking(self, prompt: str) -> str:
@@ -2243,11 +2245,17 @@ class DiscordCodexClient(discord.Client):
 
         codex = await codex_login_status(self.config)
         limits = await probe_rate_limits(self.config)
-        spare = fallback_target(
-            self.config.codex_fallback_model,
+        # Where a Codex turn goes right now, worked out as _answer does: from MODEL_CHAIN, not
+        # just CODEX_FALLBACK_MODEL, and never into Grok (Codex on PR #3).
+        codex_choice = parse_choice(f"{CODEX}:{self.config.codex_model}", self.config.codex_model)
+        spares = fallback_chain(
+            codex_choice,
+            self.config.model_chain,
             self.config.codex_model,
             self.config.codex_reasoning_effort,
+            self.config.codex_fallback_model,
         )
+        spare = next((target for target in spares if target.backend != GROK), None)
         if limits is not None:
             codex += (
                 f" · 額度 5h {limits.primary_used_percent:.0f}%"

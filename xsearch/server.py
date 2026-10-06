@@ -101,7 +101,11 @@ _CHAT_SLOTS = threading.BoundedSemaphore(CHAT_PARALLEL)
 _AUTH_LOCK = threading.Lock()  # every read and write of the login file
 _POST_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 TWITTER_EPOCH_MS = 1288834974657
-SNOWFLAKE_MIN = 1 << 32  # ids below this predate snowflakes (2006-2010) and carry no time
+# Ids below this predate snowflakes (2006 to November 2010) and carry no time. The sequential
+# ids ran to about 29.7 billion, well past 2**32, which used to be the cut (Codex on PR #2). A
+# snowflake this small would date from the first ~4 minutes after its 2010-11-04 epoch; either
+# way it is far too small to move a cursor.
+SNOWFLAKE_MIN = 1 << 40
 
 POST_ID = re.compile(r"[0-9]{1,19}")  # fullmatch only: `$` would let a trailing newline through
 HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
@@ -414,7 +418,7 @@ def _id_matches_time(post_id: str, created: str) -> bool:
     tracking cursor and hide every real post behind it."""
     value = int(post_id)
     if value < SNOWFLAKE_MIN:
-        return True  # pre-2010 ids carry no time; too small to ever move a cursor forward
+        return True  # sequential ids carry no time; too small to ever move a cursor forward
     id_ms = (value >> 22) + TWITTER_EPOCH_MS
     created_ms = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp() * 1000
     now_ms = time.time() * 1000
@@ -455,7 +459,9 @@ def shape(kind: str, request: dict, answer: dict) -> dict:
         return {"found": post is not None, "post": post}
     if kind == "user":
         handle = str(request["handle"]).lstrip(AT_SIGNS)
-        same = str(answer.get("handle", handle)).lstrip(AT_SIGNS).lower() == handle.lower()
+        # No handle confirms nothing: defaulting to the requested one made {"exists": true}
+        # alone a match (Codex on PR #2).
+        same = str(answer.get("handle") or "").lstrip(AT_SIGNS).lower() == handle.lower()
         exists = answer.get("exists") is True and same
         return {
             "exists": exists,

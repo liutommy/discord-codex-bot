@@ -1208,3 +1208,87 @@ def test_a_failed_fixed_time_retries_within_an_hour_even_on_a_long_interval() ->
     )
     assert not watch_due(watch, taipei(2, 12, 30))
     assert watch_due(watch, taipei(2, 13, 3))
+
+
+# ----- Codex review, second batch -------------------------------------------------------------
+
+from datetime import UTC as _UTC  # noqa: E402
+from datetime import timedelta as _td  # noqa: E402
+
+
+def _ago(**delta) -> str:
+    return (_dt.now(_UTC) - _td(**delta)).isoformat()
+
+
+def test_a_long_interval_watch_keeps_its_items_until_it_is_due(tmp_path: Path) -> None:
+    # "Every 3 days" against a fixed 48-hour cutoff: everything expired before the watch was
+    # ever judged (Codex on PR #6).
+    path, store, watch = _flooded(tmp_path, 3)
+    store.set_watch_interval(watch.id, 3 * 1440)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE items SET observed_at=? WHERE external_id='n000'", (_ago(hours=60),))
+        db.execute("UPDATE items SET observed_at=? WHERE external_id='n001'", (_ago(days=7),))
+    assert store.expire_stale() == {watch.id: 1}  # only past twice its interval
+    [(_, items)] = store.pending_by_watch()
+    assert [i.external_id for i in items] == ["n000", "n002"]
+
+
+async def test_pruned_history_is_not_expired_all_over_again(tmp_path: Path, monkeypatch) -> None:
+    # Pruning drops old decisions but keeps their items; the next pass found those items
+    # undecided and logged every one of them as `expired` again (Codex on PR #9).
+    path, store, _watch = _flooded(tmp_path, 1)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE items SET observed_at=?", (_ago(days=100),))
+        db.execute(
+            """INSERT INTO decisions(watch_id, item_id, notify, confidence, category, reason,
+                                     matched_topics_json, status, message, created_at)
+               SELECT 1, id, 0, 0.9, 'x', 'x', '[]', 'decided', '', ? FROM items
+               WHERE external_id='n000'""",
+            (_ago(days=100),),
+        )
+    assert store.prune(90)["decisions"] == 1
+
+    async def sleep(_seconds):
+        raise asyncio.CancelledError  # one pass is enough
+
+    async def classify(prompt):
+        return classifier_answer(prompt, notify=False)
+
+    monkeypatch.setattr(tracking.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await tracking.tracking_loop(store, _nothing_new, classify, _no_delivery, 60, 90)
+    assert store.decisions() == []  # pruned, and not re-created by the next pass
+
+
+def test_a_date_is_not_read_as_a_time() -> None:
+    # 「2026-10-01 12:01」 also scheduled the watch at 20:26 every day (Codex on PR #15).
+    assert parse_times("2026-10-01 12:01") == ("12:01",)
+    assert parse_times("2026/10/01 12:01") == ("12:01",)
+    assert parse_times("2026年10月1日 1201") == ("12:01",)
+    assert parse_times("1201 2001") == ("12:01", "20:01")  # compact times on their own still work
+
+
+async def test_a_failed_fetch_does_not_use_up_a_fixed_time(tmp_path, monkeypatch) -> None:
+    # A due slot with nothing pending was consumed even when its source could not be read, so
+    # what the next pass found waited for tomorrow's time (Codex on PR #15).
+    store, _watch, clock = _slot_store(tmp_path, monkeypatch, 0)
+
+    async def classify(prompt):
+        return classifier_answer(prompt, notify=False)
+
+    async def broken(_source):
+        raise ProviderError("down")
+
+    async def unread(source):
+        return FetchResult((), source.cursor, dict(source.state), checked=False)
+
+    async def fresh(source):
+        return FetchResult((content(source.id, "new", "商品"),), "new")
+
+    for fetch in (broken, unread):
+        await tracking.run_tracking_once(store, fetch, classify, _no_delivery)
+        assert watch_due(store.watches()[0], clock[0])  # still owed
+    clock[0] = taipei(2, 12, 20)
+    stats = await tracking.run_tracking_once(store, fresh, classify, _no_delivery)
+    assert stats["decisions"] == 1
+    assert not watch_due(store.watches()[0], clock[0])
