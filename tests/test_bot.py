@@ -2371,3 +2371,26 @@ async def test_one_refused_session_is_not_followed_by_a_recovery_notice(client) 
     await client._grok_refused(RuntimeError("thrice"))  # breaker: Grok off for an hour
     await client.alerts.record_success("grok")
     assert len(sent) == 3 and "恢復" in sent[-1]
+
+
+def test_model_text_cannot_ping_everyone_roles_or_users(config: Config, tmp_path) -> None:
+    # The answer paths (followup.send, message.reply, placeholder.edit) pass no allowed_mentions
+    # of their own, so the client's default is what Discord gets (hub on PR #25): a model that
+    # writes @everyone, a role or a member mention must not ping anyone. Replying still pings
+    # the member who asked, as before.
+    from dataclasses import replace
+
+    from discord.http import handle_message_parameters
+
+    client = DiscordCodexClient(replace(config, codex_home=tmp_path / "codex"))
+    text = "@everyone @here <@&123456789012345678> <@234567890123456789>"
+    sent = handle_message_parameters(
+        content=text, previous_allowed_mentions=client.allowed_mentions
+    )
+    assert sent.payload["allowed_mentions"] == {"parse": [], "replied_user": True}
+    # A call that sets its own (the reminder's user ping) still gets exactly that.
+    own = discord.AllowedMentions(users=True, everyone=False, roles=False)
+    sent = handle_message_parameters(
+        content=text, allowed_mentions=own, previous_allowed_mentions=client.allowed_mentions
+    )
+    assert sent.payload["allowed_mentions"]["parse"] == ["users"]
