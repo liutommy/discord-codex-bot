@@ -9,8 +9,10 @@ This repository contains a private Discord gateway to a subscription-authenticat
 - Keep Discord authorization based on an explicit guild ID allowlist.
 - Do not add per-user authorization unless the owner requests it.
 - Never commit Discord tokens, Codex credentials, `.env`, `.venv`, or volume contents.
-- Keep the Codex model operator-controlled; Discord may only pick the reasoning effort from the
-  allowlist in `config.py`, which must match what `codex debug models` reports for that model.
+- The operator sets `CODEX_MODEL`, `DEFAULT_MODEL` and `MODEL_CHAIN`; Discord cannot change them.
+  A member's `/model` picks only from the catalog in `backends.choices` (the operator's Codex
+  model, the Grok catalog, the Antigravity families) or a router model, with an effort that
+  model allows.
 - Keep `/codex` and `@mention` on one shared pipeline (access → validate → queue → `run_codex`).
 - Spawn Codex without inheriting Discord secrets.
 - Preserve the read-only container and disabled Codex execution tools unless a reviewed use case requires them.
