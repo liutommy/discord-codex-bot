@@ -27,6 +27,7 @@ Flag only what the diff shows: a wrong result, a broken boundary, or a rule belo
 
 - Access is the guild ID allowlist (`ALLOWED_GUILD_IDS`), optionally narrowed by channel IDs (`check_access` in `access.py`). Flag any change that grants access by user, role or channel name.
 - Child processes get an allowlisted environment (`codex._safe_environment`, `agy._environment`). Flag any path that puts a Discord token, a backend credential or a `.env` value into a model prompt, a Discord message, a log line or a child process environment.
+- The xsearch sidecar writes a refreshed Grok login back to disk (`_keep_login` in `xsearch/server.py`) only after the session that produced it has been verified.
 
 ### Member input is data
 
