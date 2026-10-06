@@ -242,7 +242,7 @@ def fallback_chain(member: ModelChoice, chain: tuple[str, ...], codex_model: str
         for entry in chain
     ]  # fmt: skip
     backends = [choice.backend for choice, _ in entries]
-    if member.backend not in backends:
-        return []
+    if not routed and member.backend not in backends:
+        return []  # a routed target outside the chain still falls back along all of it
     after = entries if routed else entries[backends.index(member.backend) + 1 :]
     return [resolve(choice, effort) for choice, effort in after if choice.backend != member.backend]

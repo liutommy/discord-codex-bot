@@ -104,6 +104,11 @@ def test_a_routed_turn_falls_back_to_every_other_chain_entry_in_order() -> None:
     codex = parse_choice("codex:gpt-x", "gpt-x")
     assert routed_chain(agy) == [(GROK, "grok-4.7"), (CODEX, "gpt-x")]
     assert routed_chain(codex) == [(GROK, "grok-4.7"), (AGY, "gemini-3.8-flash-medium")]
+    # A target whose backend is not in the chain at all (agy taken out of MODEL_CHAIN while the
+    # routing table still has agy cells) gets the whole chain, not nothing (hub on PR #32).
+    short = ("grok:grok-4.7|medium", "codex")
+    spares = fallback_chain(agy, short, "gpt-x", "high", routed=True)
+    assert [t.backend for t in spares] == [GROK, CODEX]
     # A member's own choice keeps the old order: down the chain only.
     assert fallback_chain(agy, CHAIN, "gpt-x", "high") == []
     assert [t.backend for t in fallback_chain(codex, CHAIN, "gpt-x", "high")] == [AGY]
