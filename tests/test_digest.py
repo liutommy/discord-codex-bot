@@ -531,3 +531,15 @@ def test_a_legacy_thread_two_members_were_on_feeds_nobodys_digest(
     threads = ThreadStore(config.codex_home / "threads.json", 3600, "v1")
     threads.remember("1:2:4", "T")
     assert conversations(config, threads, since=NOW - 7 * DAY) == {1: {3: [(2, ["我叫小華"])]}}
+
+
+def test_a_one_member_thread_spanning_the_deploy_keeps_their_older_words(
+    tmp_path: Path, config: Config
+) -> None:
+    # Untagged turns from before the deploy next to tagged ones from after: when only one member
+    # was ever on the thread, the untagged ones are theirs too, not dropped (review on PR #27).
+    config, _ = _setup(tmp_path, config)
+    _tagged_thread(config, "T", [(None, "我最喜歡抹茶，已經喝了十年"), (3, "今天天氣不錯")])
+    record_retired(config, "1:2:3", "T", now=NOW - DAY)
+    found = conversations(config, None, since=NOW - 7 * DAY)
+    assert found == {1: {3: [(2, ["我最喜歡抹茶，已經喝了十年", "今天天氣不錯"])]}}

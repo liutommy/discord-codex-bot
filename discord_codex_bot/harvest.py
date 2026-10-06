@@ -210,16 +210,20 @@ def _parse(answer: str, turns: list[Turn]) -> tuple[list[tuple[str, str]], int]:
     return notes, len(proposed)
 
 
-def _attribute(turns: list[Turn], user_id: int) -> list[Turn]:
+def _attribute(turns: list[Turn], user_id: int, shared: bool = False) -> list[Turn]:
     """Turns as seen by the member being harvested: their own stay "user", every other member's
-    become "other_member" (context, never evidence). Once a thread has a tagged turn, an untagged
-    one cannot be anybody's in particular, so it is "other_member" too."""
+    become "other_member" (context, never evidence). An untagged turn next to tagged ones (a
+    thread that spans the deploy) is the member's only when nobody else was ever on the thread;
+    otherwise it cannot be anybody's in particular and is "other_member" too."""
     if all(turn.speaker is None for turn in turns):
         return turns
+    alone = not shared and {t.speaker for t in turns if t.speaker is not None} == {user_id}
+
+    def theirs(turn: Turn) -> bool:
+        return turn.speaker == user_id or (turn.speaker is None and alone)
+
     return [
-        replace(turn, role="other_member")
-        if turn.role == "user" and turn.speaker != user_id
-        else turn
+        replace(turn, role="other_member") if turn.role == "user" and not theirs(turn) else turn
         for turn in turns
     ]
 
@@ -265,7 +269,7 @@ async def harvest_thread(
             str(user_id)[-4:],
         )
         return 0
-    turns = _recent_turns(_attribute(turns, user_id))
+    turns = _recent_turns(_attribute(turns, user_id, shared))
     users = sum(turn.role == "user" for turn in turns)
     if not users:
         LOGGER.info(

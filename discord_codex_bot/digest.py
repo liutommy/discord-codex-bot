@@ -139,9 +139,15 @@ def conversations(
         ]
         speakers: dict[int, list[str]] = {}
         if any(turn.speaker is not None for turn in turns):
+            tagged = {turn.speaker for turn in turns if turn.speaker is not None}
+            # Untagged next to tagged (a thread spanning the deploy): the owner's when they are the
+            # only member the thread ever had, otherwise nobody's in particular.
+            owner = ids[0][2]
+            alone = tagged == {owner} and not shared_thread(threads, ledger, thread_id)
             for turn in turns:
-                if turn.speaker is not None:  # untagged next to tagged: nobody's in particular
-                    speakers.setdefault(turn.speaker, []).append(turn.text[:MAX_MESSAGE_CHARS])
+                speaker = turn.speaker if turn.speaker is not None else (owner if alone else None)
+                if speaker is not None:
+                    speakers.setdefault(speaker, []).append(turn.text[:MAX_MESSAGE_CHARS])
         elif turns:
             # The whole ledger and thread store count, not only this window's keys.
             if shared_thread(threads, ledger, thread_id):

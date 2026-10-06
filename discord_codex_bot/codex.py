@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 from collections.abc import Sequence
@@ -227,8 +228,12 @@ def output_style(config: Config) -> str:
 QUOTE_FENCE = f"[quoted-{secrets.token_hex(8)}]"
 
 
+_TAG_NAME = re.compile(r"(user)_(message)", re.IGNORECASE)
+
+
 def defang(text: str) -> str:
-    return text.replace("USER_MESSAGE", "USER\u2060MESSAGE")
+    # Any case: the speaker parser is case-sensitive, but the model reading the prompt is not.
+    return _TAG_NAME.sub(lambda m: m[1] + "\u2060" + m[2], text)
 
 
 def split_quoted(user_prompt: str) -> tuple[str, str]:
