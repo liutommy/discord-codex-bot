@@ -668,6 +668,28 @@ async def test_answer_feeds_recall_results_back_into_the_same_thread(client, bac
     assert tuple(kw.get("images", ())) == () and "memory" not in kw  # no re-injection
 
 
+async def test_answer_tags_the_members_turn_with_their_id_but_not_recall_rounds(
+    client, backends, monkeypatch
+) -> None:
+    # A shared reply thread holds several members' turns; harvest and the digest tell them
+    # apart by this tag (Codex on PR #13). Recall results are the Bot's, so they carry none.
+    codex, _ = backends
+    codex.replies = ['<search scope="user" query="綠茶"/>', "答案"]
+    await client._answer("q", [], GUILD, USER)
+    assert codex.calls[0][2]["speaker"] == USER
+    assert codex.calls[1][2]["raw"] is True and "speaker" not in codex.calls[1][2]
+    # A spare answering mid-request gets the same tag.
+    agy = FakeBackend("備援答案")
+
+    async def spent(*_args, **_kw):
+        raise CodexUsageLimit("quota spent")
+
+    monkeypatch.setattr(bot_module, "run_codex", spent)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    await client._answer("q", [], GUILD, USER)
+    assert agy.calls[0][2]["speaker"] == USER
+
+
 async def test_answer_stops_recalling_after_the_configured_rounds(client, backends) -> None:
     codex, _ = backends
     tag = '<recall scope="permanent" name="list"/>'

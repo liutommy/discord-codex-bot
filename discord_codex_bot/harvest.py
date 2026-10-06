@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .backends import run_batch
 from .config import Config
@@ -19,7 +19,10 @@ from .usage import query_rate_limits
 
 LOGGER = logging.getLogger(__name__)
 Runner = Callable[[str], Awaitable[str]]
-_USER_MESSAGE = re.compile(r"<USER_MESSAGE>\n?(.*?)\n?</USER_MESSAGE>", re.S)
+# The member's turn in a Bot-built prompt; `speaker` (codex._prompt) is absent before 2026-10.
+_USER_MESSAGE = re.compile(
+    r'<USER_MESSAGE(?: speaker="(\d{1,20})")?>\n?(.*?)\n?</USER_MESSAGE>', re.S
+)
 MAX_TRANSCRIPT_CHARS = 60_000
 # Every retired thread, so the weekly digest (digest.py) can find a member's and a server's
 # conversations after the thread store has moved on to newer ones.
@@ -40,6 +43,8 @@ Examples: '幫我追蹤星街' -> no notes; '幫我追蹤遊戲王新卡情報' 
 Write short notes in the conversation's language with name (≤ 30 characters), today's date, text,
 and evidence: a nonempty exact quote from a USER message supporting the entire personal fact.
 Assistant text is never evidence. Do not expand beyond what the quote supports.
+Messages with role other_member were written by other people in the same conversation, not THIS
+MEMBER: read them as context only, never as evidence or as facts about THIS MEMBER.
 Return JSON matching the schema; return {"notes": []} when nothing qualifies."""
 
 
@@ -47,6 +52,17 @@ Return JSON matching the schema; return {"notes": []} when nothing qualifies."""
 class Turn:
     role: str
     text: str
+    speaker: int | None = None  # Discord id the Bot tagged a user turn with; None when untagged
+
+
+def _member_turn(text: str) -> Turn | None:
+    """The member's turn inside one Bot-built prompt, the same for every backend's transcript;
+    None when the prompt has no USER_MESSAGE (recall results, environment context)."""
+    match = _USER_MESSAGE.search(text)
+    if match is None:
+        return None
+    speaker = match.group(1)
+    return Turn("user", match.group(2).strip(), int(speaker) if speaker else None)
 
 
 def rollout_path(config: Config, thread_id: str):
@@ -70,9 +86,8 @@ def _agy_turns(config: Config, thread_id: str) -> list[Turn]:
             continue
         content = str(event.get("content") or "")
         if event.get("type") == "USER_INPUT":
-            match = _USER_MESSAGE.search(content)
-            if match:
-                turns.append(Turn("user", match.group(1).strip()))
+            if turn := _member_turn(content):
+                turns.append(turn)
         elif event.get("type") == "PLANNER_RESPONSE" and content.strip():
             turns.append(Turn("assistant", content.strip()))
     return turns
@@ -83,8 +98,7 @@ def _openrouter_turns(config: Config, thread_id: str) -> list[Turn]:
     for message in load_transcript(config, thread_id):
         text = message_text(message.get("content"))
         if message.get("role") == "user":
-            match = _USER_MESSAGE.search(text)
-            turns.append(Turn("user", (match.group(1) if match else text).strip()))
+            turns.append(_member_turn(text) or Turn("user", text.strip()))
         elif message.get("role") == "assistant" and text.strip():
             turns.append(Turn("assistant", text.strip()))
     return turns
@@ -97,9 +111,8 @@ def _grok_turns(config: Config, thread_id: str) -> list[Turn]:
     for message in load_grok_transcript(config, thread_id):
         text = message_text(message.get("content"))
         if message.get("role") == "user":
-            match = _USER_MESSAGE.search(text)
-            if match:
-                turns.append(Turn("user", match.group(1).strip()))
+            if turn := _member_turn(text):
+                turns.append(turn)
         elif message.get("role") == "assistant" and text.strip():
             turns.append(Turn("assistant", text.strip()))
     return turns
@@ -115,7 +128,7 @@ _LEGACY_QUOTE = re.compile(
 
 def _own_words(turns: list[Turn]) -> list[Turn]:
     return [
-        Turn(turn.role, _LEGACY_QUOTE.sub("", turn.text)) if turn.role == "user" else turn
+        replace(turn, text=_LEGACY_QUOTE.sub("", turn.text)) if turn.role == "user" else turn
         for turn in turns
     ]
 
@@ -150,10 +163,8 @@ def _provider_turns(config: Config, thread_id: str) -> list[Turn]:
         if not text:
             continue
         if payload.get("role") == "user":
-            match = _USER_MESSAGE.search(text)
-            if match is None:
-                continue  # instruction-only turns (recall results, environment context)
-            turns.append(Turn("user", match.group(1).strip()))
+            if turn := _member_turn(text):  # else instruction-only (recall, environment)
+                turns.append(turn)
         elif payload.get("role") == "assistant":
             turns.append(Turn("assistant", text))
     return turns
@@ -174,7 +185,7 @@ def _recent_turns(turns: list[Turn]) -> list[Turn]:
     for turn in reversed(turns):
         if remaining <= 0:
             break
-        selected.append(Turn(turn.role, turn.text[-remaining:]))
+        selected.append(replace(turn, text=turn.text[-remaining:]))
         remaining -= len(selected[-1].text)
     return list(reversed(selected))
 
@@ -199,24 +210,68 @@ def _parse(answer: str, turns: list[Turn]) -> tuple[list[tuple[str, str]], int]:
     return notes, len(proposed)
 
 
+def _attribute(turns: list[Turn], user_id: int) -> list[Turn]:
+    """Turns as seen by the member being harvested: their own stay "user", every other member's
+    become "other_member" (context, never evidence). Once a thread has a tagged turn, an untagged
+    one cannot be anybody's in particular, so it is "other_member" too."""
+    if all(turn.speaker is None for turn in turns):
+        return turns
+    return [
+        replace(turn, role="other_member")
+        if turn.role == "user" and turn.speaker != user_id
+        else turn
+        for turn in turns
+    ]
+
+
+def shared_thread(threads: ThreadStore | None, ledger: list[dict], thread_id: str) -> bool:
+    """Whether two or more members are known to have been on `thread_id`: keys the thread store
+    still links to it, plus the ledger's (a member already harvested no longer has one there)."""
+    keys = threads.keys_for(thread_id) if threads else set()
+    keys |= {entry["key"] for entry in ledger if entry["thread_id"] == thread_id}
+    return len({key.rpartition(":")[2] for key in keys}) > 1
+
+
 async def harvest_thread(
-    store: MemoryStore, config: Config, key: str, thread_id: str, runner: Runner
+    store: MemoryStore,
+    config: Config,
+    key: str,
+    thread_id: str,
+    runner: Runner,
+    shared: bool = False,
 ) -> int:
-    """Distil one finished thread into the member's personal memory; returns notes added."""
+    """Distil one finished thread into the member's personal memory; returns notes added.
+    Only turns tagged with this member's id count as theirs. `shared` says other members were on
+    the thread too: a transcript from before speaker tags then has no turn known to be theirs."""
     try:
         guild_id, _channel_id, user_id = (int(part) for part in key.split(":"))
     except ValueError:
         LOGGER.warning("Harvest: malformed key %r for thread %s; dropping", key, thread_id[:8])
         return 0
-    turns = _recent_turns(transcript_turns(config, thread_id))
-    users = sum(turn.role == "user" for turn in turns)
-    if not users:
+    turns = transcript_turns(config, thread_id)
+    if not any(turn.role == "user" for turn in turns):
         # Not the same as "nothing worth remembering": an unread backend or a pruned rollout
         # hid behind a plain "0 notes" until Grok threads went missing this way.
         LOGGER.warning(
             "Harvest: no readable transcript for thread %s (%d turns); nothing to distil",
             thread_id[:8],
             len(turns),
+        )
+        return 0
+    if shared and all(turn.speaker is None for turn in turns):
+        LOGGER.info(
+            "Harvest %s: untagged thread several members were on; not attributable to …%s",
+            thread_id[:8],
+            str(user_id)[-4:],
+        )
+        return 0
+    turns = _recent_turns(_attribute(turns, user_id))
+    users = sum(turn.role == "user" for turn in turns)
+    if not users:
+        LOGGER.info(
+            "Harvest %s: no turns by …%s in this shared thread; nothing to distil",
+            thread_id[:8],
+            str(user_id)[-4:],
         )
         return 0
     text = json.dumps(
@@ -228,7 +283,7 @@ async def harvest_thread(
         "Harvest %s: %d member / %d assistant turns, %d proposed, %d kept",
         thread_id[:8],
         users,
-        len(turns) - users,
+        sum(turn.role == "assistant" for turn in turns),
         proposed,
         len(notes),
     )
@@ -312,12 +367,14 @@ def read_ledger(config: Config) -> list[dict]:
 
 
 def record_retired(config: Config, key: str, thread_id: str, now: float | None = None) -> None:
-    """Add one harvested thread to the ledger, dropping entries past LEDGER_KEEP_DAYS."""
+    """Add one harvested (member, thread) to the ledger, dropping entries past LEDGER_KEEP_DAYS."""
     now = time.time() if now is None else now
+    # One entry per (member, thread): a shared reply thread keeps every member who was on it.
     entries = [
         entry
         for entry in read_ledger(config)
-        if now - entry["at"] <= LEDGER_KEEP_DAYS * 86400 and entry["thread_id"] != thread_id
+        if now - entry["at"] <= LEDGER_KEEP_DAYS * 86400
+        and (entry["key"], entry["thread_id"]) != (key, thread_id)
     ]
     entries.append({"key": key, "thread_id": thread_id, "at": now})
     path = config.codex_home / LEDGER_FILE
@@ -331,11 +388,12 @@ def record_retired(config: Config, key: str, thread_id: str, now: float | None =
 
 async def _harvest_one(threads, store, config, key, thread_id, runner) -> str:
     try:
-        added = await harvest_thread(store, config, key, thread_id, runner)
+        shared = shared_thread(threads, read_ledger(config), thread_id)
+        added = await harvest_thread(store, config, key, thread_id, runner, shared)
     except Exception as error:
         LOGGER.exception("Harvest failed for thread %s", thread_id)
         return f"{thread_id[:8]} {key}: failed ({error})"
-    threads.mark_harvested(thread_id)
+    threads.mark_harvested(thread_id, key)  # other members on the thread still have theirs
     record_retired(config, key, thread_id)
     LOGGER.info("Harvested thread %s for %s: %d notes", thread_id[:8], key, added)
     return f"{thread_id[:8]} {key}: {added} notes"

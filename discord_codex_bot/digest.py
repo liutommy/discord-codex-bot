@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 from .backends import run_batch
 from .clock import sleep_for
 from .config import Config
-from .harvest import _quota_ok, read_ledger, transcript_turns
+from .harvest import _quota_ok, read_ledger, shared_thread, transcript_turns
 from .memory import MARKERS, MemoryStore
 from .threads import ThreadStore
 
@@ -112,26 +112,46 @@ def conversations(
     config: Config, threads: ThreadStore | None, since: float
 ) -> dict[int, dict[int, list[Conversation]]]:
     """{guild: {member: [(channel, [message, …]) per conversation, oldest first]}} for threads
-    used since `since`: the harvest ledger plus each conversation's latest thread."""
-    found: dict[str, tuple[str, float]] = {}
-    for entry in read_ledger(config):
+    used since `since`: the harvest ledger plus each conversation's latest thread.
+
+    A member replying to the Bot's answer to someone else continues that thread, so one thread
+    can hold several members' turns. Each turn goes to the speaker the Bot tagged it with; an
+    untagged (older) thread goes to the member whose key it is, unless the ledger and the thread
+    store show more than one member on it — then nobody's words in it can be told apart."""
+    found: dict[str, dict[str, float]] = {}  # thread -> {key: last used}
+    ledger = read_ledger(config)
+    for entry in ledger:
         if entry["at"] >= since:
-            found[entry["thread_id"]] = (entry["key"], entry["at"])
+            keys = found.setdefault(entry["thread_id"], {})
+            keys[entry["key"]] = max(entry["at"], keys.get(entry["key"], 0.0))
     for key, thread_id, at in threads.recent(since) if threads else []:
-        found.setdefault(thread_id, (key, at))
+        found.setdefault(thread_id, {}).setdefault(key, at)
     result: dict[int, dict[int, list[Conversation]]] = {}
-    for thread_id, (key, _at) in sorted(found.items(), key=lambda item: item[1][1]):
-        ids = _parse_key(key)
-        if ids is None:
-            continue
-        messages = [
-            turn.text[:MAX_MESSAGE_CHARS]
+    for thread_id, keys in sorted(found.items(), key=lambda item: max(item[1].values())):
+        ids = [_parse_key(key) for key in keys]
+        if None in ids or len({guild for guild, _channel, _user in ids}) != 1:
+            continue  # DMs ("None:…") and malformed keys have no server to belong to
+        guild_id, channel_id, _user = ids[0]
+        turns = [
+            turn
             for turn in transcript_turns(config, thread_id)
             if turn.role == "user" and turn.text.strip()
         ]
-        if messages:
-            guild_id, channel_id, user_id = ids
-            members = result.setdefault(guild_id, {})
+        speakers: dict[int, list[str]] = {}
+        if any(turn.speaker is not None for turn in turns):
+            for turn in turns:
+                if turn.speaker is not None:  # untagged next to tagged: nobody's in particular
+                    speakers.setdefault(turn.speaker, []).append(turn.text[:MAX_MESSAGE_CHARS])
+        elif turns:
+            # The whole ledger and thread store count, not only this window's keys.
+            if shared_thread(threads, ledger, thread_id):
+                LOGGER.info(
+                    "Digest: untagged thread %s had several members; left out", thread_id[:8]
+                )
+                continue
+            speakers[ids[0][2]] = [turn.text[:MAX_MESSAGE_CHARS] for turn in turns]
+        members = result.setdefault(guild_id, {}) if speakers else {}
+        for user_id, messages in speakers.items():
             talks = members.pop(user_id, [])  # re-inserted: members end up most recent last
             talks.append((channel_id, messages))
             members[user_id] = talks

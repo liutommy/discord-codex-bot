@@ -151,3 +151,22 @@ def test_live_entry_returns_the_record_only_while_live(tmp_path: Path) -> None:
     entry = store.live_entry(key)
     assert entry["thread_id"] == "t1" and entry["model"] == "codex:x" and "at" in entry
     assert store.live_entry(key, now=entry["at"] + 101) is None  # past the TTL
+
+
+def test_a_shared_reply_thread_is_harvested_once_per_member(tmp_path: Path) -> None:
+    # Member B replying to the Bot's answer to A continues A's thread (kept on purpose). Each of
+    # them harvests it once, for their own turns; one harvest must not retire the other's
+    # (Codex on PR #13).
+    import time
+
+    store = ThreadStore(tmp_path / "t.json", ttl_seconds=60, version="v1")
+    a, b = ThreadStore.key(1, 2, 3), ThreadStore.key(1, 2, 4)
+    store.remember(a, "T")
+    store.remember(b, "T")
+    later = time.time() + 61
+    assert store.harvest_candidates(now=later) == [(a, "T"), (b, "T")]
+    assert store.keys_for("T") == {a, b}
+    store.mark_harvested("T", a)
+    assert store.harvest_candidates(now=later) == [(b, "T")]
+    store.mark_harvested("T", b)
+    assert store.harvest_candidates(now=later) == []
