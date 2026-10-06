@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import logging
 import logging.handlers
 import re
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime as _dt
 from pathlib import Path
 from typing import NamedTuple
@@ -18,7 +20,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from . import apis, embedfix, gemini, grok, instructions, sandbox, search, xsearch
+from . import apis, embedfix, gemini, grok, instructions, routing, sandbox, search, xsearch
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
@@ -33,12 +35,14 @@ from .attachments import (
 )
 from .backends import (
     AGY,
+    AGY_FAMILIES,
     BACKEND_LABELS,
     CODEX,
     GROK,
     OPENROUTER,
     ORCAROUTER,
     ROUTER_BACKENDS,
+    ROUTER_LABELS,
     BackendUnavailable,
     ModelChoice,
     Resolved,
@@ -61,11 +65,12 @@ from .codex import (
     codex_login_status,
     defang,
     run_codex,
+    split_quoted,
 )
 from .config import REASONING_EFFORTS, Config, load_config
 from .consolidate import consolidate_forever
 from .digest import digest_forever
-from .harvest import harvest_forever
+from .harvest import harvest_forever, transcript_turns
 from .help import render_guide, render_sheet
 from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, is_link_only, plan, spoilered
 from .links import (
@@ -91,7 +96,7 @@ from .memory import (
     extract_memory_tags,
     extract_read_requests,
 )
-from .openrouter import ROUTERS, Catalog, run_router
+from .openrouter import ROUTERS, Catalog, run_router, trim_history
 from .output import format_reply, split_discord_message, truncate
 from .queue import QueueFullError, SerialQueue
 from .reminders import (
@@ -102,6 +107,7 @@ from .reminders import (
     reminder_loop,
     render_pending,
 )
+from .routing import CONTEXT_TURNS, MAX_EARLIER, Route, Table, Verdict
 from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
 from .threads import ThreadStore
 from .tracking import (
@@ -134,7 +140,7 @@ from .ui import (
     StyleModal,
     recover_exchange,
 )
-from .usage import probe_rate_limits
+from .usage import probe_rate_limits, read_rate_limits
 
 LOGGER = logging.getLogger(__name__)
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
@@ -401,6 +407,23 @@ async def _memory_autocomplete(
     return client.memory_options(interaction.guild_id, interaction.user.id, scope, current)
 
 
+NO_X_NOTE = "（這次沒有 X 搜尋：Grok 現在不能用，以上不是從 X 上查到的。）"
+
+
+@dataclass(frozen=True, slots=True)
+class RoutePlan:
+    """The router's pick for one request (DiscordCodexClient._route)."""
+
+    target: Resolved
+    value: str  # "<backend>:<model>" that will hold the thread (ThreadStore model)
+    route: Route
+    resume: str
+    history: str
+    spares: tuple[Resolved, ...]
+    log: dict
+    no_x: bool  # an X question: say so when something other than Grok answers it
+
+
 class DiscordCodexClient(discord.Client):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.none()
@@ -443,6 +466,11 @@ class DiscordCodexClient(discord.Client):
         # Grok sessions the sidecar refused, for the circuit breaker in _grok_usable.
         self._grok_refusals: list[float] = []
         self._grok_off_until = 0.0
+        # Checked here so a bad routing table stops the Bot at start-up instead of quietly
+        # sending every member to DEFAULT_MODEL.
+        self.routing: Table | None = (
+            routing.load_table(config.routing_path) if config.jev_enabled else None
+        )
         self._emoji_cache: dict[int, dict[str, discord.PartialEmoji]] = {}
         self.reminders = ReminderStore(config.codex_home / "reminders.json")
         self.apis = apis.load_registry(config.apis_path)
@@ -802,7 +830,10 @@ class DiscordCodexClient(discord.Client):
         """What this Bot can do, generated from the registered commands so it never drifts from
         the code; injected as HELP so the model can explain itself truthfully."""
         sheet = render_sheet(
-            self.config.command_prefix, self._command_rows(), self._default_label()
+            self.config.command_prefix,
+            self._command_rows(),
+            self._default_label(),
+            routing=self.routing is not None,
         )
         doc = apis.render_doc(self.apis)
         return f"{sheet}\n{doc}" if doc else sheet
@@ -813,6 +844,7 @@ class DiscordCodexClient(discord.Client):
             self.config.command_prefix,
             [row[0] for row in self._command_rows()],
             self._default_label(),
+            routing=self.routing is not None,
         )
 
     def _default_label(self) -> str:
@@ -867,11 +899,15 @@ class DiscordCodexClient(discord.Client):
         on_delta: Callable[[str], Awaitable[None]] | None = None,
         channel_id: int | None = None,
         routed: Resolved | None = None,
+        routed_spares: Sequence[Resolved] = (),
+        history: str = "",
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
         `on_delta` receives the accumulated answer while a backend streams it (agy, routers).
         `routed` is a target the Bot picked for a member who chose no model: it replaces the
-        member's backend and falls back along the whole chain (see `fallback_chain`)."""
+        member's backend and falls back along the whole chain (see `fallback_chain`), after
+        the router's own stand-ins in `routed_spares`. `history` is the conversation so far,
+        replayed to a backend that did not hold it. The result's `via` is what answered."""
         stored = self._stored(guild_id, user_id)
         choice = self._choice(stored)
         target = resolve(
@@ -902,8 +938,13 @@ class DiscordCodexClient(discord.Client):
             fallback = self._choice(self.config.default_model)
             if fallback.backend == GROK and grok.cached_model(fallback.family) is not None:
                 target = resolve(fallback, target.effort)
+        if routed is not None:
+            ahead = [*routed_spares, *spares]
+            spares = [s for i, s in enumerate(ahead) if s != target and s not in ahead[:i]]
         fell_back = False
-        if target.backend == GROK and spares and not await self._grok_usable():
+        # A routed Grok turn was gated when it was routed (an X question may use the whole
+        # weekly quota; anything else got its stand-in there), so only a member's own is here.
+        if routed is None and target.backend == GROK and spares and not await self._grok_usable():
             # Straight to the next backend: the reserve for X lookups, or the breaker. Still a
             # fallback: the gk- id is not resumed there, and the spare's thread id is not kept
             # under the Grok model (Grok would later resume a foreign id and start over).
@@ -1021,9 +1062,11 @@ class DiscordCodexClient(discord.Client):
             images.extend(shots)
             video = await self._understand_videos(found, link_dir, on_video_slow)
             links = "\n\n".join(block for block in (links, video) if block)
+            replay = {"history": history} if history else {}
             result = await self.queue.run(
                 lambda: turn(
                     prompt,
+                    **replay,
                     images=images,
                     resume=resume,
                     memory=memory,
@@ -1135,6 +1178,7 @@ class DiscordCodexClient(discord.Client):
                 generated_dir,
                 "" if fell_back else result.thread_id,
                 result.resumed and not fell_back,
+                via=target,
             )
         except QueueFullError:
             return CodexResult(QUEUE_FULL_MESSAGE)
@@ -1387,12 +1431,191 @@ class DiscordCodexClient(discord.Client):
                 GROK, "refused", f"🛑 **Grok** 的工作階段被安全檢查拒絕：{str(error)[:300]}"
             )
 
+    def _grok_alive(self) -> bool:
+        """Whether Grok can take an X question at all: configured and the breaker closed. The
+        weekly chat share does not apply (owner, 2026-10-06: X questions may use it all up)."""
+        return grok.enabled(self.config) and time.time() >= self._grok_off_until
+
+    def _default_entry(self) -> str:
+        return self.config.default_model or f"{CODEX}|{self.config.codex_reasoning_effort}"
+
+    async def _route(
+        self,
+        key: str,
+        replied_to: int | None,
+        guild_id: int | None,
+        user_id: int,
+        prompt: str,
+        attachments: Sequence[discord.Attachment],
+        plain: bool,
+        fresh: bool = False,
+    ) -> RoutePlan | None:
+        """Where this request goes when the router picks the model; None when it does not (Jev
+        off, or the member chose a model with /model). Every message is judged; a conversation
+        only moves up (routing.decide). No judgement — an image, a Jev timeout, error, odd
+        answer or low confidence — keeps a routed conversation where it is and sends a new one
+        to DEFAULT_MODEL, without retrying Jev."""
+        table = self.routing
+        if table is None or self.memory.get_model(guild_id, user_id):
+            return None
+        current = None if fresh else self.threads.routed(key, replied_to, plain)
+        route = Route.from_dict(current["route"]) if current else None
+        sources = [*route.earlier, current["thread_id"]] if current and route else []
+        turns = await asyncio.to_thread(
+            lambda: [turn for thread in sources for turn in transcript_turns(self.config, thread)]
+        )
+        own = split_quoted(prompt)[1].strip()
+        said = [t.text for t in turns if t.role == "user" and t.speaker in (None, user_id)]
+        images = any((a.content_type or "").startswith("image/") for a in attachments)
+        if images:
+            verdict = Verdict("image")
+        elif not own:
+            verdict = Verdict("no-text")
+        else:
+            verdict = await routing.judge(own, said[-CONTEXT_TURNS:], self.config)
+        if verdict.status == "ok":
+            route, why = routing.decide(table, verdict.kind, routing.band(verdict.score), route)
+        elif route is not None:
+            why = "kept"  # no judgement: stay; never down on a missing answer
+        else:
+            route, why = Route(self._default_entry(), "M", ""), "default"
+        kind = verdict.kind if verdict.status == "ok" else ""
+        entry, degraded = route.entry, []
+        backend = routing.backend_of(entry)
+        if backend == CODEX:
+            limits = await asyncio.to_thread(read_rate_limits, self.config)
+            if limits is not None and (
+                limits.primary_used_percent >= table.codex_five_hour
+                or limits.secondary_used_percent >= table.codex_seven_day
+            ):
+                lowered = routing.lower_effort(entry)
+                if lowered != entry:
+                    entry = lowered
+                    degraded.append("codex-quota")
+        elif backend == GROK and kind == "live-x":
+            if not self._grok_alive():
+                entry = table.live_x_without_grok
+                degraded.append("grok-off")
+        elif backend == GROK and not await self._grok_usable():
+            entry = table.grok_spent
+            degraded.append("grok-spent")
+        model = self.config.codex_model
+        target = routing.resolved(entry, model)
+        value = routing.choice_of(entry, model).value
+        spares: list[Resolved] = []
+        if target.backend == GROK and kind == "live-x":
+            spares.append(routing.resolved(table.live_x_without_grok, model))
+        if routing.is_claude(entry) and route.kind in table.claude_failed:
+            spares.append(routing.resolved(table.claude_failed[route.kind], model))
+        resume, history = "", ""
+        if current and current["model"] == value:
+            resume = current["thread_id"]
+        elif turns:
+            # Another backend from here on: it gets the conversation replayed, defanged by the
+            # prompt builder like every other block, and the earlier thread ids stay listed so
+            # a later move replays all of it.
+            messages = [{"role": t.role, "content": t.text} for t in turns]
+            history = grok.render_history(trim_history(messages, self.config.grok_history_chars))
+        earlier = route.earlier
+        if current and not resume:
+            earlier = (*route.earlier, current["thread_id"])[-MAX_EARLIER:]
+        stored = Route(route.entry, route.band, route.kind, earlier)
+        return RoutePlan(
+            target=target,
+            value=value,
+            route=stored,
+            resume=resume,
+            history=history,
+            spares=tuple(spares),
+            log={
+                "key": key,
+                "turn": len(said) + 1,
+                "status": verdict.status,
+                "type": verdict.kind,
+                "difficulty": round(verdict.score + 1, 2) if verdict.kind else None,
+                "band": routing.band(verdict.score) if verdict.kind else None,
+                "confidence": round(verdict.confidence, 3) if verdict.kind else None,
+                "why": why,
+                "cell": route.entry,
+                "target": entry,
+                "degraded": degraded,
+                "replayed": bool(history),
+                "jev_ms": verdict.ms,
+                "input_tokens": verdict.input_tokens,
+                "text": own,
+            },
+            no_x=kind == "live-x",
+        )
+
+    @staticmethod
+    def _routed_kw(route_plan: RoutePlan | None) -> dict:
+        """_answer's routing arguments for a routed request; none for a member's own model."""
+        if route_plan is None:
+            return {}
+        return {
+            "routed": route_plan.target,
+            "routed_spares": route_plan.spares,
+            "history": route_plan.history,
+        }
+
+    def _log_route(self, route_plan: RoutePlan, result: CodexResult) -> None:
+        """One structured line per routed message. It carries the member's text (owner,
+        2026-10-06: nothing private is said in the server) with the thread id and the turn, so a
+        holdout can be lined up with what Jev said at the time."""
+        via = result.via
+        record = {
+            **route_plan.log,
+            "thread": result.thread_id,
+            "via": f"{via.backend}:{via.model}|{via.effort}" if via else None,
+            "fallback": via is not None and via != route_plan.target,
+        }
+        LOGGER.info("Route %s", json.dumps(record, ensure_ascii=False))
+
+    def _via_label(self, via: Resolved) -> str:
+        """What answered, as a member reads it: "Gemini 3.8 Flash · 低"."""
+        if via.backend == AGY:
+            name = next(
+                (label for label, by in AGY_FAMILIES.values() if via.model in by.values()),
+                via.model,
+            )
+        elif via.backend == GROK:
+            found = grok.cached_model(via.model)
+            name = f"Grok · {found.name if found else via.model}"
+        elif via.backend in ROUTER_BACKENDS:
+            name = f"{ROUTER_LABELS[via.backend]} · {via.model}"
+        else:
+            name = f"Codex · {via.model}"
+        return f"{name} · {self._effort_label(via)}"
+
+    def _routed_text(self, route_plan: RoutePlan, result: CodexResult) -> str:
+        """The answer with what the router picked under it, and the note an X question gets
+        when Grok could not answer it."""
+        text = result.text
+        if result.via is None:
+            return text
+        if route_plan.no_x and result.via.backend != GROK:
+            text += f"\n\n{NO_X_NOTE}"
+        return f"{text}\n-# 自動選擇：{self._via_label(result.via)}"
+
     def _remember(
-        self, key: str, thread_id: str, message_id: int | None, plain: bool, model: str
+        self,
+        key: str,
+        thread_id: str,
+        message_id: int | None,
+        plain: bool,
+        model: str,
+        route: Route | None = None,
     ) -> None:
         """Record the thread; a switch retires the old one, so harvest it without waiting."""
         switched = self.threads.switched(key, thread_id)
-        self.threads.remember(key, thread_id, message_id, plain=plain, model=model)
+        self.threads.remember(
+            key,
+            thread_id,
+            message_id,
+            plain=plain,
+            model=model,
+            route=route.as_dict() if route else None,
+        )
         if switched and hasattr(self, "_harvest_wakeup"):
             self._harvest_wakeup.set()
 
@@ -1515,6 +1738,17 @@ class DiscordCodexClient(discord.Client):
             prompt = with_quoted_message(question, pointed.author.display_name, pointed.content, 0)
         if asked is not None:
             previews = await self._previews(asked, pointed)
+        routed = await self._route(
+            key,
+            getattr(interaction.message, "id", None),
+            interaction.guild_id,
+            user_id,
+            prompt,
+            [],
+            plain,
+        )
+        if routed is not None:
+            resume = routed.resume
         LOGGER.info(
             "Button redo guild=%s user=%s resume=%s quoted=%s",
             interaction.guild_id,
@@ -1530,12 +1764,23 @@ class DiscordCodexClient(discord.Client):
             resume=resume,
             channel_id=interaction.channel_id,
             previews=previews,
+            **self._routed_kw(routed),
         )
+        if routed is not None:
+            self._log_route(routed, result)
+            result = replace(result, text=self._routed_text(routed, result))
         sent = await self.send_answer(
             interaction.followup, question, result, interaction.guild_id, user_id
         )
         # Link the redo answer too, so replying to *it* continues the same thread.
-        self._remember(key, result.thread_id, getattr(sent, "id", None), plain, model)
+        self._remember(
+            key,
+            result.thread_id,
+            getattr(sent, "id", None),
+            plain,
+            routed.value if routed else model,
+            routed.route if routed else None,
+        )
 
     async def send_answer(self, destination, prompt: str, result, guild_id, user_id):
         """Post an answer (with its buttons) through any `.send`-able destination — used by the
@@ -2689,6 +2934,21 @@ class DiscordCodexClient(discord.Client):
         model = self._model(interaction.guild_id, interaction.user.id)
         resume = "" if new else self.threads.current(key, plain=plain, model=model)
         await interaction.response.defer(thinking=True)
+        # An effort given here is the member choosing for this message: not routed.
+        routed = None
+        if effort is None:
+            routed = await self._route(
+                key,
+                None,
+                interaction.guild_id,
+                interaction.user.id,
+                prompt,
+                attachments,
+                plain,
+                fresh=new,
+            )
+        if routed is not None:
+            resume = routed.resume
 
         async def show(text: str, view) -> None:
             try:
@@ -2710,6 +2970,7 @@ class DiscordCodexClient(discord.Client):
                 on_video_slow=on_video_slow,
                 on_delta=on_delta,
                 channel_id=interaction.channel_id,
+                **self._routed_kw(routed),
             ),
         )
         if result is None:
@@ -2717,14 +2978,24 @@ class DiscordCodexClient(discord.Client):
                 "Cancelled slash guild=%s user=%s", interaction.guild_id, interaction.user.id
             )
             return
+        if routed is not None:
+            self._log_route(routed, result)
         # Discord does not echo slash command inputs, so quote the question above the answer.
-        target = resolve(self._choice(model), effort_value)
+        # The model named is the one that answered, a fallback spare included.
+        target = result.via or resolve(self._choice(model), effort_value)
         shown = self._effort_label(target)
+        if routed is not None:
+            tag = f"自動選擇：{self._via_label(target)}"
+        else:
+            tag = shown if target.backend == "codex" else f"{target.model} · {shown}"
+        answer = result.text
+        if routed is not None and routed.no_x and target.backend != GROK:
+            answer += f"\n\n{NO_X_NOTE}"
         reply = format_reply(
             prompt,
-            result.text,
+            answer,
             has_image=bool(attachments),
-            effort=shown if target.backend == "codex" else f"{target.model} · {shown}",
+            effort=tag,
             resumed=result.resumed,
         )
         chunks = split_discord_message(reply)
@@ -2750,7 +3021,14 @@ class DiscordCodexClient(discord.Client):
                 pass
         finally:
             remove_dir(result.generated_dir)
-        self._remember(key, result.thread_id, sent_id, plain, model)
+        self._remember(
+            key,
+            result.thread_id,
+            sent_id,
+            plain,
+            routed.value if routed else model,
+            routed.route if routed else None,
+        )
         # channel too: a watch is created in whichever channel the member spoke in, and without
         # it a request cannot be traced back to where its side effects landed.
         LOGGER.info(
@@ -2829,6 +3107,11 @@ class DiscordCodexClient(discord.Client):
                 pass
 
         async with message.channel.typing():
+            routed = await self._route(
+                key, replied_to, guild_id, message.author.id, prompt, attachments, plain
+            )
+            if routed is not None:
+                resume = routed.resume
             result = await self._run_tracked(
                 key,
                 message.author.id,
@@ -2843,12 +3126,17 @@ class DiscordCodexClient(discord.Client):
                     on_video_slow=on_video_slow,
                     on_delta=on_delta,
                     channel_id=message.channel.id,
+                    **self._routed_kw(routed),
                 ),
             )
         if result is None:
             LOGGER.info("Cancelled @mention guild=%s user=%s", guild_id, message.author.id)
             return
-        chunks = split_discord_message(result.text)
+        text = result.text
+        if routed is not None:
+            self._log_route(routed, result)
+            text = self._routed_text(routed, result)
+        chunks = split_discord_message(text)
         sent_id = None
         try:
             files = self._files(result)
@@ -2868,7 +3156,14 @@ class DiscordCodexClient(discord.Client):
                 pass
         finally:
             remove_dir(result.generated_dir)
-        self._remember(key, result.thread_id, sent_id, plain, model)
+        self._remember(
+            key,
+            result.thread_id,
+            sent_id,
+            plain,
+            routed.value if routed else model,
+            routed.route if routed else None,
+        )
         LOGGER.info(
             "Completed @mention guild=%s channel=%s user=%s",
             message.guild.id,

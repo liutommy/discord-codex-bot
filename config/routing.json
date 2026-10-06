@@ -1,0 +1,23 @@
+{
+  "_comment": "Jev routing table v3 (hub, evaluated in ~/jev-eval a2fcf4d). Each type has one target per difficulty band L/M/H/X (Jev's 10-level score: 1-3 L, 4-6 M, 7-8 H, 9-10 X), written like a stored model with its effort; 'codex' is CODEX_MODEL. Every cell is checked at start-up and a bad one stops the Bot.",
+  "types": {
+    "chat":     ["agy:gemini-3.8-flash|low",    "agy:gemini-3.8-flash|low",    "agy:gemini-3.8-flash|medium", "agy:gemini-3.8-flash|medium"],
+    "quick":    ["agy:gemini-3.8-flash|low",    "agy:gemini-3.8-flash|medium", "agy:gemini-3.8-flash|high",   "grok:grok-4.7|high"],
+    "live-x":   ["grok:grok-4.7|low",           "grok:grok-4.7|medium",        "grok:grok-4.7|high",          "grok:grok-4.7|high"],
+    "live-web": ["codex|low",                   "codex|medium",                "codex|high",                  "codex|high"],
+    "text":     ["agy:gemini-3.8-flash|low",    "agy:gemini-3.8-flash|medium", "agy:gemini-3.8-flash|high",   "agy:claude-sonnet-4-6"],
+    "code":     ["codex|low",                   "codex|medium",                "codex|high",                  "codex|xhigh"],
+    "reason":   ["agy:gemini-3.8-flash|medium", "codex|medium",                "codex|high",                  "codex|xhigh"],
+    "create":   ["agy:gemini-3.8-flash|medium", "grok:grok-4.7|medium",        "agy:claude-sonnet-4-6",       "agy:claude-opus-4-6"],
+    "advice":   ["agy:gemini-3.8-flash|medium", "grok:grok-4.7|medium",        "grok:grok-4.7|high",          "codex|high"]
+  },
+  "_comment_needs": "A type that only these backends can answer: a conversation already on another backend moves for it even when the message is not harder.",
+  "needs": {"live-x": "grok", "live-web": "codex", "code": "codex"},
+  "_comment_degrade": "Quota and failure stand-ins, tried before MODEL_CHAIN. grok_spent: a Grok cell while chat is past GROK_CHAT_MAX_WEEKLY_PERCENT, the breaker is open or Grok is off. live_x_without_grok: an X question when Grok cannot answer at all (the answer says it had no X search). claude_failed: an agy Claude cell that failed, by type. codex_quota: at or past these used percentages Codex effort drops one level.",
+  "degrade": {
+    "grok_spent": "agy:gemini-3.8-flash|high",
+    "live_x_without_grok": "agy:gemini-3.8-flash|medium",
+    "claude_failed": {"text": "agy:gemini-3.8-flash|high", "create": "grok:grok-4.7|high"},
+    "codex_quota": {"five_hour_percent": 80, "seven_day_percent": 90}
+  }
+}

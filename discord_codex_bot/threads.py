@@ -80,6 +80,27 @@ class ThreadStore:
             return ""
         return entry["thread_id"]
 
+    def routed(
+        self, key: str, message_id: int | None = None, plain: bool = False, now: float | None = None
+    ) -> dict | None:
+        """The routed conversation a request continues — the answer it replies to, else the
+        member's latest thread within the TTL — as {"thread_id", "model", "route"}; None when
+        there is none, or it is the member's own model's (no route), or the workspace differs.
+        Not filtered by model: the router may move it to another backend, and the caller
+        resumes the id only on the backend that created it."""
+        entry = self._by_message.get(str(message_id)) if message_id is not None else None
+        if entry is None or entry.get("version", "") != self._version:
+            entry = self._by_key.get(key)
+            if entry is None or not self._live(entry, time.time() if now is None else now):
+                return None
+        if entry.get("plain") is None or bool(entry["plain"]) != plain or "route" not in entry:
+            return None
+        return {
+            "thread_id": str(entry["thread_id"]),
+            "model": str(entry.get("model", "")),
+            "route": entry["route"],
+        }
+
     def backend_of(self, thread_id: str) -> str:
         """The backend that created `thread_id` ("codex", "grok", "agy", a router), as recorded
         with it; "" when the store does not know the id."""
@@ -96,7 +117,11 @@ class ThreadStore:
         message_id: int | None = None,
         plain: bool = False,
         model: str = "",
+        route: dict | None = None,
     ) -> None:
+        """`model` is the "<backend>:<model>" that created `thread_id` (only that backend can
+        resume it); `route` is where the router has this conversation (routing.Route), absent
+        for a member's own model."""
         if not thread_id:
             return
         previous = self._by_key.get(key)
@@ -110,6 +135,7 @@ class ThreadStore:
             "version": self._version,
             "plain": plain,
             "model": model,
+            **({"route": route} if route else {}),
         }
         if message_id is not None:
             self._by_message[str(message_id)] = {
@@ -117,6 +143,7 @@ class ThreadStore:
                 "version": self._version,
                 "plain": plain,
                 "model": model,
+                **({"route": route} if route else {}),
             }
             while len(self._by_message) > MAX_MESSAGE_LINKS:
                 del self._by_message[next(iter(self._by_message))]

@@ -181,6 +181,7 @@ async def run_agy(
     files: str = "",
     on_delta=None,
     speaker: int | None = None,
+    history: str = "",
 ) -> CodexResult:
     """One turn on Antigravity CLI with the same contract as run_codex. `on_delta(text)` is
     called with the accumulated answer as agy streams it.
@@ -195,7 +196,15 @@ async def run_agy(
         user_prompt
         if raw
         else _prompt(
-            user_prompt, memory, output_style(config), personal_style, links, help, files, speaker
+            user_prompt,
+            memory,
+            output_style(config),
+            personal_style,
+            links,
+            help,
+            files,
+            speaker,
+            history=history,
         )
     )
     args = ["--project", project, "--model", model, "--output-format", "stream-json"]
