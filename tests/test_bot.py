@@ -2223,3 +2223,73 @@ async def test_grok_catalog_is_retried_until_the_sidecar_answers(client, monkeyp
     monkeypatch.setattr(bot_module.asyncio, "sleep", no_wait)
     await client._load_grok_models(attempts=5, wait=0)
     assert len(calls) == 3  # stops as soon as the catalog arrives
+
+
+async def test_grok_refusal_alerts_at_once_and_again_when_the_breaker_opens(client) -> None:
+    # The first refused session and the breaker opening are each worth a DM right away; the
+    # failure streak (threshold 3, reset by any success) sent none at all (Codex on PR #3).
+    from discord_codex_bot.alerts import Alerter
+
+    sent: list[str] = []
+
+    async def send(text: str) -> None:
+        sent.append(text)
+
+    owner = types.SimpleNamespace(send=send)
+    discord_stub = types.SimpleNamespace(get_user=lambda uid: owner)
+    client.alerts = Alerter(discord_stub, replace(client.config, alert_user_id=7))
+    await client._grok_refused(RuntimeError("tool call outside the allow-list"))
+    assert len(sent) == 1 and "allow-list" in sent[0]
+    await client._grok_refused(RuntimeError("again"))
+    assert len(sent) == 1  # no DM per refusal
+    await client._grok_refused(RuntimeError("third"))
+    assert len(sent) == 2 and "一小時" in sent[1]
+    assert client._grok_off_until > time.time()
+
+
+async def test_skipping_grok_before_the_turn_is_a_fallback_too(client, monkeypatch) -> None:
+    # The X-lookup reserve or the breaker sends a Grok member's turn straight to the spare. That
+    # spare must not get the gk- id to resume, and its own thread id must not be stored under
+    # the Grok model, or Grok resumes a foreign id later and silently starts over (Codex, PR #3).
+    agy = FakeBackend("備援答案")
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+
+    async def not_now() -> bool:
+        return False
+
+    monkeypatch.setattr(client, "_grok_usable", not_now)
+    client.config = replace(
+        client.config, model_chain=("grok:grok-4.7|medium", "agy:gemini-3.8-flash|medium")
+    )
+    client.memory.set_model(GUILD, USER, "grok:grok-4.7|medium")
+    result = await client._answer("q", [], GUILD, USER, resume="gk-old")
+    assert result.text == "備援答案" and len(agy.calls) == 1
+    assert "resume" not in agy.calls[0][2]
+    assert result.thread_id == "" and not result.resumed
+    # A recall round chains on the spare's own thread, as with any other fallback.
+    agy.replies = ['<search scope="user" query="綠茶"/>', "答案"]
+    await client._answer("q", [], GUILD, USER, resume="gk-old")
+    assert "resume" not in agy.calls[1][2] and agy.calls[2][2]["resume"] == "t2"
+
+
+async def test_one_refused_session_is_not_followed_by_a_recovery_notice(client) -> None:
+    # A single refusal is an event, not an outage: the next normal Grok answer must not DM
+    # "recovered". Only the breaker (Grok off for an hour) earns one when it comes back.
+    from discord_codex_bot.alerts import Alerter
+
+    sent: list[str] = []
+
+    async def send(text: str) -> None:
+        sent.append(text)
+
+    owner = types.SimpleNamespace(send=send)
+    client.alerts = Alerter(
+        types.SimpleNamespace(get_user=lambda uid: owner), replace(client.config, alert_user_id=7)
+    )
+    await client._grok_refused(RuntimeError("once"))
+    await client.alerts.record_success("grok")
+    assert len(sent) == 1
+    await client._grok_refused(RuntimeError("twice"))
+    await client._grok_refused(RuntimeError("thrice"))  # breaker: Grok off for an hour
+    await client.alerts.record_success("grok")
+    assert len(sent) == 3 and "恢復" in sent[-1]

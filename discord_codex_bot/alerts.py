@@ -72,6 +72,14 @@ class Alerter:
         if self._alerted.pop(backend, False):
             await self._send(f"{backend}:ok", f"✅ **{backend}** 已恢復正常。", cooldown=False)
 
+    async def alert_now(self, backend: str, kind: str, text: str, outage: bool = False) -> None:
+        """A rare event worth a look on first sight (a refused session): no streak to reach,
+        which a success in between would reset anyway. Cooldown is per kind. Only an `outage`
+        (the backend switched off) is followed by a recovery notice; a one-off event is not."""
+        if outage:
+            self._alerted[backend] = True
+        await self._send(f"{backend}:{kind}", text)
+
     async def login_lost(self, backend: str, detail: str) -> None:
         self._alerted[backend] = True
         await self._send(f"{backend}:auth", f"🔑 **{backend}** 登入狀態異常：{detail}")

@@ -312,10 +312,10 @@ async def test_refused_sessions_fall_back_and_trip_the_breaker(grok_client, monk
     bot, calls, replies, codex, _agy = grok_client
     alerts = []
 
-    async def record(backend, detail):
+    async def record(backend, kind, text, outage=False):
         alerts.append(backend)
 
-    monkeypatch.setattr(bot.alerts, "record_failure", record)
+    monkeypatch.setattr(bot.alerts, "alert_now", record)
     replies["grok"] = grok.GrokRefused("503")
     for _ in range(3):
         result = await bot._answer("q", [], GUILD, USER)

@@ -136,6 +136,9 @@ class FetchResult:
     items: tuple[ContentItem, ...]
     cursor: str = ""
     state: Mapping[str, Any] = field(default_factory=dict)
+    # False when the fetcher read nothing (throttled or failed): an empty result then says
+    # nothing about the source, so it must not end the baseline.
+    checked: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -726,9 +729,15 @@ class TrackerStore:
                 if cursor.rowcount:
                     inserted_ids.append(cursor.lastrowid)
             connection.execute(
-                """UPDATE sources SET cursor=?, state_json=?, baseline_complete=1, updated_at=?
+                """UPDATE sources SET cursor=?, state_json=?, baseline_complete=?, updated_at=?
                    WHERE id=?""",
-                (result.cursor, json.dumps(result.state), _utc_now(), source.id),
+                (
+                    result.cursor,
+                    json.dumps(result.state),
+                    int(source.baseline_complete or result.checked),
+                    _utc_now(),
+                    source.id,
+                ),
             )
             if not inserted_ids:
                 return []
@@ -932,7 +941,7 @@ class TrackerStore:
                           d.category, d.reason, d.matched_topics_json, d.status AS decision_status,
                           d.message,
                           w.source_id, w.guild_id, w.channel_id, w.user_id, w.interest,
-                          w.active, w.start_item_id,
+                          w.active, w.start_item_id, w.mention_ids,
                           i.external_id, i.url, i.title, i.description, i.published_at,
                           i.kind, i.live_status, i.baseline, i.raw_json
                    FROM outbox o JOIN decisions d ON d.id=o.decision_id
@@ -950,6 +959,8 @@ class TrackerStore:
                 row["interest"],
                 bool(row["active"]),
                 row["start_item_id"],
+                # Delivery @s these too; without them who= people were never notified.
+                tuple(int(part) for part in str(row["mention_ids"] or "").split(",") if part),
             )
             item = ContentItem(
                 row["item_id"],
@@ -1428,7 +1439,7 @@ class XFetcher:
     async def fetch(self, source: Source) -> FetchResult:
         now = self.clock()
         if now - float(source.state.get("fetched_at", 0)) < self.interval_seconds:
-            return FetchResult((), source.cursor, dict(source.state))
+            return FetchResult((), source.cursor, dict(source.state), checked=False)
         handle = str(source.state.get("handle") or source.external_id)
         try:
             posts = await self.recent_posts(handle, source.cursor)
@@ -1437,7 +1448,7 @@ class XFetcher:
             # interval before the next one, instead of retrying on every tracking pass.
             LOGGER.warning("X source %s check failed: %s", handle, type(error).__name__)
             state = {**source.state, "fetched_at": now, "last_error": type(error).__name__}
-            return FetchResult((), source.cursor, state)
+            return FetchResult((), source.cursor, state, checked=False)
         items = []
         for post in sorted(posts, key=lambda p: int(p["id"])):  # oldest first, like a feed
             text = str(post.get("text", ""))

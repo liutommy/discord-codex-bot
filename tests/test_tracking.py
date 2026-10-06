@@ -456,6 +456,42 @@ def test_extra_mentions_drop_the_owner_and_duplicates(tmp_path: Path) -> None:
     assert store.watches(user_id=3)[0].mention_ids == (4, 5)
 
 
+def test_a_source_whose_first_check_did_not_run_stays_in_baseline(tmp_path: Path) -> None:
+    # X's first check failed (or was throttled): nothing was read, so the latest posts that
+    # come back once it works are the starting point, not news to notify (Codex, PR #2/#4).
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("x", "riot", "@riot")
+    store.ingest(source, FetchResult((), "", {"last_error": "XSearchError"}, checked=False))
+    source = store.get_source(source.id)
+    assert source is not None and not source.baseline_complete
+    assert source.state == {"last_error": "XSearchError"}
+    first = store.ingest(source, FetchResult((content(source.id, "old"),), "old"))
+    assert [item.baseline for item in first] == [True]
+    assert store.get_source(source.id).baseline_complete
+
+
+async def test_queued_notification_keeps_the_extra_mentions(tmp_path: Path) -> None:
+    # Delivery @s message.watch.mention_ids; the outbox query rebuilds the Watch, so it has
+    # to carry them too or the people named with who= are never notified (Codex on PR #4).
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("youtube", "UC1", "@one")
+    store.add_watch(source.id, 1, 2, 3, mention_ids=(4, 5))
+    store.ingest(source, FetchResult((content(source.id, "old"),), "old"))
+    delivered = []
+
+    async def fetch(current):
+        return FetchResult((content(current.id, "old"), content(current.id, "new")), "new")
+
+    async def classify(prompt):
+        return classifier_answer(prompt)
+
+    async def deliver(message):
+        delivered.append(message)
+
+    await run_tracking_once(store, fetch, classify, deliver)
+    assert [m.watch.mention_ids for m in delivered] == [(4, 5)]
+
+
 def test_a_database_made_before_the_new_columns_gains_them(tmp_path: Path) -> None:
     path = tmp_path / "tracking.sqlite3"
     store = TrackerStore(path)

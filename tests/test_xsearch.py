@@ -593,6 +593,7 @@ async def test_x_fetcher_resolves_and_fetches_on_its_own_clock() -> None:
     now[0] += 30 * 60  # within the interval: no Grok session at all
     skipped = await fetcher.fetch(later)
     assert skipped.items == () and skipped.cursor == "300" and len(asked) == 1
+    assert skipped.checked is False  # nothing was read: must not end a baseline
     now[0] += 31 * 60
     await fetcher.fetch(later)
     assert asked[-1] == ("Riot", "300")
@@ -614,6 +615,7 @@ async def test_x_fetcher_waits_a_full_interval_after_a_failed_check() -> None:
     result = await fetcher.fetch(source)
     assert result.items == () and result.cursor == "123"
     assert result.state["fetched_at"] == 10_000.0 and result.state["last_error"] == "XSearchError"
+    assert result.checked is False
     now[0] += 15 * 60  # the next tracking pass: no new session
     await fetcher.fetch(replace(source, state=result.state))
     assert len(attempts) == 1
