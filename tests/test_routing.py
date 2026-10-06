@@ -409,7 +409,18 @@ async def test_an_image_is_not_judged(client, backends, monkeypatch) -> None:
     picture = types.SimpleNamespace(content_type="image/png", filename="a.png", size=10)
     plan = await client._route(KEY, None, GUILD, USER, "這是什麼", [picture], False)
     assert asked == [] and plan.target == Resolved("grok", "grok-4.7", "medium")
-    assert plan.log["status"] == "image"
+    assert plan.log["status"] == "image" and plan.log["files"] == 1
+
+
+async def test_a_document_is_judged_from_the_words_and_counted_in_the_log(
+    client, monkeypatch
+) -> None:
+    # Jev sees only the member's words, as evaluated; the holdout uses `files` to measure how
+    # often "幫我看這個" + a PDF is misrouted (hub on #33).
+    asked = verdicts(monkeypatch, ok("chat", 1))
+    pdf = types.SimpleNamespace(content_type="application/pdf", filename="a.pdf", size=10)
+    plan = await client._route(KEY, None, GUILD, USER, "幫我看這個", [pdf], False)
+    assert asked == [("幫我看這個", [])] and plan.log["files"] == 1
 
 
 async def test_a_member_with_their_own_model_is_not_routed(client, backends, monkeypatch) -> None:
@@ -764,7 +775,7 @@ async def test_each_routed_message_logs_one_structured_line(
     assert record["input_tokens"] == 1600 and record["thread"] == "codex-t1"
     assert record["turn"] == 1 and record["text"] == "修這個 bug"
     assert record["via"] == "codex:gpt-5.6-luna|high" and record["fallback"] is False
-    assert record["quoted"] is False
+    assert record["quoted"] is False and record["files"] == 0
     assert SECRET not in caplog.text
 
 
@@ -820,6 +831,61 @@ async def test_a_routed_mention_names_the_model_that_answered(
     client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
     await client.on_message(message)
     assert "自動選擇" not in sent[-1]  # their own model: as before
+
+
+async def test_files_counts_what_the_model_gets_including_a_replied_to_pdf(
+    client, monkeypatch
+) -> None:
+    # Stand-in review on #34: on_message folds the replied-to message's files in, and `files`
+    # counts them on purpose (Jev saw none of them); `quoted` tells the cases apart.
+    verdicts(monkeypatch, ok("text", 4))
+    client._connection.user = types.SimpleNamespace(id=123)
+    logged: list[dict] = []
+    monkeypatch.setattr(client, "_log_route", lambda plan, result: logged.append(plan.log))
+
+    async def answer(*args, **kwargs):
+        return CodexResult("好", via=kwargs["routed"])
+
+    async def reply(text, **kw):
+        return types.SimpleNamespace(id=778)
+
+    pdf = types.SimpleNamespace(content_type="application/pdf", filename="a.pdf", size=10)
+    quoted = types.SimpleNamespace(
+        author=types.SimpleNamespace(display_name="A"), content="報告", attachments=[pdf]
+    )
+    channel = types.SimpleNamespace(id=3, typing=contextlib.nullcontext)
+    message = types.SimpleNamespace(
+        author=types.SimpleNamespace(bot=False, id=USER, display_name="B"),
+        content="<@123> 幫我看這個",
+        mentions=[client._connection.user],
+        guild=types.SimpleNamespace(id=GUILD),
+        channel=channel,
+        attachments=[],
+        reference=types.SimpleNamespace(message_id=5),
+        reply=reply,
+    )
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    async def referenced(message):
+        return quoted
+
+    async def no_previews(*args, **kwargs):
+        return {}
+
+    async def direct(key, owner, show, start):
+        return await start(None, None)
+
+    monkeypatch.setattr(client, "_linkclean", nothing)
+    monkeypatch.setattr(client, "_referenced", referenced)
+    monkeypatch.setattr(client, "_previews", no_previews)
+    monkeypatch.setattr(client, "_run_tracked", direct)
+    monkeypatch.setattr(client, "_answer", answer)
+    monkeypatch.setattr(client, "_access", lambda *args: "")
+    await client.on_message(message)
+    assert logged[-1]["quoted"] is True and logged[-1]["files"] == 1
+    assert logged[-1]["text"] == "幫我看這個"
 
 
 def test_help_tells_members_and_the_model_about_routing(client) -> None:
