@@ -418,7 +418,8 @@ class RoutePlan:
     value: str  # "<backend>:<model>" that will hold the thread (ThreadStore model)
     route: Route
     resume: str
-    history: str
+    history: str  # replayed to the target: it does not hold this conversation
+    replay: str  # the same conversation, for a stand-in or spare taking over a resumed turn
     spares: tuple[Resolved, ...]
     log: dict
     no_x: bool  # an X question: say so when something other than Grok answers it
@@ -901,13 +902,16 @@ class DiscordCodexClient(discord.Client):
         routed: Resolved | None = None,
         routed_spares: Sequence[Resolved] = (),
         history: str = "",
+        spare_history: str = "",
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
         `on_delta` receives the accumulated answer while a backend streams it (agy, routers).
         `routed` is a target the Bot picked for a member who chose no model: it replaces the
         member's backend and falls back along the whole chain (see `fallback_chain`), after
         the router's own stand-ins in `routed_spares`. `history` is the conversation so far,
-        replayed to a backend that did not hold it. The result's `via` is what answered."""
+        replayed to a backend that did not hold it; `spare_history` is what a spare taking over
+        from the routed target gets instead of the target's thread. The result's `via` is what
+        answered."""
         stored = self._stored(guild_id, user_id)
         choice = self._choice(stored)
         target = resolve(
@@ -1030,7 +1034,8 @@ class DiscordCodexClient(discord.Client):
                         await self.alerts.login_lost("Grok", str(unavailable))
                     elif isinstance(unavailable, grok.GrokRefused):
                         await self._grok_refused(unavailable)
-                    kw.pop("resume", None)
+                    if kw.pop("resume", None) and spare_history and not kw.get("raw"):
+                        kw.setdefault("history", spare_history)  # the thread stays behind
 
         images: list[Path] = []
         self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
@@ -1494,7 +1499,9 @@ class DiscordCodexClient(discord.Client):
             why = "kept"  # no judgement: stay; never down on a missing answer
         else:
             route, why = Route(self._default_entry(), "M", ""), "default"
-        kind = verdict.kind if verdict.status == "ok" else ""
+        # What this message is for the gates below: the verdict, or with none, the type that put
+        # the conversation where it stays (an X conversation keeps its X handling).
+        kind = verdict.kind if verdict.status == "ok" else route.kind
         entry, degraded = route.entry, []
         backend = routing.backend_of(entry)
         if backend == CODEX and not effort:  # an effort the member set is theirs
@@ -1524,15 +1531,15 @@ class DiscordCodexClient(discord.Client):
             spares.append(routing.resolved(table.live_x_without_grok, model))
         if routing.is_claude(entry) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))
-        resume, history = "", ""
-        if current and current["model"] == value:
-            resume = current["thread_id"]
-        elif turns:
-            # Another backend from here on: it gets the conversation replayed, defanged by the
-            # prompt builder like every other block, and the earlier thread ids stay listed so
-            # a later move replays all of it.
+        replay = ""
+        if turns:
+            # Another backend gets the conversation replayed, defanged by the prompt builder like
+            # every other block; the earlier thread ids stay listed so a later move replays all
+            # of it. A resumed turn keeps it too, for a stand-in that answers if its model fails.
             messages = [{"role": t.role, "content": t.text} for t in turns]
-            history = grok.render_history(trim_history(messages, self.config.grok_history_chars))
+            replay = grok.render_history(trim_history(messages, self.config.grok_history_chars))
+        resume = current["thread_id"] if current and current["model"] == value else ""
+        history = "" if resume else replay
         earlier = route.earlier
         if current and not resume:
             earlier = (*route.earlier, current["thread_id"])[-MAX_EARLIER:]
@@ -1543,6 +1550,7 @@ class DiscordCodexClient(discord.Client):
             route=stored,
             resume=resume,
             history=history,
+            replay=replay,
             spares=tuple(spares),
             log={
                 "key": key,
@@ -1584,6 +1592,7 @@ class DiscordCodexClient(discord.Client):
             "routed": route_plan.target,
             "routed_spares": route_plan.spares,
             "history": route_plan.history,
+            "spare_history": route_plan.replay,
         }
 
     def _log_route(self, route_plan: RoutePlan, result: CodexResult) -> None:
