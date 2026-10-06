@@ -1096,7 +1096,13 @@ async def test_the_loop_wakes_for_the_next_fixed_time(tmp_path: Path, monkeypatc
     async def nothing(*_args):
         return FetchResult(())
 
-    monkeypatch.setattr(tracking.asyncio, "sleep", sleep)
+    async def monotonic_sleep(_seconds):
+        raise AssertionError("a wait toward a clock time must count the VM's frozen time")
+
+    # The wait goes through clock.sleep_for (wall clock), not asyncio.sleep (Codex on PR #25):
+    # a VM frozen through the watch's fixed time would otherwise run the pass late by the pause.
+    monkeypatch.setattr(tracking, "sleep_for", sleep)
+    monkeypatch.setattr(tracking.asyncio, "sleep", monotonic_sleep)
     with pytest.raises(asyncio.CancelledError):
         await tracking.tracking_loop(store, nothing, nothing, nothing, 900)
     assert slept == [32.0]
@@ -1264,7 +1270,7 @@ async def test_pruned_history_is_not_expired_all_over_again(tmp_path: Path, monk
     async def classify(prompt):
         return classifier_answer(prompt, notify=False)
 
-    monkeypatch.setattr(tracking.asyncio, "sleep", sleep)
+    monkeypatch.setattr(tracking, "sleep_for", sleep)
     with pytest.raises(asyncio.CancelledError):
         await tracking.tracking_loop(store, _nothing_new, classify, _no_delivery, 60, 90)
     assert store.decisions() == []  # pruned, and not re-created by the next pass
