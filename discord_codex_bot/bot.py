@@ -408,7 +408,11 @@ class DiscordCodexClient(discord.Client):
         intents.guild_messages = True
         intents.message_content = True
         intents.emojis_and_stickers = True  # keeps guild.emojis populated for the 記住 button
-        super().__init__(intents=intents)
+        # What the model writes is sent as is: an answer quoting @everyone, a role or a member
+        # must not ping them (hub on PR #25). Only replying pings the member who asked; a send
+        # that means to mention someone (reminders, tracking) says so with its own value.
+        mentions = discord.AllowedMentions(everyone=False, users=False, roles=False)
+        super().__init__(intents=intents, allowed_mentions=mentions)
         self.config = config
         prefix = config.command_prefix
         self.tree = app_commands.CommandTree(self)
