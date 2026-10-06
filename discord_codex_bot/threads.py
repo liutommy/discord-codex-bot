@@ -21,7 +21,9 @@ class ThreadStore:
 
     A thread that stops being resumable (TTL passed, version changed, replaced by `new`/reset)
     becomes a harvest candidate: its transcript is distilled once into the member's long-term
-    memory. `harvest_candidates()` lists them, `mark_harvested()` retires them.
+    memory. `harvest_candidates()` lists them, `mark_harvested()` retires them. A member replying
+    to the Bot's answer to someone else continues that thread under their own key, so one thread
+    can be a candidate once per member; each harvest takes only that member's turns.
     """
 
     def set_version(self, version: str) -> None:
@@ -135,8 +137,14 @@ class ThreadStore:
         for key, entry in self._by_key.items():
             if not entry.get("harvested") and not self._live(entry, current):
                 found.append((key, str(entry["thread_id"])))
-        seen: set[str] = set()
-        return [c for c in found if not (c[1] in seen or seen.add(c[1]))]
+        seen: set[tuple[str, str]] = set()
+        return [c for c in found if not (c in seen or seen.add(c))]
+
+    def keys_for(self, thread_id: str) -> set[str]:
+        """Every conversation key the store still links to `thread_id` (current or pending);
+        more than one member means a shared reply thread."""
+        keys = {key for key, entry in self._by_key.items() if entry["thread_id"] == thread_id}
+        return keys | {p["key"] for p in self._pending if p["thread_id"] == thread_id}
 
     def recent(self, since: float) -> list[tuple[str, str, float]]:
         """(key, thread_id, last used) of each conversation's latest thread used since `since`;
@@ -147,10 +155,16 @@ class ThreadStore:
             if float(entry["at"]) >= since
         ]
 
-    def mark_harvested(self, thread_id: str) -> None:
-        self._pending = [p for p in self._pending if p["thread_id"] != thread_id]
-        for entry in self._by_key.values():
-            if entry["thread_id"] == thread_id:
+    def mark_harvested(self, thread_id: str, key: str | None = None) -> None:
+        """Retire `thread_id` for `key` only (another member on the same thread still has their
+        own harvest to come), or for every key when none is given."""
+        self._pending = [
+            p
+            for p in self._pending
+            if not (p["thread_id"] == thread_id and key in (None, p["key"]))
+        ]
+        for entry_key, entry in self._by_key.items():
+            if entry["thread_id"] == thread_id and key in (None, entry_key):
                 entry["harvested"] = True
         self._save()
 

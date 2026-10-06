@@ -1001,6 +1001,7 @@ class DiscordCodexClient(discord.Client):
                     links=links,
                     help=self.help_sheet(),
                     files=files,
+                    speaker=user_id,  # shared reply threads: who said it (harvest, digest)
                 )
             )
             # On-demand reads (search snippets / paged recall): the Bot executes the request and

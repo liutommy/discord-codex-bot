@@ -462,3 +462,84 @@ async def test_scopes_that_cannot_reach_the_model_cost_no_quota_probe(
     )
     assert summary == "nothing new" and probes == []
     assert "Digest guild 1: 1 of 3 channels public, 1 members there" in caplog.text
+
+
+# ----- shared reply threads: every turn belongs to its real speaker (Codex on PR #13) ---------
+
+
+def _tagged_thread(config: Config, thread_id: str, turns: list[tuple[int, str]]) -> None:
+    """A Codex rollout whose member turns carry the speaker tag the Bot writes (codex._prompt)."""
+    from discord_codex_bot.codex import _prompt
+
+    day = config.codex_home / "sessions" / "2026" / "09" / "28"
+    day.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for speaker, message in turns:
+        for role, kind, text in (
+            ("user", "input_text", _prompt(message, speaker=speaker)),
+            ("assistant", "output_text", "好的"),
+        ):
+            payload = {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}
+            lines.append(json.dumps({"type": "response_item", "payload": payload}))
+    (day / f"rollout-2026-09-28T10-00-00-{thread_id}.jsonl").write_text("\n".join(lines), "utf-8")
+
+
+def test_both_members_of_a_shared_thread_stay_in_the_ledger(tmp_path: Path, config: Config) -> None:
+    # A and B each harvest the thread B continued; the second record must not erase the first,
+    # or the digest loses track of who was on it (Codex on PR #13).
+    config, _ = _setup(tmp_path, config)
+    record_retired(config, "1:2:3", "T", now=NOW - DAY)
+    record_retired(config, "1:2:4", "T", now=NOW)
+    assert [(e["key"], e["thread_id"]) for e in read_ledger(config)] == [
+        ("1:2:3", "T"),
+        ("1:2:4", "T"),
+    ]
+
+
+async def test_a_shared_thread_is_split_by_speaker_for_the_digest(
+    tmp_path: Path, config: Config
+) -> None:
+    # Only A's key is in the ledger, yet B's words are B's: the server digest sees two members,
+    # and neither member's conversations carry the other's messages (Codex on PR #13).
+    config, store = _setup(tmp_path, config)
+    _tagged_thread(config, "T", [(3, "這週五晚上開團打副本嗎"), (4, "這週五晚上開團我會到")])
+    record_retired(config, "1:2:3", "T", now=NOW - DAY)
+    found = conversations(config, None, since=NOW - 7 * DAY)
+    assert found == {1: {3: [(2, ["這週五晚上開團打副本嗎"])], 4: [(2, ["這週五晚上開團我會到"])]}}
+    seen = []
+
+    async def runner(prompt: str, scope: str) -> str:
+        seen.append(scope)
+        return _guild_note("M1", "M2")
+
+    assert await digest_all(config, None, store, runner, now=NOW, public=lambda g, c: True) == (
+        "1/伺服器: +1"
+    )
+    assert seen == ["guild"]
+
+
+def test_a_legacy_thread_two_members_were_on_feeds_nobodys_digest(
+    tmp_path: Path, config: Config
+) -> None:
+    # Untagged turns cannot be told apart, so a thread the ledger and the thread store show two
+    # members on is left out rather than credited to one of them.
+    config, _ = _setup(tmp_path, config)
+    _thread(config, "T", ["我叫小美"])
+    _thread(config, "U", ["我叫小華"])
+    record_retired(config, "1:2:3", "T", now=NOW - DAY)
+    record_retired(config, "1:2:3", "U", now=NOW - DAY)
+    threads = ThreadStore(config.codex_home / "threads.json", 3600, "v1")
+    threads.remember("1:2:4", "T")
+    assert conversations(config, threads, since=NOW - 7 * DAY) == {1: {3: [(2, ["我叫小華"])]}}
+
+
+def test_a_one_member_thread_spanning_the_deploy_keeps_their_older_words(
+    tmp_path: Path, config: Config
+) -> None:
+    # Untagged turns from before the deploy next to tagged ones from after: when only one member
+    # was ever on the thread, the untagged ones are theirs too, not dropped (review on PR #27).
+    config, _ = _setup(tmp_path, config)
+    _tagged_thread(config, "T", [(None, "我最喜歡抹茶，已經喝了十年"), (3, "今天天氣不錯")])
+    record_retired(config, "1:2:3", "T", now=NOW - DAY)
+    found = conversations(config, None, since=NOW - 7 * DAY)
+    assert found == {1: {3: [(2, ["我最喜歡抹茶，已經喝了十年", "今天天氣不錯"])]}}
