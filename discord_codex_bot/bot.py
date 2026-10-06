@@ -1567,7 +1567,9 @@ class DiscordCodexClient(discord.Client):
                 # A reply to someone's message: Jev saw only the member's words (as evaluated);
                 # the holdout measures how often that misroutes "幫我看這個".
                 "quoted": bool(pointed),
-                # Attached files (documents too): Jev does not see them either, as evaluated.
+                # Files the answering model gets — the member's own plus those of a message they
+                # replied to (on_message folds them in) — none of which Jev sees, as evaluated;
+                # with `quoted`, a holdout can tell the two cases apart.
                 "files": len(attachments),
             },
             no_x=kind == "live-x",

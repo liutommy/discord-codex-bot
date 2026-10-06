@@ -833,6 +833,61 @@ async def test_a_routed_mention_names_the_model_that_answered(
     assert "自動選擇" not in sent[-1]  # their own model: as before
 
 
+async def test_files_counts_what_the_model_gets_including_a_replied_to_pdf(
+    client, monkeypatch
+) -> None:
+    # Stand-in review on #34: on_message folds the replied-to message's files in, and `files`
+    # counts them on purpose (Jev saw none of them); `quoted` tells the cases apart.
+    verdicts(monkeypatch, ok("text", 4))
+    client._connection.user = types.SimpleNamespace(id=123)
+    logged: list[dict] = []
+    monkeypatch.setattr(client, "_log_route", lambda plan, result: logged.append(plan.log))
+
+    async def answer(*args, **kwargs):
+        return CodexResult("好", via=kwargs["routed"])
+
+    async def reply(text, **kw):
+        return types.SimpleNamespace(id=778)
+
+    pdf = types.SimpleNamespace(content_type="application/pdf", filename="a.pdf", size=10)
+    quoted = types.SimpleNamespace(
+        author=types.SimpleNamespace(display_name="A"), content="報告", attachments=[pdf]
+    )
+    channel = types.SimpleNamespace(id=3, typing=contextlib.nullcontext)
+    message = types.SimpleNamespace(
+        author=types.SimpleNamespace(bot=False, id=USER, display_name="B"),
+        content="<@123> 幫我看這個",
+        mentions=[client._connection.user],
+        guild=types.SimpleNamespace(id=GUILD),
+        channel=channel,
+        attachments=[],
+        reference=types.SimpleNamespace(message_id=5),
+        reply=reply,
+    )
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    async def referenced(message):
+        return quoted
+
+    async def no_previews(*args, **kwargs):
+        return {}
+
+    async def direct(key, owner, show, start):
+        return await start(None, None)
+
+    monkeypatch.setattr(client, "_linkclean", nothing)
+    monkeypatch.setattr(client, "_referenced", referenced)
+    monkeypatch.setattr(client, "_previews", no_previews)
+    monkeypatch.setattr(client, "_run_tracked", direct)
+    monkeypatch.setattr(client, "_answer", answer)
+    monkeypatch.setattr(client, "_access", lambda *args: "")
+    await client.on_message(message)
+    assert logged[-1]["quoted"] is True and logged[-1]["files"] == 1
+    assert logged[-1]["text"] == "幫我看這個"
+
+
 def test_help_tells_members_and_the_model_about_routing(client) -> None:
     assert "自動挑模型" in client.help_guide() and "自動挑模型" in client.help_sheet()
     assert "/codex-model" in client.help_sheet().split("自動挑模型")[1]
