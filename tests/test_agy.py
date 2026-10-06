@@ -268,3 +268,25 @@ async def test_run_streams_agent_text_deltas_while_agy_runs(monkeypatch, config)
     code, out, err = await agy_module._run(["x"], "{}", Path("/tmp"), config, on_delta)
     assert code == 0 and seen == ["Hel", "Hello"]
     assert agy_module.parse_stream(out) == ("c1", "Hello", "")
+
+
+@pytest.mark.parametrize(
+    ("reply", "unavailable"),
+    [
+        ((1, "", "Error: RESOURCE_EXHAUSTED: quota exceeded for model"), True),
+        ((1, "", "HTTP 503 Service Unavailable"), True),
+        ((1, "", "model is overloaded, try again later"), True),
+        ((0, _stream("c", ""), ""), True),  # no reply at all
+        ((2, "", "settings.json: unexpected token"), False),  # broken install: surfaces
+        ((1, "", "unknown flag --print-timeout"), False),
+    ],
+)
+async def test_run_agy_marks_only_availability_failures_for_fallback(
+    agy_config: Config, project, monkeypatch, reply, unavailable
+) -> None:
+    # A routed turn falls back on AgyUnavailable; bad settings must reach the failure alert
+    # instead of being answered quietly by a spare (Codex on PR #33).
+    monkeypatch.setattr(agy, "_run", FakeRun(reply))
+    with pytest.raises(RuntimeError) as raised:
+        await run_agy("q", agy_config, "gemini-3.8-flash-high")
+    assert isinstance(raised.value, agy.AgyUnavailable) is unavailable

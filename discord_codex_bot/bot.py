@@ -976,16 +976,9 @@ class DiscordCodexClient(discord.Client):
                 return await grok.run_grok(text, self.config, via.model, effort=via.effort, **kw)
             if via.backend == AGY:
                 kw.pop("effort", None)
-                try:
-                    return await run_agy(text, self.config, via.model, **kw)
-                except BackendUnavailable:
-                    raise
-                except RuntimeError as error:
-                    if routed is None:
-                        raise  # a member's own agy: reported as before
-                    # agy reports a timeout, a failed exit or an empty reply as a plain error;
-                    # on a routed turn that must reach the stand-ins and the chain, not end it.
-                    raise BackendUnavailable(f"agy failed: {error}") from error
+                # A timeout, an empty reply or a model out of quota is AgyUnavailable and falls
+                # back; broken settings stay a plain error and reach the failure alert.
+                return await run_agy(text, self.config, via.model, **kw)
             if via.backend in ROUTER_BACKENDS:
                 catalog = self.catalogs[via.backend]
                 await catalog.free_models()  # image / effort capability lookup

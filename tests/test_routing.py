@@ -509,9 +509,9 @@ async def test_grok_refusing_an_x_question_falls_to_flash_medium_with_the_note(
 async def test_a_failed_claude_turn_takes_its_types_stand_in(
     client, backends, monkeypatch, kind, degree, stand_in
 ) -> None:
-    # A real agy failure is a plain RuntimeError (timeout, failed exit, empty reply), not
-    # BackendUnavailable; on a routed turn it must still reach the stand-in (Codex on #33).
-    claude = Backend("agy", error=RuntimeError("agy exited with code 1: overloaded"))
+    # What run_agy raises when the model is out (Codex on #33: a plain RuntimeError never
+    # reached the stand-in); test_agy checks which failures are of this kind.
+    claude = Backend("agy", error=agy_module.AgyUnavailable("agy exited with code 1: overloaded"))
     calls: list[tuple] = []
 
     async def run_agy(prompt, config, model, **kw):
@@ -524,6 +524,18 @@ async def test_a_failed_claude_turn_takes_its_types_stand_in(
     verdicts(monkeypatch, ok(kind, degree))
     plan, result = await ask(client)
     assert calls[0] == "claude-sonnet-4-6" and result.via == stand_in
+
+
+async def test_a_broken_agy_on_a_routed_turn_is_reported_not_hidden(
+    client, backends, monkeypatch
+) -> None:
+    # Codex on #33: bad settings or a failed project registration must reach the failure path
+    # and its alert, not be answered quietly by a spare.
+    backends["agy"].error = RuntimeError("agy exited with code 2: settings.json is invalid")
+    verdicts(monkeypatch, ok("chat", 1))
+    plan, result = await ask(client)
+    assert result.text == bot_module.FAILURE_MESSAGE.format(prefix=client.config.command_prefix)
+    assert backends["grok"].calls == [] and backends["codex"].calls == []
 
 
 async def test_a_plain_agy_failure_still_ends_a_members_own_agy_turn(
