@@ -65,6 +65,7 @@ def config() -> Config:
         sandbox_timeout_seconds=30,
         xsearch_url="",
         xsearch_timeout_seconds=240,
+        xsearch_sidecar_seconds=210,
         x_tracking_interval_minutes=60,
         default_model="",
         model_chain=(),

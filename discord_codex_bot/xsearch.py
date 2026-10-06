@@ -4,6 +4,7 @@ Grok subscription. Everything that comes back is X content, i.e. untrusted text.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -49,10 +50,41 @@ def enabled(config: Config) -> bool:
     return bool(config.xsearch_url)
 
 
+# The sidecar runs one lookup session at a time and turns away a request that waited past its
+# own 30 s queue (429). This bot's lookups — several X links in one message, a tracking check —
+# take turns here instead (Codex on PR #2), within one deadline for the wait and the request
+# together (Codex on PR #29). A request is only sent with the time the sidecar may take to
+# answer it (xsearch_sidecar_seconds) still left: once a session starts it runs to the end
+# whether anyone waits or not, so one given up on early is quota spent for nothing. The rest of
+# the deadline is the wait. For the same reason a turn is held until the sidecar has answered,
+# even when the caller stopped waiting.
+_TURN = asyncio.Semaphore(1)
+
+
 async def _ask(config: Config, kind: str, body: dict) -> dict:
     if not config.xsearch_url:
         raise XSearchError("X lookup is not configured")
-    timeout = aiohttp.ClientTimeout(total=config.xsearch_timeout_seconds)
+    started = time.monotonic()
+    wait = max(0, config.xsearch_timeout_seconds - config.xsearch_sidecar_seconds)
+    try:
+        async with asyncio.timeout(wait):
+            await _TURN.acquire()
+    except TimeoutError:
+        raise XSearchBusy(f"X lookup {kind} failed: still queued behind this bot's own") from None
+    budget = config.xsearch_timeout_seconds - (time.monotonic() - started)
+    request = asyncio.ensure_future(_post(config, kind, body, budget))
+    request.add_done_callback(_end_turn)
+    return await asyncio.shield(request)  # a caller cancelled here leaves the request running
+
+
+def _end_turn(request: asyncio.Future) -> None:
+    _TURN.release()
+    if not request.cancelled():
+        request.exception()  # retrieved: a request nobody waits for any more fails quietly
+
+
+async def _post(config: Config, kind: str, body: dict, budget: float) -> dict:
+    timeout = aiohttp.ClientTimeout(total=budget)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(

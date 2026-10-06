@@ -94,11 +94,13 @@ def test_each_session_gets_a_fresh_home_holding_only_the_login(monkeypatch, tmp_
             self.returncode, self.pid = 0, 0
 
         def communicate(self, timeout=None):
-            return "\n".join(_stream(INIT_EMPTY)), ""
+            return "\n".join(_stream(INIT_EMPTY, _assistant(X_SEARCH), _result("{}"))), ""
 
     monkeypatch.setattr(server.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(server, "login_expires_in", lambda: 10_000.0)
-    server._session(server.threading.Lock(), lambda: True, prompt="prompt")
+    server._session(
+        server.threading.Lock(), lambda: True, prompt="prompt", verify=server.verify_stream
+    )
     command, env = seen["command"], seen["env"]
     start = command.index("--verbatim")
     assert tuple(command[start : start + len(server.LOCKED_ARGS)]) == server.LOCKED_ARGS
@@ -274,6 +276,16 @@ def test_verify_stream_reports_failed_or_empty_answers() -> None:
                                                   "is_error": True}))  # fmt: skip
     with pytest.raises(server.LookupFailed):
         server.verify_stream(_stream(INIT_EMPTY, _result("no json here")))
+
+
+def test_verify_stream_refuses_a_lookup_answered_without_x_search() -> None:
+    # Grok skipped "Search first" and answered from what it remembers (Codex on PR #2): a post or
+    # an account no X search returned is a guess, so the lookup fails (502, nothing cached) and
+    # the caller falls back. A chat turn need not search.
+    with pytest.raises(server.LookupFailed) as raised:
+        server.verify_stream(_stream(INIT_EMPTY, _result('{"found": false}')))
+    assert type(raised.value) is server.LookupFailed
+    assert server.verify_stream(_stream(INIT_EMPTY, _result("hi")), mode="chat") == "hi"
 
 
 def test_last_json_object_takes_the_last_top_level_object() -> None:
@@ -480,7 +492,7 @@ def test_http_handler_rejects_bad_lengths_and_slow_clients(monkeypatch) -> None:
 def test_post_lookups_are_cached_and_a_busy_queue_is_refused(monkeypatch) -> None:
     calls = []
 
-    def fake_run(prompt):
+    def fake_run(prompt, verify):
         calls.append(prompt)
         post = {
             "id": "2105070184717262858",
@@ -488,7 +500,8 @@ def test_post_lookups_are_cached_and_a_busy_queue_is_refused(monkeypatch) -> Non
             "text": "t",
             "created_at": "2026-09-29T23:00:17Z",
         }
-        return _stream(INIT_EMPTY, _result(json.dumps({"found": True, "post": post})))
+        answer = json.dumps({"found": True, "post": post})
+        return verify(_stream(INIT_EMPTY, _assistant(X_SEARCH), _result(answer)))
 
     monkeypatch.setattr(server, "run_grok", fake_run)
     monkeypatch.setattr(server, "_POST_CACHE", server.OrderedDict())
@@ -502,6 +515,39 @@ def test_post_lookups_are_cached_and_a_busy_queue_is_refused(monkeypatch) -> Non
             server.lookup("user", {"handle": "a"})
     finally:
         server._LOCK.release()
+
+
+def test_a_lookup_queued_behind_the_same_question_reuses_its_answer(monkeypatch) -> None:
+    # Two requests for one account both miss the cache. The second waits for the lock while the
+    # first runs; once it gets the lock it must find the first one's answer, not pay for another
+    # session (Codex on PR #2).
+    import threading as threading_
+
+    calls, second_missed, results = [], threading_.Event(), []
+
+    class Cache(server.OrderedDict):
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            if value is None and threading_.current_thread() is not threading_.main_thread():
+                second_missed.set()
+            return value
+
+    def fake_run(prompt, verify):
+        calls.append(prompt)
+        if len(calls) == 1:  # the first session: the same question arrives while it runs
+            second.start()
+            assert second_missed.wait(5)
+        answer = json.dumps({"exists": True, "handle": "a", "name": "A"})
+        return verify(_stream(INIT_EMPTY, _assistant(X_SEARCH), _result(answer)))
+
+    second = threading_.Thread(
+        target=lambda: results.append(server.lookup("user", {"handle": "a"}))
+    )
+    monkeypatch.setattr(server, "run_grok", fake_run)
+    monkeypatch.setattr(server, "_POST_CACHE", Cache())
+    first = server.lookup("user", {"handle": "a"})
+    second.join(5)
+    assert len(calls) == 1 and results == [first] and first["exists"]
 
 
 # -------------------------------------------------------------------------- the bot's side
@@ -565,6 +611,96 @@ async def test_link_lookups_are_rate_limited(sidecar, monkeypatch, config: Confi
     with pytest.raises(xsearch.XSearchError):
         await xsearch.fetch_post(cfg, "200")
     assert len(sidecar.calls) == 2
+
+
+async def test_this_bots_lookups_take_turns_at_the_sidecar(monkeypatch, config: Config) -> None:
+    # The sidecar runs one lookup at a time and turns away whoever waits past its 30 s queue;
+    # several X links in one message used to all go at once and get 429 (Codex on PR #2). The
+    # bot queues its own lookups instead, within its own deadline.
+    import asyncio
+
+    running, most = 0, 0
+
+    async def handle(request: web.Request) -> web.Response:
+        nonlocal running, most
+        running += 1
+        most = max(most, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+        return web.json_response({"found": False})
+
+    app = web.Application()
+    app.add_routes([web.post("/x/{kind}", handle)])
+    monkeypatch.setattr(xsearch, "_post_lookups", xsearch.deque())
+    async with TestServer(app) as server_:
+        cfg = replace(config, xsearch_url=f"http://127.0.0.1:{server_.port}")
+        found = await asyncio.gather(*(xsearch.fetch_post(cfg, str(200 + i)) for i in range(3)))
+        assert found == [None] * 3 and most == 1
+        # A lookup that cannot get its turn within the deadline is busy, not left waiting.
+        await xsearch._TURN.acquire()
+        try:
+            with pytest.raises(xsearch.XSearchBusy):
+                await xsearch.fetch_post(replace(cfg, xsearch_timeout_seconds=0), "300")
+        finally:
+            xsearch._TURN.release()
+
+    # One deadline for both (Codex on PR #29): a request is sent only with the time the sidecar
+    # may need still left, and only the rest of the deadline is spent waiting for the turn.
+    budgets = []
+
+    async def fake_post(config, kind, body, budget):
+        budgets.append(budget)
+        return {"found": False}
+
+    monkeypatch.setattr(xsearch, "_post", fake_post)
+    # 0.1 s to wait for the turn; the reservation is the operator's, matching the sidecar's
+    # own limits (Codex on PR #29)
+    quick = replace(cfg, xsearch_timeout_seconds=0.4, xsearch_sidecar_seconds=0.3)
+    loop = asyncio.get_running_loop()
+    await xsearch._TURN.acquire()
+    loop.call_later(0.05, xsearch._TURN.release)
+    await xsearch.fetch_post(quick, "301")
+    assert 0.3 <= budgets[0] <= 0.35
+    await xsearch._TURN.acquire()
+    loop.call_later(0.15, xsearch._TURN.release)  # held past the wait: too late to be answered
+    with pytest.raises(xsearch.XSearchBusy):
+        await xsearch.fetch_post(quick, "302")
+    assert budgets == [budgets[0]]  # nothing was sent
+    await asyncio.sleep(0.15)
+    assert not xsearch._TURN.locked()
+
+
+async def test_a_cancelled_lookup_keeps_its_turn_until_the_sidecar_is_done(
+    monkeypatch, config: Config
+) -> None:
+    # The member stopped the turn mid-lookup (Codex on PR #29): the sidecar's session runs on
+    # regardless, so the next lookup must not be sent into it (and wait 30 s for a 429).
+    import asyncio
+
+    answered = asyncio.Event()
+
+    async def handle(request: web.Request) -> web.Response:
+        await asyncio.sleep(0.3)
+        answered.set()
+        return web.json_response({"found": False})
+
+    app = web.Application()
+    app.add_routes([web.post("/x/{kind}", handle)])
+    monkeypatch.setattr(xsearch, "_post_lookups", xsearch.deque())
+    async with TestServer(app) as server_:
+        cfg = replace(config, xsearch_url=f"http://127.0.0.1:{server_.port}")
+        lookup = asyncio.create_task(xsearch.fetch_post(cfg, "200"))
+        await asyncio.sleep(0.1)
+        lookup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lookup
+        assert xsearch._TURN.locked() and not answered.is_set()
+        await asyncio.wait_for(answered.wait(), 2)
+        for _ in range(50):
+            if not xsearch._TURN.locked():
+                break
+            await asyncio.sleep(0.01)
+        assert not xsearch._TURN.locked()
 
 
 def test_post_text_flags_unverified_fields_and_a_different_author() -> None:
@@ -982,7 +1118,7 @@ def test_chat_returns_the_text_of_a_clean_session_and_refuses_a_dirty_one(monkey
 
     def clean(slot, still_wanted, **kw):
         seen.update(kw)
-        return _stream(INIT_EMPTY, _assistant(X_SEARCH), _result("  前輩看過了。  "))
+        return kw["verify"](_stream(INIT_EMPTY, _assistant(X_SEARCH), _result("  前輩看過了。  ")))
 
     monkeypatch.setattr(server, "_session", clean)
     out = server.chat(
@@ -993,7 +1129,9 @@ def test_chat_returns_the_text_of_a_clean_session_and_refuses_a_dirty_one(monkey
 
     shell = {"type": "tool_use", "name": "run_terminal_cmd", "input": {"command": "id"}}
     monkeypatch.setattr(
-        server, "_session", lambda *a, **k: _stream(INIT_EMPTY, _assistant(shell), _result("ok"))
+        server,
+        "_session",
+        lambda *a, **k: k["verify"](_stream(INIT_EMPTY, _assistant(shell), _result("ok"))),
     )
     with pytest.raises(server.Unsafe):  # chat mode runs exactly the same checks as lookups
         server.chat({"prompt": "hi", "model": "grok-4.7"})
@@ -1004,7 +1142,9 @@ def test_a_fullwidth_at_the_model_copied_comes_back_as_ascii(monkeypatch) -> Non
     monkeypatch.setattr(server, "models", lambda *a: server.parse_models(CATALOG))
     answer = "from dataclasses import dataclass\n\n\uff20dataclass\nclass P: ..."
     monkeypatch.setattr(
-        server, "_session", lambda *a, **k: _stream(INIT_EMPTY, _assistant(), _result(answer))
+        server,
+        "_session",
+        lambda *a, **k: k["verify"](_stream(INIT_EMPTY, _assistant(), _result(answer))),
     )
     out = server.chat({"prompt": "fix @dataclass", "model": "grok-4.7"})
     assert "\uff20" not in out["text"] and "\n@dataclass\n" in out["text"]
@@ -1262,6 +1402,48 @@ def test_a_session_that_echoes_the_login_is_refused(monkeypatch, tmp_path) -> No
         server.run_grok("hi", model="grok-4.7")
 
 
+def test_a_refreshed_login_is_kept_only_from_a_verified_session(monkeypatch, tmp_path) -> None:
+    # The login a session leaves behind is only as good as the session (Codex on PR #2 and #3):
+    # a client tool that ran in a session refused as unsafe, cut off by the timeout or exited
+    # nonzero could have rewritten it. Only a session whose stream passed the safety checks
+    # writes it back — one that merely gave no usable answer was still the locked-down one.
+    auth, scratch = tmp_path / "auth", tmp_path / "scratch"
+    auth.mkdir()
+    scratch.mkdir()
+    monkeypatch.setattr(server, "AUTH_DIR", str(auth))
+    monkeypatch.setattr(server, "SCRATCH", str(scratch))
+    good = _stream(INIT_EMPTY, _assistant(X_SEARCH), _result('{"found": false}'))
+    cases = [
+        (good, None, True),
+        (_stream(dict(INIT_EMPTY, tools=["read_file"]), _result("{}")), server.Unsafe, False),
+        (_stream(INIT_EMPTY, _assistant(X_SEARCH), _result("no json")), server.LookupFailed, True),
+        (server.LookupFailed("grok timed out"), server.LookupFailed, False),
+        (server.LookupFailed("grok exited 1"), server.LookupFailed, False),
+    ]
+    for outcome, raises, kept in cases:
+        (auth / "auth.json").write_text('{"token": "old"}')
+
+        def fake_run(model, tail, home_env, cwd, timeout, *rest, outcome=outcome):
+            (Path(home_env["GROK_HOME"]) / "auth.json").write_text('{"token": "refreshed"}')
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(server, "_run", fake_run)
+        if raises:
+            with pytest.raises(raises):
+                server.run_grok("hi", verify=server.verify_stream)
+        else:
+            assert server.run_grok("hi", verify=server.verify_stream) == {"found": False}
+        expected = "refreshed" if kept else "old"
+        assert json.loads((auth / "auth.json").read_text())["token"] == expected, outcome
+    # A caller that verifies nothing gets the raw lines, and the login is not kept.
+    (auth / "auth.json").write_text('{"token": "old"}')
+    monkeypatch.setattr(server, "_run", lambda *a, **k: fake_run(*a, outcome=good))
+    assert server.run_grok("hi") == good
+    assert json.loads((auth / "auth.json").read_text())["token"] == "old"
+
+
 # ----------------------------------------------------------- the login under overlap
 
 
@@ -1437,8 +1619,8 @@ def test_chat_with_images_tells_the_model_how_to_see_them(monkeypatch) -> None:
 
     def session(slot, still_wanted, **kw):
         seen.update(kw)
-        return _stream(INIT_IMAGES, _assistant(_use(server.IMAGE_TOOL, {"index": 1})),
-                       _result("紅色"))  # fmt: skip
+        return kw["verify"](_stream(INIT_IMAGES, _assistant(_use(server.IMAGE_TOOL, {"index": 1})),
+                                    _result("紅色")))  # fmt: skip
 
     monkeypatch.setattr(server, "_session", session)
     out = server.chat(
@@ -1456,7 +1638,7 @@ def test_chat_with_images_tells_the_model_how_to_see_them(monkeypatch) -> None:
 
     seen.clear()
     monkeypatch.setattr(server, "_session", lambda *a, **kw: seen.update(kw) or
-                        _stream(INIT_EMPTY, _result("ok")))  # fmt: skip
+                        kw["verify"](_stream(INIT_EMPTY, _result("ok"))))  # fmt: skip
     server.chat({"prompt": "hi", "model": "grok-4.7", "system": "persona"})
     assert "images" not in seen and seen["system"] == "persona"
 
@@ -1580,7 +1762,9 @@ def test_images_that_cannot_be_staged_fail_the_turn_cleanly(monkeypatch, tmp_pat
 
 def test_chat_drops_the_base64_once_decoded(monkeypatch) -> None:
     monkeypatch.setattr(server, "models", lambda *a: server.parse_models(CATALOG))
-    monkeypatch.setattr(server, "_session", lambda *a, **k: _stream(INIT_IMAGES, _result("ok")))
+    monkeypatch.setattr(
+        server, "_session", lambda *a, **k: k["verify"](_stream(INIT_IMAGES, _result("ok")))
+    )
     request = {"prompt": "hi", "model": "grok-4.7", "images": [_b64(PNG)]}
     server.chat(request)
     assert "images" not in request  # the handler's copy of the body does not hold them too

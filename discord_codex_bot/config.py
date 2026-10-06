@@ -187,6 +187,7 @@ class Config:
     sandbox_timeout_seconds: int
     xsearch_url: str
     xsearch_timeout_seconds: int
+    xsearch_sidecar_seconds: int
     x_tracking_interval_minutes: int
     default_model: str
     model_chain: tuple[str, ...]
@@ -250,7 +251,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     application_id = _required(values, "DISCORD_APPLICATION_ID")
     if not DISCORD_ID.fullmatch(application_id):
         raise ValueError("DISCORD_APPLICATION_ID contains an invalid Discord ID")
-    return Config(
+    config = Config(
         discord_token=_required(values, "DISCORD_TOKEN"),
         application_id=int(application_id),
         allowed_guild_ids=parse_id_set(
@@ -348,6 +349,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Longer than the sidecar's own queue wait (30 s) plus session timeout (180 s), so the
         # Bot does not give up on a lookup the sidecar is still going to run.
         xsearch_timeout_seconds=_bounded_int(values, "XSEARCH_TIMEOUT_SECONDS", 240, 10, 600),
+        # How long the sidecar may take to answer one lookup: its queue wait plus its session
+        # timeout (the xsearch service's XSEARCH_QUEUE_WAIT_SECONDS + XSEARCH_TIMEOUT_SECONDS,
+        # 30 + 180 by default — change this with them). A lookup keeps this much of its deadline
+        # for the request and spends only the rest waiting for its turn.
+        xsearch_sidecar_seconds=_bounded_int(values, "XSEARCH_SIDECAR_SECONDS", 210, 10, 1200),
         # Each check of an X account is one Grok session on the subscription, so X sources are
         # fetched on their own, slower clock than TRACKING_INTERVAL_MINUTES.
         x_tracking_interval_minutes=_positive_int(values, "X_TRACKING_INTERVAL_MINUTES", 60),
@@ -475,3 +481,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         twitch_client_secret=values.get("TWITCH_CLIENT_SECRET", "").strip(),
         linkclean_admin_ids=parse_id_set(values.get("LINKCLEAN_ADMIN_IDS"), "LINKCLEAN_ADMIN_IDS"),
     )
+    if config.xsearch_url and config.xsearch_sidecar_seconds > config.xsearch_timeout_seconds:
+        # The reservation comes out of the deadline: larger, and a lookup would be sent with
+        # less time than the sidecar may take, then given up on while its session runs on.
+        raise ValueError("XSEARCH_SIDECAR_SECONDS must not exceed XSEARCH_TIMEOUT_SECONDS")
+    return config
