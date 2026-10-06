@@ -1346,6 +1346,7 @@ class DiscordCodexClient(discord.Client):
                 "breaker",
                 "🛑 **Grok** 的工作階段 10 分鐘內被安全檢查拒絕 3 次，已暫停一小時"
                 "（xsearch log 有 REFUSED）",
+                outage=True,
             )
         elif len(self._grok_refusals) == 1:
             await self.alerts.alert_now(

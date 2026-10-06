@@ -65,7 +65,8 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
         for name in BACKUP_MEMBERS
         if (config.codex_home / name).exists()
     ]
-    # Grok's gk- transcripts: by path, since GROK_DIR may be set outside CODEX_HOME.
+    # Grok's gk- transcripts: by path, since GROK_DIR may be set outside CODEX_HOME. In the
+    # archive they are always grok/; a restore puts that back at GROK_DIR.
     if config.grok_dir.is_dir() and all(path != config.grok_dir for path, _ in present):
         present.append((config.grok_dir, "grok"))
     tracking = config.tracking_db_path

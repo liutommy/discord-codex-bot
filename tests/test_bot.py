@@ -2270,3 +2270,26 @@ async def test_skipping_grok_before_the_turn_is_a_fallback_too(client, monkeypat
     agy.replies = ['<search scope="user" query="綠茶"/>', "答案"]
     await client._answer("q", [], GUILD, USER, resume="gk-old")
     assert "resume" not in agy.calls[1][2] and agy.calls[2][2]["resume"] == "t2"
+
+
+async def test_one_refused_session_is_not_followed_by_a_recovery_notice(client) -> None:
+    # A single refusal is an event, not an outage: the next normal Grok answer must not DM
+    # "recovered". Only the breaker (Grok off for an hour) earns one when it comes back.
+    from discord_codex_bot.alerts import Alerter
+
+    sent: list[str] = []
+
+    async def send(text: str) -> None:
+        sent.append(text)
+
+    owner = types.SimpleNamespace(send=send)
+    client.alerts = Alerter(
+        types.SimpleNamespace(get_user=lambda uid: owner), replace(client.config, alert_user_id=7)
+    )
+    await client._grok_refused(RuntimeError("once"))
+    await client.alerts.record_success("grok")
+    assert len(sent) == 1
+    await client._grok_refused(RuntimeError("twice"))
+    await client._grok_refused(RuntimeError("thrice"))  # breaker: Grok off for an hour
+    await client.alerts.record_success("grok")
+    assert len(sent) == 3 and "恢復" in sent[-1]
