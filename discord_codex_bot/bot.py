@@ -1477,7 +1477,8 @@ class DiscordCodexClient(discord.Client):
         turns = await asyncio.to_thread(
             lambda: [turn for thread in sources for turn in transcript_turns(self.config, thread)]
         )
-        own = split_quoted(prompt)[1].strip()
+        pointed, own = split_quoted(prompt)
+        own = own.strip()
         said = [t.text for t in turns if t.role == "user" and t.speaker in (None, user_id)]
         images = any((a.content_type or "").startswith("image/") for a in attachments)
         if effort:
@@ -1563,6 +1564,9 @@ class DiscordCodexClient(discord.Client):
                 "jev_ms": verdict.ms,
                 "input_tokens": verdict.input_tokens,
                 "text": own,
+                # A reply to someone's message: Jev saw only the member's words (as evaluated);
+                # the holdout measures how often that misroutes "幫我看這個".
+                "quoted": bool(pointed),
             },
             no_x=kind == "live-x",
         )

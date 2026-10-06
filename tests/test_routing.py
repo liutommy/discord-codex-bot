@@ -168,15 +168,44 @@ def test_only_up() -> None:
     first, why = routing.decide(table, "chat", "L", None)
     assert (first.entry, why) == ("agy:gemini-3.8-flash|low", "new")
     same, why = routing.decide(table, "quick", "L", first)
-    assert same == first and why == "kept"  # not harder, no special need: stays
+    assert same.entry == first.entry and why == "kept" and same.kind == "quick"
     harder, why = routing.decide(table, "reason", "H", first)
     assert (harder.entry, harder.band, why) == ("codex|high", "H", "harder")
     easy, why = routing.decide(table, "chat", "L", harder)
     assert easy == harder and why == "kept"  # never down
     x, why = routing.decide(table, "live-x", "L", harder)
-    assert (x.entry, x.band, why) == ("grok:grok-4.7|high", "H", "needs-grok")  # band kept
+    assert (x.entry, x.band, why) == ("grok:grok-4.7|high", "H", "type")  # band kept
     code, why = routing.decide(table, "code", "M", x)
-    assert (code.entry, code.band, why) == ("codex|high", "H", "needs-codex")
+    assert (code.entry, code.band, why) == ("codex|high", "H", "type")
+
+
+def test_a_hard_question_does_not_stay_on_the_cell_an_easier_type_left(  # hub on #33
+) -> None:
+    # reason M (codex|medium) -> text H (flash|high) -> reason H stayed on Flash until band X.
+    table = routing.load_table(TABLE_PATH)
+    route, _ = routing.decide(table, "reason", "M", None)
+    route, _ = routing.decide(table, "text", "H", route)
+    assert route.entry == "agy:gemini-3.8-flash|high"
+    route, why = routing.decide(table, "reason", "H", route)
+    assert (route.entry, route.band, why) == ("codex|high", "H", "type")
+
+
+def test_chat_in_a_running_conversation_moves_nothing() -> None:
+    # chat H would have pulled a Codex conversation onto flash|medium; and a thank-you inside
+    # an X conversation keeps it an X one.
+    table = routing.load_table(TABLE_PATH)
+    route, _ = routing.decide(table, "reason", "M", None)
+    assert routing.decide(table, "chat", "H", route) == (route, "kept")
+    x, _ = routing.decide(table, "live-x", "M", None)
+    kept, _ = routing.decide(table, "chat", "L", x)
+    assert kept.kind == "live-x" and kept.entry == "grok:grok-4.7|medium"
+
+
+def test_a_greeting_then_a_hard_question_still_moves_up() -> None:
+    table = routing.load_table(TABLE_PATH)
+    hello, _ = routing.decide(table, "chat", "L", None)
+    route, why = routing.decide(table, "code", "X", hello)
+    assert (route.entry, route.band, why) == ("codex|xhigh", "X", "harder")
 
 
 def test_lower_effort_steps_once_and_stops_at_the_bottom() -> None:
@@ -217,6 +246,8 @@ async def test_recent_context_is_the_members_last_three_own_messages(client, mon
     await ask(client, quoted)
     assert asked[0] == ("第一句", [])
     assert asked[1] == ("第二句", ["二", "三", "四"])
+    plan = await client._route(KEY, None, GUILD, USER, quoted, [], False)
+    assert plan.log["quoted"] is True and plan.log["text"] == "第二句"
 
 
 # --------------------------------------------------------------------------- each type
@@ -733,6 +764,7 @@ async def test_each_routed_message_logs_one_structured_line(
     assert record["input_tokens"] == 1600 and record["thread"] == "codex-t1"
     assert record["turn"] == 1 and record["text"] == "修這個 bug"
     assert record["via"] == "codex:gpt-5.6-luna|high" and record["fallback"] is False
+    assert record["quoted"] is False
     assert SECRET not in caplog.text
 
 

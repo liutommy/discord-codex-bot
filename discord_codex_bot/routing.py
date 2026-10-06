@@ -4,8 +4,8 @@ and effort. The questions below are the setup adopted after evaluation (~/jev-ev
 the state is {message, recent_context}, types are offered as objects (what / not_for /
 examples), difficulty is the 10-level degree scale, and no yes/no gate questions are asked.
 
-A conversation only ever moves up: a message switches backend when it is harder than the band
-the conversation is on, or needs an ability its backend lacks (X posts, live web, code)."""
+A conversation never drops a band: it moves to the cell of its latest message of substance at the
+higher of that message's band and its own (routing.decide)."""
 
 from __future__ import annotations
 
@@ -277,19 +277,22 @@ class Route:
 
 
 def decide(table: Table, kind: str, level: str, current: Route | None) -> tuple[Route, str]:
-    """(where this message goes, why). Only up: a new conversation takes its cell; a running one
-    moves when this message is in a higher band, or to the same band on the one backend that can
-    answer this type; otherwise it stays where it is."""
-    cell = table.types[kind][BANDS.index(level)]
+    """(where this message goes, why). A new conversation takes its cell. A running one never
+    drops a band and follows the latest message of substance: chat (any backend can chat) leaves
+    it as it is, type and all, so a thank-you inside an X conversation keeps it an X one; any
+    other type goes to its own cell at the higher of the two bands. That also covers the types
+    only one backend can answer (`needs`, checked at load), and keeps a hard question from staying
+    on the weak cell an easier type left the conversation on (hub on #33)."""
     if current is None:
-        return Route(cell, level, kind), "new"
-    if BANDS.index(level) > BANDS.index(current.band):
-        return Route(cell, level, kind, current.earlier), "harder"
-    need = table.needs.get(kind)
-    if need and backend_of(current.entry) != need:
-        moved = table.types[kind][BANDS.index(current.band)]
-        return Route(moved, current.band, kind, current.earlier), f"needs-{need}"
-    return current, "kept"
+        return Route(table.types[kind][BANDS.index(level)], level, kind), "new"
+    if kind == "chat":
+        return current, "kept"
+    top = max(level, current.band, key=BANDS.index)
+    cell = table.types[kind][BANDS.index(top)]
+    moved = Route(cell, top, kind, current.earlier)
+    if cell == current.entry:
+        return moved, "kept"
+    return moved, "harder" if BANDS.index(level) > BANDS.index(current.band) else "type"
 
 
 # --------------------------------------------------------------------------- the call
