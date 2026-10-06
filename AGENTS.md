@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains a private Discord gateway to a subscription-authenticated Codex CLI.
+This repository contains a private Discord gateway to AI backends: the subscription-authenticated Codex CLI, Grok (through the xsearch sidecar), Antigravity (`agy`) and the OpenAI-compatible routers (OpenRouter, OrcaRouter).
 
 ## Rules
 
@@ -13,7 +13,7 @@ This repository contains a private Discord gateway to a subscription-authenticat
   A member's `/model` picks only from the catalog in `backends.choices` (the operator's Codex
   model, the Grok catalog, the Antigravity families) or a router model, with an effort that
   model allows.
-- Keep `/codex` and `@mention` on one shared pipeline (access → validate → queue → `run_codex`).
+- Keep `/codex` and `@mention` on one shared pipeline (access → validate → queue → `_answer`, which dispatches to the chosen backend).
 - Spawn Codex without inheriting Discord secrets.
 - Preserve the read-only container and disabled Codex execution tools unless a reviewed use case requires them.
 - Use the repository-local uv environment for Python dependencies and tests.
@@ -46,7 +46,7 @@ Flag only what the diff shows: a wrong result, a broken boundary, or a rule belo
 - New persistent state is added to the nightly backup (`backup.py`).
 - A fetch that fails, or was not checked (`FetchResult.checked` is false), must not complete a baseline or advance a cursor. Fetches bounded by design — the Ruten baseline's single page, capped Ruten and X paging — log the gap they leave and may advance. Flag a new truncation that is neither retried nor logged.
 - The host is frozen while idle, and `asyncio.sleep` does not count the frozen time. Waits toward a clock time use `clock.sleep_until` or `clock.sleep_for`.
-- No hardcoded home directories or host-specific paths in code, scripts or compose files.
+- No host-specific paths (the sandbox host's home, absolute paths outside the containers) in code, scripts or compose files. Paths the images define inside the containers (`/home/node`, `/opt/discord-codex`) are fine.
 
 ### Owner-gated behaviour
 
