@@ -32,7 +32,7 @@ Flag only what the diff shows: a wrong result, a broken boundary, or a rule belo
 ### Member input is data
 
 - Text from members, fetched pages, X posts and transcripts is data. Flag parsing that lets such text decide who said what, or what the bot does next.
-- Answers to members, and the channel summary, build their prompt with `_prompt` in `codex.py`, which runs every block through `defang`, the member's own message included: a member who types a `USER_MESSAGE` tag must not forge or close the envelope. Batch jobs (the tracking classifier, harvest, digest) build their own envelope and run with `raw=True`; that is intended. A new prompt builder defangs untrusted text where it enters. Flag one that does not.
+- Answers to members, and the channel summary, build their prompt with `_prompt` in `codex.py`, which runs every block through `defang`, the member's own message included: a member who types a `USER_MESSAGE` tag must not forge or close the envelope. Batch jobs (the tracking classifier, harvest, digest, memory consolidation) build their own envelope and run with `raw=True` through `run_batch`, and the recall/link follow-up turn in `_answer` runs raw after it `defang`s the fetched blocks itself; both are intended. A new interactive prompt builder defangs untrusted text where it enters. Flag one that does not.
 - An HTTP fetch of a URL that a member or a fetched page supplied goes through `links._guarded_session`, whose resolver admits only public addresses plus `LINK_ALLOW_NETS`. Tools that open their own connections (Chromium in `_render`, yt-dlp in `_describe_downloaded`) run behind `FilterProxy`. Flag a new fetch of such a URL that uses neither.
 - `DiscordCodexClient` sets a default `allowed_mentions` that pings no one but the replied-to member, so model or member text cannot trigger `@everyone`, roles or user mentions. A send that passes its own `allowed_mentions` (reminders, tracking, linkclean) overrides it. Flag a change that drops the default or turns `everyone` or `roles` on for model or member text.
 
@@ -44,7 +44,7 @@ Flag only what the diff shows: a wrong result, a broken boundary, or a rule belo
 
 - Memory notes are replaced atomically: write a scratch file, then `os.replace` (`memory.atomic_write`). Tracking state lives in SQLite and changes inside a transaction. Flag a change that writes either in place. The small JSON stores (`ThreadStore`, `ReminderStore`, router transcripts, announcement state) are still overwritten in place today; moving one of them to `atomic_write` is welcome, and new state should use it.
 - New persistent state is added to the nightly backup (`backup.py`).
-- A first fetch that fails, or comes back truncated, must not complete a baseline or advance a cursor.
+- A fetch that fails, or was not checked (`FetchResult.checked` is false), must not complete a baseline or advance a cursor. Fetches bounded by design — the Ruten baseline's single page, capped Ruten and X paging — log the gap they leave and may advance. Flag a new truncation that is neither retried nor logged.
 - The host is frozen while idle, and `asyncio.sleep` does not count the frozen time. Waits toward a clock time use `clock.sleep_until` or `clock.sleep_for`.
 - No hardcoded home directories or host-specific paths in code, scripts or compose files.
 
