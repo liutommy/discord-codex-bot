@@ -4,7 +4,7 @@ import ipaddress
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DISCORD_ID = re.compile(r"^\d{17,20}$")
@@ -128,6 +128,21 @@ def _boolean(env: Mapping[str, str], name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be true or false")
 
 
+def _bounded_float(
+    env: Mapping[str, str], name: str, default: float, low: float, high: float
+) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a number between {low} and {high}") from error
+    if not low <= value <= high:
+        raise ValueError(f"{name} must be a number between {low} and {high}")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     discord_token: str
@@ -194,6 +209,15 @@ class Config:
     grok_dir: Path
     grok_history_chars: int
     grok_chat_max_weekly_percent: int
+    jev_enabled: bool
+    jev_url: str
+    jev_model: str
+    jev_timeout_seconds: float
+    jev_min_confidence: float
+    routing_path: Path
+    # Never in a repr, a log line or an error message; no child process is given it either
+    # (codex._safe_environment and agy._environment are allowlists).
+    typesafe_api_key: str = field(repr=False)
     apis_path: Path | None
     apis_max_chars: int
     openrouter_dir: Path
@@ -376,6 +400,15 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         grok_chat_max_weekly_percent=_bounded_int(
             values, "GROK_CHAT_MAX_WEEKLY_PERCENT", 80, 1, 100
         ),
+        # Routing (Jev, TypeSafe's hosted decision model): a member who never chose a model with
+        # /<prefix>-model gets one picked per message from config/routing.json (baked in).
+        jev_enabled=_boolean(values, "JEV_ENABLED"),
+        jev_url=values.get("JEV_URL", "").strip() or "https://api.typesafe.ai/v1/systemone",
+        jev_model=values.get("JEV_MODEL", "").strip() or "jev-1.13.0",
+        jev_timeout_seconds=_bounded_float(values, "JEV_TIMEOUT_SECONDS", 1.0, 0.1, 30.0),
+        jev_min_confidence=_bounded_float(values, "JEV_MIN_CONFIDENCE", 0.3, 0.0, 1.0),
+        routing_path=Path(values.get("ROUTING_FILE", "/opt/discord-codex/routing.json")),
+        typesafe_api_key=values.get("TYPESAFE_API_KEY", "").strip(),
         # Registered data APIs the model may call with <api/> (config/apis.json baked in).
         apis_path=Path(values.get("APIS_FILE", "/opt/discord-codex/apis.json")),
         apis_max_chars=_positive_int(values, "APIS_MAX_CHARS", 60_000),  # schedules are long
@@ -485,4 +518,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # The reservation comes out of the deadline: larger, and a lookup would be sent with
         # less time than the sidecar may take, then given up on while its session runs on.
         raise ValueError("XSEARCH_SIDECAR_SECONDS must not exceed XSEARCH_TIMEOUT_SECONDS")
+    if config.jev_enabled and not config.typesafe_api_key:
+        raise ValueError("JEV_ENABLED needs TYPESAFE_API_KEY")
+    if config.jev_enabled and not config.jev_url.startswith("https://"):
+        raise ValueError("JEV_URL must be an https:// URL")  # the key travels with every call
     return config

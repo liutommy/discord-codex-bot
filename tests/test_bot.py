@@ -2372,7 +2372,8 @@ async def test_a_routed_agy_turn_falls_back_to_grok_then_codex(client, monkeypat
     routed = Resolved("agy", "claude-sonnet-4-6", "")
     result = await client._answer("q", [], GUILD, USER, routed=routed)
     assert result.text == "Grok 備援" and grok_spare.calls[0][1] == ("grok-4.7",)
-    assert codex.calls == [] and result.thread_id == ""
+    # A routed turn keeps its spare's thread; the caller records it under Grok (_routed_memo).
+    assert codex.calls == [] and result.thread_id == "t1" and result.via.backend == "grok"
 
     async def grok_down(*_args, **_kw):
         raise BackendUnavailable("grok is out")

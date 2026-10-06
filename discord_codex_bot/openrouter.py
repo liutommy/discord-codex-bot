@@ -249,6 +249,7 @@ async def run_router(
     files: str = "",
     on_delta=None,
     speaker: int | None = None,
+    history: str = "",
 ) -> CodexResult:
     """One turn on an OpenAI-compatible router with the same contract as run_codex. The
     conversation lives in a Bot-kept transcript (thread id `<prefix>…`); `resume` replays it,
@@ -259,7 +260,15 @@ async def run_router(
         user_prompt
         if raw
         else _prompt(
-            user_prompt, memory, output_style(config), personal_style, links, help, files, speaker
+            user_prompt,
+            memory,
+            output_style(config),
+            personal_style,
+            links,
+            help,
+            files,
+            speaker,
+            history=history,
         )
     )
     history = load_transcript(config, resume) if resume else []

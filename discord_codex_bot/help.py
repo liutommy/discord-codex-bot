@@ -195,11 +195,29 @@ FEATURES: list[str] = [
 ]
 
 
+# Shown only while routing is on (JEV_ENABLED).
+ROUTING_FEATURE = (
+    "**自動挑模型**：沒用 `/{p}-model` 指定模型的話，預設模型會依每則問題的類型與難度自動挑選"
+    "（閒聊與簡單問題用輕量模型，程式與要上網查的用 Codex，X 貼文用 Grok，難題換更強的），"
+    "回覆最下面會寫這次是哪個模型回答；同一段對話的難度只升不降，換了問題類型會改用最適合"
+    "那類問題的模型，閒聊不會讓對話換模型。"
+    "用 `/{p}-model` 指定模型就不會自動挑，`clear` 回到自動挑選；"
+    "`/{p}` 的 effort 只改這一則的強度，對話照樣留在原本的模型。附圖片或判斷不出來時，"
+    "新對話用 {default}，進行中的對話維持原本的模型。"
+)
+
+
+def _features(routing: bool) -> list[str]:
+    return [*FEATURES, ROUTING_FEATURE] if routing else FEATURES
+
+
 def _fill(text: str, prefix: str, default: str) -> str:
     return text.replace("{p}", prefix).replace("{default}", default)
 
 
-def render_guide(prefix: str, registered: Iterable[str], default: str = "Codex") -> str:
+def render_guide(
+    prefix: str, registered: Iterable[str], default: str = "Codex", routing: bool = False
+) -> str:
     """The member-facing guide for /<prefix>-help, in registered-command order. `default`
     is DEFAULT_MODEL as members read it; it is configuration, so never written in the text."""
     p = prefix
@@ -211,13 +229,17 @@ def render_guide(prefix: str, registered: Iterable[str], default: str = "Codex")
         lines += [f"　`{_fill(example, p, default)}`" for example in examples]
         blocks.append("\n".join(lines))
     blocks.append(
-        "**不用指令也能做的事**\n" + "\n".join(f"・{_fill(f, p, default)}" for f in FEATURES)
+        "**不用指令也能做的事**\n"
+        + "\n".join(f"・{_fill(f, p, default)}" for f in _features(routing))
     )
     return "\n\n".join(blocks)
 
 
 def render_sheet(
-    prefix: str, commands: Iterable[tuple[str, str, list[str]]], default: str = "Codex"
+    prefix: str,
+    commands: Iterable[tuple[str, str, list[str]]],
+    default: str = "Codex",
+    routing: bool = False,
 ) -> str:
     """The compact sheet injected into the model's prompt: one line per command plus the
     feature list, Markdown stripped so it reads as facts rather than formatting."""
@@ -226,6 +248,7 @@ def render_sheet(
         suffix = f"（參數：{'、'.join(params)}）" if params else ""
         lines.append(f"/{name} — {description}{suffix}")
     lines.append(
-        "其他用法：" + " ".join(_fill(f, prefix, default).replace("**", "") for f in FEATURES)
+        "其他用法："
+        + " ".join(_fill(f, prefix, default).replace("**", "") for f in _features(routing))
     )
     return "\n".join(lines)

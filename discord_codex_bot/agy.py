@@ -4,9 +4,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
+from .backends import BackendUnavailable
 from .codex import (
     MAX_PROCESS_OUTPUT_BYTES,
     CodexResult,
@@ -18,6 +20,19 @@ from .config import Config
 
 LOGGER = logging.getLogger(__name__)
 PROJECTS_DIR = Path(".gemini/config/projects")
+# What agy says when the model or service cannot answer right now (quota, rate limit, capacity,
+# a 5xx, a deadline), as opposed to a broken install or settings, which must surface.
+_UNAVAILABLE = re.compile(
+    r"quota|rate.?limit|resource.?exhausted|\b429\b|\b50[234]\b|overload|capacity|"
+    r"unavailable|temporar|deadline|try again",
+    re.IGNORECASE,
+)
+
+
+class AgyUnavailable(BackendUnavailable):
+    """agy could not answer for a reason outside the Bot — a timeout, an empty reply, a model or
+    service out of quota or capacity. A routed turn falls back on it; anything else agy reports
+    (bad settings, registration, the output limit) stays a plain error and is alerted."""
 
 
 def _environment(config: Config) -> dict[str, str]:
@@ -107,7 +122,7 @@ async def _run(
             )
     except TimeoutError:
         await _kill_process_group(process)
-        raise RuntimeError("agy request timed out") from None
+        raise AgyUnavailable("agy request timed out") from None
     except asyncio.CancelledError:
         await _kill_process_group(process)  # a cancelled request must not leave agy running
         raise
@@ -181,6 +196,7 @@ async def run_agy(
     files: str = "",
     on_delta=None,
     speaker: int | None = None,
+    history: str = "",
 ) -> CodexResult:
     """One turn on Antigravity CLI with the same contract as run_codex. `on_delta(text)` is
     called with the accumulated answer as agy streams it.
@@ -195,7 +211,15 @@ async def run_agy(
         user_prompt
         if raw
         else _prompt(
-            user_prompt, memory, output_style(config), personal_style, links, help, files, speaker
+            user_prompt,
+            memory,
+            output_style(config),
+            personal_style,
+            links,
+            help,
+            files,
+            speaker,
+            history=history,
         )
     )
     args = ["--project", project, "--model", model, "--output-format", "stream-json"]
@@ -223,8 +247,9 @@ async def run_agy(
     conversation, response, error = parse_stream(out)
     if code != 0 or error:
         summary = error or " | ".join(err.strip().splitlines()[-3:])
-        raise RuntimeError(f"agy exited with code {code}: {summary}")
+        kind = AgyUnavailable if _UNAVAILABLE.search(summary) else RuntimeError
+        raise kind(f"agy exited with code {code}: {summary}")
     if not response.strip():
         detail = f" ({err.strip()[-160:]})" if err.strip() else ""
-        raise RuntimeError("agy returned no response" + detail)
+        raise AgyUnavailable("agy returned no response" + detail)
     return CodexResult(response.strip(), (), None, conversation, bool(resume))
