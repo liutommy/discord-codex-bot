@@ -409,7 +409,18 @@ async def test_an_image_is_not_judged(client, backends, monkeypatch) -> None:
     picture = types.SimpleNamespace(content_type="image/png", filename="a.png", size=10)
     plan = await client._route(KEY, None, GUILD, USER, "這是什麼", [picture], False)
     assert asked == [] and plan.target == Resolved("grok", "grok-4.7", "medium")
-    assert plan.log["status"] == "image"
+    assert plan.log["status"] == "image" and plan.log["files"] == 1
+
+
+async def test_a_document_is_judged_from_the_words_and_counted_in_the_log(
+    client, monkeypatch
+) -> None:
+    # Jev sees only the member's words, as evaluated; the holdout uses `files` to measure how
+    # often "幫我看這個" + a PDF is misrouted (hub on #33).
+    asked = verdicts(monkeypatch, ok("chat", 1))
+    pdf = types.SimpleNamespace(content_type="application/pdf", filename="a.pdf", size=10)
+    plan = await client._route(KEY, None, GUILD, USER, "幫我看這個", [pdf], False)
+    assert asked == [("幫我看這個", [])] and plan.log["files"] == 1
 
 
 async def test_a_member_with_their_own_model_is_not_routed(client, backends, monkeypatch) -> None:
@@ -764,7 +775,7 @@ async def test_each_routed_message_logs_one_structured_line(
     assert record["input_tokens"] == 1600 and record["thread"] == "codex-t1"
     assert record["turn"] == 1 and record["text"] == "修這個 bug"
     assert record["via"] == "codex:gpt-5.6-luna|high" and record["fallback"] is False
-    assert record["quoted"] is False
+    assert record["quoted"] is False and record["files"] == 0
     assert SECRET not in caplog.text
 
 
