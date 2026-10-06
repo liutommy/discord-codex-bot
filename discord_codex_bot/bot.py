@@ -452,7 +452,7 @@ class DiscordCodexClient(discord.Client):
         self.ruten_tracker = RutenFetcher()
         self.x_tracker = XFetcher(
             lambda handle: xsearch.lookup_user(config, handle),
-            lambda handle, since_id: xsearch.recent_posts(config, handle, since_id),
+            lambda handle, since_id, **page: xsearch.recent_posts(config, handle, since_id, **page),
             config.x_tracking_interval_minutes,
         )
         self.tree.add_command(

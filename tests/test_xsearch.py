@@ -301,6 +301,13 @@ def test_last_json_object_takes_the_last_top_level_object() -> None:
         ("post", {"id": "123\n"}),
         ("user", {"handle": "abc\n"}),
         ("recent", {"handle": "abc", "since_id": "5\n"}),
+        # paging back: until_id is checked like since_id, and must leave a range to read
+        ("recent", {"handle": "ok", "until_id": "x"}),
+        ("recent", {"handle": "ok", "until_id": "5\n"}),
+        ("recent", {"handle": "ok", "until_id": 300}),
+        ("recent", {"handle": "ok", "until_id": "99999999999999999999"}),
+        ("recent", {"handle": "ok", "since_id": "300", "until_id": "300"}),
+        ("recent", {"handle": "ok", "since_id": "300", "until_id": "200"}),
         # types: a bool is an int to isinstance; numbers and lists are not strings
         ("recent", {"handle": "abc", "limit": True}),
         ("post", {"id": 123}),
@@ -385,6 +392,49 @@ def test_shape_drops_what_contradicts_the_request() -> None:
     # "found": "false" is a non-empty string, i.e. truthy: only a real true counts
     assert server.shape("post", {"id": "200"}, {"found": "false", "post": post})["found"] is False
     assert server.shape("user", {"handle": "riot"}, {"exists": "yes"})["exists"] is False
+
+
+def test_recent_can_page_back_below_until_id() -> None:
+    # A busy account posts more than a page between checks: the bot reads the older posts in
+    # between with until_id (Codex on PR #2). The prompt asks for that range, and an answer
+    # outside it — at or above until_id, at or below since_id — is dropped, not trusted.
+    request = {"handle": "riot", "since_id": "150", "until_id": "300", "limit": 5}
+    prompt = server.build_prompt("recent", request)
+    assert "greater than 150 and less than 300" in prompt
+    assert "less than 300" in server.build_prompt("recent", {"handle": "riot", "until_id": "300"})
+    assert "less than" not in server.build_prompt("recent", {"handle": "riot", "since_id": "150"})
+    post = {"id": "200", "author_handle": "Riot", "created_at": "2026-09-29T23:00:17Z",
+            "text": "hi"}  # fmt: skip
+    shaped = server.shape(
+        "recent", request, {"posts": [dict(post, id=i) for i in ("300", "301", "250", "150")]}
+    )
+    assert [p["id"] for p in shaped["posts"]] == ["250"]
+    # "full" counts what the model returned before filtering: a full page with one post dropped
+    # (wrong author, at or above until_id) is still full, or the bot stops paging too early.
+    request = {"handle": "riot", "since_id": "150", "limit": 3}
+    answer = {"posts": [dict(post, id=i) for i in ("253", "252", "251")]}
+    answer["posts"][1]["author_handle"] = "someone_else"
+    shaped = server.shape("recent", request, answer)
+    assert [p["id"] for p in shaped["posts"]] == ["253", "251"] and shaped["full"] is True
+    assert server.shape("recent", request, {"posts": answer["posts"][:2]})["full"] is False
+
+
+def test_recent_page_that_reaches_since_id_is_not_full() -> None:
+    # The model ignored since_id and padded the page with older posts (hub on PR #28): one valid
+    # post by the account at or below since_id means the page already reached the cursor, so
+    # the bot must not page back — a further Grok session would only find nothing new.
+    post = {"id": "200", "author_handle": "Riot", "created_at": "2026-09-29T23:00:17Z",
+            "text": "hi"}  # fmt: skip
+    request = {"handle": "riot", "since_id": "150", "limit": 3}
+    shaped = server.shape(
+        "recent", request, {"posts": [dict(post, id=i) for i in ("253", "252", "150")]}
+    )
+    assert [p["id"] for p in shaped["posts"]] == ["253", "252"] and shaped["full"] is False
+    # A post below the cursor that is not the account's, or not a valid post, proves nothing.
+    for bad in ({"author_handle": "someone_else"}, {"created_at": "garbage"}):
+        answer = {"posts": [dict(post, id=i) for i in ("253", "252", "140")]}
+        answer["posts"][2].update(bad)
+        assert server.shape("recent", request, answer)["full"] is True
 
 
 def test_a_caller_that_gave_up_while_queued_costs_no_session(monkeypatch) -> None:
@@ -488,7 +538,8 @@ async def sidecar():
                     "created_at": "2026-09-30T00:00:00Z",
                     "text": "older",
                 },
-            ]
+            ],
+            "full": False,
         },  # fmt: skip
         "user": {"exists": True, "handle": "Riot", "name": "Riot Games"},
     }
@@ -528,9 +579,18 @@ async def test_client_round_trips(sidecar, monkeypatch, config: Config) -> None:
     cfg = replace(config, xsearch_url=f"http://127.0.0.1:{sidecar.port}")
     post = await xsearch.fetch_post(cfg, "200")
     assert "hello" in xsearch.post_text(post) and "讚 3" in xsearch.post_text(post)
-    assert len(await xsearch.recent_posts(cfg, "Riot", "200")) == 2
+    page = await xsearch.recent_posts(cfg, "Riot", "200")
+    assert len(page) == 2 and page.full is False  # the sidecar's own flag, passed through
     assert (await xsearch.lookup_user(cfg, "Riot"))["name"] == "Riot Games"
     assert sidecar.calls[1] == ("recent", {"handle": "Riot", "since_id": "200", "limit": 10})
+    # Paging back sends until_id; a plain check's request is unchanged.
+    await xsearch.recent_posts(cfg, "Riot", "200", until_id="290", limit=7)
+    assert sidecar.calls[-1] == (
+        "recent",
+        {"handle": "Riot", "since_id": "200", "until_id": "290", "limit": 7},
+    )
+    with pytest.raises(ValueError):
+        await xsearch.recent_posts(cfg, "Riot", "200", until_id="29a")
     with pytest.raises(ValueError):
         await xsearch.fetch_post(cfg, "../etc")
     with pytest.raises(xsearch.XSearchError):
@@ -598,7 +658,7 @@ async def test_x_fetcher_resolves_and_fetches_on_its_own_clock() -> None:
             {"exists": True, "handle": "Riot", "name": "Riot Games"} if handle == "riot" else None
         )
 
-    async def recent(handle, since_id):
+    async def recent(handle, since_id, **page):
         asked.append((handle, since_id))
         return [{"id": "300", "created_at": "t", "text": "newer", "is_reply": True},
                 {"id": "250", "created_at": "t", "text": "older"}]  # fmt: skip
@@ -632,7 +692,7 @@ async def test_x_fetcher_waits_a_full_interval_after_a_failed_check() -> None:
     now = [10_000.0]
     attempts = []
 
-    async def failing(handle, since_id):
+    async def failing(handle, since_id, **page):
         attempts.append(now[0])
         raise xsearch.XSearchError("refused")
 
@@ -648,6 +708,159 @@ async def test_x_fetcher_waits_a_full_interval_after_a_failed_check() -> None:
     now[0] += 15 * 60  # the next tracking pass: no new session
     await fetcher.fetch(replace(source, state=result.state))
     assert len(attempts) == 1
+
+
+def _timeline(ids, asked, fail_on_call=0):
+    """A fake sidecar over one account's post ids, honouring since_id/until_id/limit the way
+    xsearch/server.py does (newest first). It records each call's arguments as given."""
+
+    async def recent(handle, since_id, **page):
+        asked.append((handle, since_id, page))
+        if fail_on_call and len(asked) == fail_on_call:
+            raise xsearch.XSearchError("X lookup recent failed: HTTP 502")
+        until = int(page.get("until_id") or 0)
+        found = [
+            i
+            for i in sorted(ids, reverse=True)
+            if i > int(since_id or 0) and (not until or i < until)
+        ]
+        return [{"id": str(i), "created_at": "t", "text": f"post {i}"} for i in found][
+            : page.get("limit", 10)
+        ]
+
+    return recent
+
+
+async def _no_user(handle):
+    return None
+
+
+def _x_source(cursor: str) -> Source:
+    return Source(1, "x", "riot", "https://x.com/riot", cursor, {"handle": "Riot"})
+
+
+async def test_x_fetcher_reads_back_older_pages_when_a_busy_account_fills_the_first(
+    caplog,
+) -> None:
+    # 25 posts since the last check, pages of 10: the first page alone left 101-115 unread for
+    # good, because the cursor then jumped to 125 (Codex on PR #2).
+    caplog.set_level("INFO", logger="discord_codex_bot.tracking")
+    asked: list = []
+    fetcher = XFetcher(_no_user, _timeline(range(90, 126), asked), 60, clock=lambda: 10_000.0)
+    result = await fetcher.fetch(_x_source("100"))
+    assert [item.external_id for item in result.items] == [str(i) for i in range(101, 126)]
+    assert result.cursor == "125" and result.checked is True
+    assert result.state["fetched_at"] == 10_000.0
+    assert asked == [
+        ("Riot", "100", {"limit": 10}),
+        ("Riot", "100", {"until_id": "116", "limit": 10}),
+        ("Riot", "100", {"until_id": "106", "limit": 10}),
+    ]
+    assert "2 more Grok session(s) for older posts" in caplog.text and "WARNING" not in caplog.text
+
+
+async def test_x_fetcher_spends_one_session_on_a_normal_account() -> None:
+    asked: list = []
+    fetcher = XFetcher(_no_user, _timeline(range(90, 110), asked), 60, clock=lambda: 10_000.0)
+    result = await fetcher.fetch(_x_source("100"))  # 9 new posts: not a full page
+    assert [item.external_id for item in result.items] == [str(i) for i in range(101, 110)]
+    assert result.cursor == "109"
+    assert asked == [("Riot", "100", {"limit": 10})]
+    # First sight: no cursor means no gap to fill — the baseline is one page, one session.
+    asked.clear()
+    baseline = await fetcher.fetch(_x_source(""))
+    assert [item.external_id for item in baseline.items] == [str(i) for i in range(100, 110)]
+    assert asked == [("Riot", "", {"limit": 10})]
+
+
+async def test_x_fetcher_reads_at_most_two_older_pages_and_says_what_it_left(caplog) -> None:
+    caplog.set_level("INFO", logger="discord_codex_bot.tracking")
+    asked: list = []
+    fetcher = XFetcher(_no_user, _timeline(range(90, 141), asked), 60, clock=lambda: 10_000.0)
+    result = await fetcher.fetch(_x_source("100"))  # 40 new posts: more than three pages
+    assert len(asked) == 3  # one check, at most two extra Grok sessions
+    assert [item.external_id for item in result.items] == [str(i) for i in range(111, 141)]
+    # The cursor still moves on: holding it would re-read the same three pages every hour
+    # while the account kept posting, and never close the gap.
+    assert result.cursor == "140" and result.checked is True
+    warning = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warning) == 1
+    assert "after 100 and before 111 were not read" in warning[0].getMessage()
+
+
+async def test_x_fetcher_keeps_what_it_read_when_an_older_page_fails(caplog) -> None:
+    caplog.set_level("INFO", logger="discord_codex_bot.tracking")
+    asked: list = []
+    recent = _timeline(range(90, 126), asked, fail_on_call=2)
+    fetcher = XFetcher(_no_user, recent, 60, clock=lambda: 10_000.0)
+    result = await fetcher.fetch(_x_source("100"))
+    assert len(asked) == 2
+    # The newest page was read and is kept; the check counts (sessions were spent).
+    assert [item.external_id for item in result.items] == [str(i) for i in range(116, 126)]
+    assert result.cursor == "125" and result.checked is True
+    assert result.state["fetched_at"] == 10_000.0 and "last_error" not in result.state
+    warning = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warning) == 1 and "XSearchError" in warning[0].getMessage()
+    assert "after 100 and before 116 were not read" in warning[0].getMessage()
+
+
+async def test_x_fetcher_dedupes_and_stops_when_the_sidecar_ignores_until_id(caplog) -> None:
+    # A bot updated before its sidecar is rebuilt: the old sidecar ignores until_id and sends
+    # the newest page again. Nothing is read twice, and paging stops at once.
+    asked: list = []
+    plain = _timeline(range(90, 126), asked)
+
+    async def old_sidecar(handle, since_id, **page):
+        return await plain(handle, since_id, limit=page.get("limit", 10))
+
+    fetcher = XFetcher(_no_user, old_sidecar, 60, clock=lambda: 10_000.0)
+    result = await fetcher.fetch(_x_source("100"))
+    ids = [item.external_id for item in result.items]
+    assert ids == [str(i) for i in range(116, 126)] and len(asked) == 2
+    assert result.cursor == "125"
+    # The gap was not read: say so, not just "1 more session".
+    assert "after 100 and before 116 were not read" in caplog.text
+
+
+async def test_x_fetcher_trusts_the_sidecars_full_flag_over_the_filtered_count() -> None:
+    # The sidecar drops posts it cannot trust (wrong author, out of range) after the model
+    # answered a full page. Judging "full" by what is left stopped paging and lost 101-115
+    # without a word (stand-in review on PR #28).
+    asked: list = []
+    plain = _timeline(range(90, 126), asked)
+
+    async def filtering(handle, since_id, **page):
+        posts = await plain(handle, since_id, **page)
+        kept = xsearch.Page(p for p in posts if p["id"] != "120")
+        kept.full = len(posts) >= page.get("limit", 10)
+        return kept
+
+    fetcher = XFetcher(_no_user, filtering, 60, clock=lambda: 10_000.0)
+    result = await fetcher.fetch(_x_source("100"))
+    ids = [item.external_id for item in result.items]
+    assert ids == [str(i) for i in range(101, 126) if i != 120] and len(asked) == 3
+
+
+async def test_x_fetcher_retries_an_older_page_once_when_the_sidecar_is_busy() -> None:
+    # 429 Busy means another lookup held the sidecar past its queue wait: nothing was spent,
+    # so one retry after a pause beats giving the gap up for good.
+    asked: list = []
+    plain = _timeline(range(90, 126), asked)
+    pauses: list = []
+
+    async def busy_once(handle, since_id, **page):
+        if len(asked) == 1:
+            asked.append((handle, since_id, page))
+            raise xsearch.XSearchBusy("X lookup recent failed: HTTP 429")
+        return await plain(handle, since_id, **page)
+
+    async def pause(seconds):
+        pauses.append(seconds)
+
+    fetcher = XFetcher(_no_user, busy_once, 60, clock=lambda: 10_000.0, sleep=pause)
+    result = await fetcher.fetch(_x_source("100"))
+    assert [item.external_id for item in result.items] == [str(i) for i in range(101, 126)]
+    assert len(pauses) == 1 and len(asked) == 4  # first page, busy, retry, the page after
 
 
 # ----------------------------------------------------------------- concurrency and the login

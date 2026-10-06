@@ -288,13 +288,25 @@ def build_prompt(kind: str, request: dict) -> str:
         since = request.get("since_id", "") or ""
         if since and not _is_id(since):
             raise BadRequest("since_id must be a numeric X post id")
+        # until_id pages back: the posts just older than the oldest one the caller already has,
+        # when an account posted more than a page since its last check.
+        until = request.get("until_id", "") or ""
+        if until and not _is_id(until):
+            raise BadRequest("until_id must be a numeric X post id")
+        if since and until and int(until) <= int(since):
+            raise BadRequest("until_id must be greater than since_id")
         limit = request.get("limit", 10)
         if type(limit) is not int or not 1 <= limit <= 20:
             raise BadRequest("limit must be 1-20")
-        newer = f" with a status id greater than {since}" if since else ""
+        bounds = []
+        if since:
+            bounds.append(f"greater than {since}")
+        if until:
+            bounds.append(f"less than {until}")
+        within = f" with a status id {' and '.join(bounds)}" if bounds else ""
         return (
             f"Use X search to list up to {limit} of the most recent posts authored by the "
-            f"account with username {handle}{newer}, newest first. Include the account's "
+            f"account with username {handle}{within}, newest first. Include the account's "
             "replies and reposts but mark them. For each post give its numeric status id, UTC "
             "time, full text and the fields of the schema. Report only what X search returned."
         )
@@ -473,13 +485,26 @@ def shape(kind: str, request: dict, answer: dict) -> dict:
         }
     handle = str(request["handle"]).lstrip(AT_SIGNS).lower()
     since = int(request.get("since_id") or 0)
+    until = int(request.get("until_id") or 0)
     posts = []
+    reached = False
     for raw in answer.get("posts") or []:
         post = _clean_post(raw)
-        if post and post["author_handle"].lower() == handle and int(post["id"]) > since:
+        if not post or post["author_handle"].lower() != handle:
+            continue
+        if int(post["id"]) <= since:
+            reached = True
+        elif not until or int(post["id"]) < until:
             posts.append(post)
     posts.sort(key=lambda p: int(p["id"]), reverse=True)
-    return {"posts": posts[: int(request.get("limit", 10))]}
+    limit = int(request.get("limit", 10))
+    # Whether the model filled the page, counted before the filtering above: the caller pages
+    # back on it, and a dropped post must not make a full page look like the end. A post of
+    # the account's at or below since_id ends it though: the page already reached the cursor
+    # (hub on PR #28).
+    raw = answer.get("posts")
+    full = isinstance(raw, list) and len(raw) >= limit and not reached
+    return {"posts": posts[:limit], "full": full}
 
 
 class _SessionGate:
