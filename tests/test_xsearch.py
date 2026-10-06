@@ -644,8 +644,8 @@ async def test_this_bots_lookups_take_turns_at_the_sidecar(monkeypatch, config: 
         finally:
             xsearch._TURN.release()
 
-    # One deadline for both (Codex on PR #29): the turn is waited for at most half of it, and the
-    # request gets what is left — never a fresh full timeout after a long wait.
+    # One deadline for both (Codex on PR #29): a request is sent only with the time the sidecar
+    # may need still left, and only the rest of the deadline is spent waiting for the turn.
     budgets = []
 
     async def fake_post(config, kind, body, budget):
@@ -653,14 +653,15 @@ async def test_this_bots_lookups_take_turns_at_the_sidecar(monkeypatch, config: 
         return {"found": False}
 
     monkeypatch.setattr(xsearch, "_post", fake_post)
-    quick = replace(cfg, xsearch_timeout_seconds=0.4)
+    monkeypatch.setattr(xsearch, "SIDECAR_LOOKUP_SECONDS", 0.3)
+    quick = replace(cfg, xsearch_timeout_seconds=0.4)  # 0.1 s to wait for the turn
     loop = asyncio.get_running_loop()
     await xsearch._TURN.acquire()
-    loop.call_later(0.1, xsearch._TURN.release)
+    loop.call_later(0.05, xsearch._TURN.release)
     await xsearch.fetch_post(quick, "301")
-    assert 0.25 < budgets[0] <= 0.3
+    assert 0.3 <= budgets[0] <= 0.35
     await xsearch._TURN.acquire()
-    loop.call_later(0.3, xsearch._TURN.release)  # held past half the deadline
+    loop.call_later(0.15, xsearch._TURN.release)  # held past the wait: too late to be answered
     with pytest.raises(xsearch.XSearchBusy):
         await xsearch.fetch_post(quick, "302")
     assert budgets == [budgets[0]]  # nothing was sent

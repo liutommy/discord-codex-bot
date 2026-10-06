@@ -53,17 +53,20 @@ def enabled(config: Config) -> bool:
 # The sidecar runs one lookup session at a time and turns away a request that waited past its
 # own 30 s queue (429). This bot's lookups — several X links in one message, a tracking check —
 # take turns here instead (Codex on PR #2), within one deadline for the wait and the request
-# together (Codex on PR #29). The turn is waited for at most half of it, so a request is never
-# sent with only seconds left — the sidecar would start a session nobody waits for.
+# together (Codex on PR #29). A request is only sent with the time the sidecar may take to
+# answer it still left: once a session starts it runs to the end whether anyone waits or not,
+# so one given up on early is quota spent for nothing. The rest of the deadline is the wait.
 _TURN = asyncio.Semaphore(1)
+SIDECAR_LOOKUP_SECONDS = 30 + 180  # the sidecar's queue wait plus its lookup session timeout
 
 
 async def _ask(config: Config, kind: str, body: dict) -> dict:
     if not config.xsearch_url:
         raise XSearchError("X lookup is not configured")
     started = time.monotonic()
+    wait = max(0, config.xsearch_timeout_seconds - SIDECAR_LOOKUP_SECONDS)
     try:
-        async with asyncio.timeout(config.xsearch_timeout_seconds / 2):
+        async with asyncio.timeout(wait):
             await _TURN.acquire()
     except TimeoutError:
         raise XSearchBusy(f"X lookup {kind} failed: still queued behind this bot's own") from None
