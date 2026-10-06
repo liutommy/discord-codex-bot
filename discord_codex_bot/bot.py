@@ -880,6 +880,10 @@ class DiscordCodexClient(discord.Client):
         if routed is not None:
             target = routed
             choice = ModelChoice("", "", routed.backend, routed.model)  # only its backend counts
+            if resume and self.threads.backend_of(resume) != routed.backend:
+                # A thread id belongs to the backend that created it: the router moving a
+                # conversation to another backend (or an id the store cannot place) starts over.
+                resume = ""
         spares = fallback_chain(
             choice,
             self.config.model_chain,

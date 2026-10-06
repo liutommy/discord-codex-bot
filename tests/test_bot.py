@@ -2410,6 +2410,23 @@ async def test_a_routed_turn_skips_grok_as_a_spare_when_grok_is_not_usable(
     assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)
 
 
+async def test_a_routed_turn_resumes_only_a_thread_of_its_own_backend(
+    client, backends
+) -> None:
+    # The router may move a conversation from Codex to agy; the Codex thread id must not go to
+    # agy (AGENTS.md: a thread id belongs to the backend that created it; Codex on PR #32).
+    codex, agy = backends
+    client.threads.remember("k", "codex-thread", plain=False, model="codex:gpt-5.6-luna")
+    client.threads.remember("k2", "agy-thread", plain=False, model="agy:gemini-3.8-flash")
+    flash = Resolved("agy", "gemini-3.8-flash-low", "low")
+    await client._answer("q", [], GUILD, USER, resume="codex-thread", routed=flash)
+    assert "resume" not in agy.calls[0][2] or agy.calls[0][2]["resume"] == ""
+    await client._answer("q", [], GUILD, USER, resume="agy-thread", routed=flash)
+    assert agy.calls[1][2]["resume"] == "agy-thread"
+    await client._answer("q", [], GUILD, USER, resume="unknown", routed=flash)
+    assert agy.calls[2][2].get("resume", "") == ""
+
+
 async def test_a_members_own_codex_still_never_falls_into_grok(client, monkeypatch) -> None:
     grok_spare, agy = FakeBackend("Grok 備援"), FakeBackend("agy 備援")
 
