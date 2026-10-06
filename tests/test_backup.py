@@ -164,3 +164,22 @@ def test_backup_takes_size_and_bytes_from_the_same_file(
     with tarfile.open(target) as tar:
         member = tar.extractfile("memory/1/users/2/topics/x.md").read()
     assert member == topic.read_bytes()
+
+
+def test_backup_includes_grok_transcripts_wherever_grok_dir_is(tmp_path: Path, config) -> None:
+    # Grok is the default provider; its gk- conversations live in GROK_DIR, which may sit
+    # outside CODEX_HOME. Missing them means a restore drops every Grok thread (Codex on PR #3).
+    home = _home(tmp_path)
+    grok_dir = tmp_path / "elsewhere" / "grok"
+    grok_dir.mkdir(parents=True)
+    (grok_dir / "gk-1.json").write_text("{}", "utf-8")
+    cfg = replace(
+        config,
+        codex_home=home,
+        grok_dir=grok_dir,
+        backup_dir=tmp_path / "backups",
+        tracking_db_path=home / "tracking.sqlite3",
+    )
+    target = make_backup(cfg, now=1_700_000_000)
+    with tarfile.open(target) as tar:
+        assert "grok/gk-1.json" in tar.getnames()

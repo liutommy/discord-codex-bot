@@ -884,12 +884,15 @@ class DiscordCodexClient(discord.Client):
             fallback = self._choice(self.config.default_model)
             if fallback.backend == GROK and grok.cached_model(fallback.family) is not None:
                 target = resolve(fallback, target.effort)
-        if target.backend == GROK and spares and not await self._grok_usable():
-            # Straight to the next backend: the reserve for X lookups, or the breaker.
-            LOGGER.info("Skipping Grok for this turn; answering with %s", spares[0].model)
-            target, spares = spares[0], spares[1:]
-        spares = [spare for spare in spares if spare.backend != GROK]  # never fall *into* Grok
         fell_back = False
+        if target.backend == GROK and spares and not await self._grok_usable():
+            # Straight to the next backend: the reserve for X lookups, or the breaker. Still a
+            # fallback: the gk- id is not resumed there, and the spare's thread id is not kept
+            # under the Grok model (Grok would later resume a foreign id and start over).
+            LOGGER.info("Skipping Grok for this turn; answering with %s", spares[0].model)
+            target, spares, fell_back = spares[0], spares[1:], True
+        spares = [spare for spare in spares if spare.backend != GROK]  # never fall *into* Grok
+        drop_resume = fell_back  # only the caller's id is foreign; later recall rounds chain
 
         async def run_on(via, text: str, **kw) -> CodexResult:
             if via.backend == GROK:
@@ -912,8 +915,11 @@ class DiscordCodexClient(discord.Client):
             return await run_codex(text, self.config, effort=via.effort, **kw)
 
         async def turn(text: str, **kw) -> CodexResult:
-            nonlocal target, fell_back, spares
+            nonlocal target, fell_back, spares, drop_resume
             kw.setdefault("on_delta", on_delta)
+            if drop_resume:
+                kw.pop("resume", None)  # a thread id means nothing to another backend
+                drop_resume = False
             while True:
                 try:
                     return await run_on(target, text, **kw)
@@ -1335,11 +1341,16 @@ class DiscordCodexClient(discord.Client):
         if len(self._grok_refusals) >= 3 and now >= self._grok_off_until:
             self._grok_off_until = now + 3600
             LOGGER.error("Grok refused 3 sessions in 10 minutes; off for an hour")
-            await self.alerts.record_failure(
-                GROK, "Grok 的工作階段連續被安全檢查拒絕，已暫停一小時（xsearch log 有 REFUSED）"
+            await self.alerts.alert_now(
+                GROK,
+                "breaker",
+                "🛑 **Grok** 的工作階段 10 分鐘內被安全檢查拒絕 3 次，已暫停一小時"
+                "（xsearch log 有 REFUSED）",
             )
         elif len(self._grok_refusals) == 1:
-            await self.alerts.record_failure(GROK, f"Grok session refused: {error}")
+            await self.alerts.alert_now(
+                GROK, "refused", f"🛑 **Grok** 的工作階段被安全檢查拒絕：{str(error)[:300]}"
+            )
 
     def _remember(
         self, key: str, thread_id: str, message_id: int | None, plain: bool, model: str

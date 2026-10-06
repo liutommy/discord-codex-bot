@@ -1,5 +1,5 @@
 """Backups and exports of what the Bot keeps for people. Daily, the Bot's own state (member and
-server memories, router transcripts, thread map, reminders) is tarred into BACKUP_DIR — a
+server memories, router and Grok transcripts, thread map, reminders) is tarred into BACKUP_DIR — a
 bind-mounted host directory — and old archives are pruned; a member can also export their own
 memories with /<prefix>-export. Codex's own files (sessions, auth.json) are not ours to copy."""
 
@@ -60,7 +60,14 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
     """One tar.gz of BACKUP_MEMBERS under BACKUP_DIR; None when there is nothing or no dir."""
     if not config.backup_dir:
         return None
-    present = [name for name in BACKUP_MEMBERS if (config.codex_home / name).exists()]
+    present = [
+        (config.codex_home / name, name)
+        for name in BACKUP_MEMBERS
+        if (config.codex_home / name).exists()
+    ]
+    # Grok's gk- transcripts: by path, since GROK_DIR may be set outside CODEX_HOME.
+    if config.grok_dir.is_dir() and all(path != config.grok_dir for path, _ in present):
+        present.append((config.grok_dir, "grok"))
     tracking = config.tracking_db_path
     if not present and not tracking.exists():
         return None
@@ -74,8 +81,8 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
             with sqlite3.connect(tracking) as source, sqlite3.connect(snapshot) as destination:
                 source.backup(destination)
         with tarfile.open(partial, "w:gz") as tar:
-            for name in present:
-                _add_tree(tar, config.codex_home / name, name)
+            for path, name in present:
+                _add_tree(tar, path, name)
             if snapshot.exists():
                 tar.add(snapshot, arcname=TRACKING_DB)
     partial.replace(target)
