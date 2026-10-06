@@ -32,6 +32,19 @@ class XSearchError(RuntimeError):
     """The sidecar is off, unreachable, or could not answer."""
 
 
+class XSearchBusy(XSearchError):
+    """HTTP 429: another lookup held the sidecar past its queue wait. Nothing was spent."""
+
+    busy = True  # what tracking checks, without importing this module
+
+
+class Page(list):
+    """Posts of one "recent" page. `full`: the sidecar's word on whether the model filled the
+    page before its filtering; None from a sidecar built before it said so."""
+
+    full: bool | None = None
+
+
 def enabled(config: Config) -> bool:
     return bool(config.xsearch_url)
 
@@ -46,6 +59,8 @@ async def _ask(config: Config, kind: str, body: dict) -> dict:
                 f"{config.xsearch_url.rstrip('/')}/x/{kind}", json=body
             ) as response:
                 answer = await response.json(content_type=None)
+                if response.status == 429:
+                    raise XSearchBusy(f"X lookup {kind} failed: HTTP 429")
                 if response.status != 200 or not isinstance(answer, dict):
                     raise XSearchError(f"X lookup {kind} failed: HTTP {response.status}")
                 return answer
@@ -69,7 +84,7 @@ async def fetch_post(config: Config, post_id: str) -> dict | None:
 
 async def recent_posts(
     config: Config, handle: str, since_id: str = "", limit: int = 10, until_id: str = ""
-) -> list[dict]:
+) -> Page:
     """Up to `limit` of the account's newest posts after `since_id` — and, paging back, before
     `until_id`. A sidecar built before until_id existed ignores it, so callers filter by id too."""
     ids = (since_id, until_id)
@@ -79,7 +94,9 @@ async def recent_posts(
     if until_id:
         body["until_id"] = until_id
     answer = await _ask(config, "recent", body)
-    return [post for post in answer.get("posts") or [] if isinstance(post, dict)]
+    page = Page(post for post in answer.get("posts") or [] if isinstance(post, dict))
+    page.full = answer["full"] if isinstance(answer.get("full"), bool) else None
+    return page
 
 
 async def lookup_user(config: Config, handle: str) -> dict | None:

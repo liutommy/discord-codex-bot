@@ -409,6 +409,14 @@ def test_recent_can_page_back_below_until_id() -> None:
         "recent", request, {"posts": [dict(post, id=i) for i in ("300", "301", "250", "150")]}
     )
     assert [p["id"] for p in shaped["posts"]] == ["250"]
+    # "full" counts what the model returned before filtering: a full page with one post dropped
+    # (wrong author, out of range) is still full, or the bot stops paging too early.
+    request = {"handle": "riot", "since_id": "150", "limit": 3}
+    answer = {"posts": [dict(post, id=i) for i in ("253", "252", "251")]}
+    answer["posts"][1]["author_handle"] = "someone_else"
+    shaped = server.shape("recent", request, answer)
+    assert [p["id"] for p in shaped["posts"]] == ["253", "251"] and shaped["full"] is True
+    assert server.shape("recent", request, {"posts": answer["posts"][:2]})["full"] is False
 
 
 def test_a_caller_that_gave_up_while_queued_costs_no_session(monkeypatch) -> None:
@@ -512,7 +520,8 @@ async def sidecar():
                     "created_at": "2026-09-30T00:00:00Z",
                     "text": "older",
                 },
-            ]
+            ],
+            "full": False,
         },  # fmt: skip
         "user": {"exists": True, "handle": "Riot", "name": "Riot Games"},
     }
@@ -552,7 +561,8 @@ async def test_client_round_trips(sidecar, monkeypatch, config: Config) -> None:
     cfg = replace(config, xsearch_url=f"http://127.0.0.1:{sidecar.port}")
     post = await xsearch.fetch_post(cfg, "200")
     assert "hello" in xsearch.post_text(post) and "讚 3" in xsearch.post_text(post)
-    assert len(await xsearch.recent_posts(cfg, "Riot", "200")) == 2
+    page = await xsearch.recent_posts(cfg, "Riot", "200")
+    assert len(page) == 2 and page.full is False  # the sidecar's own flag, passed through
     assert (await xsearch.lookup_user(cfg, "Riot"))["name"] == "Riot Games"
     assert sidecar.calls[1] == ("recent", {"handle": "Riot", "since_id": "200", "limit": 10})
     # Paging back sends until_id; a plain check's request is unchanged.
@@ -776,7 +786,7 @@ async def test_x_fetcher_keeps_what_it_read_when_an_older_page_fails(caplog) -> 
     assert "after 100 and before 116 were not read" in warning[0].getMessage()
 
 
-async def test_x_fetcher_dedupes_and_stops_when_the_sidecar_ignores_until_id() -> None:
+async def test_x_fetcher_dedupes_and_stops_when_the_sidecar_ignores_until_id(caplog) -> None:
     # A bot updated before its sidecar is rebuilt: the old sidecar ignores until_id and sends
     # the newest page again. Nothing is read twice, and paging stops at once.
     asked: list = []
@@ -790,6 +800,49 @@ async def test_x_fetcher_dedupes_and_stops_when_the_sidecar_ignores_until_id() -
     ids = [item.external_id for item in result.items]
     assert ids == [str(i) for i in range(116, 126)] and len(asked) == 2
     assert result.cursor == "125"
+    # The gap was not read: say so, not just "1 more session".
+    assert "after 100 and before 116 were not read" in caplog.text
+
+
+async def test_x_fetcher_trusts_the_sidecars_full_flag_over_the_filtered_count() -> None:
+    # The sidecar drops posts it cannot trust (wrong author, out of range) after the model
+    # answered a full page. Judging "full" by what is left stopped paging and lost 101-115
+    # without a word (stand-in review on PR #28).
+    asked: list = []
+    plain = _timeline(range(90, 126), asked)
+
+    async def filtering(handle, since_id, **page):
+        posts = await plain(handle, since_id, **page)
+        kept = xsearch.Page(p for p in posts if p["id"] != "120")
+        kept.full = len(posts) >= page.get("limit", 10)
+        return kept
+
+    fetcher = XFetcher(_no_user, filtering, 60, clock=lambda: 10_000.0)
+    result = await fetcher.fetch(_x_source("100"))
+    ids = [item.external_id for item in result.items]
+    assert ids == [str(i) for i in range(101, 126) if i != 120] and len(asked) == 3
+
+
+async def test_x_fetcher_retries_an_older_page_once_when_the_sidecar_is_busy() -> None:
+    # 429 Busy means another lookup held the sidecar past its queue wait: nothing was spent,
+    # so one retry after a pause beats giving the gap up for good.
+    asked: list = []
+    plain = _timeline(range(90, 126), asked)
+    pauses: list = []
+
+    async def busy_once(handle, since_id, **page):
+        if len(asked) == 1:
+            asked.append((handle, since_id, page))
+            raise xsearch.XSearchBusy("X lookup recent failed: HTTP 429")
+        return await plain(handle, since_id, **page)
+
+    async def pause(seconds):
+        pauses.append(seconds)
+
+    fetcher = XFetcher(_no_user, busy_once, 60, clock=lambda: 10_000.0, sleep=pause)
+    result = await fetcher.fetch(_x_source("100"))
+    assert [item.external_id for item in result.items] == [str(i) for i in range(101, 126)]
+    assert len(pauses) == 1 and len(asked) == 4  # first page, busy, retry, the page after
 
 
 # ----------------------------------------------------------------- concurrency and the login

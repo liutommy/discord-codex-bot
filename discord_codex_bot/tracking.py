@@ -1449,6 +1449,8 @@ def parse_x_locator(locator: str) -> str:
 
 X_PAGE_SIZE = 10  # posts per Grok session (the sidecar takes 1-20)
 X_MAX_EXTRA_PAGES = 2  # older pages read back per check when an account posted more than a page
+# The sidecar answers 429 after a 30 s queue wait; one retry of an older page after this.
+X_BUSY_RETRY_SECONDS = 30
 
 
 class XFetcher:
@@ -1467,6 +1469,8 @@ class XFetcher:
         clock: Callable[[], float] = time.time,
         page_size: int = X_PAGE_SIZE,
         max_extra_pages: int = X_MAX_EXTRA_PAGES,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        busy_retry_seconds: float = X_BUSY_RETRY_SECONDS,
     ) -> None:
         self.lookup_user = lookup_user
         self.recent_posts = recent_posts
@@ -1474,6 +1478,24 @@ class XFetcher:
         self.clock = clock
         self.page_size = page_size
         self.max_extra_pages = max_extra_pages
+        self.sleep = sleep
+        self.busy_retry_seconds = busy_retry_seconds
+
+    def _full(self, page: list, kept: int) -> bool:
+        """The sidecar's own word on a full page (counted before it dropped posts it could not
+        trust); a sidecar built before it said so leaves the count of what was kept."""
+        full = getattr(page, "full", None)
+        return full if isinstance(full, bool) else kept >= self.page_size
+
+    async def _older(self, handle: str, since: str, oldest: str) -> list:
+        """One older page; a busy sidecar (nothing spent) gets one retry after a pause."""
+        try:
+            return await self.recent_posts(handle, since, limit=self.page_size, until_id=oldest)
+        except Exception as error:
+            if not getattr(error, "busy", False):  # xsearch.XSearchBusy (HTTP 429)
+                raise
+            await self.sleep(self.busy_retry_seconds)
+            return await self.recent_posts(handle, since, limit=self.page_size, until_id=oldest)
 
     async def resolve(self, locator: str) -> tuple[str, Mapping[str, Any]]:
         handle = parse_x_locator(locator)
@@ -1505,7 +1527,8 @@ class XFetcher:
         # page comes back short (it reached the cursor) — at most `max_extra_pages`. With no
         # cursor (first sight) there is no gap: the baseline is one page.
         extra = 0
-        while since and len(page) >= self.page_size and posts:
+        full = self._full(page, len(page))
+        while since and full and posts:
             oldest = min(posts, key=int)
             if int(oldest) <= int(since) + 1:  # nothing can lie between: the gap is closed
                 break
@@ -1518,9 +1541,7 @@ class XFetcher:
                 break
             extra += 1
             try:
-                older = await self.recent_posts(
-                    handle, since, limit=self.page_size, until_id=oldest
-                )
+                older = await self._older(handle, since, oldest)
             except Exception as error:
                 # What is in hand is kept and the cursor still moves on: retrying would spend
                 # the newest page's session again, and a spent quota would only fail again.
@@ -1533,7 +1554,17 @@ class XFetcher:
             # By id, not by trust: a sidecar not yet rebuilt ignores until_id and sends the
             # newest page again, which must neither repeat posts nor loop.
             page = [p for p in older if int(since) < int(p["id"]) < int(oldest)]
+            if not page:
+                # Nothing new in range: a sidecar not yet rebuilt sent the newest page again, or
+                # the model returned nothing it could stand behind. Either way the gap stays.
+                LOGGER.warning(
+                    "X source %s: the older page brought nothing in range (a sidecar without "
+                    "until_id?); posts after %s and before %s were not read",
+                    handle, since, oldest,
+                )  # fmt: skip
+                break
             posts.update((str(post["id"]), post) for post in page)
+            full = self._full(older, len(page))
         if extra:
             LOGGER.info(
                 "X source %s: first page full; %d more Grok session(s) for older posts, "

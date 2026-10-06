@@ -494,7 +494,11 @@ def shape(kind: str, request: dict, answer: dict) -> dict:
         if since < int(post["id"]) and (not until or int(post["id"]) < until):
             posts.append(post)
     posts.sort(key=lambda p: int(p["id"]), reverse=True)
-    return {"posts": posts[: int(request.get("limit", 10))]}
+    limit = int(request.get("limit", 10))
+    # Whether the model filled the page, counted before the filtering above: the caller pages
+    # back on it, and a dropped post must not make a full page look like the end.
+    raw = answer.get("posts")
+    return {"posts": posts[:limit], "full": isinstance(raw, list) and len(raw) >= limit}
 
 
 class _SessionGate:
