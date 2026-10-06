@@ -257,11 +257,13 @@ MAX_SLOT_BATCHES = 10
 # A failed fixed-time judgement retries after its interval, but never later than this: a watch
 # that once ran every 1440 minutes must not wait a day to retry its time.
 RETRY_MAX_MINUTES = 60
-# A compact "1201" must stand on its own: touching - / . or 年 it is part of a date, and
-# 「2026-10-01 12:01」 would otherwise also schedule 20:26 (Codex on PR #15).
-_TIME = re.compile(
-    r"(?<!\d)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)"
-    r"|(?<![\d\-/.])([01]?\d|2[0-3])([0-5]\d)(?![\d\-/.年])"
+_TIME = re.compile(r"(?<!\d)([01]?\d|2[0-3])[:：]?([0-5]\d)(?!\d)")
+# Dates are taken out before times are read: 「2026-10-01 12:01」 also scheduled 20:26 (Codex on
+# PR #15). Only whole dates go, so lists like 「1201/2001」 or 「0930.」 still read as times.
+_DATE = re.compile(
+    r"(?<!\d)\d{4}\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?(?!\d)"
+    r"|(?<!\d)\d{1,2}\s*月\s*\d{1,2}\s*日"
+    r"|(?<![\d/])(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12]\d|3[01])(?![\d/])"
 )
 # Cancelling used to be slash-only, on the grounds that dropping a watch throws away its
 # baseline and rebuilding one costs a classification pass. That cost is the member's to spend —
@@ -297,13 +299,18 @@ WEB_LINK = re.compile(r"<(https?://[^>\s]+)>\s{0,4}([^\n<>]{0,160})")
 TrackAdd = tuple[str, str, tuple[int, ...], int, tuple[str, ...] | None]
 
 
-def _pending_minutes() -> str:
+def _pending_minutes(keep_days: int = 0) -> str:
     """How long an item may wait for its watch `w`, in minutes, as SQL. "Every 3 days" against
     a flat 48 hours expired everything before the watch was ever judged (Codex on PR #6): an
     interval watch keeps its items for two intervals, one missed pass of slack. Unchanged up to
-    a daily interval, and for fixed-time watches, which are judged every day."""
+    a daily interval, and for fixed-time watches, which are judged every day. Capped half a day
+    short of the prune horizon, so a long wait still ends as a logged `expired` instead of the
+    item slipping past _prune_floor unjudged and unlogged."""
     floor = PENDING_MAX_HOURS * 60
-    return f"(CASE WHEN w.times != '' THEN {floor} ELSE MAX({floor}, 2 * w.interval_minutes) END)"
+    window = f"(CASE WHEN w.times != '' THEN {floor} ELSE MAX({floor}, 2 * w.interval_minutes) END)"
+    if keep_days <= 0:
+        return window
+    return f"MIN({window}, {keep_days * 1440 - 720})"
 
 
 def _prune_floor(keep_days: int) -> str:
@@ -318,10 +325,7 @@ def _prune_floor(keep_days: int) -> str:
 def parse_times(text: str) -> tuple[str, ...]:
     """Times of day as sorted "HH:MM": 「12:01,20:01」, 「1201 2001」 and 「9:30、21:00」 all work.
     Anything that is not a time is ignored; at most MAX_TRACK_TIMES are kept."""
-    found = {
-        f"{int(hour or compact_hour):02d}:{minute or compact_minute}"
-        for hour, minute, compact_hour, compact_minute in _TIME.findall(text)
-    }
+    found = {f"{int(hour):02d}:{minute}" for hour, minute in _TIME.findall(_DATE.sub(" ", text))}
     return tuple(sorted(found))[:MAX_TRACK_TIMES]
 
 
@@ -785,6 +789,7 @@ class TrackerStore:
         is its baseline and is never classified: a new watch is about what happens from now on.
         Only watches due now, unless `watch_id` asks for the next batch of one watch already
         being judged."""
+        wait = _pending_minutes(keep_days)  # minutes an item may wait, as SQL
         with self._connect() as connection:
             rows = connection.execute(
                 f"""SELECT w.*, i.id AS item_id, i.external_id AS item_external_id,
@@ -795,7 +800,7 @@ class TrackerStore:
                    FROM watches w JOIN items i ON i.source_id=w.source_id
                    LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
                    WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id AND i.baseline=0
-                     AND julianday(i.observed_at) >= julianday(?) - {_pending_minutes()} / 1440.0
+                     AND julianday(i.observed_at) >= julianday(?) - {wait} / 1440.0
                      AND i.observed_at >= ? AND (? IS NULL OR w.id = ?)
                    ORDER BY w.id, i.published_at, i.id""",
                 (_utc_now(), _prune_floor(keep_days), watch_id, watch_id),
@@ -833,13 +838,14 @@ class TrackerStore:
         `expired` (never notified) instead of a silent drop, so the log behind a watch shows
         them and the count reaches the container log. Items from before the prune horizon are
         left alone. {watch id: items expired}."""
+        wait = _pending_minutes(keep_days)  # minutes an item may wait, as SQL
         with self._connect() as connection:
             rows = connection.execute(
-                f"""SELECT w.id AS watch_id, i.id AS item_id, {_pending_minutes()} AS minutes
+                f"""SELECT w.id AS watch_id, i.id AS item_id, {wait} AS minutes
                    FROM watches w JOIN items i ON i.source_id=w.source_id
                    LEFT JOIN decisions d ON d.watch_id=w.id AND d.item_id=i.id
                    WHERE w.active=1 AND d.id IS NULL AND i.id > w.start_item_id AND i.baseline=0
-                     AND julianday(i.observed_at) < julianday(?) - {_pending_minutes()} / 1440.0
+                     AND julianday(i.observed_at) < julianday(?) - {wait} / 1440.0
                      AND i.observed_at >= ?""",
                 (_utc_now(), _prune_floor(keep_days)),
             ).fetchall()

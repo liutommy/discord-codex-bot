@@ -194,7 +194,8 @@ SCHEMAS = {
             "name": {"type": "string"},
             "description": {"type": "string"},
         },
-        "required": ["exists"],
+        # handle is how the answer proves it is about the requested account (shape()).
+        "required": ["exists", "handle"],
     },
 }
 
@@ -279,8 +280,9 @@ def build_prompt(kind: str, request: dict) -> str:
     if kind == "user":
         return (
             f"Use X search to check whether the X account with username {handle} exists. "
-            "Return its handle, display name and bio, or exists=false. Report only what X "
-            "search returned."
+            "Always return handle: the account's username exactly as X search showed it "
+            "(empty if it does not exist). Return its display name and bio, or exists=false. "
+            "Report only what X search returned."
         )
     if kind == "recent":
         since = request.get("since_id", "") or ""

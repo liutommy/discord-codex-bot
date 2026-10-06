@@ -2263,7 +2263,8 @@ class DiscordCodexClient(discord.Client):
             )
             # "Falling back right now" needs no memory: a spent window means the next request
             # goes to the spare. Derived from the live probe, so it survives a restart and covers
-            # requests this process has not seen (the batch jobs fall back the same way).
+            # requests this process has not seen. Chat requests only: the batch jobs (tracking
+            # classifier, memory) fall back to CODEX_FALLBACK_MODEL, agy only (run_batch).
             if max(limits.primary_used_percent, limits.secondary_used_percent) >= 100:
                 codex += (
                     f"\n　└ 額度已達上限，現在的請求改用 {spare.model} 回答"

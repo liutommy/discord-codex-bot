@@ -343,6 +343,13 @@ def test_legacy_ids_past_2_to_the_32_are_not_read_as_snowflakes(post_id, created
     assert server._clean_post(post) is not None
 
 
+def test_the_user_schema_asks_for_the_handle_it_now_depends_on() -> None:
+    # A missing handle now means "not confirmed", so the model must be told to always send it;
+    # an optional field let a real account come back as missing, cached for an hour.
+    assert "handle" in server.SCHEMAS["user"]["required"]
+    assert "always return handle" in server.build_prompt("user", {"handle": "riot"}).lower()
+
+
 def test_a_user_answer_without_a_handle_confirms_nothing() -> None:
     # {"exists": true} with no handle defaulted to the requested one and counted as a match,
     # so an account the lookup never identified could be watched (Codex on PR #2).

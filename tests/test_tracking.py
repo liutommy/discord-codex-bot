@@ -1233,6 +1233,16 @@ def test_a_long_interval_watch_keeps_its_items_until_it_is_due(tmp_path: Path) -
     assert [i.external_id for i in items] == ["n000", "n002"]
 
 
+def test_a_long_wait_expires_before_the_prune_horizon_hides_it(tmp_path: Path) -> None:
+    # Twice a 10-day interval is longer than a 7-day prune horizon: an item past the horizon
+    # was neither judged nor expired, it just vanished. It must be logged as expired first.
+    path, store, watch = _flooded(tmp_path, 1)
+    store.set_watch_interval(watch.id, 10 * 1440)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE items SET observed_at=?", (_ago(days=6, hours=18),))
+    assert store.expire_stale(7) == {watch.id: 1}
+
+
 async def test_pruned_history_is_not_expired_all_over_again(tmp_path: Path, monkeypatch) -> None:
     # Pruning drops old decisions but keeps their items; the next pass found those items
     # undecided and logged every one of them as `expired` again (Codex on PR #9).
@@ -1266,6 +1276,12 @@ def test_a_date_is_not_read_as_a_time() -> None:
     assert parse_times("2026/10/01 12:01") == ("12:01",)
     assert parse_times("2026年10月1日 1201") == ("12:01",)
     assert parse_times("1201 2001") == ("12:01", "20:01")  # compact times on their own still work
+    # …and so do the lists people already wrote with / - or a trailing full stop.
+    assert parse_times("1201/2001") == ("12:01", "20:01")
+    assert parse_times("1201-2001") == ("12:01", "20:01")
+    assert parse_times("930/2130") == ("09:30", "21:30")
+    assert parse_times("每天 0930.") == ("09:30",)
+    assert parse_times("10/01 0930") == ("09:30",)  # a month/day date is still not a time
 
 
 async def test_a_failed_fetch_does_not_use_up_a_fixed_time(tmp_path, monkeypatch) -> None:
