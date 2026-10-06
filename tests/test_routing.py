@@ -341,6 +341,48 @@ async def test_a_member_with_their_own_model_is_not_routed(client, backends, mon
     assert "自動選擇" not in result.text
 
 
+async def test_a_slash_effort_keeps_the_routed_conversation_and_only_sets_its_effort(
+    client, backends, monkeypatch
+) -> None:
+    # Codex on #33: turning routing off for an effort override dropped the routed context
+    # and the route itself. The conversation stays put; Jev is not asked.
+    asked = verdicts(monkeypatch, ok("code", 8))
+    await ask(client, "修 bug")
+    reading = RateLimits(95.0, 95.0, "test")  # an effort the member set is not lowered
+    monkeypatch.setattr(bot_module, "read_rate_limits", lambda config: reading)
+    plan = await client._route(KEY, None, GUILD, USER, "再仔細一點", [], False, effort="xhigh")
+    assert len(asked) == 1 and plan.log["status"] == "effort"
+    assert plan.target == Resolved("codex", "gpt-5.6-luna", "xhigh") and plan.resume == "codex-t1"
+    assert plan.route.entry == "codex|high" and plan.log["degraded"] == []
+    fresh = await client._route(KEY, None, GUILD, USER, "新問題", [], False, True, effort="low")
+    assert fresh.target == Resolved("grok", "grok-4.7", "low") and fresh.resume == ""
+
+
+async def test_an_effortless_default_takes_the_configured_effort(client, monkeypatch) -> None:
+    # Codex on #33: "agy:gemini-3.8-flash" with no effort resolved to its strongest slug on the
+    # no-judgement path, unlike _answer, which applies CODEX_REASONING_EFFORT.
+    client.config = replace(
+        client.config, default_model="agy:gemini-3.8-flash", codex_reasoning_effort="medium"
+    )
+    verdicts(monkeypatch, Verdict("timeout"))
+    plan = await client._route(KEY, None, GUILD, USER, "問題", [], False)
+    assert plan.target == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+    client.config = replace(client.config, default_model="")
+    plan = await client._route(KEY, None, GUILD, USER, "問題", [], False)
+    assert plan.target == Resolved("codex", "gpt-5.6-luna", "medium")
+
+
+async def test_a_routed_slash_answer_that_nothing_produced_names_no_model(
+    client, monkeypatch
+) -> None:
+    verdicts(monkeypatch, ok("code", 8))
+    plan = await client._route(KEY, None, GUILD, USER, "修 bug", [], False)
+    assert client._slash_tag(plan, CodexResult("失敗"), "", "high") == ""
+    answered = CodexResult("好", via=Resolved("codex", "gpt-5.6-luna", "high"))
+    tag = client._slash_tag(plan, answered, "", "high")
+    assert tag.startswith("自動選擇：Codex · gpt-5.6-luna")
+
+
 async def test_jev_off_routes_nobody(client, monkeypatch) -> None:
     asked = verdicts(monkeypatch, ok("code", 9))
     client.routing = None
@@ -687,6 +729,7 @@ def test_help_tells_members_and_the_model_about_routing(client) -> None:
     assert "自動挑模型" in client.help_guide() and "自動挑模型" in client.help_sheet()
     assert "/codex-model" in client.help_sheet().split("自動挑模型")[1]
     assert "進行中的對話維持原本的模型" in client.help_sheet()
+    assert "effort 只改這一則的強度" in client.help_sheet()
     client.routing = None
     assert "自動挑模型" not in client.help_guide() and "自動挑模型" not in client.help_sheet()
 

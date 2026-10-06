@@ -1446,7 +1446,10 @@ class DiscordCodexClient(discord.Client):
         return grok.enabled(self.config) and time.time() >= self._grok_off_until
 
     def _default_entry(self) -> str:
-        return self.config.default_model or f"{CODEX}|{self.config.codex_reasoning_effort}"
+        """DEFAULT_MODEL as a routing entry, with CODEX_REASONING_EFFORT where it names none
+        (as `_answer` applies it to a member's own model)."""
+        value, effort = split_stored(self.config.default_model or CODEX)
+        return f"{value}|{effort or self.config.codex_reasoning_effort}"
 
     async def _route(
         self,
@@ -1458,6 +1461,7 @@ class DiscordCodexClient(discord.Client):
         attachments: Sequence[discord.Attachment],
         plain: bool,
         fresh: bool = False,
+        effort: str = "",
     ) -> RoutePlan | None:
         """Where this request goes when the router picks the model; None when it does not (Jev
         off, or the member chose a model with /model). Every message is judged; a conversation
@@ -1476,7 +1480,9 @@ class DiscordCodexClient(discord.Client):
         own = split_quoted(prompt)[1].strip()
         said = [t.text for t in turns if t.role == "user" and t.speaker in (None, user_id)]
         images = any((a.content_type or "").startswith("image/") for a in attachments)
-        if images:
+        if effort:
+            verdict = Verdict("effort")  # the member set this message's effort: no move
+        elif images:
             verdict = Verdict("image")
         elif not own:
             verdict = Verdict("no-text")
@@ -1491,7 +1497,7 @@ class DiscordCodexClient(discord.Client):
         kind = verdict.kind if verdict.status == "ok" else ""
         entry, degraded = route.entry, []
         backend = routing.backend_of(entry)
-        if backend == CODEX:
+        if backend == CODEX and not effort:  # an effort the member set is theirs
             limits = await asyncio.to_thread(read_rate_limits, self.config)
             if limits is not None and (
                 limits.primary_used_percent >= table.codex_five_hour
@@ -1510,6 +1516,8 @@ class DiscordCodexClient(discord.Client):
             degraded.append("grok-spent")
         model = self.config.codex_model
         target = routing.resolved(entry, model)
+        if effort:
+            target = resolve(routing.choice_of(entry, model), effort)
         value = routing.choice_of(entry, model).value
         spares: list[Resolved] = []
         if target.backend == GROK and kind == "live-x":
@@ -1555,6 +1563,17 @@ class DiscordCodexClient(discord.Client):
             },
             no_x=kind == "live-x",
         )
+
+    def _slash_tag(
+        self, route_plan: RoutePlan | None, result: CodexResult, model: str, effort: str
+    ) -> str:
+        """The model named above a slash answer: the one that answered. A routed request that
+        nothing answered names none, rather than a model that was never tried."""
+        if route_plan is not None:
+            return f"自動選擇：{self._via_label(result.via)}" if result.via else ""
+        target = result.via or resolve(self._choice(model), effort)
+        shown = self._effort_label(target)
+        return shown if target.backend == CODEX else f"{target.model} · {shown}"
 
     @staticmethod
     def _routed_kw(route_plan: RoutePlan | None) -> dict:
@@ -2957,19 +2976,19 @@ class DiscordCodexClient(discord.Client):
         model = self._model(interaction.guild_id, interaction.user.id)
         resume = "" if new else self.threads.current(key, plain=plain, model=model)
         await interaction.response.defer(thinking=True)
-        # An effort given here is the member choosing for this message: not routed.
-        routed = None
-        if effort is None:
-            routed = await self._route(
-                key,
-                None,
-                interaction.guild_id,
-                interaction.user.id,
-                prompt,
-                attachments,
-                plain,
-                fresh=new,
-            )
+        # An effort given here is the member's for this message: the conversation stays on its
+        # model (no Jev, no move) and only the effort changes.
+        routed = await self._route(
+            key,
+            None,
+            interaction.guild_id,
+            interaction.user.id,
+            prompt,
+            attachments,
+            plain,
+            fresh=new,
+            effort=effort.value if effort is not None else "",
+        )
         if routed is not None:
             resume = routed.resume
 
@@ -3005,14 +3024,10 @@ class DiscordCodexClient(discord.Client):
             self._log_route(routed, result)
         # Discord does not echo slash command inputs, so quote the question above the answer.
         # The model named is the one that answered, a fallback spare included.
-        target = result.via or resolve(self._choice(model), effort_value)
-        shown = self._effort_label(target)
-        if routed is not None:
-            tag = f"自動選擇：{self._via_label(target)}"
-        else:
-            tag = shown if target.backend == "codex" else f"{target.model} · {shown}"
+        tag = self._slash_tag(routed, result, model, effort_value)
+        target = result.via
         answer = result.text
-        if routed is not None and routed.no_x and target.backend != GROK:
+        if routed is not None and routed.no_x and target is not None and target.backend != GROK:
             answer += f"\n\n{NO_X_NOTE}"
         reply = format_reply(
             prompt,
