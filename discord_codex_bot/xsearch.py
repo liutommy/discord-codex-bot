@@ -52,26 +52,30 @@ def enabled(config: Config) -> bool:
 
 # The sidecar runs one lookup session at a time and turns away a request that waited past its
 # own 30 s queue (429). This bot's lookups — several X links in one message, a tracking check —
-# take turns here instead, each waiting no longer than its own deadline (Codex on PR #2).
+# take turns here instead (Codex on PR #2), within one deadline for the wait and the request
+# together (Codex on PR #29). The turn is waited for at most half of it, so a request is never
+# sent with only seconds left — the sidecar would start a session nobody waits for.
 _TURN = asyncio.Semaphore(1)
 
 
 async def _ask(config: Config, kind: str, body: dict) -> dict:
     if not config.xsearch_url:
         raise XSearchError("X lookup is not configured")
+    started = time.monotonic()
     try:
-        async with asyncio.timeout(config.xsearch_timeout_seconds):
+        async with asyncio.timeout(config.xsearch_timeout_seconds / 2):
             await _TURN.acquire()
     except TimeoutError:
         raise XSearchBusy(f"X lookup {kind} failed: still queued behind this bot's own") from None
     try:
-        return await _post(config, kind, body)
+        budget = config.xsearch_timeout_seconds - (time.monotonic() - started)
+        return await _post(config, kind, body, budget)
     finally:
         _TURN.release()
 
 
-async def _post(config: Config, kind: str, body: dict) -> dict:
-    timeout = aiohttp.ClientTimeout(total=config.xsearch_timeout_seconds)
+async def _post(config: Config, kind: str, body: dict, budget: float) -> dict:
+    timeout = aiohttp.ClientTimeout(total=budget)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(

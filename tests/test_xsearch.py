@@ -644,6 +644,29 @@ async def test_this_bots_lookups_take_turns_at_the_sidecar(monkeypatch, config: 
         finally:
             xsearch._TURN.release()
 
+    # One deadline for both (Codex on PR #29): the turn is waited for at most half of it, and the
+    # request gets what is left — never a fresh full timeout after a long wait.
+    budgets = []
+
+    async def fake_post(config, kind, body, budget):
+        budgets.append(budget)
+        return {"found": False}
+
+    monkeypatch.setattr(xsearch, "_post", fake_post)
+    quick = replace(cfg, xsearch_timeout_seconds=0.4)
+    loop = asyncio.get_running_loop()
+    await xsearch._TURN.acquire()
+    loop.call_later(0.1, xsearch._TURN.release)
+    await xsearch.fetch_post(quick, "301")
+    assert 0.25 < budgets[0] <= 0.3
+    await xsearch._TURN.acquire()
+    loop.call_later(0.3, xsearch._TURN.release)  # held past half the deadline
+    with pytest.raises(xsearch.XSearchBusy):
+        await xsearch.fetch_post(quick, "302")
+    assert budgets == [budgets[0]]  # nothing was sent
+    await asyncio.sleep(0.15)
+    assert not xsearch._TURN.locked()
+
 
 def test_post_text_flags_unverified_fields_and_a_different_author() -> None:
     post = {"author_handle": "elonmusk", "text": "hi", "created_at": "t"}
