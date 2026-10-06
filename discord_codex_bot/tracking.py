@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
+from .clock import sleep_for
 from .links import strip_tracking
 
 LOGGER = logging.getLogger(__name__)
@@ -2033,4 +2034,6 @@ async def tracking_loop(
         except Exception:
             upcoming = None
         delay = interval_seconds if upcoming is None else min(interval_seconds, upcoming + 2)
-        await asyncio.sleep(max(1.0, delay))
+        # Wall-clock steps: a VM frozen through a watch's fixed time runs the pass when it resumes,
+        # not late by the whole pause (Codex on PR #25).
+        await sleep_for(max(1.0, delay))
