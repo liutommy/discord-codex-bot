@@ -481,7 +481,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         twitch_client_secret=values.get("TWITCH_CLIENT_SECRET", "").strip(),
         linkclean_admin_ids=parse_id_set(values.get("LINKCLEAN_ADMIN_IDS"), "LINKCLEAN_ADMIN_IDS"),
     )
-    if config.xsearch_sidecar_seconds > config.xsearch_timeout_seconds:
+    if config.xsearch_url and config.xsearch_sidecar_seconds > config.xsearch_timeout_seconds:
         # The reservation comes out of the deadline: larger, and a lookup would be sent with
         # less time than the sidecar may take, then given up on while its session runs on.
         raise ValueError("XSEARCH_SIDECAR_SECONDS must not exceed XSEARCH_TIMEOUT_SECONDS")

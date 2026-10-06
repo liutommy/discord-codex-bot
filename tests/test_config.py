@@ -165,6 +165,9 @@ def test_the_sidecar_reservation_fits_in_the_lookup_deadline() -> None:
     }
     config = load_config(base)
     assert (config.xsearch_timeout_seconds, config.xsearch_sidecar_seconds) == (240, 210)
-    assert load_config({**base, "XSEARCH_SIDECAR_SECONDS": "240"}).xsearch_sidecar_seconds == 240
+    on = {**base, "XSEARCH_URL": "http://xsearch:8090"}
+    assert load_config({**on, "XSEARCH_SIDECAR_SECONDS": "240"}).xsearch_sidecar_seconds == 240
     with pytest.raises(ValueError, match="XSEARCH_SIDECAR_SECONDS"):
-        load_config({**base, "XSEARCH_SIDECAR_SECONDS": "241"})
+        load_config({**on, "XSEARCH_SIDECAR_SECONDS": "241"})
+    # Without the sidecar the two settings mean nothing: a short timeout must not stop the Bot.
+    assert load_config({**base, "XSEARCH_TIMEOUT_SECONDS": "60"}).xsearch_timeout_seconds == 60
