@@ -1190,8 +1190,10 @@ class DiscordCodexClient(discord.Client):
                 truncate(text, self.config.max_response_chars),
                 outgoing,
                 generated_dir,
-                "" if fell_back else result.thread_id,
-                result.resumed and not fell_back,
+                # A routed turn keeps its spare's thread: the caller records it under the spare
+                # that made it (`_routed_memo`), and the conversation goes on from there.
+                "" if fell_back and routed is None else result.thread_id,
+                result.resumed and not (fell_back and routed is None),
                 via=target,
             )
         except QueueFullError:
@@ -1572,6 +1574,24 @@ class DiscordCodexClient(discord.Client):
             no_x=kind == "live-x",
         )
 
+    def _routed_memo(
+        self, route_plan: RoutePlan | None, result: CodexResult, model: str
+    ) -> tuple[str, Route | None]:
+        """(ThreadStore model, route) to record a request's thread under. A routed thread is
+        recorded under the backend that made it: the target, or the spare that answered for it
+        (then the target's own thread, if this turn resumed one, joins the replay sources)."""
+        if route_plan is None:
+            return model, None
+        via, target = result.via, route_plan.target
+        if via is None or (via.backend, via.model) == (target.backend, target.model):
+            return route_plan.value, route_plan.route
+        value = parse_choice(f"{via.backend}:{via.model}", self.config.codex_model).value
+        route = route_plan.route
+        if route_plan.resume:
+            earlier = (*route.earlier, route_plan.resume)[-MAX_EARLIER:]
+            route = Route(route.entry, route.band, route.kind, earlier)
+        return value, route
+
     def _slash_tag(
         self, route_plan: RoutePlan | None, result: CodexResult, model: str, effort: str
     ) -> str:
@@ -1815,8 +1835,7 @@ class DiscordCodexClient(discord.Client):
             result.thread_id,
             getattr(sent, "id", None),
             plain,
-            routed.value if routed else model,
-            routed.route if routed else None,
+            *self._routed_memo(routed, result, model),
         )
 
     async def send_answer(self, destination, prompt: str, result, guild_id, user_id):
@@ -3073,8 +3092,7 @@ class DiscordCodexClient(discord.Client):
             result.thread_id,
             sent_id,
             plain,
-            routed.value if routed else model,
-            routed.route if routed else None,
+            *self._routed_memo(routed, result, model),
         )
         # channel too: a watch is created in whichever channel the member spoke in, and without
         # it a request cannot be traced back to where its side effects landed.
@@ -3208,8 +3226,7 @@ class DiscordCodexClient(discord.Client):
             result.thread_id,
             sent_id,
             plain,
-            routed.value if routed else model,
-            routed.route if routed else None,
+            *self._routed_memo(routed, result, model),
         )
         LOGGER.info(
             "Completed @mention guild=%s channel=%s user=%s",

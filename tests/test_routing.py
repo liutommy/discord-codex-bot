@@ -107,7 +107,7 @@ async def ask(client, text: str = "問題", attachments=(), replied_to=None):
     )  # fmt: skip
     if plan is not None:
         client._log_route(plan, result)
-        client._remember(KEY, result.thread_id, None, False, plan.value, plan.route)
+        client._remember(KEY, result.thread_id, None, False, *client._routed_memo(plan, result, ""))
     return plan, result
 
 
@@ -300,6 +300,26 @@ async def test_a_spare_taking_over_a_resumed_turn_gets_the_conversation(
     assert agy_call[2]["resume"] == "agy-t1" and "history" not in agy_call[2]
     assert "resume" not in grok_call[2] and "喜歡貓" in grok_call[2]["history"]
     assert result.via.backend == "grok"
+
+
+async def test_a_spares_answer_stays_in_the_conversation(client, backends, monkeypatch) -> None:
+    # Codex on #33: the spare's thread was dropped, so the next message started over (first
+    # turn) or resumed the target's thread without the spare's exchange. It is kept, recorded
+    # under the spare that made it, and the next turn replays it to the target.
+    verdicts(monkeypatch, ok("chat", 1))
+    backends["agy"].error = BackendUnavailable("agy out")
+    plan, result = await ask(client, "嗨，我喜歡貓")
+    assert result.thread_id == "grok-t1" and result.via.backend == "grok"
+    found = client.threads.routed(KEY, None, False)
+    assert found["model"] == "grok:grok-4.7" and found["thread_id"] == "grok-t1"
+    assert client.threads.backend_of("grok-t1") == "grok"
+    backends["agy"].error = None
+    turns = {"grok-t1": [Turn("user", "嗨，我喜歡貓", USER), Turn("assistant", "貓很可愛")]}
+    monkeypatch.setattr(bot_module, "transcript_turns", lambda c, t: turns.get(t, []))
+    plan, result = await ask(client, "我喜歡什麼")
+    agy_call = backends["agy"].calls[-1]
+    assert agy_call[2]["resume"] == "" and "貓很可愛" in agy_call[2]["history"]
+    assert plan.route.earlier == ("grok-t1",)
 
 
 async def test_an_x_conversation_without_a_verdict_keeps_its_x_handling(
