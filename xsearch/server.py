@@ -51,6 +51,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("XSEARCH_PORT", "8090"))
 MODEL = os.environ.get("XSEARCH_MODEL", "grok-4.7")
+# TIMEOUT and QUEUE_WAIT together are how long one lookup may take; the Bot's
+# XSEARCH_SIDECAR_SECONDS must match their sum.
 TIMEOUT = int(os.environ.get("XSEARCH_TIMEOUT_SECONDS", "180"))
 GROK = os.environ.get("XSEARCH_GROK_BIN", "grok")
 # The persistent volume holds only the login; every session gets a throwaway home under SCRATCH.

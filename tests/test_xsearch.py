@@ -653,8 +653,9 @@ async def test_this_bots_lookups_take_turns_at_the_sidecar(monkeypatch, config: 
         return {"found": False}
 
     monkeypatch.setattr(xsearch, "_post", fake_post)
-    monkeypatch.setattr(xsearch, "SIDECAR_LOOKUP_SECONDS", 0.3)
-    quick = replace(cfg, xsearch_timeout_seconds=0.4)  # 0.1 s to wait for the turn
+    # 0.1 s to wait for the turn; the reservation is the operator's, matching the sidecar's
+    # own limits (Codex on PR #29)
+    quick = replace(cfg, xsearch_timeout_seconds=0.4, xsearch_sidecar_seconds=0.3)
     loop = asyncio.get_running_loop()
     await xsearch._TURN.acquire()
     loop.call_later(0.05, xsearch._TURN.release)
@@ -667,6 +668,39 @@ async def test_this_bots_lookups_take_turns_at_the_sidecar(monkeypatch, config: 
     assert budgets == [budgets[0]]  # nothing was sent
     await asyncio.sleep(0.15)
     assert not xsearch._TURN.locked()
+
+
+async def test_a_cancelled_lookup_keeps_its_turn_until_the_sidecar_is_done(
+    monkeypatch, config: Config
+) -> None:
+    # The member stopped the turn mid-lookup (Codex on PR #29): the sidecar's session runs on
+    # regardless, so the next lookup must not be sent into it (and wait 30 s for a 429).
+    import asyncio
+
+    answered = asyncio.Event()
+
+    async def handle(request: web.Request) -> web.Response:
+        await asyncio.sleep(0.3)
+        answered.set()
+        return web.json_response({"found": False})
+
+    app = web.Application()
+    app.add_routes([web.post("/x/{kind}", handle)])
+    monkeypatch.setattr(xsearch, "_post_lookups", xsearch.deque())
+    async with TestServer(app) as server_:
+        cfg = replace(config, xsearch_url=f"http://127.0.0.1:{server_.port}")
+        lookup = asyncio.create_task(xsearch.fetch_post(cfg, "200"))
+        await asyncio.sleep(0.1)
+        lookup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await lookup
+        assert xsearch._TURN.locked() and not answered.is_set()
+        await asyncio.wait_for(answered.wait(), 2)
+        for _ in range(50):
+            if not xsearch._TURN.locked():
+                break
+            await asyncio.sleep(0.01)
+        assert not xsearch._TURN.locked()
 
 
 def test_post_text_flags_unverified_fields_and_a_different_author() -> None:
