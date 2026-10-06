@@ -80,6 +80,15 @@ class ThreadStore:
             return ""
         return entry["thread_id"]
 
+    def backend_of(self, thread_id: str) -> str:
+        """The backend that created `thread_id` ("codex", "grok", "agy", a router), as recorded
+        with it; "" when the store does not know the id."""
+        entries = [*self._by_key.values(), *self._by_message.values()]
+        for entry in entries:
+            if entry.get("thread_id") == thread_id and entry.get("model"):
+                return str(entry["model"]).split(":", 1)[0]
+        return ""
+
     def remember(
         self,
         key: str,

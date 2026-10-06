@@ -222,12 +222,17 @@ def resolve(choice: ModelChoice, effort: str) -> Resolved:
 
 
 def fallback_chain(member: ModelChoice, chain: tuple[str, ...], codex_model: str,
-                   default_effort: str, legacy_spare: str = "") -> list[Resolved]:  # fmt: skip
+                   default_effort: str, legacy_spare: str = "",
+                   routed: bool = False) -> list[Resolved]:  # fmt: skip
     """Where a turn goes when the member's backend cannot answer: the MODEL_CHAIN entries after
     the member's backend, in order ("grok → codex → agy": a Grok turn may end on Codex, then
     agy; a Codex turn on agy; never back up the chain). A backend missing from the chain (the
     routers) has no fallback. Without MODEL_CHAIN, the old single CODEX_FALLBACK_MODEL spare
-    still backs Codex."""
+    still backs Codex.
+
+    A `routed` turn went where the Bot sent it, not where the member asked, so it may sit
+    anywhere in the chain (agy for creative writing, Codex for code): its spares are every
+    other chain entry in chain order ("agy → grok → codex"), not only the ones after it."""
     if not chain:
         spare = fallback_target(legacy_spare, codex_model, default_effort)
         return [spare] if spare is not None and member.backend == CODEX else []
@@ -237,7 +242,7 @@ def fallback_chain(member: ModelChoice, chain: tuple[str, ...], codex_model: str
         for entry in chain
     ]  # fmt: skip
     backends = [choice.backend for choice, _ in entries]
-    if member.backend not in backends:
-        return []
-    after = entries[backends.index(member.backend) + 1 :]
+    if not routed and member.backend not in backends:
+        return []  # a routed target outside the chain still falls back along all of it
+    after = entries if routed else entries[backends.index(member.backend) + 1 :]
     return [resolve(choice, effort) for choice, effort in after if choice.backend != member.backend]
