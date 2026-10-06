@@ -152,3 +152,19 @@ def test_env_example_does_not_promise_a_shadow_mode() -> None:
 
     text = (Path(__file__).resolve().parents[1] / ".env.example").read_text("utf-8")
     assert "shadow" not in text.lower() and "live:" not in text
+
+
+def test_the_sidecar_reservation_fits_in_the_lookup_deadline() -> None:
+    # A lookup keeps XSEARCH_SIDECAR_SECONDS of its deadline for the request; a reservation
+    # larger than the whole deadline would send requests the Bot gives up on while the sidecar
+    # runs on (Codex on PR #29).
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    config = load_config(base)
+    assert (config.xsearch_timeout_seconds, config.xsearch_sidecar_seconds) == (240, 210)
+    assert load_config({**base, "XSEARCH_SIDECAR_SECONDS": "240"}).xsearch_sidecar_seconds == 240
+    with pytest.raises(ValueError, match="XSEARCH_SIDECAR_SECONDS"):
+        load_config({**base, "XSEARCH_SIDECAR_SECONDS": "241"})
