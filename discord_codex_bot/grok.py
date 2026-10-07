@@ -294,14 +294,17 @@ def _fit(compose, parts: dict[str, str], kept: list[dict]) -> tuple[str, str]:
         whole = _whole(kept, prompt)
         cut[:] = ["transcript"]
     for name in CUT_ORDER:
+        value = parts[name]  # every cut is taken from the whole value: one mark, never two
+        mark = CUT_HEAD if name == "history" else CUT_TAIL
+        room = len(value) - len(mark)
         while len(whole) > MAX_PROMPT_CHARS and parts[name]:
-            value, over = parts[name], len(whole) - MAX_PROMPT_CHARS
-            if name == "history":  # the newest part of a conversation matters most
-                room = len(value) - over - len(CUT_HEAD)
-                parts[name] = CUT_HEAD + value[-room:] if room > 0 else ""
+            room -= len(whole) - MAX_PROMPT_CHARS
+            if room <= 0:
+                parts[name] = ""
+            elif name == "history":  # the newest part of a conversation matters most
+                parts[name] = mark + value[-room:]
             else:
-                room = len(value) - over - len(CUT_TAIL)
-                parts[name] = value[:room] + CUT_TAIL if room > 0 else ""
+                parts[name] = value[:room] + mark
             prompt = compose(parts)
             whole = _whole(kept, prompt)
             if name not in cut:

@@ -2026,12 +2026,11 @@ async def tracking_loop(
     pruned_at = 0.0
     full_at = 0.0  # wall clock of the next full pass: every source, every due watch
     while True:
+        now = time.time()
+        full = now >= full_at
         try:
-            now = time.time()
             only = None
-            if now >= full_at:
-                full_at = now + interval_seconds
-            else:
+            if not full:
                 # Woken early for a fixed time: only the watches it made due, and their sources.
                 only = {
                     watch.id
@@ -2060,6 +2059,8 @@ async def tracking_loop(
             raise
         except Exception:
             LOGGER.exception("Social tracking pass failed")
+        if full:  # an interval after the pass ends, as before: a slow pass is not run back to back
+            full_at = time.time() + interval_seconds
         # Wake for a watch's fixed time rather than up to one interval after it.
         try:
             upcoming = store.seconds_to_next_slot()

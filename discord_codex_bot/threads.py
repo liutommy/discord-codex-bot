@@ -37,7 +37,7 @@ class ThreadStore:
         self._version = version
         self._by_key: dict[str, dict[str, float | str | bool]] = {}
         self._by_message: dict[str, dict[str, str]] = {}
-        self._pending: list[dict[str, str]] = []
+        self._pending: list[dict[str, str | float]] = []  # key, thread_id, at
         self._load()
 
     @staticmethod
