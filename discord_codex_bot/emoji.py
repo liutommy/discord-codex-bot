@@ -322,6 +322,9 @@ class EmojiStore:
                     "DELETE FROM samples WHERE message_id=? AND kind='message' AND emoji_id=?",
                     (message_id, emoji_id),
                 )
+                # Evidence gone is a change even when the clipped text reads the same (an emoji
+                # past TEXT_MAX taken out; Codex on PR #41).
+                connection.execute("UPDATE emojis SET added=added+1 WHERE emoji_id=?", (emoji_id,))
         before = rows[0] if rows else None
         for emoji_id in sorted(now - had):
             self.add_sample(

@@ -768,3 +768,13 @@ async def test_a_moderator_bot_lists_every_private_archive(bot, monkeypatch) -> 
     monkeypatch.setattr(DiscordCodexClient, "guilds", property(lambda self: [guild]))
     await bot._backfill_emoji()
     assert asked == [{}, {"private": True}]
+
+
+def test_an_emoji_taken_out_past_the_kept_text_is_described_again(store: EmojiStore) -> None:
+    # Codex on PR #41: both versions share their first TEXT_MAX characters, so the clipped text
+    # reads the same while the emoji at the end was removed.
+    head = "長" * emoji_module.TEXT_MAX
+    _sample(store, PEPE, 2, text=f"{head} <:pepe:{PEPE}>")
+    store.describe(PEPE, "x", False, "b")
+    store.edit_message(GUILD, 2, 3, f"{head} 沒了", 5.0, True)
+    assert store.samples(PEPE) == [] and [e.emoji_id for e in store.pending([GUILD])] == [PEPE]
