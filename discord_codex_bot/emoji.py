@@ -278,6 +278,45 @@ class EmojiStore:
                 is not None
             )
 
+    def edit_message(
+        self, guild_id: int, message_id: int, channel_id: int, text: str, at: float, member: bool
+    ) -> None:
+        """An edited message: every sample says what it says now, as a sample and as another's
+        "previous"; an emoji taken out of a member's message is no longer sampled from it, and one
+        put in is (Codex on PR #40). Uses already counted stay."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE samples SET text=? WHERE message_id=?", (clip(text), message_id)
+            )
+            connection.execute(
+                "UPDATE samples SET previous=? WHERE previous_id=?", (clip(text), message_id)
+            )
+            rows = connection.execute(
+                """SELECT emoji_id, previous, previous_id FROM samples
+                   WHERE message_id=? AND kind='message'""",
+                (message_id,),
+            ).fetchall()
+            had = {row["emoji_id"] for row in rows}
+            now = {e for e in static_ids(text) if self.known(guild_id, e)} if member else set()
+            for emoji_id in had - now:
+                connection.execute(
+                    "DELETE FROM samples WHERE message_id=? AND kind='message' AND emoji_id=?",
+                    (message_id, emoji_id),
+                )
+        before = rows[0] if rows else None
+        for emoji_id in sorted(now - had):
+            self.add_sample(
+                guild_id,
+                emoji_id,
+                "message",
+                message_id,
+                channel_id,
+                text,
+                before["previous"] if before else "",
+                at,
+                previous_id=before["previous_id"] if before else None,
+            )
+
     def count_use(self, emoji_id: int) -> None:
         """Another reaction on a message already sampled: a use, not a new sample."""
         with self._connect() as connection:
@@ -482,6 +521,11 @@ def _short(description: str) -> str:
     if len(description) <= LISTED_MAX:
         return description
     return description[: LISTED_MAX - 1] + "…"
+
+
+def static_ids(text: str) -> list[int]:
+    """The static custom emoji in a message, each once (animated ones are never described)."""
+    return sorted({int(i) for animated, _n, i in CUSTOM.findall(text or "") if not animated})
 
 
 def names_only(text: str) -> str:

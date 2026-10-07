@@ -744,10 +744,28 @@ class DiscordCodexClient(discord.Client):
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
         """The channel's latest message changed (an answer replacing its 「思考中」 placeholder,
         a member's edit): the next sample's "previous" is what it says now (Codex on PR #40)."""
-        latest = self._last_message.get(payload.channel_id)
         content = payload.data.get("content")
-        if latest is not None and latest[0] == payload.message_id and isinstance(content, str):
+        if not isinstance(content, str):
+            return  # an embed resolving, not a text change
+        latest = self._last_message.get(payload.channel_id)
+        if latest is not None and latest[0] == payload.message_id:
             self._last_message[payload.channel_id] = (payload.message_id, content)
+        channel = self.get_channel(payload.channel_id)
+        if channel is None or not self._samples_from(payload.guild_id, channel):
+            return
+        author = payload.data.get("author") or {}
+        try:
+            at = _dt.fromisoformat(payload.data["timestamp"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            at = time.time()
+        self.emoji.edit_message(
+            payload.guild_id,
+            payload.message_id,
+            payload.channel_id,
+            content,
+            at,
+            member=not author.get("bot", False),
+        )
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         """Someone reacted with one of the server's emoji: the message it was put on is a sample
@@ -815,14 +833,20 @@ class DiscordCodexClient(discord.Client):
                 continue
             channels: list = [*guild.text_channels, *guild.threads]
             unlisted = []  # parents whose archived threads Discord would not list
-            for parent in [*guild.text_channels, *guild.forums]:
+            # Public archived threads, and the private ones the Bot joined (only text channels have
+            # private threads; Codex on PR #40).
+            listings = [(parent, {}) for parent in [*guild.text_channels, *guild.forums]]
+            joined = {"private": True, "joined": True}
+            listings += [(parent, joined) for parent in guild.text_channels]
+            for parent, kind in listings:
                 try:
-                    async for thread in parent.archived_threads(limit=None):
+                    async for thread in parent.archived_threads(limit=None, **kind):
                         if thread.archive_timestamp < horizon:
                             break
                         channels.append(thread)
                 except discord.HTTPException as error:
-                    unlisted.append(f"#{parent.name} ({parent.id}): {error.status}")
+                    which = " private" if kind else ""
+                    unlisted.append(f"#{parent.name} ({parent.id}){which}: {error.status}")
             if unlisted:
                 # Their archived threads are not read this run; the next start lists them again.
                 LOGGER.warning(

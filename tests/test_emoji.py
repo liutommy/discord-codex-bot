@@ -405,7 +405,7 @@ class _Text(discord.TextChannel):
     async def fetch_message(self, message_id: int):
         return next(m for m in self.messages if m.id == message_id)
 
-    def archived_threads(self, limit=None):
+    def archived_threads(self, limit=None, **kind):
         async def none():
             return
             yield
@@ -619,7 +619,7 @@ async def test_each_ready_syncs_the_emoji_and_runs_one_backfill(bot, monkeypatch
 async def test_archived_threads_discord_will_not_list_are_logged(bot, monkeypatch, caplog) -> None:
     # Codex on PR #40: a failed listing dropped those threads without a word.
     class Closed(_Text):
-        def archived_threads(self, limit=None):
+        def archived_threads(self, limit=None, **kind):
             async def refuse():
                 raise discord.Forbidden(types.SimpleNamespace(status=403, reason="x"), "x")
                 yield
@@ -634,10 +634,60 @@ async def test_archived_threads_discord_will_not_list_are_logged(bot, monkeypatc
     monkeypatch.setattr(DiscordCodexClient, "guilds", property(lambda self: [guild]))
     caplog.set_level(logging.INFO)
     await bot._backfill_emoji()
-    assert "archived threads not listed in 1 channel(s): #封存 (6): 403" in caplog.text
+    assert "not listed in 2 channel(s): #封存 (6): 403, #封存 (6) private: 403" in caplog.text
 
 
 def test_help_explains_emoji_only_while_it_is_on(bot, config) -> None:
     assert "看得懂伺服器表情" in bot.help_guide() and "看得懂伺服器表情" in bot.help_sheet()
     off = DiscordCodexClient(replace(bot.config, emoji_enabled=False))
     assert "看得懂伺服器表情" not in off.help_guide() + off.help_sheet()
+
+
+async def test_private_archived_threads_the_bot_joined_are_read(bot, monkeypatch) -> None:
+    # Codex on PR #40: archived_threads() lists public threads only by default.
+    class Parent(_Text):
+        def archived_threads(self, limit=None, **kind):
+            async def listing():
+                if kind == {"private": True, "joined": True}:
+                    yield secret
+
+            return listing()
+
+    parent = Parent(3, "閒聊")
+    secret = _Text(9, "私串")
+    secret.archive_timestamp = datetime.now(UTC)
+    _incoming(1, secret, f"<:pepe:{PEPE}> 私串裡")
+    guild = types.SimpleNamespace(
+        id=GUILD, default_role="everyone", me="bot", text_channels=[parent], threads=[], forums=[]
+    )
+    monkeypatch.setattr(bot, "get_guild", lambda guild_id: guild)
+    monkeypatch.setattr(DiscordCodexClient, "guilds", property(lambda self: [guild]))
+    await bot._backfill_emoji()
+    assert [s.text for s in bot.emoji.samples(PEPE)] == [f"<:pepe:{PEPE}> 私串裡"]
+
+
+async def test_an_edit_updates_what_the_samples_say(bot, monkeypatch) -> None:
+    # Codex on PR #40: an edited message kept its old text and emoji in the samples.
+    channel = _Text(3, "閒聊")
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: channel)
+    first = _incoming(1, channel, "早安")
+    await bot._collect_emoji(first)
+    second = _incoming(2, channel, f"<:pepe:{PEPE}> 舊的")
+    await bot._collect_emoji(second)
+
+    def edit(message, content, bot_author=False):
+        return types.SimpleNamespace(
+            guild_id=GUILD, channel_id=3, message_id=message.id,
+            data={"content": content, "author": {"bot": bot_author},
+                  "timestamp": "2026-10-07T08:00:00+00:00"},
+        )  # fmt: skip
+
+    await bot.on_raw_message_edit(edit(first, "早安（改過）"))
+    assert bot.emoji.samples(PEPE)[0].previous == "早安（改過）"
+    await bot.on_raw_message_edit(edit(second, f"<:cat:{CAT}> 換成貓"))
+    assert bot.emoji.samples(PEPE) == []  # pepe was taken out
+    assert [(s.text, s.previous) for s in bot.emoji.samples(CAT)] == [
+        (f"<:cat:{CAT}> 換成貓", "早安（改過）")
+    ]
+    await bot.on_raw_message_edit(edit(second, "沒有表情了"))
+    assert bot.emoji.samples(CAT) == []
