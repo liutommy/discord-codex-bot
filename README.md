@@ -583,9 +583,8 @@ The model reads the server's own emoji by how its members use them. Samples go i
   before it;
 - a message someone reacted to with one (further reactions on it only count as uses).
 
-Only public channels are sampled (what `@everyone` can read), because the descriptions reach
-every prompt of the server, just like server memory. The newest 100 samples are kept per emoji,
-and a deleted message takes its samples with it. Animated emoji and stickers are not described.
+Every channel the Bot can see is sampled, private ones included (owner, 2026-10-07). The
+newest 100 samples are kept per emoji, and a deleted message takes its samples with it. Animated emoji and stickers are not described.
 
 **History.** The history is read once, in the background:
 
@@ -593,8 +592,8 @@ and a deleted message takes its samples with it. Animated emoji and stickers are
   messages at a time, with a pause between pages.
 - It is resumable: a restart goes on where it stopped. A larger value later reads further back
   from where it ended.
-- Each guild logs the channels it may not read (no Read Message History) and the non-public
-  ones it skipped, by name, along with its totals.
+- Each guild logs the channels it may not read (no View Channel or Read Message History) and
+  the ones whose archived threads Discord would not list, by name, along with its totals.
 
 **Descriptions.** Daily at `EMOJI_DESCRIBE_HOUR` (default 04:00 in the consolidation timezone;
 -1 = off), behind the same quota gate as harvest:

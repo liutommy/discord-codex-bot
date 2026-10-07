@@ -2,9 +2,8 @@
 
 Samples (EmojiStore, one SQLite file keyed by guild): a member message that carries one of the
 server's emoji, with the channel's message before it; and a message someone reacted to with one.
-The newest KEEP_SAMPLES per emoji are kept. They come from public channels only (what @everyone
-can read): the descriptions they lead to go into every prompt of the server, like server memory.
-A deleted message takes its samples with it.
+The newest KEEP_SAMPLES per emoji are kept. They come from every channel the Bot can see, private
+ones included (owner, 2026-10-07). A deleted message takes its samples with it.
 
 Descriptions: once a day (EMOJI_DESCRIBE_HOUR, behind the same quota gate as the other background
 jobs) every static emoji with new samples is described from its image and its samples — what it
@@ -18,7 +17,7 @@ no description, and always for animated emoji, which are not described), and MEM
 server's PROMPT_MAX most used emoji. No emoji image goes along: that would make every such message
 an image turn, which skips the Jev router.
 
-The backfill reads each public channel's history once, BACKFILL_PAGE messages at a time with a
+The backfill reads each readable channel's history once, BACKFILL_PAGE messages at a time with a
 pause between pages, back EMOJI_BACKFILL_DAYS from when it first ran; it stops anywhere and goes
 on from there, and a larger EMOJI_BACKFILL_DAYS later reads further back from where it stopped.
 """

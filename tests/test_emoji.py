@@ -343,15 +343,25 @@ async def test_a_longer_backfill_reads_on_from_the_oldest_message_read(store) ->
 
 
 class _Text(discord.TextChannel):
-    def __init__(self, channel_id: int, name: str, public: bool = True, readable: bool = True):
+    def __init__(
+        self,
+        channel_id: int,
+        name: str,
+        public: bool = True,
+        readable: bool = True,
+        visible: bool = True,
+    ):
         self.id, self.name, self._public, self._readable = channel_id, name, public, readable
+        self._visible = visible  # to the Bot
         self.messages: list = []
         self.reads = 0  # history() calls: one REST request each
 
     def permissions_for(self, who) -> discord.Permissions:
         if who == "everyone":
             return discord.Permissions(view_channel=self._public)
-        return discord.Permissions(view_channel=True, read_message_history=self._readable)
+        return discord.Permissions(
+            view_channel=self._visible, read_message_history=self._visible and self._readable
+        )
 
     def history(self, *, limit, before=None, after=None, oldest_first=None):
         self.reads += 1
@@ -400,18 +410,21 @@ def _incoming(n: int, channel, content: str, bot: bool = False):
     return message
 
 
-async def test_members_messages_in_public_channels_are_sampled(bot) -> None:
+async def test_members_messages_in_every_channel_the_bot_sees_are_sampled(bot) -> None:
+    # Owner 2026-10-07: 「只要bot能看到的頻道都算可以運用的」 — private ones included.
     public, private = _Text(3, "閒聊"), _Text(4, "幹部", public=False)
+    hidden = _Text(7, "看不到", public=False, visible=False)
     await bot._collect_emoji(_incoming(1, public, f"<:pepe:{PEPE}> 第一則"))  # asks history
     await bot._collect_emoji(_incoming(2, public, "Bot 的回答", bot=True))
     await bot._collect_emoji(_incoming(3, public, f"又是 <:pepe:{PEPE}>"))
     await bot._collect_emoji(_incoming(4, private, f"<:cat:{CAT}> 私下講"))
     await bot._collect_emoji(_incoming(5, public, f"<:pepe:{PEPE}>", bot=True))  # a bot's own
+    await bot._collect_emoji(_incoming(6, hidden, f"<:cat:{CAT}> 看不到的頻道"))
     assert [(s.text, s.previous) for s in bot.emoji.samples(PEPE)] == [
         (f"又是 <:pepe:{PEPE}>", "Bot 的回答"),
         (f"<:pepe:{PEPE}> 第一則", ""),
     ]
-    assert bot.emoji.samples(CAT) == []  # not public: never sampled
+    assert [s.text for s in bot.emoji.samples(CAT)] == [f"<:cat:{CAT}> 私下講"]  # private: kept
     assert public.reads == 1  # only the first message asked Discord for the one before it
 
 
@@ -438,23 +451,26 @@ async def test_a_reaction_samples_the_message_it_was_put_on_once(bot, monkeypatc
 
 
 async def test_the_backfill_reports_channels_it_cannot_read(bot, monkeypatch, caplog) -> None:
-    readable, closed, private = (
+    readable, closed, private, hidden = (
         _Text(3, "閒聊"),
         _Text(4, "公告", readable=False),
         _Text(5, "幹部", public=False),
+        _Text(8, "密室", public=False, visible=False),
     )
     _incoming(1, readable, f"<:pepe:{PEPE}>")
+    _incoming(2, private, f"<:cat:{CAT}>")
     guild = types.SimpleNamespace(
-        id=GUILD, default_role="everyone", me="bot", text_channels=[readable, closed, private],
-        threads=[], forums=[],
+        id=GUILD, default_role="everyone", me="bot",
+        text_channels=[readable, closed, private, hidden], threads=[], forums=[],
     )  # fmt: skip
     monkeypatch.setattr(bot, "get_guild", lambda guild_id: guild)
     monkeypatch.setattr(DiscordCodexClient, "guilds", property(lambda self: [guild]))
     caplog.set_level(logging.INFO)
     await bot._backfill_emoji()
-    assert "no Read Message History in 1 channel(s): #公告 (4)" in caplog.text
-    assert "1 channel(s) not public, not read: #幹部 (5)" in caplog.text
+    assert "Read Message History in 2 channel(s): #公告 (4), #密室 (8)" in caplog.text
+    assert "not public" not in caplog.text
     assert len(bot.emoji.samples(PEPE)) == 1 and bot.emoji.meta("backfill_anchor")
+    assert len(bot.emoji.samples(CAT)) == 1  # a private channel the Bot can read: read
     assert "Emoji backfill guild=111111111111111111 done back 90 days" in caplog.text
 
 

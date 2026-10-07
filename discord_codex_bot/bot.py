@@ -690,18 +690,14 @@ class DiscordCodexClient(discord.Client):
         self._sync_emoji(guild)
 
     def _samples_from(self, guild_id: int | None, channel) -> bool:
-        """Emoji samples come from an allowed guild's public channels only: descriptions made
-        from them reach every prompt of the server, like server memory."""
+        """Emoji samples come from every channel of an allowed guild the Bot can see, private
+        ones included (owner, 2026-10-07: 「只要bot能看到的頻道都算可以運用的」)."""
         if self.emoji is None or guild_id not in self.config.allowed_guild_ids:
             return False
         guild = self.get_guild(guild_id)
-        if isinstance(channel, discord.Thread):
-            if channel.is_private():
-                return False
-            channel = channel.parent
-        if guild is None or not isinstance(channel, discord.abc.GuildChannel):
+        if guild is None or not isinstance(channel, (discord.abc.GuildChannel, discord.Thread)):
             return False
-        return bool(channel.permissions_for(guild.default_role).view_channel)
+        return bool(channel.permissions_for(guild.me).view_channel)
 
     async def _collect_emoji(self, message: discord.Message) -> None:
         """A member message with the server's own emoji is a sample, with the channel's message
@@ -785,7 +781,7 @@ class DiscordCodexClient(discord.Client):
             self.emoji.forget_messages(payload.message_ids)
 
     async def _backfill_emoji(self) -> None:
-        """The one-off history read (emoji.backfill_channel) of every allowed guild: each public
+        """The one-off history read (emoji.backfill_channel) of every allowed guild: each
         channel, active and archived thread the Bot may read, back EMOJI_BACKFILL_DAYS from the
         first run. Channels it may not read are logged by name, never skipped silently."""
         days = self.config.emoji_backfill_days
@@ -816,11 +812,8 @@ class DiscordCodexClient(discord.Client):
                     len(unlisted),
                     ", ".join(unlisted),
                 )
-            readable, unreadable, private = [], [], []
+            readable, unreadable = [], []
             for channel in channels:
-                if not self._samples_from(guild.id, channel):
-                    private.append(channel)
-                    continue
                 allowed = channel.permissions_for(guild.me)
                 if allowed.view_channel and allowed.read_message_history:
                     readable.append(channel)
@@ -828,17 +821,11 @@ class DiscordCodexClient(discord.Client):
                     unreadable.append(channel)
             if unreadable:
                 LOGGER.warning(
-                    "Emoji backfill guild=%s: no Read Message History in %d channel(s): %s",
+                    "Emoji backfill guild=%s: no View Channel / Read Message History in %d"
+                    " channel(s): %s",
                     guild.id,
                     len(unreadable),
                     ", ".join(f"#{c.name} ({c.id})" for c in unreadable),
-                )
-            if private:
-                LOGGER.info(
-                    "Emoji backfill guild=%s: %d channel(s) not public, not read: %s",
-                    guild.id,
-                    len(private),
-                    ", ".join(f"#{c.name} ({c.id})" for c in private),
                 )
             for channel in readable:
                 try:
@@ -858,13 +845,12 @@ class DiscordCodexClient(discord.Client):
                     )
             done = [row for row in self.emoji.status()["backfill"] if row["guild_id"] == guild.id]
             LOGGER.info(
-                "Emoji backfill guild=%s done back %d days: %s; unreadable %d, not public %d,"
-                " archived threads not listed in %d",
+                "Emoji backfill guild=%s done back %d days: %s; unreadable %d, archived threads"
+                " not listed in %d",
                 guild.id,
                 days,
                 done[0] if done else {},
                 len(unreadable),
-                len(private),
                 len(unlisted),
             )
 
