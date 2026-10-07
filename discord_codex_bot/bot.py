@@ -799,14 +799,23 @@ class DiscordCodexClient(discord.Client):
             if guild.id not in self.config.allowed_guild_ids:
                 continue
             channels: list = [*guild.text_channels, *guild.threads]
+            unlisted = []  # parents whose archived threads Discord would not list
             for parent in [*guild.text_channels, *guild.forums]:
                 try:
                     async for thread in parent.archived_threads(limit=None):
                         if thread.archive_timestamp < horizon:
                             break
                         channels.append(thread)
-                except discord.HTTPException:
-                    pass  # no Read Message History there: the channel itself is reported below
+                except discord.HTTPException as error:
+                    unlisted.append(f"#{parent.name} ({parent.id}): {error.status}")
+            if unlisted:
+                # Their archived threads are not read this run; the next start lists them again.
+                LOGGER.warning(
+                    "Emoji backfill guild=%s: archived threads not listed in %d channel(s): %s",
+                    guild.id,
+                    len(unlisted),
+                    ", ".join(unlisted),
+                )
             readable, unreadable, private = [], [], []
             for channel in channels:
                 if not self._samples_from(guild.id, channel):
@@ -849,12 +858,14 @@ class DiscordCodexClient(discord.Client):
                     )
             done = [row for row in self.emoji.status()["backfill"] if row["guild_id"] == guild.id]
             LOGGER.info(
-                "Emoji backfill guild=%s done back %d days: %s; unreadable %d, not public %d",
+                "Emoji backfill guild=%s done back %d days: %s; unreadable %d, not public %d,"
+                " archived threads not listed in %d",
                 guild.id,
                 days,
                 done[0] if done else {},
                 len(unreadable),
                 len(private),
+                len(unlisted),
             )
 
     async def _backfill_emoji_safely(self) -> None:
@@ -911,15 +922,21 @@ class DiscordCodexClient(discord.Client):
             except Exception:
                 LOGGER.exception("Emoji descriptions failed")
 
+    def _start_emoji(self) -> None:
+        """On every ready: the guilds' emoji as they are now, and the backfill unless one is
+        running (it goes on from where the last one stopped)."""
+        if self.emoji is None:
+            return
+        for guild in self.guilds:
+            self._sync_emoji(guild)
+        task = getattr(self, "_emoji_backfill_task", None)
+        if self.config.emoji_backfill_days > 0 and (task is None or task.done()):
+            self._emoji_backfill_task = asyncio.create_task(self._backfill_emoji_safely())
+
     async def on_ready(self) -> None:
         LOGGER.info("Discord bot ready as %s", self.user)
         await self.warm_emojis()
-        if self.emoji is not None:
-            for guild in self.guilds:
-                self._sync_emoji(guild)
-            task = getattr(self, "_emoji_backfill", None)
-            if self.config.emoji_backfill_days > 0 and (task is None or task.done()):
-                self._emoji_backfill = asyncio.create_task(self._backfill_emoji_safely())
+        self._start_emoji()
         LOGGER.info("%s", await codex_login_status(self.config))
         if grok.enabled(self.config):  # the model list /model offers and effort mapping uses
             # never hold up startup on the sidecar; kept so the task is not garbage-collected
@@ -1095,6 +1112,7 @@ class DiscordCodexClient(discord.Client):
             self._command_rows(),
             self._default_label(),
             image_order=self._image_order(),
+            emoji=self.emoji is not None,
         )
         doc = apis.render_doc(self.apis)
         return f"{sheet}\n{doc}" if doc else sheet
@@ -1106,6 +1124,7 @@ class DiscordCodexClient(discord.Client):
             [row[0] for row in self._command_rows()],
             self._default_label(),
             image_order=self._image_order(),
+            emoji=self.emoji is not None,
         )
 
     def _image_order(self) -> str:

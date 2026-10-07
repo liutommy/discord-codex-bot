@@ -505,3 +505,58 @@ def test_the_emoji_database_is_backed_up(tmp_path: Path, config: Config) -> None
     target = make_backup(cfg, now=1_700_000_000)
     with tarfile.open(target) as tar:
         assert "emoji.sqlite3" in tar.getnames()
+
+
+async def test_each_ready_syncs_the_emoji_and_runs_one_backfill(bot, monkeypatch) -> None:
+    # Codex on PR #40 feared the task attribute shadowed the method: a ready must start exactly
+    # one backfill, and a second ready while it runs must not start another.
+    import asyncio
+
+    started: list[int] = []
+    gate = asyncio.Event()
+
+    async def backfill():
+        started.append(1)
+        await gate.wait()
+
+    guild = types.SimpleNamespace(id=GUILD, emojis=[types.SimpleNamespace(
+        id=CAT, name="cat", animated=False)])  # fmt: skip
+    monkeypatch.setattr(DiscordCodexClient, "guilds", property(lambda self: [guild]))
+    monkeypatch.setattr(bot, "_backfill_emoji", backfill)
+    bot._start_emoji()
+    bot._start_emoji()
+    await asyncio.sleep(0)
+    assert started == [1] and not bot.emoji.known(GUILD, PEPE)  # synced: pepe is gone
+    gate.set()
+    await bot._emoji_backfill_task
+    bot._start_emoji()
+    await asyncio.sleep(0)
+    assert started == [1, 1]  # the next ready goes on from where it stopped
+    await bot._emoji_backfill_task
+
+
+async def test_archived_threads_discord_will_not_list_are_logged(bot, monkeypatch, caplog) -> None:
+    # Codex on PR #40: a failed listing dropped those threads without a word.
+    class Closed(_Text):
+        def archived_threads(self, limit=None):
+            async def refuse():
+                raise discord.Forbidden(types.SimpleNamespace(status=403, reason="x"), "x")
+                yield
+
+            return refuse()
+
+    closed = Closed(6, "封存")
+    guild = types.SimpleNamespace(
+        id=GUILD, default_role="everyone", me="bot", text_channels=[closed], threads=[], forums=[]
+    )
+    monkeypatch.setattr(bot, "get_guild", lambda guild_id: guild)
+    monkeypatch.setattr(DiscordCodexClient, "guilds", property(lambda self: [guild]))
+    caplog.set_level(logging.INFO)
+    await bot._backfill_emoji()
+    assert "archived threads not listed in 1 channel(s): #封存 (6): 403" in caplog.text
+
+
+def test_help_explains_emoji_only_while_it_is_on(bot, config) -> None:
+    assert "看得懂伺服器表情" in bot.help_guide() and "看得懂伺服器表情" in bot.help_sheet()
+    off = DiscordCodexClient(replace(bot.config, emoji_enabled=False))
+    assert "看得懂伺服器表情" not in off.help_guide() + off.help_sheet()
