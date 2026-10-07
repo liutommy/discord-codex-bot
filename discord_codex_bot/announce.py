@@ -1,5 +1,5 @@
-"""Announcements: an owner-approved message is sent now, or queued for a time or for the next
-deploy, and every queued item is posted at most once.
+"""Announcements: an owner-approved message is sent now, or queued for a time or for the Bot's
+next start, and every queued item is posted at most once.
 
 Run inside the bot container, where the Bot's token and guild allowlist are:
 
@@ -8,6 +8,9 @@ Run inside the bot container, where the Bot's token and guild allowlist are:
                                                 [--after-deploy] [--not-after "YYYY-MM-DD HH:MM"]
                                                 < text.md
     python -m discord_codex_bot.announce list
+
+`--after-deploy` means the next start of the Bot after the item was queued — a deploy, or any
+restart (a reboot of the host, a crash brought back by dcb-up) — whichever comes first.
 
 Nothing is baked into the image and nothing posts on start-up by itself: the old start-up
 announcement kept its "already posted" record in a file and re-posted on 2026-10-02 when that
@@ -275,7 +278,7 @@ def list_items(config: Config) -> list[str]:
             item = json.loads(path.read_text("utf-8"))
             when = (
                 show_time(item["at"]) if item.get("at")
-                else "下次部署後" if item.get("after_deploy") else "下一輪"
+                else "下次啟動（部署或重啟）後" if item.get("after_deploy") else "下一輪"
             )  # fmt: skip
             lines.append(
                 f"{path.name}  頻道 {item['channel']}  {when}  最晚 {show_time(item['not_after'])}"
@@ -291,10 +294,12 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     send = commands.add_parser("send", help="post now; text on stdin")
     send.add_argument("--channel", type=int, required=True)
-    queue = commands.add_parser("queue", help="queue for a time or the next deploy")
+    queue = commands.add_parser("queue", help="queue for a time or the Bot's next start")
     queue.add_argument("--channel", type=int, required=True)
     queue.add_argument("--at", default="", help='"YYYY-MM-DD HH:MM", Taipei')
-    queue.add_argument("--after-deploy", action="store_true")
+    queue.add_argument(
+        "--after-deploy", action="store_true", help="the Bot's next start: a deploy or any restart"
+    )
     queue.add_argument("--not-after", default="", help='"YYYY-MM-DD HH:MM", Taipei')
     commands.add_parser("list", help="show the queue")
     args = parser.parse_args(argv)

@@ -294,7 +294,7 @@ sign-in lives in the `<name>_agy_home` volume: run `agy` inside the container on
 + code loop). Threads never cross backends; switching models starts a new thread and harvests the
 old one. Google's content policy may reject prompts on the Gemini models that the Claude models
 accept. Announcements are posted only on purpose, after the owner approves the text: `python -m
-discord_codex_bot.announce send` posts one now, `queue` holds one for a time or the next deploy
+discord_codex_bot.announce send` posts one now, `queue` holds one for a time or the Bot's next start (deploy or restart)
 (`CODEX_HOME/announce-queue`, each item posted at most once); nothing posts on start-up.
 
 When the ChatGPT subscription quota runs out or the selected model is temporarily at capacity,
