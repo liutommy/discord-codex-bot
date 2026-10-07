@@ -551,6 +551,19 @@ async def test_an_image_in_an_x_conversation_gets_no_x_handling(
     assert result.via.backend == "codex"
 
 
+async def test_an_image_on_a_claude_cell_goes_on_down_the_image_list(
+    client, backends, monkeypatch
+) -> None:
+    # Codex on #35: with agy first in `image`, a Claude conversation kept its cell and, when
+    # Claude failed, its create stand-in (Grok) ran before the list's next entry.
+    verdicts(monkeypatch, ok("create", 8))
+    await ask(client, "寫一篇短篇小說")
+    client.routing = replace(client.routing, image=("agy:gemini-3.8-flash|medium", "codex|medium"))
+    plan, _ = await ask_with_image(client, "照這張圖續寫")
+    assert plan.target == Resolved("agy", "claude-sonnet-4-6", "")
+    assert plan.spares == (Resolved("codex", "gpt-5.6-luna", "medium"),)
+
+
 async def test_an_image_in_an_x_conversation_carries_no_no_x_note(
     client, backends, monkeypatch
 ) -> None:

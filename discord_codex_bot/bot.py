@@ -1554,9 +1554,11 @@ class DiscordCodexClient(discord.Client):
         spares: list[Resolved] = []
         if target.backend == GROK and kind == "live-x":
             spares.append(routing.resolved(table.live_x_without_grok, model))
-        if routing.is_claude(entry) and route.kind in table.claude_failed:
+        if not image_turn and routing.is_claude(entry) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))
-        if image_turn:  # Codex → Grok → agy, then MODEL_CHAIN (_answer drops repeats)
+        # An image turn takes only the image list's order (no type stand-ins), then MODEL_CHAIN;
+        # _answer drops repeats.
+        if image_turn:
             spares.extend(routing.resolved(spare, model) for spare in image_rest)
         replay = ""
         if turns:
