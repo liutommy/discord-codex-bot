@@ -331,11 +331,6 @@ def _prompt(
             ' <recall scope="permanent|user|guild" name="<name from the index>" offset="1"'
             ' lines="200"/> reads a page of one note; <recall scope="…" name="list"/> lists'
             " notes that are not in the index.",
-            "MEMORY may carry a [伺服器表情] section: this server's own custom emoji, most used"
-            " first, as :name:（what it looks like and what members use it to say）. In the"
-            " messages, :name: or :name:（…） is such an emoji, written that way by the Bot (the"
-            " part in brackets is the Bot's, not the member's words); read it for the tone. Do"
-            " not list or explain the emoji unless asked.",
             "MEMORY may end with a [待辦提醒] section: this member's pending reminders (#id,"
             " Taipei time, text). When the member asks to be reminded of something, append"
             ' <remind when="YYYY-MM-DD HH:MM" text="what" who="<@user id>"/> after your'

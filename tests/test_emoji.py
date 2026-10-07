@@ -17,6 +17,7 @@ from discord_codex_bot import emoji as emoji_module
 from discord_codex_bot.bot import DiscordCodexClient
 from discord_codex_bot.config import Config, load_config
 from discord_codex_bot.emoji import (
+    BLOCK_HEADER,
     INSUFFICIENT,
     KEEP_SAMPLES,
     MARK,
@@ -150,7 +151,7 @@ def test_memory_lists_the_most_used_static_emoji(store: EmojiStore, monkeypatch)
         _sample(store, CAT, 10 + n)
     _sample(store, PEPE, 20)
     store.describe(CAT, "一隻貓", False, "bot:x")
-    assert store.block(GUILD) == "[伺服器表情]\n:cat:（一隻貓）\n:pepe:"  # party is animated
+    assert store.block(GUILD) == f"{BLOCK_HEADER}\n:cat:（一隻貓）\n:pepe:"  # party is animated
     assert store.block(None) == "" and store.block(42) == ""
     monkeypatch.setattr(emoji_module, "PROMPT_MAX", 1)
     assert store.listing(GUILD, 1)[0].name == "cat"
@@ -198,7 +199,7 @@ async def test_only_emoji_with_new_samples_are_described(store: EmojiStore, tmp_
         path.write_bytes(b"png")
         return path
 
-    stats = await describe_pending(store, describer, image, 10, "bot:gpt")
+    stats = await describe_pending(store, describer, image, 10, "bot:gpt", [GUILD])
     assert stats == {"described": 2, "failed": 0, "no_image": 0}
     assert {p.name for _q, p in asked} == {f"{PEPE}.png", f"{CAT}.png"}
     assert not any(p.exists() for _q, p in asked)  # the images are not kept
@@ -207,7 +208,7 @@ async def test_only_emoji_with_new_samples_are_described(store: EmojiStore, tmp_
     assert (pepe.description, pepe.insufficient, pepe.source) == ("說明", False, "bot:gpt")
     assert cat.insufficient  # one sample: looks only, whatever the model said
     assert pepe.added == 1 and cat.added == 0  # pepe's late sample still counts as new
-    assert [e.emoji_id for e in store.pending()] == [PEPE]
+    assert [e.emoji_id for e in store.pending([GUILD])] == [PEPE]
 
 
 async def test_a_failed_description_stays_pending(store: EmojiStore, tmp_path) -> None:
@@ -223,9 +224,9 @@ async def test_a_failed_description_stays_pending(store: EmojiStore, tmp_path) -
     async def no_image(emoji):
         return None
 
-    assert (await describe_pending(store, broken, image, 10, "b"))["failed"] == 1
-    assert (await describe_pending(store, broken, no_image, 10, "b"))["no_image"] == 1
-    assert store.get(PEPE).description == "" and store.pending()[0].emoji_id == PEPE
+    assert (await describe_pending(store, broken, image, 10, "b", [GUILD]))["failed"] == 1
+    assert (await describe_pending(store, broken, no_image, 10, "b", [GUILD]))["no_image"] == 1
+    assert store.get(PEPE).description == "" and store.pending([GUILD])[0].emoji_id == PEPE
 
 
 def test_the_prompt_carries_the_rules_and_the_samples(store: EmojiStore) -> None:
@@ -260,7 +261,7 @@ def test_descriptions_written_elsewhere_are_checked_and_marked(store: EmojiStore
     assert (pepe.description, pepe.insufficient, pepe.source) == (
         "青蛙，表示無奈", False, "import:claude_agent")  # fmt: skip
     assert cat.insufficient and cat.description == "一隻貓"  # one sample: marked anyway
-    assert store.pending() == []
+    assert store.pending([GUILD]) == []
 
 
 def test_an_emoji_gone_from_the_server_is_not_imported(store: EmojiStore) -> None:
@@ -554,7 +555,8 @@ async def test_answers_read_emoji_by_meaning_and_memory_lists_them(bot, monkeypa
     await bot._answer(f"這是什麼意思 <:pepe:{PEPE}>", [], GUILD, 5)
     prompt, kw = seen[0]
     assert shown(prompt) == "這是什麼意思 :pepe:（綠色青蛙，表示無奈）"
-    assert "[伺服器表情]\n:cat:\n:pepe:（綠色青蛙，表示無奈）" in kw["memory"]  # by name at 0 uses
+    listed = f"{BLOCK_HEADER}\n:cat:\n:pepe:（綠色青蛙，表示無奈）"  # by name at 0 uses
+    assert listed in kw["memory"]
     assert kw["images"] == []  # never the emoji's picture
 
 
@@ -691,3 +693,76 @@ async def test_an_edit_updates_what_the_samples_say(bot, monkeypatch) -> None:
     ]
     await bot.on_raw_message_edit(edit(second, "沒有表情了"))
     assert bot.emoji.samples(CAT) == []
+
+
+async def test_a_guild_taken_off_the_allowlist_sends_nothing_out(store, tmp_path) -> None:
+    # Codex on PR #40: its rows stayed `present` and the daily job still described them.
+    _sample(store, PEPE, 1)
+    _sample(store, FOREIGN, 2, guild=OTHER)
+    asked: list[str] = []
+
+    async def describer(prompt: str, image: Path) -> str:
+        asked.append(prompt)
+        return json.dumps({"description": "x", "insufficient": True})
+
+    async def image(emoji):
+        path = tmp_path / f"{emoji.emoji_id}.png"
+        path.write_bytes(b"png")
+        return path
+
+    await describe_pending(store, describer, image, 10, "b", [GUILD])
+    assert len(asked) == 1 and '"name": "pepe"' in asked[0]
+    assert [e.emoji_id for e in store.pending([GUILD, OTHER])] == [FOREIGN]
+    assert store.pending([]) == []
+
+
+def test_an_edit_sends_the_emoji_back_for_a_new_description(store: EmojiStore) -> None:
+    # Codex on PR #40: an edit changed the evidence but the old description stayed for good.
+    store.sync(GUILD, [(PEPE, "pepe", False), (CAT, "cat", False)])
+    _sample(store, PEPE, 2, previous="前", previous_id=1)
+    _sample(store, CAT, 3)
+    store.describe(PEPE, "x", False, "b")
+    store.describe(CAT, "y", False, "b")
+    assert store.pending([GUILD]) == []
+    store.edit_message(GUILD, 1, 3, "前（改過）", 5.0, True)  # pepe's "previous" changed
+    assert [e.emoji_id for e in store.pending([GUILD])] == [PEPE]
+    store.edit_message(GUILD, 3, 3, "沒有貓了", 5.0, True)  # cat taken out of its message
+    assert {e.emoji_id for e in store.pending([GUILD])} == {PEPE, CAT}
+
+
+def test_the_emoji_explanation_comes_only_with_the_list(store: EmojiStore) -> None:
+    # Codex on PR #40: with the feature off, every prompt still said :name: was the Bot's.
+    from discord_codex_bot.codex import _prompt
+
+    assert ":name:" not in _prompt("我打了 :smile: 而已")
+    assert store.block(GUILD).startswith(BLOCK_HEADER) and "the Bot's" in BLOCK_HEADER
+
+
+async def test_a_moderator_bot_lists_every_private_archive(bot, monkeypatch) -> None:
+    # Codex on PR #40: with Manage Threads, private=True lists unjoined archives too.
+    asked: list[dict] = []
+
+    class Parent(_Text):
+        def permissions_for(self, who):
+            allowed = super().permissions_for(who)
+            if who == "bot":
+                allowed.manage_threads = True
+            return allowed
+
+        def archived_threads(self, limit=None, **kind):
+            asked.append(kind)
+
+            async def none():
+                return
+                yield
+
+            return none()
+
+    guild = types.SimpleNamespace(
+        id=GUILD, default_role="everyone", me="bot", text_channels=[Parent(3, "閒聊")],
+        threads=[], forums=[],
+    )  # fmt: skip
+    monkeypatch.setattr(bot, "get_guild", lambda guild_id: guild)
+    monkeypatch.setattr(DiscordCodexClient, "guilds", property(lambda self: [guild]))
+    await bot._backfill_emoji()
+    assert asked == [{}, {"private": True}]

@@ -836,8 +836,13 @@ class DiscordCodexClient(discord.Client):
             # Public archived threads, and the private ones the Bot joined (only text channels have
             # private threads; Codex on PR #40).
             listings = [(parent, {}) for parent in [*guild.text_channels, *guild.forums]]
-            joined = {"private": True, "joined": True}
-            listings += [(parent, joined) for parent in guild.text_channels]
+            # All private archives need Manage Threads; without it, the ones the Bot joined.
+            listings += [
+                (parent, {"private": True})
+                if parent.permissions_for(guild.me).manage_threads
+                else (parent, {"private": True, "joined": True})
+                for parent in guild.text_channels
+            ]
             for parent, kind in listings:
                 try:
                     async for thread in parent.archived_threads(limit=None, **kind):
@@ -944,6 +949,7 @@ class DiscordCodexClient(discord.Client):
                     self._emoji_image,
                     self.config.emoji_describe_max,
                     f"bot:{self.config.codex_model}",
+                    self.config.allowed_guild_ids,
                 )
                 LOGGER.info("Emoji descriptions: %s", stats)
             except asyncio.CancelledError:

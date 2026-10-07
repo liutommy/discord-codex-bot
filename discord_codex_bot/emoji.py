@@ -131,6 +131,16 @@ def clip(text: str) -> str:
     return text if len(text) <= TEXT_MAX else text[:TEXT_MAX] + "…"
 
 
+# The section explains itself, so the explanation reaches a prompt only with the section: with
+# the feature off, a member's own :name: text is never said to be the Bot's (Codex on PR #40).
+BLOCK_HEADER = (
+    "[伺服器表情] This server's own custom emoji, most used first, as :name:（what it looks like"
+    " and what members use it to say）. In the messages, :name: or :name:（…） is such an emoji"
+    " written that way by the Bot: the part in brackets is the Bot's, not the member's words."
+    " Read it for the tone; do not list or explain the emoji unless asked."
+)
+
+
 def label(description: str, insufficient: bool) -> str:
     return f"{description}；{INSUFFICIENT}" if insufficient else description
 
@@ -285,6 +295,12 @@ class EmojiStore:
         "previous"; an emoji taken out of a member's message is no longer sampled from it, and one
         put in is (Codex on PR #40). Uses already counted stay."""
         with self._connect() as connection:
+            # Every emoji whose evidence this changes is described again (Codex on PR #40).
+            connection.execute(
+                """UPDATE emojis SET added=added+1 WHERE emoji_id IN (
+                       SELECT emoji_id FROM samples WHERE message_id=? OR previous_id=?)""",
+                (message_id, message_id),
+            )
             connection.execute(
                 "UPDATE samples SET text=? WHERE message_id=?", (clip(text), message_id)
             )
@@ -351,15 +367,20 @@ class EmojiStore:
 
     # ----- descriptions ----------------------------------------------------------------------
 
-    def pending(self, limit: int | None = None) -> list[Emoji]:
-        """Static emoji still on their server with samples added since their description: never
-        described first, then the most used."""
+    def pending(self, guild_ids: Iterable[int], limit: int | None = None) -> list[Emoji]:
+        """Static emoji of `guild_ids` (the allowed guilds now: a guild taken off the allowlist
+        sends nothing more out, Codex on PR #40) still on their server with samples added since
+        their description: never described first, then the most used."""
+        guilds = list(guild_ids)
+        if not guilds:
+            return []
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT * FROM emojis WHERE present=1 AND animated=0 AND added>0
-                   ORDER BY description='' DESC, uses DESC, emoji_id
-                   LIMIT ?""",
-                (-1 if limit is None else limit,),
+                f"""SELECT * FROM emojis WHERE present=1 AND animated=0 AND added>0
+                    AND guild_id IN ({",".join("?" * len(guilds))})
+                    ORDER BY description='' DESC, uses DESC, emoji_id
+                    LIMIT ?""",
+                [*guilds, -1 if limit is None else limit],
             ).fetchall()
         return [self._emoji(row) for row in rows]
 
@@ -513,7 +534,9 @@ class EmojiStore:
             else f":{e.name}:"
             for e in self.listing(guild_id)
         ]
-        return "[伺服器表情]\n" + "\n".join(lines) if lines else ""
+        if not lines:
+            return ""
+        return f"{BLOCK_HEADER}\n" + "\n".join(lines)
 
 
 def _short(description: str) -> str:
@@ -565,10 +588,15 @@ ImageFetcher = Callable[[Emoji], Awaitable[Path | None]]
 
 
 async def describe_pending(
-    store: EmojiStore, describer: Describer, fetch_image: ImageFetcher, limit: int, source: str
+    store: EmojiStore,
+    describer: Describer,
+    fetch_image: ImageFetcher,
+    limit: int,
+    source: str,
+    guild_ids: Iterable[int],
 ) -> dict[str, int]:
     stats = {"described": 0, "failed": 0, "no_image": 0}
-    for emoji in store.pending(limit):
+    for emoji in store.pending(guild_ids, limit):
         samples = store.samples(emoji.emoji_id)
         image = await fetch_image(emoji)
         if image is None:
@@ -706,12 +734,14 @@ def _write_instructions(directory: Path) -> None:
     )
 
 
-async def export(store: EmojiStore, directory: Path, limit: int | None = None) -> str:
+async def export(
+    store: EmojiStore, directory: Path, guild_ids: Iterable[int], limit: int | None = None
+) -> str:
     """Every emoji waiting for a description, for a description made outside the Bot: one
     <emoji id>.json (guild, name, samples) and <emoji id>.png each, plus INSTRUCTIONS.md."""
     await asyncio.to_thread(_write_instructions, directory)
     written = missing = 0
-    for emoji in store.pending(limit):
+    for emoji in store.pending(guild_ids, limit):
         samples = store.samples(emoji.emoji_id)
         if not await _download(emoji.emoji_id, directory / f"{emoji.emoji_id}.png"):
             missing += 1
@@ -796,11 +826,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     into = commands.add_parser("import", help="descriptions written elsewhere (JSON lines)")
     into.add_argument("file", type=Path)
     args = parser.parse_args(argv)
-    store = EmojiStore(load_config().emoji_db_path)
+    config = load_config()
+    store = EmojiStore(config.emoji_db_path)
     if args.command == "status":
         print(json.dumps(store.status(), ensure_ascii=False, indent=1))
     elif args.command == "export":
-        print(asyncio.run(export(store, args.directory, args.limit)))
+        print(asyncio.run(export(store, args.directory, config.allowed_guild_ids, args.limit)))
     else:
         with args.file.open(encoding="utf-8") as lines:
             print(import_descriptions(store, lines))
