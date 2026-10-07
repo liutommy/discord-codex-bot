@@ -1513,6 +1513,15 @@ class DiscordCodexClient(discord.Client):
             # This message only (the route stays for the next one); a conversation already on
             # the first image backend keeps its own cell and band there.
             entry = first
+        image_rest = list(table.image[1:])
+        if image_turn:
+            # The image list is the order: a Grok entry past its weekly share or with the breaker
+            # open gives way to the next entry, not to the ordinary Grok stand-in.
+            while (
+                image_rest and routing.backend_of(entry) == GROK and not await self._grok_usable()
+            ):
+                entry = image_rest.pop(0)
+                degraded.append("grok-spent")
         backend = routing.backend_of(entry)
         if backend == CODEX and not effort:  # an effort the member set is theirs
             limits = await asyncio.to_thread(read_rate_limits, self.config)
@@ -1524,6 +1533,8 @@ class DiscordCodexClient(discord.Client):
                 if lowered != entry:
                     entry = lowered
                     degraded.append("codex-quota")
+        elif image_turn:
+            pass  # Grok was gated against the image list above
         elif backend == GROK and kind == "live-x":
             if not self._grok_alive():
                 entry = table.live_x_without_grok
@@ -1542,7 +1553,7 @@ class DiscordCodexClient(discord.Client):
         if routing.is_claude(entry) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))
         if image_turn:  # Codex → Grok → agy, then MODEL_CHAIN (_answer drops repeats)
-            spares.extend(routing.resolved(spare, model) for spare in table.image[1:])
+            spares.extend(routing.resolved(spare, model) for spare in image_rest)
         replay = ""
         if turns:
             # Another backend gets the conversation replayed, defanged by the prompt builder like

@@ -490,6 +490,24 @@ async def test_an_image_follows_the_configured_first_backend_everywhere(
     assert plan.target == Resolved("grok", "grok-4.7", "high") and result.via.backend == "grok"
 
 
+async def test_a_gated_grok_first_in_the_image_list_gives_way_to_the_next_entry(
+    client, backends, monkeypatch
+) -> None:
+    # Codex on #35: with Grok first and gated, the ordinary grok_spent stand-in took over and
+    # the list's next entry was never tried.
+    async def spent() -> bool:
+        return False
+
+    monkeypatch.setattr(client, "_grok_usable", spent)
+    client.routing = replace(
+        client.routing, image=("grok:grok-4.7|high", "codex|medium", "agy:gemini-3.8-flash|low")
+    )
+    plan, result = await ask_with_image(client)
+    assert plan.target == Resolved("codex", "gpt-5.6-luna", "medium")
+    assert plan.spares[0] == Resolved("agy", "gemini-3.8-flash-low", "low")
+    assert plan.log["degraded"] == ["grok-spent"] and result.via.backend == "codex"
+
+
 async def test_an_image_in_an_x_conversation_carries_no_no_x_note(
     client, backends, monkeypatch
 ) -> None:
