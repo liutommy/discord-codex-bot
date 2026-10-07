@@ -834,7 +834,7 @@ class DiscordCodexClient(discord.Client):
             self.config.command_prefix,
             self._command_rows(),
             self._default_label(),
-            routing=self.routing is not None,
+            image_order=self._image_order(),
         )
         doc = apis.render_doc(self.apis)
         return f"{sheet}\n{doc}" if doc else sheet
@@ -845,8 +845,22 @@ class DiscordCodexClient(discord.Client):
             self.config.command_prefix,
             [row[0] for row in self._command_rows()],
             self._default_label(),
-            routing=self.routing is not None,
+            image_order=self._image_order(),
         )
+
+    def _image_order(self) -> str:
+        """The routing table's image list as members read it ("Codex、Grok、Gemini 3.8 Flash");
+        "" while routing is off. From the table, so help never drifts from what runs."""
+        if self.routing is None:
+            return ""
+        names = []
+        for entry in self.routing.image:
+            choice = routing.choice_of(entry, self.config.codex_model)
+            name = AGY_FAMILIES[choice.family][0].split("（")[0] if choice.backend == AGY else (
+                BACKEND_LABELS.get(choice.backend, choice.backend)
+            )  # fmt: skip
+            names.append(name)
+        return "、".join(names)
 
     def _default_label(self) -> str:
         """DEFAULT_MODEL as members read it (\"Grok · Grok 4.7\"), for the help texts."""
@@ -1467,8 +1481,7 @@ class DiscordCodexClient(discord.Client):
         off, or the member chose a model with /model). Every message is judged; a conversation
         never drops a band and follows its latest message of substance (routing.decide). An
         image is not judged (Jev reads text only): that message goes down the table's `image`
-        list (Codex → Grok → agy by default; a conversation already on that list's first backend
-        keeps its cell), and the
+        list (Codex → Grok → agy; a conversation already on a Codex cell keeps it), and the
         conversation's route is left for the next message. No judgement otherwise — a Jev
         timeout, error, odd answer or low confidence — keeps a routed conversation where it is
         and sends a new one to DEFAULT_MODEL, without retrying Jev."""
@@ -1513,21 +1526,10 @@ class DiscordCodexClient(discord.Client):
         else:
             kind = "" if image_turn else route.kind
         entry, degraded = route.entry, []
-        first = table.image[0]
-        if image_turn and routing.backend_of(entry) != routing.backend_of(first):
-            # This message only (the route stays for the next one); a conversation already on
-            # the first image backend keeps its own cell and band there.
-            entry = first
-        image_rest = list(table.image[1:])
-        if image_turn:
-            # The image list is the order: a Grok entry past its weekly share or with the breaker
-            # open gives way to the next entry. A gated Grok left when the list runs out meets
-            # the ordinary Grok gates below (grok_spent), like any other routed Grok turn.
-            while (
-                image_rest and routing.backend_of(entry) == GROK and not await self._grok_usable()
-            ):
-                entry = image_rest.pop(0)
-                degraded.append("grok-spent")
+        if image_turn and routing.backend_of(entry) != CODEX:
+            # This message only (the route stays for the next one). The image list starts with
+            # Codex (checked at load); a conversation already on a Codex cell keeps its cell.
+            entry = table.image[0]
         backend = routing.backend_of(entry)
         if backend == CODEX and not effort:  # an effort the member set is theirs
             limits = await asyncio.to_thread(read_rate_limits, self.config)
@@ -1559,7 +1561,7 @@ class DiscordCodexClient(discord.Client):
         # An image turn takes only the image list's order (no type stand-ins), then MODEL_CHAIN;
         # _answer drops repeats.
         if image_turn:
-            spares.extend(routing.resolved(spare, model) for spare in image_rest)
+            spares.extend(routing.resolved(spare, model) for spare in table.image[1:])
         replay = ""
         if turns:
             # Another backend gets the conversation replayed, defanged by the prompt builder like

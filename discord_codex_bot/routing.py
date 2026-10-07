@@ -203,6 +203,10 @@ def load_table(path: Path) -> Table:
             raise ValueError(f"routing: every {kind} cell must be on {backend}")
     if not table.image:
         raise ValueError("routing: image needs at least one target")
+    if backend_of(table.image[0]) != CODEX:
+        # Owner 2026-10-07: an image goes Codex first (then Grok, agy). Codex cells have no
+        # type stand-ins, so keeping a conversation's Codex cell for its image stays simple.
+        raise ValueError("routing: image must start with codex (owner: codex → grok → agy)")
     for kind in table.claude_failed:
         if kind not in TYPES:
             raise ValueError(f"routing: claude_failed names an unknown type {kind!r}")

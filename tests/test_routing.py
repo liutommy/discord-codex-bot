@@ -155,6 +155,20 @@ def test_the_image_list_is_checked_too(tmp_path) -> None:
         path.write_text(json.dumps(data), "utf-8")
         with pytest.raises(ValueError, match="routing"):
             routing.load_table(path)
+    # Owner: Codex first. Anything else stops the Bot at start-up (hub on #35: keeping a
+    # conversation's cell for its image is only simple on Codex, which has no type stand-ins).
+    for bad in (
+        ["grok:grok-4.7|medium", "codex|medium"],
+        ["agy:gemini-3.8-flash|medium", "codex|medium"],
+        ["agy:claude-sonnet-4-6"],
+    ):
+        data["image"] = bad
+        path.write_text(json.dumps(data), "utf-8")
+        with pytest.raises(ValueError, match="must start with codex"):
+            routing.load_table(path)
+    data["image"] = ["codex|high"]
+    path.write_text(json.dumps(data), "utf-8")
+    assert routing.load_table(path).image == ("codex|high",)
 
 
 def test_a_needs_type_must_stay_on_its_backend(tmp_path) -> None:
@@ -476,92 +490,33 @@ async def test_an_image_mid_conversation_goes_to_codex_and_leaves_the_route(
     assert result.via.backend == "agy" and "是一隻貓" in backends["agy"].calls[-1][2]["history"]
 
 
-async def test_an_image_follows_the_configured_first_backend_everywhere(
+async def test_an_image_in_an_x_or_claude_conversation_takes_only_the_image_order(
     client, backends, monkeypatch
 ) -> None:
-    # Codex on #35: keeping the cell was hard-coded to Codex, so with Grok first in `image` a
-    # Codex conversation's image skipped Grok while every other conversation's went there.
-    client.routing = replace(
-        client.routing, image=("grok:grok-4.7|high", "codex|medium", "agy:gemini-3.8-flash|medium")
+    # Codex on #35: an image turn kept the conversation's type, so an X conversation got the X
+    # stand-in (and weekly-share exemption) and a Claude one its type stand-in, ahead of the
+    # image list. An image turn has no type: Codex, then the list, then MODEL_CHAIN.
+    image_spares = (
+        Resolved("grok", "grok-4.7", "medium"),
+        Resolved("agy", "gemini-3.8-flash-medium", "medium"),
     )
-    verdicts(monkeypatch, ok("code", 8))
-    await ask(client, "修這個 bug")
-    plan, result = await ask_with_image(client, "這個錯誤截圖")
-    assert plan.target == Resolved("grok", "grok-4.7", "high") and result.via.backend == "grok"
-
-
-async def test_a_gated_grok_first_in_the_image_list_gives_way_to_the_next_entry(
-    client, backends, monkeypatch
-) -> None:
-    # Codex on #35: with Grok first and gated, the ordinary grok_spent stand-in took over and
-    # the list's next entry was never tried.
-    async def spent() -> bool:
-        return False
-
-    monkeypatch.setattr(client, "_grok_usable", spent)
-    client.routing = replace(
-        client.routing, image=("grok:grok-4.7|high", "codex|medium", "agy:gemini-3.8-flash|low")
-    )
-    plan, result = await ask_with_image(client)
-    assert plan.target == Resolved("codex", "gpt-5.6-luna", "medium")
-    assert plan.spares[0] == Resolved("agy", "gemini-3.8-flash-low", "low")
-    assert plan.log["degraded"] == ["grok-spent"] and result.via.backend == "codex"
-
-
-async def test_a_gated_grok_left_when_the_image_list_runs_out_is_not_used(
-    client, backends, monkeypatch
-) -> None:
-    # hub + Codex on #35: a list ending in (or made only of) a gated Grok ran Grok past its
-    # weekly share; it now meets the ordinary Grok gate and takes grok_spent.
-    async def spent() -> bool:
-        return False
-
-    monkeypatch.setattr(client, "_grok_usable", spent)
-    client.routing = replace(client.routing, image=("grok:grok-4.7|medium",))
-    plan, result = await ask_with_image(client)
-    assert plan.target == Resolved("agy", "gemini-3.8-flash-high", "high")
-    assert plan.log["degraded"] == ["grok-spent"] and backends["grok"].calls == []
-
-
-async def test_an_image_in_an_x_conversation_gets_no_x_handling(
-    client, backends, monkeypatch
-) -> None:
-    # Codex on #35: the image turn kept kind live-x, so with Grok in the image list it skipped
-    # the weekly-share gate and put the X stand-in ahead of the list's next entry.
-    verdicts(monkeypatch, ok("live-x", 5))
-    await ask(client, "馬斯克今天發了什麼")
+    for kind, degree in (("live-x", 5), ("create", 8)):
+        client.threads = type(client.threads)(client.threads._path.with_name(f"{kind}.json"), 3600)
+        verdicts(monkeypatch, ok(kind, degree))
+        await ask(client, "第一句")
+        plan, _ = await ask_with_image(client, "這張圖呢")
+        assert plan.target == Resolved("codex", "gpt-5.6-luna", "medium")
+        assert plan.spares == image_spares and plan.no_x is False
 
     async def spent() -> bool:
         return False
 
     monkeypatch.setattr(client, "_grok_usable", spent)
-    client.routing = replace(client.routing, image=("grok:grok-4.7|medium",))
-    plan, _ = await ask_with_image(client, "這張截圖呢")
-    assert plan.target == Resolved("agy", "gemini-3.8-flash-high", "high")  # grok_spent
-    assert plan.log["degraded"] == ["grok-spent"]
-
-    async def usable() -> bool:
-        return True
-
-    monkeypatch.setattr(client, "_grok_usable", usable)
-    client.routing = replace(client.routing, image=("grok:grok-4.7|medium", "codex|medium"))
-    backends["grok"].error = BackendUnavailable("grok out")
-    plan, result = await ask_with_image(client, "這張截圖呢")
-    assert plan.spares[0] == Resolved("codex", "gpt-5.6-luna", "medium")
-    assert result.via.backend == "codex"
-
-
-async def test_an_image_on_a_claude_cell_goes_on_down_the_image_list(
-    client, backends, monkeypatch
-) -> None:
-    # Codex on #35: with agy first in `image`, a Claude conversation kept its cell and, when
-    # Claude failed, its create stand-in (Grok) ran before the list's next entry.
-    verdicts(monkeypatch, ok("create", 8))
-    await ask(client, "寫一篇短篇小說")
-    client.routing = replace(client.routing, image=("agy:gemini-3.8-flash|medium", "codex|medium"))
-    plan, _ = await ask_with_image(client, "照這張圖續寫")
-    assert plan.target == Resolved("agy", "claude-sonnet-4-6", "")
-    assert plan.spares == (Resolved("codex", "gpt-5.6-luna", "medium"),)
+    backends["codex"].error = BackendUnavailable("codex out")
+    before = len(backends["grok"].calls)
+    plan, result = await ask_with_image(client, "這張圖呢")
+    assert result.via == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+    assert len(backends["grok"].calls) == before  # the ordinary weekly-share gate applies
 
 
 async def test_an_image_in_an_x_conversation_carries_no_no_x_note(
@@ -1075,7 +1030,10 @@ def test_help_tells_members_and_the_model_about_routing(client) -> None:
     assert "自動挑模型" in client.help_guide() and "自動挑模型" in client.help_sheet()
     assert "/codex-model" in client.help_sheet().split("自動挑模型")[1]
     assert "進行中的對話維持原本的模型" in client.help_sheet()
-    assert "附圖片時依序用 Codex、Grok、Gemini" in client.help_sheet()
+    assert "附圖片時依序用 Codex、Grok、Gemini 3.8 Flash 看圖" in client.help_sheet()
+    # From the table, never hard-coded (Codex on #35).
+    client.routing = replace(client.routing, image=("codex|medium", "agy:claude-sonnet-4-6"))
+    assert "附圖片時依序用 Codex、Claude Sonnet 4.6 看圖" in client.help_guide()
     assert "effort 只改這一則的強度" in client.help_sheet()
     assert "難度只升不降" in client.help_sheet() and "不會換弱" not in client.help_sheet()
     client.routing = None
