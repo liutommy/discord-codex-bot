@@ -1558,7 +1558,8 @@ class DiscordCodexClient(discord.Client):
             or guild_id not in self.config.allowed_guild_ids
         ):
             return None
-        return lambda text, streaming: store.reply(text, guild_id, streaming)
+        known = store.by_name(guild_id)  # once per answer, not once per streamed version
+        return lambda text, streaming: store.reply(text, guild_id, streaming, known)
 
     def _read(
         self,

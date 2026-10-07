@@ -565,18 +565,26 @@ class EmojiStore:
             ).fetchall()
         return {row["name"]: self._emoji(row) for row in rows}
 
-    def reply(self, text: str, guild_id: int, streaming: bool = False) -> str:
+    def reply(
+        self,
+        text: str,
+        guild_id: int,
+        streaming: bool = False,
+        known: dict[str, Emoji] | None = None,
+    ) -> str:
         """The model's `:name:` → `<:name:id>` for `guild_id`'s own static emoji still on it,
         outside code; any other `:name:` stays as written. A description the model copied after
         it (`:name:（…）`, from the list or a member's message) goes. `streaming`: a part-way
         answer, so a trailing `:na` that may still become an emoji, or the start of a copied
-        description, is held back rather than shown and taken away again."""
-        known = self.by_name(guild_id)
+        description, is held back rather than shown and taken away again. `known`: `by_name`,
+        looked up once for every part-way version of one answer."""
+        if known is None:
+            known = self.by_name(guild_id)
         if not known:
             return text.replace(MARK, "")
         out: list[str] = []
         at = 0
-        for code in CODE.finditer(text):
+        for code in KEPT.finditer(text):
             out.append(_emoji_out(text[at : code.start()], known))
             out.append(code.group())
             at = code.end()
@@ -589,6 +597,8 @@ class EmojiStore:
 
 # Discord's code: ``` blocks (one not closed yet runs to the end) and `inline` spans.
 CODE = re.compile(r"```[\s\S]*?(?:```|$)|``[^`]+?``|`[^`]+`")
+# Text whose colons are not emoji: code, and a link (`https://x/:pepe:` must stay a link).
+KEPT = re.compile(rf"{CODE.pattern}|https?://[^\s<>]+")
 # `:name:` the model wrote, not already part of `<:name:id>` / `<a:name:id>`, with the bracket
 # right after it (a description it may have copied).
 WRITTEN = re.compile(

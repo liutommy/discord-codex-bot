@@ -802,7 +802,7 @@ def test_code_keeps_its_colons(store: EmojiStore) -> None:
 
 
 def test_an_emoji_already_sent_whole_or_in_text_is_left_alone(store: EmojiStore) -> None:
-    whole = f"<:pepe:{PEPE}> <a:party:{PARTY}> 12:30:45 a:pepe:"
+    whole = f"<:pepe:{PEPE}> <a:party:{PARTY}> 12:30:45 a:pepe: https://x.com/:pepe:/a?b=:cat:"
     assert store.reply(whole, GUILD) == whole
 
 
@@ -869,8 +869,14 @@ async def _answered(bot, monkeypatch, said: str, guild_id, **settings):
 async def test_answers_send_the_emoji_while_streaming_and_at_the_end(bot, monkeypatch) -> None:
     from discord_codex_bot.emoji import REPLY_HINT
 
+    looked = []
+    by_name = bot.emoji.by_name
+    monkeypatch.setattr(
+        bot.emoji, "by_name", lambda guild_id: looked.append(1) or by_name(guild_id)
+    )
     text, painted, memory = await _answered(bot, monkeypatch, "好 :pepe:", GUILD, emoji_reply=True)
     assert text == painted[0] == f"好 <:pepe:{PEPE}>" and REPLY_HINT in memory
+    assert len(looked) == 1  # once for the answer, not for each streamed version
 
 
 @pytest.mark.parametrize(
