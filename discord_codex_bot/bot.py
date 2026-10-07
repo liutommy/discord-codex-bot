@@ -2101,7 +2101,9 @@ class DiscordCodexClient(discord.Client):
         state = {"at": float("-inf")}
 
         async def on_delta(text: str) -> None:
-            if text.lstrip().startswith("<"):
+            opening = text.lstrip()
+            if opening.startswith("<") and not CUSTOM_EMOJI.match(opening):
+                # A tag-only interim; an answer that opens with an emoji is still an answer.
                 return
             now = time.monotonic()
             if now - state["at"] < STREAM_EDIT_SECONDS:

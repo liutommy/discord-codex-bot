@@ -804,6 +804,13 @@ def test_an_emoji_gone_from_the_server_stays_as_written(store: EmojiStore) -> No
     assert store.reply(":pepe: :cat:", GUILD) == f"<:pepe:{PEPE}> :cat:"
 
 
+def test_code_and_links_keep_colons_codex_found(store: EmojiStore) -> None:
+    for kept in ("``x ` y :pepe: z``", "HTTPS://example.com/:pepe:", "Http://x.com/?a=:cat:"):
+        assert store.reply(kept, GUILD) == kept
+        assert store.reply(kept, GUILD, streaming=True) == kept
+    assert store.reply("``x ` :pepe:", GUILD, streaming=True) == "``x ` :pepe:"  # unfinished
+
+
 def test_code_keeps_its_colons(store: EmojiStore) -> None:
     said = "`:pepe:` ``a :pepe: b`` :pepe:\n```\n:pepe:\n```\n:pepe: ```py\n:pepe:"
     want = f"`:pepe:` ``a :pepe: b`` <:pepe:{PEPE}>\n```\n:pepe:\n```\n<:pepe:{PEPE}> ```py\n:pepe:"
