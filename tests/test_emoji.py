@@ -720,9 +720,11 @@ def test_an_edit_sends_the_emoji_back_for_a_new_description(store: EmojiStore) -
     # Codex on PR #40: an edit changed the evidence but the old description stayed for good.
     store.sync(GUILD, [(PEPE, "pepe", False), (CAT, "cat", False)])
     _sample(store, PEPE, 2, previous="前", previous_id=1)
-    _sample(store, CAT, 3)
+    _sample(store, CAT, 3, text=f"<:cat:{CAT}> 好耶")
     store.describe(PEPE, "x", False, "b")
     store.describe(CAT, "y", False, "b")
+    assert store.pending([GUILD]) == []
+    store.edit_message(GUILD, 3, 3, f"<:cat:{CAT}> 好耶", 5.0, True)  # a pin: same text
     assert store.pending([GUILD]) == []
     store.edit_message(GUILD, 1, 3, "前（改過）", 5.0, True)  # pepe's "previous" changed
     assert [e.emoji_id for e in store.pending([GUILD])] == [PEPE]
