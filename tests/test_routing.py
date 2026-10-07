@@ -523,6 +523,34 @@ async def test_a_gated_grok_left_when_the_image_list_runs_out_is_not_used(
     assert plan.log["degraded"] == ["grok-spent"] and backends["grok"].calls == []
 
 
+async def test_an_image_in_an_x_conversation_gets_no_x_handling(
+    client, backends, monkeypatch
+) -> None:
+    # Codex on #35: the image turn kept kind live-x, so with Grok in the image list it skipped
+    # the weekly-share gate and put the X stand-in ahead of the list's next entry.
+    verdicts(monkeypatch, ok("live-x", 5))
+    await ask(client, "馬斯克今天發了什麼")
+
+    async def spent() -> bool:
+        return False
+
+    monkeypatch.setattr(client, "_grok_usable", spent)
+    client.routing = replace(client.routing, image=("grok:grok-4.7|medium",))
+    plan, _ = await ask_with_image(client, "這張截圖呢")
+    assert plan.target == Resolved("agy", "gemini-3.8-flash-high", "high")  # grok_spent
+    assert plan.log["degraded"] == ["grok-spent"]
+
+    async def usable() -> bool:
+        return True
+
+    monkeypatch.setattr(client, "_grok_usable", usable)
+    client.routing = replace(client.routing, image=("grok:grok-4.7|medium", "codex|medium"))
+    backends["grok"].error = BackendUnavailable("grok out")
+    plan, result = await ask_with_image(client, "這張截圖呢")
+    assert plan.spares[0] == Resolved("codex", "gpt-5.6-luna", "medium")
+    assert result.via.backend == "codex"
+
+
 async def test_an_image_in_an_x_conversation_carries_no_no_x_note(
     client, backends, monkeypatch
 ) -> None:

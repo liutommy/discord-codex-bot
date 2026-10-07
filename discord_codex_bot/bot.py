@@ -1505,8 +1505,13 @@ class DiscordCodexClient(discord.Client):
         else:
             route, why = Route(self._default_entry(), "M", ""), "default"
         # What this message is for the gates below: the verdict, or with none, the type that put
-        # the conversation where it stays (an X conversation keeps its X handling).
-        kind = verdict.kind if verdict.status == "ok" else route.kind
+        # the conversation where it stays (an X conversation keeps its X handling). An image is
+        # none of them: it goes the image list's order under the ordinary gates, never the X
+        # ones (no X stand-in, no weekly-share exemption, no "no X search" note).
+        if verdict.status == "ok":
+            kind = verdict.kind
+        else:
+            kind = "" if image_turn else route.kind
         entry, degraded = route.entry, []
         first = table.image[0]
         if image_turn and routing.backend_of(entry) != routing.backend_of(first):
