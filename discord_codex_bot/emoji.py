@@ -45,6 +45,7 @@ MIN_SAMPLES = 3
 PROMPT_MAX = 50
 TEXT_MAX = 500  # characters kept of a sample's message, and of the one before it
 DESCRIPTION_MAX = 300
+LISTED_MAX = 60  # characters of a description in MEMORY's list; a message gets the whole of it
 INSUFFICIENT = "用法樣本不足"
 BACKFILL_PAGE = 100
 BACKFILL_PAUSE_SECONDS = 1.0
@@ -131,6 +132,23 @@ def clip(text: str) -> str:
 
 def label(description: str, insufficient: bool) -> str:
     return f"{description}；{INSUFFICIENT}" if insufficient else description
+
+
+def tidy(description: str) -> str:
+    """One line with no full-width brackets: the `（…）` after `:name:` in a message must end
+    where the Bot's text ends, so INLINE can take it out again exactly."""
+    text = " ".join(description.split())
+    return text.replace("（", "(").replace("）", ")")[:DESCRIPTION_MAX]
+
+
+# What `rewrite` adds to a member's message. The bracketed part is the Bot's, not the member's:
+# harvest and the digest take it out before reading a member's words (strip_descriptions).
+INLINE = re.compile(rf"(:[A-Za-z0-9_]{{2,32}}:)（[^（）\n]{{1,{DESCRIPTION_MAX + 20}}}）")
+
+
+def strip_descriptions(text: str) -> str:
+    """A member's message as they wrote it, as far as emoji go: `:name:（…）` → `:name:`."""
+    return INLINE.sub(r"\1", text)
 
 
 class EmojiStore:
@@ -301,7 +319,7 @@ class EmojiStore:
                           described_at=?, added=MAX(0, added-COALESCE(?, added))
                    WHERE emoji_id=?""",
                 (
-                    description.strip()[:DESCRIPTION_MAX],
+                    tidy(description),
                     int(insufficient),
                     source,
                     now if generated_at is None else generated_at,
@@ -321,13 +339,18 @@ class EmojiStore:
             ).fetchall()
         return [self._emoji(row) for row in rows]
 
-    def lookup(self, emoji_ids: Iterable[int]) -> dict[int, Emoji]:
+    def lookup(self, guild_id: int, emoji_ids: Iterable[int]) -> dict[int, Emoji]:
+        """`guild_id`'s own emoji among `emoji_ids` that are still on it. Another server's emoji
+        (Nitro) is not looked up even when that server is ours too: its description is a summary
+        of what that server's members say (hub on PR #40)."""
         ids = list(set(emoji_ids))
         if not ids:
             return {}
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT * FROM emojis WHERE emoji_id IN ({','.join('?' * len(ids))})", ids
+                f"""SELECT * FROM emojis WHERE guild_id=? AND present=1
+                    AND emoji_id IN ({",".join("?" * len(ids))})""",
+                [guild_id, *ids],
             ).fetchall()
         return {row["emoji_id"]: self._emoji(row) for row in rows}
 
@@ -399,13 +422,14 @@ class EmojiStore:
 
     # ----- prompts ---------------------------------------------------------------------------
 
-    def rewrite(self, text: str) -> str:
-        """`<:name:id>` → `:name:（description）`; `:name:` alone when there is no description,
-        and for animated emoji (`<a:name:id>`), which are never described."""
+    def rewrite(self, text: str, guild_id: int) -> str:
+        """`<:name:id>` → `:name:（description）` for `guild_id`'s own emoji; `:name:` alone for
+        one without a description, another server's, one gone from the server, and an animated
+        one (`<a:name:id>`), which is never described."""
         found = CUSTOM.findall(text)
         if not found:
             return text
-        known = self.lookup(int(emoji_id) for _animated, _name, emoji_id in found)
+        known = self.lookup(guild_id, (int(emoji_id) for _animated, _name, emoji_id in found))
 
         def plain(match: re.Match) -> str:
             animated, name, emoji_id = match.groups()
@@ -421,12 +445,19 @@ class EmojiStore:
         if guild_id is None:
             return ""
         lines = [
-            f":{e.name}:（{label(e.description, e.insufficient)}）"
+            f":{e.name}:（{label(_short(e.description), e.insufficient)}）"
             if e.description
             else f":{e.name}:"
             for e in self.listing(guild_id)
         ]
         return "[伺服器表情]\n" + "\n".join(lines) if lines else ""
+
+
+def _short(description: str) -> str:
+    """At most LISTED_MAX characters: the list goes into every prompt of the server."""
+    if len(description) <= LISTED_MAX:
+        return description
+    return description[: LISTED_MAX - 1] + "…"
 
 
 def names_only(text: str) -> str:

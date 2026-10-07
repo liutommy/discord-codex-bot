@@ -90,11 +90,53 @@ def test_a_message_reads_its_emoji_by_meaning(store: EmojiStore) -> None:
     store.describe(CAT, "一隻貓", True, "bot:x")
     store.describe(PARTY, "不該出現", False, "bot:x")  # animated: never shown
     text = "<:pepe:100000000000000001> 和 <:cat:100000000000000002> <a:party:100000000000000003>"
-    assert store.rewrite(text + " <:theirs:100000000000000009> <:new:123456789012345678>") == (
+    text += " <:theirs:100000000000000009> <:new:123456789012345678>"
+    assert store.rewrite(text, GUILD) == (
         f":pepe:（綠色青蛙，用來表示無奈） 和 :cat:（一隻貓；{INSUFFICIENT}） :party:"
         " :theirs: :new:"
     )
-    assert store.rewrite("沒有表情") == "沒有表情"
+    assert store.rewrite("沒有表情", GUILD) == "沒有表情"
+
+
+def test_another_servers_emoji_never_brings_its_description(store: EmojiStore) -> None:
+    # Both servers are ours: a member of one using the other's emoji (Nitro) got the other's
+    # summary of how its members talk (hub on PR #40).
+    store.describe(FOREIGN, "那邊的用法", False, "bot:x")
+    store.describe(PEPE, "青蛙", False, "bot:x")
+    text = f"<:theirs:{FOREIGN}> <:pepe:{PEPE}>"
+    assert store.rewrite(text, GUILD) == ":theirs: :pepe:（青蛙）"
+    assert store.rewrite(text, OTHER) == ":theirs:（那邊的用法） :pepe:"
+    store.sync(GUILD, [(CAT, "cat", False)])  # pepe was taken off the server
+    assert store.rewrite(text, GUILD) == ":theirs: :pepe:"
+
+
+def test_the_list_carries_short_descriptions_and_a_message_the_whole(store) -> None:
+    # The list goes into every prompt of the server: 50 × 300 characters was up to 15k (hub).
+    store.describe(PEPE, "長" * 100, False, "bot:x")
+    (listed,) = [line for line in store.block(GUILD).splitlines() if line.startswith(":pepe:")]
+    assert listed == ":pepe:（" + "長" * (emoji_module.LISTED_MAX - 1) + "…）"
+    assert store.rewrite(f"<:pepe:{PEPE}>", GUILD) == ":pepe:（" + "長" * 100 + "）"
+
+
+def test_the_bots_descriptions_are_not_the_members_words(store, tmp_path, config) -> None:
+    # The description written into a message reached harvest and the digest as something the
+    # member said (hub on PR #40); a full-width bracket inside it would end it early.
+    from discord_codex_bot import harvest
+    from discord_codex_bot.codex import _prompt
+
+    store.describe(PEPE, "綠色青蛙（很有名）\n表示無奈", False, "bot:x")
+    assert store.get(PEPE).description == "綠色青蛙(很有名) 表示無奈"
+    asked = store.rewrite(f"我覺得 <:pepe:{PEPE}> 這很好笑 <:cat:{CAT}>", GUILD)
+    assert asked == "我覺得 :pepe:（綠色青蛙(很有名) 表示無奈） 這很好笑 :cat:"
+    day = tmp_path / "sessions" / "2026" / "10" / "07"
+    day.mkdir(parents=True)
+    payload = {"type": "message", "role": "user",
+               "content": [{"type": "input_text", "text": _prompt(asked, speaker=3)}]}  # fmt: skip
+    (day / "rollout-2026-10-07T10-00-00-t3.jsonl").write_text(
+        json.dumps({"type": "response_item", "payload": payload}, ensure_ascii=False), "utf-8"
+    )
+    turns = harvest.transcript_turns(replace(config, codex_home=tmp_path), "t3")
+    assert [t.text for t in turns if t.role == "user"] == ["我覺得 :pepe: 這很好笑 :cat:"]
 
 
 def test_memory_lists_the_most_used_static_emoji(store: EmojiStore, monkeypatch) -> None:

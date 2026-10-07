@@ -1189,7 +1189,7 @@ class DiscordCodexClient(discord.Client):
         if self.emoji is not None and guild_id is not None:
             # `<:name:id>` as the model can read it; never the emoji's image, which would make
             # this an image turn (emoji.py).
-            prompt = self.emoji.rewrite(prompt)
+            prompt = self.emoji.rewrite(prompt, guild_id)
         stored = self._stored(guild_id, user_id)
         choice = self._choice(stored)
         target = resolve(
