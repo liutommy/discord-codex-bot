@@ -11,6 +11,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from test_bot import GUILD, USER, FakeBackend, client  # noqa: F401  (client is a fixture)
+from test_xsearch import server as xsearch_server
 
 from discord_codex_bot import bot as bot_module
 from discord_codex_bot import grok
@@ -436,3 +437,73 @@ async def test_a_chain_listing_grok_after_codex_still_never_sends_codex_users_to
     monkeypatch.setattr(bot_module, "run_codex", spent)
     result = await bot._answer("q", [], GUILD, USER)
     assert result.text == "agy 的答案" and calls["grok"] == []
+
+
+# ----------------------------------------------------------------------------- prompt length
+
+
+LIMIT = xsearch_server.MAX_PROMPT_CHARS  # what the real sidecar answers 400 past
+
+
+def _sent(sidecar) -> str:
+    return sidecar.state["calls"][-1]["prompt"]
+
+
+async def test_the_bots_limit_is_the_sidecars() -> None:
+    assert grok.MAX_PROMPT_CHARS == LIMIT
+
+
+async def test_a_long_conversation_loses_its_oldest_turns_first(
+    sidecar, config, tmp_path, caplog
+) -> None:
+    # A 6k message, four 20k files and three 20k pages on top of a long replayed conversation
+    # went past the sidecar's 200k and came back a 400 (Codex finding 16).
+    cfg = replace(_cfg(config, sidecar, tmp_path), grok_history_chars=150_000)
+    thread = "gk-" + "1" * 16
+    old = [
+        {"role": r, "content": f"第{n}輪" + "舊" * 25_000}
+        for n in range(6)
+        for r in ("user", "assistant")
+    ]
+    grok._save_transcript_to(cfg, thread, "grok-4.7", old[:-2], "倒數", "回答")
+    files = "\n\n".join(f'<FILE name="{n}.txt">\n' + "檔" * 20_000 + "\n</FILE>" for n in range(4))
+    links = "\n\n".join("頁" * 20_000 for _ in range(3))
+    await grok.run_grok("問" * 6_000, cfg, "grok-4.7", resume=thread, files=files, links=links)
+    sent = _sent(sidecar)
+    assert len(sent) <= LIMIT
+    assert "問" * 6_000 in sent and sent.count("檔") == 80_000 and sent.count("頁") == 60_000
+    assert "倒數" in sent and "第0輪" not in sent  # the newest turns stay, the oldest go
+    assert "Grok prompt cut to fit 200000 chars: transcript" in caplog.text
+
+
+async def test_pages_are_cut_before_the_members_files(sidecar, config, tmp_path, caplog) -> None:
+    cfg = _cfg(config, sidecar, tmp_path)
+    files = "檔" * 80_000
+    links = "頁" * 150_000
+    earlier = "早" * 30_000 + "近" * 1_000
+    await grok.run_grok("問題", cfg, "grok-4.7", files=files, links=links, history=earlier)
+    sent = _sent(sidecar)
+    assert len(sent) <= LIMIT
+    assert "近" * 1_000 not in sent and "早" not in sent  # EARLIER_CONVERSATION went first
+    assert sent.count("檔") == 80_000 and "問題" in sent
+    assert 0 < sent.count("頁") < 150_000 and grok.CUT_TAIL.strip() in sent
+    assert "history, links" in caplog.text
+
+
+async def test_an_earlier_conversation_keeps_its_newest_part(sidecar, config, tmp_path) -> None:
+    cfg = _cfg(config, sidecar, tmp_path)
+    earlier = "早" * 100_000 + "近" * 1_000
+    await grok.run_grok(
+        "問題", cfg, "grok-4.7", files="檔" * 80_000, links="頁" * 60_000, history=earlier
+    )
+    sent = _sent(sidecar)
+    assert len(sent) <= LIMIT
+    assert "近" * 1_000 in sent and 0 < sent.count("早") < 100_000 and grok.CUT_HEAD.strip() in sent
+    assert sent.count("頁") == 60_000 and sent.count("檔") == 80_000
+
+
+async def test_a_prompt_that_cannot_fit_goes_down_the_chain(sidecar, config, tmp_path) -> None:
+    cfg = _cfg(config, sidecar, tmp_path)
+    with pytest.raises(grok.GrokUnavailable):
+        await grok.run_grok("長" * (LIMIT + 1), cfg, "grok-4.7", raw=True)
+    assert sidecar.state["calls"] == []  # never sent: the sidecar would answer 400

@@ -9,6 +9,8 @@ import zipfile
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from discord_codex_bot.backup import (
     ARCHIVE_PREFIX,
     export_memory_zip,
@@ -99,15 +101,12 @@ def test_export_memory_zip_packs_a_members_files(tmp_path: Path) -> None:
     assert export_memory_zip(empty, "l") is None
 
 
-def test_backup_survives_memory_being_rewritten_meanwhile(
-    tmp_path: Path, config, monkeypatch
-) -> None:
-    # After a long VM pause consolidation (02:00) and the backup (03:00) start together; a file
-    # replaced between the walk and its read must not fail the whole archive.
+def _vanishing(tmp_path: Path, config, monkeypatch, times: int):
+    """A home whose topics/gone.md vanishes when the archive reaches it, `times` times over —
+    what memory rewrite does when it moves topics/ into .backup/ mid-archive."""
     home = _home(tmp_path)
     topic_dir = home / "memory" / "1" / "users" / "2" / "topics"
     (topic_dir / ".x.md.0a1b2c3d.tmp").write_text("half a rewrite", "utf-8")
-    (topic_dir / "gone.md").write_text("replaced meanwhile", "utf-8")
     cfg = replace(
         config,
         codex_home=home,
@@ -116,18 +115,49 @@ def test_backup_survives_memory_being_rewritten_meanwhile(
     )
     from discord_codex_bot import backup
 
-    def opener(name, *args, **kwargs):  # gone.md is replaced after the walk listed it
-        if Path(name).name == "gone.md":
+    left = [times]
+
+    def opener(name, *args, **kwargs):
+        if Path(name).name == "gone.md" and left[0] > 0:
+            left[0] -= 1
+            Path(name).unlink()  # gone between the listing and the read
             raise FileNotFoundError(name)
         return open(name, *args, **kwargs)
 
+    def rewrite():
+        (topic_dir / "gone.md").write_text("moved meanwhile", "utf-8")
+
+    def sleep(_seconds):  # the retry's pause: the rewrite writes the file anew meanwhile
+        rewrite()
+
+    rewrite()
     monkeypatch.setattr(backup, "open", opener, raising=False)
+    monkeypatch.setattr(backup.time, "sleep", sleep)
+    return cfg
+
+
+def test_a_file_vanishing_mid_backup_lists_the_tree_again(
+    tmp_path: Path, config, monkeypatch
+) -> None:
+    # After a long VM pause consolidation (02:00) and the backup (03:00) start together; a file
+    # gone between the listing and its read was skipped and the backup published without it
+    # (Codex finding 36). It starts over from a fresh listing instead.
+    cfg = _vanishing(tmp_path, config, monkeypatch, 1)
     target = make_backup(cfg, now=1_700_000_000)
     assert target is not None
     with tarfile.open(target) as tar:
         names = tar.getnames()
+    assert "memory/1/users/2/topics/gone.md" in names  # from the second listing
     assert "memory/1/users/2/topics/x.md" in names and "openrouter/or-1.json" in names
-    assert not any(n.endswith(".tmp") or n.endswith("gone.md") for n in names)
+    assert not any(n.endswith(".tmp") for n in names)
+    assert [p.name for p in (tmp_path / "backups").iterdir()] == [target.name]
+
+
+def test_a_tree_that_keeps_moving_publishes_no_backup(tmp_path: Path, config, monkeypatch) -> None:
+    cfg = _vanishing(tmp_path, config, monkeypatch, 99)
+    with pytest.raises(RuntimeError, match="kept vanishing"):
+        make_backup(cfg, now=1_700_000_000)
+    assert list((tmp_path / "backups").iterdir()) == []  # no archive, no partial left behind
 
 
 def test_memory_export_leaves_out_scratch_files(tmp_path: Path) -> None:

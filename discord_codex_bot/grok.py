@@ -41,6 +41,17 @@ IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
 MAX_IMAGES = 8
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMAGES_BYTES = 16 * 1024 * 1024
+# The longest prompt the sidecar's /chat takes (xsearch/server.py MAX_PROMPT_CHARS); past it the
+# request is a 400. A member's message, four 20k files, three 20k pages and the replayed
+# conversation can add up to more, so run_grok cuts (`_fit`) before sending.
+MAX_PROMPT_CHARS = 200_000
+CUT_TAIL = "\n…（超過長度上限，以下省略）"
+CUT_HEAD = "（超過長度上限，較早的部分省略）…\n"
+# What `_fit` cuts, in this order, until the prompt fits: the replayed transcript (oldest turn
+# first), then EARLIER_CONVERSATION (oldest text first), LINKS, FILES and MEMORY (from the end).
+# The member's own message and the quoted one are never cut; a prompt still too long after all
+# of that is GrokUnavailable, so the next backend in the chain answers it.
+CUT_ORDER = ("history", "links", "files", "memory")
 
 
 class GrokUnavailable(BackendUnavailable):
@@ -222,30 +233,31 @@ async def run_grok(
 ) -> CodexResult:
     """One turn on Grok with the same contract as run_codex."""
     encoded = await asyncio.to_thread(_encode_images, images) if images else []
-    prompt = (
-        user_prompt
-        if raw
-        else _prompt(
+    style = output_style(config)
+
+    def compose(parts: dict[str, str]) -> str:
+        if raw:
+            return user_prompt
+        return _prompt(
             user_prompt,
-            memory,
-            output_style(config),
+            parts["memory"],
+            style,
             personal_style,
-            links,
+            parts["links"],
             help,
-            files,
+            parts["files"],
             speaker,
-            history=history,
+            history=parts["history"],
         )
-    )
-    history = load_transcript(config, resume) if resume else []
-    resumed = bool(history)
+
+    earlier = load_transcript(config, resume) if resume else []
+    resumed = bool(earlier)
     thread_id = resume if resumed else THREAD_PREFIX + uuid.uuid4().hex[:16]
-    kept = trim_history(history, config.grok_history_chars)
-    full = (
-        f"以下是先前的對話：\n\n{render_history(kept)}\n\n——\n\n現在的訊息：\n\n{prompt}"
-        if kept
-        else prompt
-    )
+    kept = trim_history(earlier, config.grok_history_chars)
+    parts = {"history": history, "links": links, "files": files, "memory": memory}
+    if raw:  # the caller's prompt as is: nothing of it is a part to cut
+        parts = dict.fromkeys(parts, "")
+    full, prompt = _fit(compose, parts, kept)
     body = {
         "prompt": full,
         "system": _system_prompt(config, plain),
@@ -259,8 +271,47 @@ async def run_grok(
     if not text:
         raise GrokUnavailable("Grok returned no text")
     stored = prompt + (f"\n\n[附圖 {len(images)} 張]" if images else "")
-    _save_transcript_to(config, thread_id, model, history, stored, text)
+    _save_transcript_to(config, thread_id, model, earlier, stored, text)
     return CodexResult(text, (), None, thread_id, resumed)
+
+
+def _whole(kept: Sequence[dict], prompt: str) -> str:
+    if not kept:
+        return prompt
+    return f"以下是先前的對話：\n\n{render_history(kept)}\n\n——\n\n現在的訊息：\n\n{prompt}"
+
+
+def _fit(compose, parts: dict[str, str], kept: list[dict]) -> tuple[str, str]:
+    """(the whole prompt, this turn's own part) within MAX_PROMPT_CHARS, cut in CUT_ORDER.
+    `parts` is changed in place; `compose(parts)` builds this turn's prompt from them."""
+    prompt = compose(parts)
+    whole = _whole(kept, prompt)
+    if len(whole) <= MAX_PROMPT_CHARS:
+        return whole, prompt
+    before, cut = len(whole), []
+    while kept and len(whole) > MAX_PROMPT_CHARS:
+        kept = kept[1:]
+        whole = _whole(kept, prompt)
+        cut[:] = ["transcript"]
+    for name in CUT_ORDER:
+        while len(whole) > MAX_PROMPT_CHARS and parts[name]:
+            value, over = parts[name], len(whole) - MAX_PROMPT_CHARS
+            if name == "history":  # the newest part of a conversation matters most
+                room = len(value) - over - len(CUT_HEAD)
+                parts[name] = CUT_HEAD + value[-room:] if room > 0 else ""
+            else:
+                room = len(value) - over - len(CUT_TAIL)
+                parts[name] = value[:room] + CUT_TAIL if room > 0 else ""
+            prompt = compose(parts)
+            whole = _whole(kept, prompt)
+            if name not in cut:
+                cut.append(name)
+    if len(whole) > MAX_PROMPT_CHARS:
+        raise GrokUnavailable(f"prompt of {len(whole)} chars is past Grok's {MAX_PROMPT_CHARS}")
+    LOGGER.warning(
+        "Grok prompt cut to fit %d chars: %s (was %d)", MAX_PROMPT_CHARS, ", ".join(cut), before
+    )
+    return whole, prompt
 
 
 def _encode_images(images: Sequence[Path]) -> list[str]:

@@ -126,7 +126,7 @@ class ThreadStore:
             return
         previous = self._by_key.get(key)
         if previous and previous["thread_id"] != thread_id and not previous.get("harvested"):
-            self._pending.append({"key": key, "thread_id": str(previous["thread_id"])})
+            self._pending.append(_retired(key, previous))
         # A thread continued after it was harvested (reply to an old answer) has new content;
         # it will be harvested again once it stops being resumable. Consolidation merges dupes.
         self._by_key[key] = {
@@ -154,7 +154,7 @@ class ThreadStore:
         if entry is None:
             return False
         if not entry.get("harvested"):
-            self._pending.append({"key": key, "thread_id": str(entry["thread_id"])})
+            self._pending.append(_retired(key, entry))
         self._save()
         return True
 
@@ -175,6 +175,17 @@ class ThreadStore:
                 found.append((key, str(entry["thread_id"])))
         seen: set[tuple[str, str]] = set()
         return [c for c in found if not (c in seen or seen.add(c))]
+
+    def last_active(self, key: str, thread_id: str) -> float | None:
+        """When `key` last used `thread_id` (its last remembered turn); None when the store no
+        longer knows, or the thread was retired before this was recorded (2026-10-07)."""
+        for pending in self._pending:
+            if (pending["key"], pending["thread_id"]) == (key, thread_id) and "at" in pending:
+                return float(pending["at"])
+        entry = self._by_key.get(key)
+        if entry is not None and entry["thread_id"] == thread_id:
+            return float(entry["at"])
+        return None
 
     def keys_for(self, thread_id: str) -> set[str]:
         """Every conversation key the store still links to `thread_id` (current or pending);
@@ -227,3 +238,8 @@ class ThreadStore:
             self._path.write_text(json.dumps(payload), "utf-8")
         except OSError:
             pass
+
+
+def _retired(key: str, entry: dict) -> dict:
+    """A pending harvest: the thread, and when it was last used (the harvest ledger's time)."""
+    return {"key": key, "thread_id": str(entry["thread_id"]), "at": float(entry["at"])}

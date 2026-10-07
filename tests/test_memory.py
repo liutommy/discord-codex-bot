@@ -328,3 +328,51 @@ def test_usage_ignores_scratch_files(tmp_path: Path) -> None:
     directory = store.scope_dir("user", 1, 2)
     (directory / ".MEMORY.md.0a1b2c3d.tmp").write_text("x" * 1000, "utf-8")
     assert store.usage_bytes("user", 1, 2) == before
+
+
+def test_scratch_files_of_killed_writes_are_swept_at_start_up(tmp_path: Path) -> None:
+    # atomic_write removed its scratch file only when it raised; a kill between the write and
+    # the replace left it there for good, and nothing ever swept them (Codex finding 37).
+    import os
+    import time
+
+    from discord_codex_bot.memory import MemoryStore
+
+    topics = tmp_path / "m" / "1" / "users" / "2" / "topics"
+    topics.mkdir(parents=True)
+    stale = topics / ".x.md.0a1b2c3d.tmp"
+    fresh = topics / ".y.md.0a1b2c3e.tmp"  # a write in progress right now (a CLI job)
+    kept = [topics / "x.md", topics / ".hidden", topics / "z.tmp"]  # not scratch names
+    for path in (stale, fresh, *kept):
+        path.write_text("x", "utf-8")
+    old = time.time() - 2 * 3600  # past SCRATCH_MAX_AGE_SECONDS
+    for path in (stale, *kept):
+        os.utime(path, (old, old))
+    store = MemoryStore(tmp_path / "m", LIMITS)
+    assert store.sweep_scratch() == 1
+    assert not stale.exists() and fresh.exists() and all(path.exists() for path in kept)
+    assert MemoryStore(tmp_path / "missing", LIMITS).sweep_scratch() == 0
+
+
+async def test_the_bot_sweeps_memory_scratch_when_it_starts(tmp_path: Path, config) -> None:
+    import os
+    import time
+
+    from discord_codex_bot.bot import DiscordCodexClient
+
+    client = DiscordCodexClient(replace(config, codex_home=tmp_path, tracking_enabled=False))
+    stale = tmp_path / "memory" / "1" / "guild" / ".MEMORY.md.0a1b2c3d.tmp"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("x", "utf-8")
+    os.utime(stale, (time.time() - 7200, time.time() - 7200))
+
+    class Started(Exception):
+        pass
+
+    def stop(*_items):  # the next start-up step: everything past it needs Discord
+        raise Started
+
+    client.add_dynamic_items = stop
+    with pytest.raises(Started):
+        await client.setup_hook()
+    assert not stale.exists()

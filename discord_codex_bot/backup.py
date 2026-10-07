@@ -32,12 +32,22 @@ BACKUP_MEMBERS = (
 )
 TRACKING_DB = "tracking.sqlite3"
 ARCHIVE_PREFIX = "discord-codex-bot-"
+# A file that vanished while the archive was written means the tree was moving under it (memory
+# rewrite moves MEMORY.md and topics/ into .backup/): list it again and start over, a few times.
+BACKUP_ATTEMPTS = 3
+RETRY_SECONDS = 2.0
 
 
-def _add_tree(tar: tarfile.TarFile, path: Path, arcname: str) -> None:
-    """tar.add, but a file replaced or removed while the archive is written is skipped instead
-    of failing the whole backup, and memory's scratch files are left out. Consolidation may be
-    rewriting memory/ when a long VM pause makes both nightly jobs start together."""
+class BackupIncomplete(RuntimeError):
+    """Files kept vanishing while the archive was written; no archive was published."""
+
+
+def _add_tree(tar: tarfile.TarFile, path: Path, arcname: str) -> int:
+    """tar.add, but a file replaced while the archive is written goes in as one version, and
+    memory's scratch files are left out. Consolidation may be rewriting memory/ when a long VM
+    pause makes both nightly jobs start together. Returns how many listed paths were gone by
+    the time they were read: the archive is then missing them, and the caller starts over."""
+    vanished = 0
     paths = [path, *sorted(path.rglob("*"))] if path.is_dir() else [path]
     for item in paths:
         if is_scratch(item):
@@ -52,13 +62,11 @@ def _add_tree(tar: tarfile.TarFile, path: Path, arcname: str) -> None:
             else:
                 tar.add(item, arcname=name, recursive=False)
         except FileNotFoundError:
-            continue
+            vanished += 1
+    return vanished
 
 
-def make_backup(config: Config, now: float | None = None) -> Path | None:
-    """One tar.gz of BACKUP_MEMBERS under BACKUP_DIR; None when there is nothing or no dir."""
-    if not config.backup_dir:
-        return None
+def _present(config: Config) -> list[tuple[Path, str]]:
     present = [
         (config.codex_home / name, name)
         for name in BACKUP_MEMBERS
@@ -68,6 +76,15 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
     # archive they are always grok/; a restore puts that back at GROK_DIR.
     if config.grok_dir.is_dir() and all(path != config.grok_dir for path, _ in present):
         present.append((config.grok_dir, "grok"))
+    return present
+
+
+def make_backup(config: Config, now: float | None = None) -> Path | None:
+    """One tar.gz of BACKUP_MEMBERS under BACKUP_DIR; None when there is nothing or no dir.
+    BackupIncomplete, and nothing published, when files kept vanishing mid-archive."""
+    if not config.backup_dir:
+        return None
+    present = _present(config)
     tracking = config.tracking_db_path
     if not present and not tracking.exists():
         return None
@@ -80,11 +97,24 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
         if tracking.exists():
             with sqlite3.connect(tracking) as source, sqlite3.connect(snapshot) as destination:
                 source.backup(destination)
-        with tarfile.open(partial, "w:gz") as tar:
-            for path, name in present:
-                _add_tree(tar, path, name)
-            if snapshot.exists():
-                tar.add(snapshot, arcname=TRACKING_DB)
+        for attempt in range(1, BACKUP_ATTEMPTS + 1):
+            vanished = 0
+            with tarfile.open(partial, "w:gz") as tar:
+                for path, name in present:
+                    vanished += _add_tree(tar, path, name)
+                if snapshot.exists():
+                    tar.add(snapshot, arcname=TRACKING_DB)
+            if not vanished:
+                break
+            LOGGER.warning(
+                "Backup attempt %d: %d file(s) vanished while archiving", attempt, vanished
+            )
+            if attempt < BACKUP_ATTEMPTS:
+                time.sleep(RETRY_SECONDS)
+                present = _present(config)
+        else:
+            partial.unlink(missing_ok=True)
+            raise BackupIncomplete(f"files kept vanishing after {BACKUP_ATTEMPTS} attempts")
     partial.replace(target)
     return target
 

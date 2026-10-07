@@ -224,7 +224,8 @@ A watch can be judged at fixed times of day instead (Taiwan time, up to six, e.g
 on the first pass at or after it — the tracking loop wakes for the next fixed time instead of
 waiting out `TRACKING_INTERVAL_MINUTES`, and a Bot that slept through one judges at wake-up. A
 time with nothing new to judge is used up all the same, so an item arriving afterwards waits for
-the next time. Fetching does not change: sources are still read every pass (X sources on
+the next time. A wake for a fixed time reads only the sources of the watches due then; every
+`TRACKING_INTERVAL_MINUTES` a full pass reads all of them (X sources on
 `X_TRACKING_INTERVAL_MINUTES`), so a time judges whatever has arrived since the last one — batch
 after batch of `MAX_CLASSIFY_BATCH` (30) until nothing is left, up to `MAX_SLOT_BATCHES` (10)
 with a warning past it, so a busy shop is not cut to 30 a time and the rest left to expire. A
@@ -445,7 +446,8 @@ two and harvest finds nothing in any one of them. On `DIGEST_WEEKDAY` (0 = Monda
 default 6; `-1` turns it off) at `DIGEST_HOUR` (default 01:00, `CONSOLIDATE_TIMEZONE`, so the
 consolidation that night merges what it adds) it takes every thread used in the last
 `DIGEST_DAYS` (default 7): those harvest retired, from `harvest_ledger.jsonl` next to the thread
-store (kept 35 days), plus each conversation's current thread. Only members' own messages are
+store (kept 35 days, stamped with when the member last used the thread, not when it was
+harvested), plus each conversation's current thread. Only members' own messages are
 read, never the assistant's.
 
 - **Per member** with at least two conversations: interests or habits that recur in two or more
@@ -544,6 +546,11 @@ tool-gate hook, a fresh home per session, and an answer is used only if the sess
 the locked-down one. The Bot's own `<web>`/`<fetch>`/`<run>` loop, memory and persona work as
 for every backend; Grok's server-side X search is available to the model. Grok keeps no
 conversation, so the Bot keeps a transcript (`gk-…`) and replays up to `GROK_HISTORY_CHARS`.
+The sidecar takes at most 200,000 characters of prompt, so a longer one is cut before it is sent,
+in this order: the replayed turns (oldest first), the earlier conversation carried over from
+another backend (oldest text first), linked pages, attached files, then memory (each from its
+end). The member's message is never cut; a prompt still too long goes down the chain. Each cut
+is logged.
 
 When Grok cannot answer, the turn moves down `MODEL_CHAIN` (grok → codex → agy), the same way
 Codex already fell back to agy, and `/status` shows the last fallback. A turn skips Grok
