@@ -508,6 +508,21 @@ async def test_a_gated_grok_first_in_the_image_list_gives_way_to_the_next_entry(
     assert plan.log["degraded"] == ["grok-spent"] and result.via.backend == "codex"
 
 
+async def test_a_gated_grok_left_when_the_image_list_runs_out_is_not_used(
+    client, backends, monkeypatch
+) -> None:
+    # hub + Codex on #35: a list ending in (or made only of) a gated Grok ran Grok past its
+    # weekly share; it now meets the ordinary Grok gate and takes grok_spent.
+    async def spent() -> bool:
+        return False
+
+    monkeypatch.setattr(client, "_grok_usable", spent)
+    client.routing = replace(client.routing, image=("grok:grok-4.7|medium",))
+    plan, result = await ask_with_image(client)
+    assert plan.target == Resolved("agy", "gemini-3.8-flash-high", "high")
+    assert plan.log["degraded"] == ["grok-spent"] and backends["grok"].calls == []
+
+
 async def test_an_image_in_an_x_conversation_carries_no_no_x_note(
     client, backends, monkeypatch
 ) -> None:
@@ -732,6 +747,7 @@ async def test_status_describes_the_routed_conversation(client, backends, monkey
     await ask(client, "修 bug")
     text = await client._status_text(GUILD, None, USER)
     assert "模型：自動挑選" in text
+    assert "附圖依序用 Codex · gpt-5.6-luna · Medium → Grok · grok-4.7 · Medium" in text
     assert "會接續" in text and "目前用 Codex" in text and "下一句會新開" not in text
 
 

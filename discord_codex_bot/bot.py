@@ -1516,7 +1516,8 @@ class DiscordCodexClient(discord.Client):
         image_rest = list(table.image[1:])
         if image_turn:
             # The image list is the order: a Grok entry past its weekly share or with the breaker
-            # open gives way to the next entry, not to the ordinary Grok stand-in.
+            # open gives way to the next entry. A gated Grok left when the list runs out meets
+            # the ordinary Grok gates below (grok_spent), like any other routed Grok turn.
             while (
                 image_rest and routing.backend_of(entry) == GROK and not await self._grok_usable()
             ):
@@ -1533,8 +1534,6 @@ class DiscordCodexClient(discord.Client):
                 if lowered != entry:
                     entry = lowered
                     degraded.append("codex-quota")
-        elif image_turn:
-            pass  # Grok was gated against the image list above
         elif backend == GROK and kind == "live-x":
             if not self._grok_alive():
                 entry = table.live_x_without_grok
@@ -2568,9 +2567,13 @@ class DiscordCodexClient(discord.Client):
         model_line = f"模型：{chosen.label}（{origin}）· 強度 {self._effort_label(target)}"
         auto = self.routing is not None and not own
         if auto:
+            images = " → ".join(
+                self._via_label(routing.resolved(entry, self.config.codex_model))
+                for entry in self.routing.image
+            )
             model_line = (
-                f"模型：自動挑選（依每則問題的類型與難度）；附圖或判斷不出來的新對話用 "
-                f"{chosen.label} · 強度 {self._effort_label(target)}"
+                f"模型：自動挑選（依每則問題的類型與難度）；附圖依序用 {images}；"
+                f"判斷不出來的新對話用 {chosen.label} · 強度 {self._effort_label(target)}"
             )
         if chosen.backend in ROUTER_BACKENDS:
             info = self.catalogs[chosen.backend].get(chosen.family)
