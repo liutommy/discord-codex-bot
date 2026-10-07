@@ -1465,9 +1465,12 @@ class DiscordCodexClient(discord.Client):
     ) -> RoutePlan | None:
         """Where this request goes when the router picks the model; None when it does not (Jev
         off, or the member chose a model with /model). Every message is judged; a conversation
-        never drops a band and follows its latest message of substance (routing.decide). No
-        judgement — an image, a Jev timeout, error, odd answer or low confidence — keeps a routed
-        conversation where it is and sends a new one to DEFAULT_MODEL, without retrying Jev."""
+        never drops a band and follows its latest message of substance (routing.decide). An
+        image is not judged (Jev reads text only): that message goes down the table's `image`
+        list (Codex → Grok → agy by default; a conversation on a Codex cell keeps it), and the
+        conversation's route is left for the next message. No judgement otherwise — a Jev
+        timeout, error, odd answer or low confidence — keeps a routed conversation where it is
+        and sends a new one to DEFAULT_MODEL, without retrying Jev."""
         table = self.routing
         if table is None or self.memory.get_model(guild_id, user_id):
             return None
@@ -1489,8 +1492,11 @@ class DiscordCodexClient(discord.Client):
             verdict = Verdict("no-text")
         else:
             verdict = await routing.judge(own, said[-CONTEXT_TURNS:], self.config)
+        image_turn = verdict.status == "image"
         if verdict.status == "ok":
             route, why = routing.decide(table, verdict.kind, routing.band(verdict.score), route)
+        elif image_turn:
+            route, why = route or Route(table.image[0], "M", ""), "image"
         elif route is not None:
             why = "kept"  # no judgement: stay; never down on a missing answer
         else:
@@ -1499,6 +1505,8 @@ class DiscordCodexClient(discord.Client):
         # the conversation where it stays (an X conversation keeps its X handling).
         kind = verdict.kind if verdict.status == "ok" else route.kind
         entry, degraded = route.entry, []
+        if image_turn and routing.backend_of(entry) != CODEX:
+            entry = table.image[0]  # this message only: the route stays for the next one
         backend = routing.backend_of(entry)
         if backend == CODEX and not effort:  # an effort the member set is theirs
             limits = await asyncio.to_thread(read_rate_limits, self.config)
@@ -1527,6 +1535,8 @@ class DiscordCodexClient(discord.Client):
             spares.append(routing.resolved(table.live_x_without_grok, model))
         if routing.is_claude(entry) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))
+        if image_turn:  # Codex → Grok → agy, then MODEL_CHAIN (_answer drops repeats)
+            spares.extend(routing.resolved(spare, model) for spare in table.image[1:])
         replay = ""
         if turns:
             # Another backend gets the conversation replayed, defanged by the prompt builder like

@@ -147,6 +147,16 @@ def test_a_bad_cell_stops_the_bot_at_start_up(tmp_path, config: Config, cell: st
     DiscordCodexClient(replace(config, jev_enabled=False, routing_path=bad))  # off: not read
 
 
+def test_the_image_list_is_checked_too(tmp_path) -> None:
+    data = json.loads(TABLE_PATH.read_text("utf-8"))
+    for bad in ([], ["codex"]):
+        data["image"] = bad
+        path = tmp_path / "routing.json"
+        path.write_text(json.dumps(data), "utf-8")
+        with pytest.raises(ValueError, match="routing"):
+            routing.load_table(path)
+
+
 def test_a_needs_type_must_stay_on_its_backend(tmp_path) -> None:
     data = json.loads(TABLE_PATH.read_text("utf-8"))
     data["types"]["code"][0] = "agy:gemini-3.8-flash|low"
@@ -404,12 +414,76 @@ async def test_no_judgement_keeps_a_routed_conversation_where_it_is(
     assert result.via.backend == "codex" and backends["codex"].calls[1][2]["resume"] == "codex-t1"
 
 
-async def test_an_image_is_not_judged(client, backends, monkeypatch) -> None:
+PICTURE = types.SimpleNamespace(content_type="image/png", filename="a.png", size=10)
+
+
+async def ask_with_image(client, text: str = "這是什麼"):
+    """An image message: routed with the picture, answered without downloading it."""
+    plan = await client._route(KEY, None, GUILD, USER, text, [PICTURE], False)
+    result = await client._answer(
+        text, [], GUILD, USER, resume=plan.resume, **client._routed_kw(plan)
+    )
+    client._remember(KEY, result.thread_id, None, False, *client._routed_memo(plan, result, ""))
+    return plan, result
+
+
+async def test_an_image_is_not_judged_and_goes_codex_grok_agy(
+    client, backends, monkeypatch
+) -> None:
+    # Owner 2026-10-07: an image (Jev reads text only) goes Codex → Grok → agy.
     asked = verdicts(monkeypatch, ok("code", 9))
-    picture = types.SimpleNamespace(content_type="image/png", filename="a.png", size=10)
-    plan = await client._route(KEY, None, GUILD, USER, "這是什麼", [picture], False)
-    assert asked == [] and plan.target == Resolved("grok", "grok-4.7", "medium")
-    assert plan.log["status"] == "image" and plan.log["files"] == 1
+    plan, result = await ask_with_image(client)
+    assert asked == [] and plan.target == Resolved("codex", "gpt-5.6-luna", "medium")
+    assert plan.log["status"] == "image" and plan.log["why"] == "image"
+    assert plan.log["files"] == 1 and result.via.backend == "codex"
+    assert plan.spares == (
+        Resolved("grok", "grok-4.7", "medium"),
+        Resolved("agy", "gemini-3.8-flash-medium", "medium"),
+    )
+    client.threads = type(client.threads)(client.threads._path.with_name("t2.json"), 3600)
+    backends["codex"].error = BackendUnavailable("codex out")
+    _, result = await ask_with_image(client)
+    assert result.via == Resolved("grok", "grok-4.7", "medium")
+    backends["grok"].error = BackendUnavailable("grok out")
+    _, result = await ask_with_image(client)
+    assert result.via == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+
+
+async def test_an_image_skips_grok_when_grok_is_not_usable(client, backends, monkeypatch) -> None:
+    async def spent() -> bool:
+        return False
+
+    monkeypatch.setattr(client, "_grok_usable", spent)
+    backends["codex"].error = BackendUnavailable("codex out")
+    plan, result = await ask_with_image(client)
+    assert len(backends["codex"].calls) == 1 and backends["grok"].calls == []
+    assert result.via == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+
+
+async def test_an_image_mid_conversation_goes_to_codex_and_leaves_the_route(
+    client, backends, monkeypatch
+) -> None:
+    # On a Flash conversation the image goes to Codex for this message only; the next text
+    # message is back on the conversation's own cell (with the Codex turn replayed).
+    verdicts(monkeypatch, ok("chat", 1))
+    await ask(client, "嗨")
+    plan, result = await ask_with_image(client, "這張圖是什麼")
+    assert result.via == Resolved("codex", "gpt-5.6-luna", "medium")
+    assert plan.route.entry == "agy:gemini-3.8-flash|low" and plan.resume == ""
+    turns = {"codex-t1": [Turn("user", "這張圖是什麼", USER), Turn("assistant", "是一隻貓")]}
+    monkeypatch.setattr(bot_module, "transcript_turns", lambda c, t: turns.get(t, []))
+    plan, result = await ask(client, "謝謝")
+    assert result.via.backend == "agy" and "是一隻貓" in backends["agy"].calls[-1][2]["history"]
+
+
+async def test_an_image_on_a_codex_conversation_keeps_its_cell(
+    client, backends, monkeypatch
+) -> None:
+    verdicts(monkeypatch, ok("code", 10))
+    await ask(client, "重構這個專案")
+    plan, result = await ask_with_image(client, "這個錯誤截圖")
+    assert plan.target == Resolved("codex", "gpt-5.6-luna", "xhigh")
+    assert plan.resume == "codex-t1"
 
 
 async def test_a_document_is_judged_from_the_words_and_counted_in_the_log(
@@ -892,6 +966,7 @@ def test_help_tells_members_and_the_model_about_routing(client) -> None:
     assert "自動挑模型" in client.help_guide() and "自動挑模型" in client.help_sheet()
     assert "/codex-model" in client.help_sheet().split("自動挑模型")[1]
     assert "進行中的對話維持原本的模型" in client.help_sheet()
+    assert "附圖片時依序用 Codex、Grok、Gemini" in client.help_sheet()
     assert "effort 只改這一則的強度" in client.help_sheet()
     assert "難度只升不降" in client.help_sheet() and "不會換弱" not in client.help_sheet()
     client.routing = None
