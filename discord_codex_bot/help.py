@@ -32,8 +32,10 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
     "-model": (
         "選你要用的模型：provider（Grok／Codex／Antigravity／OpenRouter／OrcaRouter）→ "
         "model（打字會自動篩選；OpenRouter、OrcaRouter 只列免費模型）→ effort（這個模型的預設"
-        "強度）。留空＝查看目前設定；clear 回到伺服器預設（{default}）。換模型後下一題會新開對話。",
+        "強度）。只選 provider 就用它的預設模型（OpenRouter、OrcaRouter 要選 model）；全部留空＝"
+        "查看目前設定；clear 回到伺服器預設（{default}）。換模型後下一題會新開對話。",
         [
+            "/{p}-model provider:Codex（只選來源：用 Codex 的模型）",
             "/{p}-model provider:Antigravity model:gemini-3.8-flash effort:Medium",
             "/{p}-model provider:OpenRouter model:gemma（打幾個字就會出現候選）",
             "/{p}-model（留空：看目前用什麼）",

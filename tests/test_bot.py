@@ -867,6 +867,91 @@ async def test_model_command_autocomplete_and_openrouter_reminder(client, monkey
     assert "看不到圖片" in client._describe("openrouter:t/text:free", "")
 
 
+async def test_picking_only_a_provider_sets_its_default_model(client, caplog) -> None:
+    # 2026-10-07: a member picked provider Codex twice, left model empty (Codex has one model),
+    # and nothing was saved: the command only showed the current setting, so every answer kept
+    # coming from the default (Grok). A provider alone now means that provider's default model.
+    from discord.app_commands import Choice
+
+    responses: list[str] = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    interaction = _interaction(USER, 999)
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send)
+    client.config = replace(client.config, default_model="grok:grok-4.7|medium")
+    codex = Choice(name="Codex", value="codex")
+    caplog.set_level(logging.INFO, logger="discord_codex_bot.bot")
+    await client.model_command(interaction, provider=codex)
+    assert client.memory.get_model(GUILD, USER) == "codex:gpt-5.6-luna"
+    assert responses[-1].startswith("已設定：Codex")
+    assert f"Model set guild={GUILD} user={USER} value=codex:gpt-5.6-luna" in caplog.text
+    # With an effort and no model it used to keep the stored/default model instead.
+    client.memory.clear_model(GUILD, USER)
+    high = Choice(name="High", value="high")
+    await client.model_command(interaction, provider=codex, effort=high)
+    assert client.memory.get_model(GUILD, USER) == "codex:gpt-5.6-luna|high"
+    # A new provider without an effort starts at its default effort (hub on #38: Codex's xhigh
+    # saved onto Gemini read differently from /status).
+    agy = Choice(name="Antigravity", value="agy")
+    await client.model_command(interaction, provider=agy)
+    assert client.memory.get_model(GUILD, USER) == "agy:gemini-3.8-flash"
+    await client.model_command(interaction, provider=agy, effort=high)
+    # Free router models come and go: the member has to pick one; nothing changes.
+    await client.model_command(interaction, provider=Choice(name="OpenRouter", value="openrouter"))
+    assert "免費模型會變動" in responses[-1] and "請在 model 欄從清單選" in responses[-1]
+    assert client.memory.get_model(GUILD, USER) == "agy:gemini-3.8-flash|high"
+    # The same provider again keeps the member's model and effort; nothing at all only shows it.
+    await client.model_command(interaction, provider=agy)
+    assert client.memory.get_model(GUILD, USER) == "agy:gemini-3.8-flash|high"
+    await client.model_command(interaction)
+    assert responses[-1].startswith("目前：")
+    assert bot_module.AGY_DEFAULT_FAMILY in bot_module.AGY_FAMILIES
+
+
+async def test_picking_only_grok_takes_a_model_the_plan_still_offers(client, monkeypatch) -> None:
+    # Codex on #38: a DEFAULT_MODEL Grok model that left the plan was saved as-is, and every
+    # answer then failed at the sidecar. An unreadable catalog asks the member to wait.
+    from discord.app_commands import Choice
+
+    responses: list[str] = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    interaction = _interaction(USER, 999)
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send)
+    grok = bot_module.grok
+    catalog = [grok.GrokModel("grok-5", "Grok 5", ("low", "medium", "high"), "medium")]
+    monkeypatch.setattr(grok, "_catalog", grok._catalog)  # restored after the test
+
+    async def models(config):
+        grok._catalog = (time.monotonic(), list(catalog))
+        return list(catalog)
+
+    monkeypatch.setattr(grok, "models", models)
+    client.config = replace(client.config, default_model="grok:grok-4.7|medium")
+    grok_choice = Choice(name="Grok", value="grok")
+    await client.model_command(interaction, provider=grok_choice)
+    assert client.memory.get_model(GUILD, USER) == "grok:grok-5"
+    client.config = replace(client.config, default_model="grok:grok-5|medium")
+    client.memory.clear_model(GUILD, USER)
+    await client.model_command(interaction, provider=grok_choice)
+    assert client.memory.get_model(GUILD, USER) == "grok:grok-5"
+    catalog.clear()
+    client.memory.clear_model(GUILD, USER)
+    await client.model_command(interaction, provider=grok_choice)
+    assert "Grok 的模型清單暫時讀不到" in responses[-1]
+    assert client.memory.get_model(GUILD, USER) == ""
+
+
 def test_previews_from_reads_discord_embeds_preferring_the_proxied_picture() -> None:
     from types import SimpleNamespace as NS
 
@@ -2411,9 +2496,7 @@ async def test_a_routed_turn_skips_grok_as_a_spare_when_grok_is_not_usable(
     assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)
 
 
-async def test_a_routed_turn_resumes_only_a_thread_of_its_own_backend(
-    client, backends
-) -> None:
+async def test_a_routed_turn_resumes_only_a_thread_of_its_own_backend(client, backends) -> None:
     # The router may move a conversation from Codex to agy; the Codex thread id must not go to
     # agy (AGENTS.md: a thread id belongs to the backend that created it; Codex on PR #32).
     codex, agy = backends
