@@ -867,6 +867,48 @@ async def test_model_command_autocomplete_and_openrouter_reminder(client, monkey
     assert "看不到圖片" in client._describe("openrouter:t/text:free", "")
 
 
+async def test_picking_only_a_provider_sets_its_default_model(client, caplog) -> None:
+    # 2026-10-07: a member picked provider Codex twice, left model empty (Codex has one model),
+    # and nothing was saved: the command only showed the current setting, so every answer kept
+    # coming from the default (Grok). A provider alone now means that provider's default model.
+    from discord.app_commands import Choice
+
+    responses: list[str] = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    interaction = _interaction(USER, 999)
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send)
+    client.config = replace(client.config, default_model="grok:grok-4.7|medium")
+    codex = Choice(name="Codex", value="codex")
+    caplog.set_level(logging.INFO, logger="discord_codex_bot.bot")
+    await client.model_command(interaction, provider=codex)
+    assert client.memory.get_model(GUILD, USER) == "codex:gpt-5.6-luna"
+    assert responses[-1].startswith("已設定：Codex")
+    assert f"Model set guild={GUILD} user={USER} value=codex:gpt-5.6-luna" in caplog.text
+    # With an effort and no model it used to keep the stored/default model instead.
+    client.memory.clear_model(GUILD, USER)
+    high = Choice(name="High", value="high")
+    await client.model_command(interaction, provider=codex, effort=high)
+    assert client.memory.get_model(GUILD, USER) == "codex:gpt-5.6-luna|high"
+    agy = Choice(name="Antigravity", value="agy")
+    await client.model_command(interaction, provider=agy)
+    assert client.memory.get_model(GUILD, USER) == "agy:gemini-3.8-flash|high"
+    # Free router models come and go: the member has to pick one; nothing changes.
+    await client.model_command(interaction, provider=Choice(name="OpenRouter", value="openrouter"))
+    assert "請在 model 欄從清單選" in responses[-1]
+    assert client.memory.get_model(GUILD, USER) == "agy:gemini-3.8-flash|high"
+    # The same provider again keeps the member's model; nothing at all only shows it.
+    await client.model_command(interaction, provider=agy)
+    assert client.memory.get_model(GUILD, USER) == "agy:gemini-3.8-flash|high"
+    await client.model_command(interaction)
+    assert responses[-1].startswith("目前：")
+
+
 def test_previews_from_reads_discord_embeds_preferring_the_proxied_picture() -> None:
     from types import SimpleNamespace as NS
 
