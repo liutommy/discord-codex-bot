@@ -216,7 +216,7 @@ async def test_guild_digest_needs_two_members_and_writes_no_member_notes(
             }
         )
 
-    summary = await digest_all(config, None, store, runner, now=NOW, public=lambda g, c: True)
+    summary = await digest_all(config, None, store, runner, now=NOW, visible=lambda g, c: True)
     assert [e.name for e in store.entries("guild", 1, None)] == [f"{GUILD_MARK}週五開團"]
     assert store.entries("guild", 7, None) == []
     for user_id in (3, 4, 5):
@@ -255,7 +255,7 @@ async def test_one_failing_scope_does_not_stop_the_rest(tmp_path: Path, config: 
         return await job()
 
     summary = await digest_all(
-        config, None, store, runner, queue_run, now=NOW, public=lambda g, c: True
+        config, None, store, runner, queue_run, now=NOW, visible=lambda g, c: True
     )
     assert summary == "1/個人/…3: failed (JSONDecodeError)\n1/伺服器: +1"
     assert len(queued) == 2  # each scope is its own queue item; member 4 (one talk) is none
@@ -384,7 +384,7 @@ def _guild_note(*members: str) -> str:
     return json.dumps({"notes": [{"name": "週五開團", "text": "週五開團", "evidence": evidence}]})
 
 
-async def test_server_notes_come_only_from_public_channels(tmp_path: Path, config: Config) -> None:
+async def test_server_notes_come_only_from_channels_the_bot_sees(tmp_path, config: Config) -> None:
     config, store = _setup(tmp_path, config)
     for thread, key in (("a", "1:10:3"), ("b", "1:20:4"), ("c", "1:10:5")):
         _thread(config, thread, ["這週五晚上開團"])
@@ -395,23 +395,23 @@ async def test_server_notes_come_only_from_public_channels(tmp_path: Path, confi
         seen.append(prompt)
         return _guild_note("M1", "M2")
 
-    def public(guild_id: int, channel_id: int) -> bool:
+    def visible(guild_id: int, channel_id: int) -> bool:
         if channel_id == 30:
             raise RuntimeError("cache miss")
-        return channel_id == 10  # channel 20 is private
+        return channel_id == 10  # the Bot cannot see channel 20
 
-    await digest_all(config, None, store, runner, now=NOW, public=public)
-    # Members 3 and 5 talked in public channel 10; member 4 only in private channel 20.
+    await digest_all(config, None, store, runner, now=NOW, visible=visible)
+    # Members 3 and 5 talked in channel 10, which the Bot sees; member 4 only in channel 20.
     assert len(seen) == 1 and '{"M1": ["這週五晚上開團"], "M2": ["這週五晚上開團"]}' in seen[0]
     assert [e.name for e in store.entries("guild", 1, None)] == [f"{GUILD_MARK}週五開團"]
 
-    # Only one member left in public channels: no server job reaches the model.
+    # Only one member left in channels the Bot sees: no server job reaches the model.
     seen.clear()
-    await digest_all(config, None, store, runner, now=NOW, public=lambda g, c: c == 20)
+    await digest_all(config, None, store, runner, now=NOW, visible=lambda g, c: c == 20)
     assert seen == []
 
     # A predicate that cannot answer counts as private; without one, no server notes at all.
-    await digest_all(config, None, store, runner, now=NOW, public=lambda g, c: public(g, 30))
+    await digest_all(config, None, store, runner, now=NOW, visible=lambda g, c: visible(g, 30))
     await digest_all(config, None, store, runner, now=NOW)
     assert seen == []
 
@@ -469,7 +469,7 @@ async def test_digest_data_cannot_close_its_block_and_stays_within_bounds(
         seen.append(prompt)
         return json.dumps({"notes": []})
 
-    await digest_all(config, None, store, runner, now=NOW, public=lambda g, c: True)
+    await digest_all(config, None, store, runner, now=NOW, visible=lambda g, c: True)
     data = seen[-1].split("<MESSAGES>\n", 1)[1].rsplit("\n</MESSAGES>", 1)[0]
     assert "</MESSAGES>" not in data and "\\u003c/MESSAGES\\u003e" in data
     members = json.loads(data)
@@ -513,10 +513,10 @@ async def test_scopes_that_cannot_reach_the_model_cost_no_quota_probe(
 
     caplog.set_level("INFO", logger="discord_codex_bot.digest")
     summary = await digest_all(
-        config, None, store, runner, now=NOW, public=lambda g, c: c == 10, quota=quota
+        config, None, store, runner, now=NOW, visible=lambda g, c: c == 10, quota=quota
     )
     assert summary == "nothing new" and probes == []
-    assert "Digest guild 1: 1 of 3 channels public, 1 members there" in caplog.text
+    assert "Digest guild 1: 1 of 3 channels visible, 1 members there" in caplog.text
 
 
 # ----- shared reply threads: every turn belongs to its real speaker (Codex on PR #13) ---------
@@ -567,7 +567,7 @@ async def test_a_shared_thread_is_split_by_speaker_for_the_digest(
         seen.append(scope)
         return _guild_note("M1", "M2")
 
-    assert await digest_all(config, None, store, runner, now=NOW, public=lambda g, c: True) == (
+    assert await digest_all(config, None, store, runner, now=NOW, visible=lambda g, c: True) == (
         "1/伺服器: +1"
     )
     assert seen == ["guild"]

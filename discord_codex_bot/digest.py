@@ -8,9 +8,9 @@ pass reads the last DIGEST_DAYS of conversations together:
   conversations. They are inferences, so their names start with USER_MARK and the model is told to
   treat them as hints (codex._prompt);
 - per server, facts about the server itself that at least two different members mention. Their
-  names start with GUILD_MARK. Nothing about an individual member goes there. Server notes reach
-  every channel's prompt, so only conversations in channels @everyone can read feed them; a
-  channel whose visibility cannot be established is left out.
+  names start with GUILD_MARK. Nothing about an individual member goes there. Conversations in
+  every channel the Bot can see feed them, private ones included (owner, 2026-10-07); a channel
+  the Bot cannot see, or whose visibility cannot be established, is left out.
 
 Every note must quote the members' own words: an exact substring of a message in each cited
 conversation (or by each cited member), from at least two different ones. Assistant text is never
@@ -37,9 +37,9 @@ from .threads import ThreadStore
 
 LOGGER = logging.getLogger(__name__)
 Runner = Callable[[str, str], Awaitable[str]]  # (prompt, "user" | "guild") -> JSON answer
-# (guild id, channel id) -> True only when @everyone can read that channel. The Bot supplies it;
+# (guild id, channel id) -> True only when the Bot can see that channel. The Bot supplies it;
 # without one (the operator CLI has no Discord connection) no server notes are written.
-Public = Callable[[int, int], bool]
+Visible = Callable[[int, int], bool]
 Conversation = tuple[int, list[str]]  # (channel id, the member's messages)
 
 USER_MARK, GUILD_MARK = MARKERS
@@ -289,10 +289,10 @@ async def digest_guild(
     return len(notes)
 
 
-def _jobs(config, threads, store, runner, now, public: Public | None):
+def _jobs(config, threads, store, runner, now, visible: Visible | None):
     """One job per member and one per server, each run as its own queue item so members'
     questions are not held behind the whole digest. A member's own notes may come from any
-    channel they talked in (harvest already does); a server's only from public channels.
+    channel they talked in (harvest already does); a server's only from channels the Bot can see.
     Scopes that cannot reach the model (one conversation, one member) are not queued at all, so
     they cost no queue slot and no quota probe."""
     since = now - config.digest_days * 86400
@@ -305,17 +305,17 @@ def _jobs(config, threads, store, runner, now, public: Public | None):
                 f"{guild_id}/個人/…{str(user_id)[-4:]}",
                 (lambda g=guild_id, u=user_id, c=groups: digest_member(store, g, u, c, runner)),
             )
-        if public is None:
+        if visible is None:
             continue
         channels = {channel for talks in members.values() for channel, _messages in talks}
-        open_channels = {c for c in channels if _is_public(public, guild_id, c)}
+        open_channels = {c for c in channels if _is_visible(visible, guild_id, c)}
         shared = {
             user_id: kept
             for user_id, talks in members.items()
             if (kept := [m for channel, m in talks if channel in open_channels])
         }
         LOGGER.info(
-            "Digest guild %s: %d of %d channels public, %d members there",
+            "Digest guild %s: %d of %d channels visible, %d members there",
             guild_id,
             len(open_channels),
             len(channels),
@@ -329,10 +329,10 @@ def _jobs(config, threads, store, runner, now, public: Public | None):
         )
 
 
-def _is_public(public: Public, guild_id: int, channel_id: int) -> bool:
+def _is_visible(visible: Visible, guild_id: int, channel_id: int) -> bool:
     try:
-        return public(guild_id, channel_id) is True
-    except Exception:  # cannot tell -> not public
+        return visible(guild_id, channel_id) is True
+    except Exception:  # cannot tell -> left out
         LOGGER.warning("Digest: visibility of channel %s unknown; left out", channel_id)
         return False
 
@@ -344,7 +344,7 @@ async def digest_all(
     runner,
     queue_run=None,
     now=None,
-    public: Public | None = None,
+    visible: Visible | None = None,
     quota: Callable[[], Awaitable[bool]] | None = None,
 ) -> str:
     async def direct(job):
@@ -353,7 +353,7 @@ async def digest_all(
     queue_run = queue_run or direct
     lines = []
     now = time.time() if now is None else now
-    for label, job in _jobs(config, threads, store, runner, now, public):
+    for label, job in _jobs(config, threads, store, runner, now, visible):
         if quota is not None and not await quota():  # checked before every model call
             lines.append(f"stopped at {label}: quota gate")
             break
@@ -379,7 +379,7 @@ def codex_runner(config: Config) -> Runner:
 
 
 async def digest_forever(
-    threads: ThreadStore, store: MemoryStore, config: Config, queue_run, public: Public
+    threads: ThreadStore, store: MemoryStore, config: Config, queue_run, visible: Visible
 ) -> None:
     """Weekly at DIGEST_WEEKDAY / DIGEST_HOUR; DIGEST_WEEKDAY=-1 turns it off."""
     if config.digest_weekday < 0:
@@ -398,7 +398,7 @@ async def digest_forever(
                 store,
                 runner,
                 queue_run,
-                public=public,
+                visible=visible,
                 quota=lambda: _quota_ok(config),
             )
             LOGGER.info("Digest done:\n%s", summary)
