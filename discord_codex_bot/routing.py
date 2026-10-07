@@ -145,6 +145,7 @@ QUESTIONS = {
 class Table:
     types: dict[str, tuple[str, ...]]  # type -> one stored-model entry per band
     needs: dict[str, str]  # type -> the only backend that can answer it
+    image: tuple[str, ...]  # where a message with an image goes, in order
     grok_spent: str
     live_x_without_grok: str
     claude_failed: dict[str, str]
@@ -183,6 +184,7 @@ def load_table(path: Path) -> Table:
         table = Table(
             types=types,
             needs={str(k): str(v) for k, v in data["needs"].items()},
+            image=tuple(str(entry) for entry in data["image"]),
             grok_spent=str(degrade["grok_spent"]),
             live_x_without_grok=str(degrade["live_x_without_grok"]),
             claude_failed={str(k): str(v) for k, v in degrade["claude_failed"].items()},
@@ -199,6 +201,12 @@ def load_table(path: Path) -> Table:
             raise ValueError(f"routing: needs {kind!r} -> {backend!r} is not a type and backend")
         if any(backend_of(cell) != backend for cell in table.types[kind]):
             raise ValueError(f"routing: every {kind} cell must be on {backend}")
+    if not table.image:
+        raise ValueError("routing: image needs at least one target")
+    if backend_of(table.image[0]) != CODEX:
+        # Owner 2026-10-07: an image goes Codex first (then Grok, agy). Codex cells have no
+        # type stand-ins, so keeping a conversation's Codex cell for its image stays simple.
+        raise ValueError("routing: image must start with codex (owner: codex → grok → agy)")
     for kind in table.claude_failed:
         if kind not in TYPES:
             raise ValueError(f"routing: claude_failed names an unknown type {kind!r}")
@@ -208,6 +216,7 @@ def load_table(path: Path) -> Table:
         table.grok_spent,
         table.live_x_without_grok,
         *table.claude_failed.values(),
+        *table.image,
     ]:
         check_entry(entry)
     return table

@@ -13,6 +13,8 @@
   },
   "_comment_needs": "A type that only these backends can answer: a conversation already on another backend moves for it even when the message is not harder.",
   "needs": {"live-x": "grok", "live-web": "codex", "code": "codex"},
+  "_comment_image": "A message with an image is not judged (Jev reads text only): it goes down this list in order, each one when the one before cannot answer, then on along MODEL_CHAIN. A conversation already on a Codex cell keeps that cell (and its band) for the image.",
+  "image": ["codex|medium", "grok:grok-4.7|medium", "agy:gemini-3.8-flash|medium"],
   "_comment_degrade": "Quota and failure stand-ins, tried before MODEL_CHAIN. grok_spent: a Grok cell while chat is past GROK_CHAT_MAX_WEEKLY_PERCENT, the breaker is open or Grok is off. live_x_without_grok: an X question when Grok cannot answer at all (the answer says it had no X search). claude_failed: an agy Claude cell that failed, by type. codex_quota: at or past these used percentages Codex effort drops one level.",
   "degrade": {
     "grok_spent": "agy:gemini-3.8-flash|high",

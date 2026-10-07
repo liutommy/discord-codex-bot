@@ -202,13 +202,18 @@ ROUTING_FEATURE = (
     "回覆最下面會寫這次是哪個模型回答；同一段對話的難度只升不降，換了問題類型會改用最適合"
     "那類問題的模型，閒聊不會讓對話換模型。"
     "用 `/{p}-model` 指定模型就不會自動挑，`clear` 回到自動挑選；"
-    "`/{p}` 的 effort 只改這一則的強度，對話照樣留在原本的模型。附圖片或判斷不出來時，"
-    "新對話用 {default}，進行中的對話維持原本的模型。"
+    "`/{p}` 的 effort 只改這一則的強度，對話照樣留在原本的模型。附圖片時依序用 "
+    "{image} 看圖回答（前一個不能用才換下一個）；判斷不出來時，新對話用 {default}，"
+    "進行中的對話維持原本的模型。"
 )
 
 
-def _features(routing: bool) -> list[str]:
-    return [*FEATURES, ROUTING_FEATURE] if routing else FEATURES
+def _features(image_order: str) -> list[str]:
+    """The ability list; with routing on (`image_order` names the image list, from
+    config/routing.json) it also explains automatic model choice."""
+    if not image_order:
+        return FEATURES
+    return [*FEATURES, ROUTING_FEATURE.replace("{image}", image_order)]
 
 
 def _fill(text: str, prefix: str, default: str) -> str:
@@ -216,7 +221,7 @@ def _fill(text: str, prefix: str, default: str) -> str:
 
 
 def render_guide(
-    prefix: str, registered: Iterable[str], default: str = "Codex", routing: bool = False
+    prefix: str, registered: Iterable[str], default: str = "Codex", image_order: str = ""
 ) -> str:
     """The member-facing guide for /<prefix>-help, in registered-command order. `default`
     is DEFAULT_MODEL as members read it; it is configuration, so never written in the text."""
@@ -230,7 +235,7 @@ def render_guide(
         blocks.append("\n".join(lines))
     blocks.append(
         "**不用指令也能做的事**\n"
-        + "\n".join(f"・{_fill(f, p, default)}" for f in _features(routing))
+        + "\n".join(f"・{_fill(f, p, default)}" for f in _features(image_order))
     )
     return "\n\n".join(blocks)
 
@@ -239,7 +244,7 @@ def render_sheet(
     prefix: str,
     commands: Iterable[tuple[str, str, list[str]]],
     default: str = "Codex",
-    routing: bool = False,
+    image_order: str = "",
 ) -> str:
     """The compact sheet injected into the model's prompt: one line per command plus the
     feature list, Markdown stripped so it reads as facts rather than formatting."""
@@ -249,6 +254,6 @@ def render_sheet(
         lines.append(f"/{name} — {description}{suffix}")
     lines.append(
         "其他用法："
-        + " ".join(_fill(f, prefix, default).replace("**", "") for f in _features(routing))
+        + " ".join(_fill(f, prefix, default).replace("**", "") for f in _features(image_order))
     )
     return "\n".join(lines)

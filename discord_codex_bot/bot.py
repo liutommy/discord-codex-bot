@@ -834,7 +834,7 @@ class DiscordCodexClient(discord.Client):
             self.config.command_prefix,
             self._command_rows(),
             self._default_label(),
-            routing=self.routing is not None,
+            image_order=self._image_order(),
         )
         doc = apis.render_doc(self.apis)
         return f"{sheet}\n{doc}" if doc else sheet
@@ -845,8 +845,22 @@ class DiscordCodexClient(discord.Client):
             self.config.command_prefix,
             [row[0] for row in self._command_rows()],
             self._default_label(),
-            routing=self.routing is not None,
+            image_order=self._image_order(),
         )
+
+    def _image_order(self) -> str:
+        """The routing table's image list as members read it ("Codex、Grok、Gemini 3.8 Flash");
+        "" while routing is off. From the table, so help never drifts from what runs."""
+        if self.routing is None:
+            return ""
+        names = []
+        for entry in self.routing.image:
+            choice = routing.choice_of(entry, self.config.codex_model)
+            name = AGY_FAMILIES[choice.family][0].split("（")[0] if choice.backend == AGY else (
+                BACKEND_LABELS.get(choice.backend, choice.backend)
+            )  # fmt: skip
+            names.append(name)
+        return "、".join(names)
 
     def _default_label(self) -> str:
         """DEFAULT_MODEL as members read it (\"Grok · Grok 4.7\"), for the help texts."""
@@ -1465,9 +1479,12 @@ class DiscordCodexClient(discord.Client):
     ) -> RoutePlan | None:
         """Where this request goes when the router picks the model; None when it does not (Jev
         off, or the member chose a model with /model). Every message is judged; a conversation
-        never drops a band and follows its latest message of substance (routing.decide). No
-        judgement — an image, a Jev timeout, error, odd answer or low confidence — keeps a routed
-        conversation where it is and sends a new one to DEFAULT_MODEL, without retrying Jev."""
+        never drops a band and follows its latest message of substance (routing.decide). An
+        image is not judged (Jev reads text only): that message goes down the table's `image`
+        list (Codex → Grok → agy; a conversation already on a Codex cell keeps it), and the
+        conversation's route is left for the next message. No judgement otherwise — a Jev
+        timeout, error, odd answer or low confidence — keeps a routed conversation where it is
+        and sends a new one to DEFAULT_MODEL, without retrying Jev."""
         table = self.routing
         if table is None or self.memory.get_model(guild_id, user_id):
             return None
@@ -1481,24 +1498,38 @@ class DiscordCodexClient(discord.Client):
         own = own.strip()
         said = [t.text for t in turns if t.role == "user" and t.speaker in (None, user_id)]
         images = any((a.content_type or "").startswith("image/") for a in attachments)
-        if effort:
-            verdict = Verdict("effort")  # the member set this message's effort: no move
-        elif images:
+        if images:
+            # Before the effort check: an image always takes the image list (a member's effort
+            # then only sets the strength there, below).
             verdict = Verdict("image")
+        elif effort:
+            verdict = Verdict("effort")  # the member set this message's effort: no move
         elif not own:
             verdict = Verdict("no-text")
         else:
             verdict = await routing.judge(own, said[-CONTEXT_TURNS:], self.config)
+        image_turn = verdict.status == "image"
         if verdict.status == "ok":
             route, why = routing.decide(table, verdict.kind, routing.band(verdict.score), route)
+        elif image_turn:
+            route, why = route or Route(table.image[0], "M", ""), "image"
         elif route is not None:
             why = "kept"  # no judgement: stay; never down on a missing answer
         else:
             route, why = Route(self._default_entry(), "M", ""), "default"
         # What this message is for the gates below: the verdict, or with none, the type that put
-        # the conversation where it stays (an X conversation keeps its X handling).
-        kind = verdict.kind if verdict.status == "ok" else route.kind
+        # the conversation where it stays (an X conversation keeps its X handling). An image is
+        # none of them: it goes the image list's order under the ordinary gates, never the X
+        # ones (no X stand-in, no weekly-share exemption, no "no X search" note).
+        if verdict.status == "ok":
+            kind = verdict.kind
+        else:
+            kind = "" if image_turn else route.kind
         entry, degraded = route.entry, []
+        if image_turn and routing.backend_of(entry) != CODEX:
+            # This message only (the route stays for the next one). The image list starts with
+            # Codex (checked at load); a conversation already on a Codex cell keeps its cell.
+            entry = table.image[0]
         backend = routing.backend_of(entry)
         if backend == CODEX and not effort:  # an effort the member set is theirs
             limits = await asyncio.to_thread(read_rate_limits, self.config)
@@ -1525,8 +1556,12 @@ class DiscordCodexClient(discord.Client):
         spares: list[Resolved] = []
         if target.backend == GROK and kind == "live-x":
             spares.append(routing.resolved(table.live_x_without_grok, model))
-        if routing.is_claude(entry) and route.kind in table.claude_failed:
+        if not image_turn and routing.is_claude(entry) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))
+        # An image turn takes only the image list's order (no type stand-ins), then MODEL_CHAIN;
+        # _answer drops repeats.
+        if image_turn:
+            spares.extend(routing.resolved(spare, model) for spare in table.image[1:])
         replay = ""
         if turns:
             # Another backend gets the conversation replayed, defanged by the prompt builder like
@@ -1572,7 +1607,8 @@ class DiscordCodexClient(discord.Client):
                 # with `quoted`, a holdout can tell the two cases apart.
                 "files": len(attachments),
             },
-            no_x=kind == "live-x",
+            # An image goes the owner's order, not because Grok is out: no "no X search" note.
+            no_x=kind == "live-x" and not image_turn,
         )
 
     def _routed_memo(
@@ -2540,9 +2576,13 @@ class DiscordCodexClient(discord.Client):
         model_line = f"模型：{chosen.label}（{origin}）· 強度 {self._effort_label(target)}"
         auto = self.routing is not None and not own
         if auto:
+            images = " → ".join(
+                self._via_label(routing.resolved(entry, self.config.codex_model))
+                for entry in self.routing.image
+            )
             model_line = (
-                f"模型：自動挑選（依每則問題的類型與難度）；附圖或判斷不出來的新對話用 "
-                f"{chosen.label} · 強度 {self._effort_label(target)}"
+                f"模型：自動挑選（依每則問題的類型與難度）；附圖依序用 {images}；"
+                f"判斷不出來的新對話用 {chosen.label} · 強度 {self._effort_label(target)}"
             )
         if chosen.backend in ROUTER_BACKENDS:
             info = self.catalogs[chosen.backend].get(chosen.family)
