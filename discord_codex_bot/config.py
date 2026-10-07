@@ -258,6 +258,12 @@ class Config:
     tracking_max_per_user: int
     tracking_schema_path: Path
     tracking_reasoning_effort: str
+    emoji_enabled: bool
+    emoji_db_path: Path
+    emoji_backfill_days: int
+    emoji_describe_hour: int
+    emoji_describe_max: int
+    emoji_schema_path: Path
     youtube_api_key: str
     twitch_client_id: str
     twitch_client_secret: str
@@ -499,6 +505,18 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             values.get("TRACKING_SCHEMA_FILE", "/opt/discord-codex/tracking-schema.json")
         ),
         tracking_reasoning_effort=_effort(values, "TRACKING_REASONING_EFFORT", "high"),
+        # Custom emoji understanding (emoji.py): samples, backfill, daily descriptions.
+        emoji_enabled=_boolean(values, "EMOJI_ENABLED"),
+        emoji_db_path=Path(
+            values.get("EMOJI_DB_FILE", "").strip()
+            or str(Path(values.get("CODEX_HOME", "/var/lib/codex")) / "emoji.sqlite3")
+        ),
+        emoji_backfill_days=_bounded_int(values, "EMOJI_BACKFILL_DAYS", 90, 0, 3650),
+        emoji_describe_hour=_bounded_int(values, "EMOJI_DESCRIBE_HOUR", 4, -1, 23),
+        emoji_describe_max=_bounded_int(values, "EMOJI_DESCRIBE_MAX", 50, 1, 1000),
+        emoji_schema_path=Path(
+            values.get("EMOJI_SCHEMA_FILE", "/opt/discord-codex/emoji-schema.json")
+        ),
         youtube_api_key=values.get("YOUTUBE_API_KEY", "").strip(),
         twitch_client_id=values.get("TWITCH_CLIENT_ID", "").strip(),
         twitch_client_secret=values.get("TWITCH_CLIENT_SECRET", "").strip(),

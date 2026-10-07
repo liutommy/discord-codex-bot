@@ -210,12 +210,24 @@ ROUTING_FEATURE = (
 )
 
 
-def _features(image_order: str) -> list[str]:
+# Shown only while EMOJI_ENABLED is on (emoji.py).
+EMOJI_FEATURE = (
+    "**看得懂伺服器表情**：訊息裡（含你回覆的那則）的本伺服器自訂表情，Bot 會照大家平常的用法"
+    "理解意思；說明每天依 Bot 看得到的頻道裡的使用情形與表情圖片整理，"
+    "用得少的只描述長相，動態表情只看名字。"
+)
+
+
+def _features(image_order: str, emoji: bool = False) -> list[str]:
     """The ability list; with routing on (`image_order` names the image list, from
-    config/routing.json) it also explains automatic model choice."""
-    if not image_order:
-        return FEATURES
-    return [*FEATURES, ROUTING_FEATURE.replace("{image}", image_order)]
+    config/routing.json) it also explains automatic model choice, and with emoji on how
+    the server's own emoji are read."""
+    features = list(FEATURES)
+    if image_order:
+        features.append(ROUTING_FEATURE.replace("{image}", image_order))
+    if emoji:
+        features.append(EMOJI_FEATURE)
+    return features
 
 
 def _fill(text: str, prefix: str, default: str) -> str:
@@ -223,7 +235,11 @@ def _fill(text: str, prefix: str, default: str) -> str:
 
 
 def render_guide(
-    prefix: str, registered: Iterable[str], default: str = "Codex", image_order: str = ""
+    prefix: str,
+    registered: Iterable[str],
+    default: str = "Codex",
+    image_order: str = "",
+    emoji: bool = False,
 ) -> str:
     """The member-facing guide for /<prefix>-help, in registered-command order. `default`
     is DEFAULT_MODEL as members read it; it is configuration, so never written in the text."""
@@ -237,7 +253,7 @@ def render_guide(
         blocks.append("\n".join(lines))
     blocks.append(
         "**不用指令也能做的事**\n"
-        + "\n".join(f"・{_fill(f, p, default)}" for f in _features(image_order))
+        + "\n".join(f"・{_fill(f, p, default)}" for f in _features(image_order, emoji))
     )
     return "\n\n".join(blocks)
 
@@ -247,6 +263,7 @@ def render_sheet(
     commands: Iterable[tuple[str, str, list[str]]],
     default: str = "Codex",
     image_order: str = "",
+    emoji: bool = False,
 ) -> str:
     """The compact sheet injected into the model's prompt: one line per command plus the
     feature list, Markdown stripped so it reads as facts rather than formatting."""
@@ -256,6 +273,8 @@ def render_sheet(
         lines.append(f"/{name} — {description}{suffix}")
     lines.append(
         "其他用法："
-        + " ".join(_fill(f, prefix, default).replace("**", "") for f in _features(image_order))
+        + " ".join(
+            _fill(f, prefix, default).replace("**", "") for f in _features(image_order, emoji)
+        )
     )
     return "\n".join(lines)

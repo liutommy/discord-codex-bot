@@ -11,6 +11,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, timedelta
 from datetime import datetime as _dt
 from pathlib import Path
 from typing import NamedTuple
@@ -56,6 +57,7 @@ from .backends import (
     split_stored,
 )
 from .backup import backup_forever, export_memory_zip
+from .clock import sleep_for
 from .codex import (
     QUOTE_FENCE,
     CodexResult,
@@ -68,9 +70,11 @@ from .codex import (
     split_quoted,
 )
 from .config import REASONING_EFFORTS, Config, load_config
-from .consolidate import consolidate_forever
+from .consolidate import consolidate_forever, seconds_until
 from .digest import digest_forever
-from .harvest import harvest_forever, transcript_turns
+from .emoji import CUSTOM as CUSTOM_EMOJI
+from .emoji import EmojiStore, backfill_channel, describe_pending
+from .harvest import _quota_ok, harvest_forever, transcript_turns
 from .help import render_guide, render_sheet
 from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, is_link_only, plan, spoilered
 from .links import (
@@ -436,6 +440,8 @@ class DiscordCodexClient(discord.Client):
         intents.guild_messages = True
         intents.message_content = True
         intents.emojis_and_stickers = True  # keeps guild.emojis populated for the 記住 button
+        if config.emoji_enabled:
+            intents.guild_reactions = True  # emoji.py: a reaction with the server's emoji
         # What the model writes is sent as is: an answer quoting @everyone, a role or a member
         # must not ping them (hub on PR #25). Only replying pings the member who asked; a send
         # that means to mention someone (reminders, tracking) says so with its own value.
@@ -462,6 +468,10 @@ class DiscordCodexClient(discord.Client):
         )
         self.memory = MemoryStore(config.codex_home / "memory", limits)
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
+        # The server's custom emoji and how members use them (emoji.py); None while off.
+        self.emoji = EmojiStore(config.emoji_db_path) if config.emoji_enabled else None
+        # channel id -> (id, text) of its latest message: the "previous" of an emoji sample.
+        self._last_message: dict[int, tuple[int, str]] = {}
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.alerts = Alerter(self, config)
         self._started_at = time.time()  # an --after-deploy announcement waits for a later start
@@ -623,6 +633,8 @@ class DiscordCodexClient(discord.Client):
         self.add_dynamic_items(AnswerButton)  # answer buttons keep working across restarts
         self._sweeper = self.loop.create_task(sweep_forever(self.config))
         self._backup_loop = self.loop.create_task(backup_forever(self.config))
+        if self.emoji is not None and self.config.emoji_describe_hour >= 0:
+            self._emoji_describer = self.loop.create_task(self._describe_emoji_forever())
         self._reminder_loop = self.loop.create_task(
             reminder_loop(self.reminders, self._fire_reminder, 30)
         )
@@ -669,9 +681,297 @@ class DiscordCodexClient(discord.Client):
             }
         LOGGER.info("Emoji cache: %s", {g: len(m) for g, m in self._emoji_cache.items()})
 
+    # ----- custom emoji understanding (emoji.py) ---------------------------------------------
+
+    def _sync_emoji(self, guild: discord.Guild) -> None:
+        if self.emoji is not None and guild.id in self.config.allowed_guild_ids:
+            self.emoji.sync(guild.id, [(e.id, e.name, e.animated) for e in guild.emojis])
+
+    async def on_guild_emojis_update(self, guild: discord.Guild, _before, _after) -> None:
+        self._sync_emoji(guild)
+
+    def _samples_from(self, guild_id: int | None, channel) -> bool:
+        """Emoji samples come from every channel of an allowed guild the Bot can see, private
+        ones included (owner, 2026-10-07: 「只要bot能看到的頻道都算可以運用的」)."""
+        if self.emoji is None or guild_id not in self.config.allowed_guild_ids:
+            return False
+        guild = self.get_guild(guild_id)
+        if guild is None or not isinstance(channel, (discord.abc.GuildChannel, discord.Thread)):
+            return False
+        return bool(channel.permissions_for(guild.me).view_channel)
+
+    async def _collect_emoji(self, message: discord.Message) -> None:
+        """A member message with the server's own emoji is a sample, with the channel's message
+        before it (any author, the Bot's own answers included)."""
+        guild_id = message.guild.id if message.guild else None
+        if not self._samples_from(guild_id, message.channel):
+            return
+        channel_id = message.channel.id
+        before = self._last_message.get(channel_id)
+        self._last_message[channel_id] = (message.id, message.content or "")
+        if message.author.bot:
+            return
+        ids = sorted(
+            {
+                int(emoji_id)
+                for animated, _n, emoji_id in CUSTOM_EMOJI.findall(message.content or "")
+                if not animated
+            }  # fmt: skip
+        )
+        ids = [emoji_id for emoji_id in ids if self.emoji.known(guild_id, emoji_id)]
+        if not ids:
+            return
+        if before is None:  # the first message seen in this channel since the Bot started
+            before = (None, "")
+            try:
+                async for earlier in message.channel.history(limit=1, before=message):
+                    before = (earlier.id, earlier.content or "")
+            except discord.HTTPException:
+                pass
+        for emoji_id in ids:
+            self.emoji.add_sample(
+                guild_id,
+                emoji_id,
+                "message",
+                message.id,
+                channel_id,
+                message.content or "",
+                before[1],
+                message.created_at.timestamp(),
+                previous_id=before[0],
+            )
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        """The channel's latest message changed (an answer replacing its 「思考中」 placeholder,
+        a member's edit): the next sample's "previous" is what it says now (Codex on PR #40)."""
+        content = payload.data.get("content")
+        if not isinstance(content, str):
+            return  # an embed resolving, not a text change
+        latest = self._last_message.get(payload.channel_id)
+        if latest is not None and latest[0] == payload.message_id:
+            self._last_message[payload.channel_id] = (payload.message_id, content)
+        channel = self.get_channel(payload.channel_id)
+        if channel is None or not self._samples_from(payload.guild_id, channel):
+            return
+        author = payload.data.get("author") or {}
+        try:
+            at = _dt.fromisoformat(payload.data["timestamp"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            at = time.time()
+        self.emoji.edit_message(
+            payload.guild_id,
+            payload.message_id,
+            payload.channel_id,
+            content,
+            at,
+            member=not author.get("bot", False),
+        )
+
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        """Someone reacted with one of the server's emoji: the message it was put on is a sample
+        (once; further reactions on it only count as uses)."""
+        emoji_id = payload.emoji.id
+        if emoji_id is None or payload.emoji.animated or payload.guild_id is None:
+            return
+        if self.user is not None and payload.user_id == self.user.id:
+            return
+        channel = self.get_channel(payload.channel_id)
+        if channel is None or not self._samples_from(payload.guild_id, channel):
+            return
+        if not self.emoji.known(payload.guild_id, emoji_id):
+            return
+        if self.emoji.has_sample(emoji_id, payload.message_id, "reaction"):
+            self.emoji.count_use(emoji_id)
+            return
+        message = discord.utils.get(self.cached_messages, id=payload.message_id)
+        if message is None:
+            try:
+                message = await channel.fetch_message(payload.message_id)
+            except (discord.HTTPException, AttributeError):
+                return
+        self.emoji.add_sample(
+            payload.guild_id,
+            emoji_id,
+            "reaction",
+            message.id,
+            payload.channel_id,
+            message.content or "",
+            "",
+            message.created_at.timestamp(),
+        )
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        self._forget_messages(payload.channel_id, [payload.message_id])
+
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
+        self._forget_messages(payload.channel_id, payload.message_ids)
+
+    def _forget_messages(self, channel_id: int, message_ids) -> None:
+        """Deleted messages leave no trace: not in samples, and not as the cached latest message
+        the next sample would take as its "previous" (Codex on PR #40)."""
+        if self.emoji is None:
+            return
+        ids = set(message_ids)
+        latest = self._last_message.get(channel_id)
+        if latest is not None and latest[0] in ids:
+            del self._last_message[channel_id]
+        self.emoji.forget_messages(ids)
+
+    async def _backfill_emoji(self) -> None:
+        """The one-off history read (emoji.backfill_channel) of every allowed guild: each
+        channel, active and archived thread the Bot may read, back EMOJI_BACKFILL_DAYS from the
+        first run. Channels it may not read are logged by name, never skipped silently."""
+        days = self.config.emoji_backfill_days
+        anchor = self.emoji.meta("backfill_anchor")
+        if anchor is None:
+            anchor = _dt.now(UTC).isoformat()
+            self.emoji.set_meta("backfill_anchor", anchor)
+        start = _dt.fromisoformat(anchor)
+        horizon = start - timedelta(days=days)
+        for guild in self.guilds:
+            if guild.id not in self.config.allowed_guild_ids:
+                continue
+            channels: list = [*guild.text_channels, *guild.threads]
+            unlisted = []  # parents whose archived threads Discord would not list
+            # Public archived threads, and the private ones the Bot joined (only text channels have
+            # private threads; Codex on PR #40).
+            listings = [(parent, {}) for parent in [*guild.text_channels, *guild.forums]]
+            # All private archives need Manage Threads; without it, the ones the Bot joined.
+            listings += [
+                (parent, {"private": True})
+                if parent.permissions_for(guild.me).manage_threads
+                else (parent, {"private": True, "joined": True})
+                for parent in guild.text_channels
+            ]
+            for parent, kind in listings:
+                try:
+                    async for thread in parent.archived_threads(limit=None, **kind):
+                        if thread.archive_timestamp < horizon:
+                            break
+                        channels.append(thread)
+                except discord.HTTPException as error:
+                    which = " private" if kind else ""
+                    unlisted.append(f"#{parent.name} ({parent.id}){which}: {error.status}")
+            if unlisted:
+                # Their archived threads are not read this run; the next start lists them again.
+                LOGGER.warning(
+                    "Emoji backfill guild=%s: archived threads not listed in %d channel(s): %s",
+                    guild.id,
+                    len(unlisted),
+                    ", ".join(unlisted),
+                )
+            readable, unreadable = [], []
+            for channel in channels:
+                allowed = channel.permissions_for(guild.me)
+                if allowed.view_channel and allowed.read_message_history:
+                    readable.append(channel)
+                else:
+                    unreadable.append(channel)
+            if unreadable:
+                LOGGER.warning(
+                    "Emoji backfill guild=%s: no View Channel / Read Message History in %d"
+                    " channel(s): %s",
+                    guild.id,
+                    len(unreadable),
+                    ", ".join(f"#{c.name} ({c.id})" for c in unreadable),
+                )
+            for channel in readable:
+                try:
+                    messages, samples = await backfill_channel(
+                        self.emoji, guild.id, channel, start, days
+                    )
+                except discord.HTTPException:
+                    LOGGER.exception("Emoji backfill of #%s (%s) failed", channel.name, channel.id)
+                    continue
+                if messages:
+                    LOGGER.info(
+                        "Emoji backfill #%s (%s): %d messages, %d samples",
+                        channel.name,
+                        channel.id,
+                        messages,
+                        samples,
+                    )
+            done = [row for row in self.emoji.status()["backfill"] if row["guild_id"] == guild.id]
+            LOGGER.info(
+                "Emoji backfill guild=%s done back %d days: %s; unreadable %d, archived threads"
+                " not listed in %d",
+                guild.id,
+                days,
+                done[0] if done else {},
+                len(unreadable),
+                len(unlisted),
+            )
+
+    async def _backfill_emoji_safely(self) -> None:
+        try:
+            await self._backfill_emoji()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("Emoji backfill stopped; the next start goes on from there")
+
+    async def _emoji_image(self, emoji) -> Path | None:
+        found = self.get_emoji(emoji.emoji_id)
+        if found is None:
+            return None
+        self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
+        path = self.config.attachment_dir / f"emoji-{emoji.emoji_id}.png"
+        try:
+            await found.save(path)
+        except (discord.HTTPException, discord.NotFound, OSError):
+            return None
+        return path
+
+    async def _describe_emoji(self, prompt: str, image: Path) -> str:
+        return await self.queue.run(
+            lambda: run_batch(
+                prompt,
+                self.config,
+                schema=self.config.emoji_schema_path,
+                isolated=True,
+                images=[image],
+            )
+        )
+
+    async def _describe_emoji_forever(self) -> None:
+        """Daily at EMOJI_DESCRIBE_HOUR, behind the same quota gate as harvest: up to
+        EMOJI_DESCRIBE_MAX emoji with new samples, one queued turn each."""
+        while True:
+            await sleep_for(
+                seconds_until(self.config.emoji_describe_hour, self.config.consolidate_timezone)
+            )
+            try:
+                if not await _quota_ok(self.config):
+                    continue
+                stats = await describe_pending(
+                    self.emoji,
+                    self._describe_emoji,
+                    self._emoji_image,
+                    self.config.emoji_describe_max,
+                    f"bot:{self.config.codex_model}",
+                    self.config.allowed_guild_ids,
+                )
+                LOGGER.info("Emoji descriptions: %s", stats)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("Emoji descriptions failed")
+
+    def _start_emoji(self) -> None:
+        """On every ready: the guilds' emoji as they are now, and the backfill unless one is
+        running (it goes on from where the last one stopped)."""
+        if self.emoji is None:
+            return
+        for guild in self.guilds:
+            self._sync_emoji(guild)
+        task = getattr(self, "_emoji_backfill_task", None)
+        if self.config.emoji_backfill_days > 0 and (task is None or task.done()):
+            self._emoji_backfill_task = asyncio.create_task(self._backfill_emoji_safely())
+
     async def on_ready(self) -> None:
         LOGGER.info("Discord bot ready as %s", self.user)
         await self.warm_emojis()
+        self._start_emoji()
         LOGGER.info("%s", await codex_login_status(self.config))
         if grok.enabled(self.config):  # the model list /model offers and effort mapping uses
             # never hold up startup on the sidecar; kept so the task is not garbage-collected
@@ -847,6 +1147,7 @@ class DiscordCodexClient(discord.Client):
             self._command_rows(),
             self._default_label(),
             image_order=self._image_order(),
+            emoji=self.emoji is not None,
         )
         doc = apis.render_doc(self.apis)
         return f"{sheet}\n{doc}" if doc else sheet
@@ -858,6 +1159,7 @@ class DiscordCodexClient(discord.Client):
             [row[0] for row in self._command_rows()],
             self._default_label(),
             image_order=self._image_order(),
+            emoji=self.emoji is not None,
         )
 
     def _image_order(self) -> str:
@@ -938,6 +1240,10 @@ class DiscordCodexClient(discord.Client):
         replayed to a backend that did not hold it; `spare_history` is what a spare taking over
         from the routed target gets instead of the target's thread. The result's `via` is what
         answered."""
+        if self.emoji is not None and guild_id is not None:
+            # `<:name:id>` as the model can read it; never the emoji's image, which would make
+            # this an image turn (emoji.py).
+            prompt = self.emoji.rewrite(prompt, guild_id)
         stored = self._stored(guild_id, user_id)
         choice = self._choice(stored)
         target = resolve(
@@ -1083,6 +1389,7 @@ class DiscordCodexClient(discord.Client):
                 for section in (
                     f"[永久記憶索引]\n{permanent}" if permanent else "",
                     self.memory.render(guild_id, user_id),
+                    self.emoji.block(guild_id) if self.emoji is not None else "",
                     f"[待辦提醒]\n{pending}" if pending else "",
                     f"[社群追蹤]\n{tracked}" if tracked else "",
                 )
@@ -3199,6 +3506,10 @@ class DiscordCodexClient(discord.Client):
     # ----- @mention entry point --------------------------------------------------------------
 
     async def on_message(self, message: discord.Message) -> None:
+        try:
+            await self._collect_emoji(message)  # any message: the next one's "previous"
+        except Exception:
+            LOGGER.exception("Emoji sample failed channel=%s", message.channel.id)
         if message.author.bot or self.user is None:
             return
         # Member-visible link cleaning runs on every message in an allowed channel, not just on

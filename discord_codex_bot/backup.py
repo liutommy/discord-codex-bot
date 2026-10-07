@@ -31,6 +31,7 @@ BACKUP_MEMBERS = (
     "reminders.json",
 )
 TRACKING_DB = "tracking.sqlite3"
+EMOJI_DB = "emoji.sqlite3"  # emoji.py's samples and descriptions
 ARCHIVE_PREFIX = "discord-codex-bot-"
 # A file that vanished while the archive was written means the tree was moving under it (memory
 # rewrite moves MEMORY.md and topics/ into .backup/): list it again and start over, a few times.
@@ -85,25 +86,32 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
     if not config.backup_dir:
         return None
     present = _present(config)
-    tracking = config.tracking_db_path
-    if not present and not tracking.exists():
+    # SQLite files go in through SQLite's online backup API, never as raw files mid-write.
+    databases = [
+        (path, name)
+        for path, name in ((config.tracking_db_path, TRACKING_DB), (config.emoji_db_path, EMOJI_DB))
+        if path.exists()
+    ]
+    if not present and not databases:
         return None
     config.backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.fromtimestamp(now or time.time()).strftime("%Y%m%d-%H%M%S")
     target = config.backup_dir / f"{ARCHIVE_PREFIX}{stamp}.tar.gz"
     partial = target.with_suffix(".tmp")
     with tempfile.TemporaryDirectory(dir=config.backup_dir) as scratch:
-        snapshot = Path(scratch) / TRACKING_DB
-        if tracking.exists():
-            with sqlite3.connect(tracking) as source, sqlite3.connect(snapshot) as destination:
+        snapshots = []
+        for path, name in databases:
+            snapshot = Path(scratch) / name
+            with sqlite3.connect(path) as source, sqlite3.connect(snapshot) as destination:
                 source.backup(destination)
+            snapshots.append((snapshot, name))
         for attempt in range(1, BACKUP_ATTEMPTS + 1):
             vanished = 0
             with tarfile.open(partial, "w:gz") as tar:
                 for path, name in present:
                     vanished += _add_tree(tar, path, name)
-                if snapshot.exists():
-                    tar.add(snapshot, arcname=TRACKING_DB)
+                for snapshot, name in snapshots:
+                    tar.add(snapshot, arcname=name)
             if not vanished:
                 break
             LOGGER.warning(

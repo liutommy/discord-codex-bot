@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 CODEX = "codex"
@@ -133,8 +135,10 @@ async def run_batch(
     schema=None,
     effort: str = "",
     isolated: bool = False,
+    images: Sequence[Path] = (),
 ) -> str:
-    """One background turn (memory consolidation, social classification) as text.
+    """One background turn (memory consolidation, social classification, emoji descriptions)
+    as text; `images` go along with it.
 
     Batch jobs have nobody watching to retry them, so a spent subscription or temporarily full
     model must not simply fail: the same CODEX_FALLBACK_MODEL that answers members takes over.
@@ -147,7 +151,7 @@ async def run_batch(
 
     try:
         result = await run_codex(
-            prompt, config, effort=effort, raw=True, schema=schema, isolated=isolated
+            prompt, config, effort=effort, raw=True, schema=schema, isolated=isolated, images=images
         )
         return result.text
     except CodexFallbackError as unavailable:
@@ -162,7 +166,9 @@ async def run_batch(
             unavailable,
             spare.model,
         )
-        result = await run_agy(prompt, config, spare.model, raw=True, schema=schema, plain=True)
+        result = await run_agy(
+            prompt, config, spare.model, raw=True, schema=schema, plain=True, images=images
+        )
         return result.text
 
 

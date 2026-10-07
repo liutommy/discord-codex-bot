@@ -1038,3 +1038,61 @@ def test_help_tells_members_and_the_model_about_routing(client) -> None:
     assert "難度只升不降" in client.help_sheet() and "不會換弱" not in client.help_sheet()
     client.routing = None
     assert "自動挑模型" not in client.help_guide() and "自動挑模型" not in client.help_sheet()
+
+
+async def test_a_message_with_custom_emoji_is_still_a_judged_text_turn(
+    client, monkeypatch, tmp_path
+) -> None:
+    # Hub spec 2026-10-07: emoji reach the model as :name:（description）, never as their
+    # picture — a picture would make this an image turn, and image turns skip Jev.
+    from discord_codex_bot.emoji import EmojiStore
+
+    pepe = 100000000000000001
+    client.emoji = EmojiStore(tmp_path / "emoji.sqlite3")
+    client.emoji.sync(GUILD, [(pepe, "pepe", False)])
+    client.emoji.describe(pepe, "綠色青蛙，表示無奈", False, "bot:x")
+    asked = verdicts(monkeypatch, ok("chat", 2))
+    client._connection.user = types.SimpleNamespace(id=123)
+    logged: list[dict] = []
+    answered: list[tuple] = []
+    monkeypatch.setattr(client, "_log_route", lambda plan, result: logged.append(plan.log))
+
+    async def answer(prompt, attachments, *args, **kwargs):
+        answered.append((prompt, list(attachments)))
+        return CodexResult("好", via=kwargs["routed"])
+
+    async def reply(text, **kw):
+        return types.SimpleNamespace(id=779)
+
+    channel = types.SimpleNamespace(id=3, typing=contextlib.nullcontext)
+    message = types.SimpleNamespace(
+        id=42,
+        author=types.SimpleNamespace(bot=False, id=USER, display_name="B"),
+        content=f"<@123> <:pepe:{pepe}> 這樣對嗎",
+        mentions=[client._connection.user],
+        guild=types.SimpleNamespace(id=GUILD),
+        channel=channel,
+        attachments=[],
+        reference=None,
+        reply=reply,
+    )
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    async def no_previews(*args, **kwargs):
+        return {}
+
+    async def direct(key, owner, show, start):
+        return await start(None, None)
+
+    monkeypatch.setattr(client, "_collect_emoji", nothing)
+    monkeypatch.setattr(client, "_linkclean", nothing)
+    monkeypatch.setattr(client, "_referenced", nothing)
+    monkeypatch.setattr(client, "_previews", no_previews)
+    monkeypatch.setattr(client, "_run_tracked", direct)
+    monkeypatch.setattr(client, "_answer", answer)
+    monkeypatch.setattr(client, "_access", lambda *args: "")
+    await client.on_message(message)
+    assert asked and logged[-1]["status"] == "ok" and logged[-1]["files"] == 0
+    assert answered == [(f"<:pepe:{pepe}> 這樣對嗎", [])]  # no picture went along

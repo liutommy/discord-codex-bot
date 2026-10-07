@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 
 from .backends import run_batch
 from .config import Config
+from .emoji import strip_descriptions
 from .grok import THREAD_ID as GROK_THREAD_ID
 from .grok import load_transcript as load_grok_transcript
 from .memory import MemoryStore
@@ -147,10 +148,16 @@ def _legacy(prompt: str) -> bool:
 
 
 def _own_words(turns: list[Turn]) -> list[Turn]:
+    """Member turns as the member wrote them: without a legacy quote prefix, and without the
+    emoji descriptions the Bot wrote into their message (emoji.strip_descriptions)."""
     return [
-        replace(turn, text=_LEGACY_QUOTE.sub("", turn.text, count=1)) if turn.legacy else turn
-        for turn in turns
+        replace(turn, text=_member_text(turn)) if turn.role == "user" else turn for turn in turns
     ]
+
+
+def _member_text(turn: Turn) -> str:
+    text = _LEGACY_QUOTE.sub("", turn.text, count=1) if turn.legacy else turn.text
+    return strip_descriptions(text)
 
 
 def transcript_turns(config: Config, thread_id: str) -> list[Turn]:
