@@ -324,6 +324,61 @@ async def test_harvesting_a_thread_records_it_in_the_ledger(tmp_path: Path, conf
     assert [(e["key"], e["thread_id"]) for e in read_ledger(config)] == [("1:2:3", "t1")]
 
 
+@pytest.mark.parametrize("retire", ["switch", "forget", "ttl"])
+async def test_the_ledger_has_when_the_thread_was_used_not_when_it_was_harvested(
+    tmp_path: Path, config: Config, monkeypatch, retire: str
+) -> None:
+    # The ledger stamped the harvest time, so a thread used weeks ago and harvested today
+    # landed in this week's digest (Codex finding 29).
+    from discord_codex_bot.harvest import _harvest_one
+
+    config, store = _setup(tmp_path, config)
+    _thread(config, "t1", ["隨便問問"])
+    used = NOW - 20 * DAY
+    clock = [used]
+    monkeypatch.setattr(time, "time", lambda: clock[0])  # one module: threads and harvest
+    threads = ThreadStore(config.codex_home / "threads.json", 3600, "v1")
+    threads.remember("1:2:3", "t1")
+    clock[0] = used + 60
+    if retire == "switch":
+        threads.remember("1:2:3", "t2")
+    elif retire == "forget":
+        threads.forget("1:2:3")
+    clock[0] = NOW
+    assert ("1:2:3", "t1") in threads.harvest_candidates()
+
+    async def nothing(prompt: str) -> str:
+        return json.dumps({"notes": []})
+
+    await _harvest_one(threads, store, config, "1:2:3", "t1", nothing)
+    assert [(e["thread_id"], e["at"]) for e in read_ledger(config)] == [("t1", used)]
+
+
+def test_a_thread_retired_twice_counts_its_latest_use(tmp_path: Path, monkeypatch) -> None:
+    # Switched away from t1, back to it (a reply to an old answer), and away again before the
+    # harvest: t1 is pending twice, and the first time was the stale one (Codex on PR #39).
+    clock = [NOW - 10 * DAY]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    threads = ThreadStore(tmp_path / "threads.json", 3600, "v1")
+    for thread, at in (("t1", NOW - 10 * DAY), ("t2", NOW - 9 * DAY), ("t1", NOW - DAY)):
+        clock[0] = at
+        threads.remember("1:2:3", thread)
+    clock[0] = NOW
+    threads.remember("1:2:3", "t3")
+    assert threads.last_active("1:2:3", "t1") == NOW - DAY
+
+
+def test_a_thread_retired_before_its_time_was_kept_is_stamped_now(
+    tmp_path: Path, config: Config
+) -> None:
+    config, _ = _setup(tmp_path, config)
+    path = config.codex_home / "threads.json"
+    path.write_text(json.dumps({"pending": [{"key": "1:2:3", "thread_id": "old"}]}), "utf-8")
+    assert ThreadStore(path, 3600, "v1").last_active("1:2:3", "old") is None
+    record_retired(config, "1:2:3", "old", None, now=NOW)
+    assert [e["at"] for e in read_ledger(config)] == [NOW]
+
+
 def _guild_note(*members: str) -> str:
     evidence = [{"member": m, "quote": "這週五晚上開團"} for m in members]
     return json.dumps({"notes": [{"name": "週五開團", "text": "週五開團", "evidence": evidence}]})

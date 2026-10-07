@@ -706,13 +706,20 @@ class TrackerStore:
         with self._connect() as connection:
             return bool(connection.execute(query, params).rowcount)
 
-    def consume_slots(self, now: float | None = None, unread: Collection[int] = ()) -> None:
+    def consume_slots(
+        self,
+        now: float | None = None,
+        unread: Collection[int] = (),
+        only: Collection[int] | None = None,
+    ) -> None:
         """A fixed time that came and went with nothing to judge is used up all the same:
         otherwise an item arriving at 13:00 would find 12:01 still owed and be judged at once.
         Not when the watch's source (in `unread`) could not be read this pass: nothing to judge
         then says nothing, and what the next pass finds would wait a day (Codex on PR #15)."""
         now = time.time() if now is None else now
         for watch in self.watches(active_only=True):
+            if only is not None and watch.id not in only:
+                continue  # its source was not fetched this pass
             if watch.times and watch.source_id not in unread and watch_due(watch, now):
                 self.mark_classified(watch.id)
 
@@ -1924,12 +1931,19 @@ async def run_tracking_once(
     classifier: Classifier,
     deliverer: Deliverer,
     keep_days: int = 0,
+    only: Collection[int] | None = None,
 ) -> dict[str, int]:
     """Fetch unique sources, batch each watch once, persist, then drain the durable outbox.
-    `keep_days` is the prune horizon: nothing older is judged or expired again."""
+    `keep_days` is the prune horizon: nothing older is judged or expired again. `only` (watch
+    ids) limits the pass to those watches and their sources: a wake for a fixed time fetches
+    what that time judges, not every source again."""
     stats = defaultdict(int)
     unread: set[int] = set()  # failed, or not checked (an X source between its own checks)
-    for source in store.active_sources():
+    sources = store.active_sources()
+    if only is not None:
+        wanted = {watch.source_id for watch in store.watches(active_only=True) if watch.id in only}
+        sources = [source for source in sources if source.id in wanted]
+    for source in sources:
         try:
             result = await fetcher(source)
             stats["new_items"] += len(store.ingest(source, result))
@@ -1946,6 +1960,8 @@ async def run_tracking_once(
         LOGGER.warning("Watch %s: %d item(s) expired unjudged", watch_id, count)
         stats["expired"] += count
     for watch, items in store.pending_by_watch(keep_days=keep_days):
+        if only is not None and watch.id not in only:
+            continue
         source = store.get_source(watch.source_id)
         label = ""
         if source is not None:
@@ -1985,7 +2001,7 @@ async def run_tracking_once(
             # Failures of an interval watch included, so a watch that keeps erroring waits out
             # its interval instead of burning quota on every fetch pass.
             store.mark_classified(watch.id)
-    store.consume_slots(unread=unread)
+    store.consume_slots(unread=unread, only=only)
     for message in store.pending_outbox():
         try:
             await deliverer(message)
@@ -2008,9 +2024,24 @@ async def tracking_loop(
     keep_days: int = 0,
 ) -> None:
     pruned_at = 0.0
+    full_at = 0.0  # wall clock of the next full pass: every source, every due watch
     while True:
+        now = time.time()
+        full = now >= full_at
         try:
-            stats = await run_tracking_once(store, fetcher, classifier, deliverer, keep_days)
+            only = None
+            if not full:
+                # Woken early for a fixed time: only the watches it made due, and their sources.
+                only = {
+                    watch.id
+                    for watch in store.watches(active_only=True)
+                    if watch.times and watch_due(watch, now)
+                }
+            stats = (
+                await run_tracking_once(store, fetcher, classifier, deliverer, keep_days, only)
+                if only is None or only
+                else {}
+            )
             # A silent success is how a total provider outage went unnoticed for half a day:
             # only failures were ever written down, so the only way to tell the pass had run
             # was to read the database. Idle passes stay quiet; anything that actually happened
@@ -2028,12 +2059,15 @@ async def tracking_loop(
             raise
         except Exception:
             LOGGER.exception("Social tracking pass failed")
+        if full:  # an interval after the pass ends, as before: a slow pass is not run back to back
+            full_at = time.time() + interval_seconds
         # Wake for a watch's fixed time rather than up to one interval after it.
         try:
             upcoming = store.seconds_to_next_slot()
         except Exception:
             upcoming = None
-        delay = interval_seconds if upcoming is None else min(interval_seconds, upcoming + 2)
+        delay = max(0.0, full_at - time.time())
+        delay = delay if upcoming is None else min(delay, upcoming + 2)
         # Wall-clock steps: a VM frozen through a watch's fixed time runs the pass when it resumes,
         # not late by the whole pause (Codex on PR #25).
         await sleep_for(max(1.0, delay))

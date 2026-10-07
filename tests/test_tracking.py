@@ -1317,3 +1317,60 @@ async def test_a_failed_fetch_does_not_use_up_a_fixed_time(tmp_path, monkeypatch
     stats = await tracking.run_tracking_once(store, fresh, classify, _no_delivery)
     assert stats["decisions"] == 1
     assert not watch_due(store.watches()[0], clock[0])
+
+
+async def test_a_wake_for_a_fixed_time_fetches_only_that_watchs_source(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Every wake for a fixed time ran a full pass, fetching every source again — a second
+    # full fetch minutes after the last one, once per slot of every watch (Codex finding 32).
+    clock = [taipei(2, 11, 50)]
+    monkeypatch.setattr(tracking.time, "time", lambda: clock[0])
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    timed = store.add_source("ruten", "1", "https://www.ruten.com.tw/store/x/")
+    other = store.add_source("youtube", "UC1", "@one")
+    store.add_watch(timed.id, 1, 2, 3, times=("12:01",), interval_minutes=60)
+    store.add_watch(other.id, 1, 2, 3, interval_minutes=15)
+    fetched: list[int] = []
+    wakes = [taipei(2, 12, 1) + 2, taipei(2, 12, 6)]
+
+    async def fetch(source):
+        fetched.append(source.id)
+        return FetchResult(())
+
+    async def sleep(_seconds):
+        if not wakes:
+            raise asyncio.CancelledError
+        clock[0] = wakes.pop(0)
+
+    monkeypatch.setattr(tracking, "sleep_for", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await tracking.tracking_loop(store, fetch, _nothing_new, _no_delivery, 900)
+    # 11:50 a full pass; 12:01 the fixed time's source alone; 12:06 the next full pass (due
+    # 12:05) fetches everything again.
+    assert fetched == [timed.id, other.id, timed.id, timed.id, other.id]
+
+
+async def test_a_slow_full_pass_still_waits_an_interval_before_the_next(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Timing the next full pass from the start of this one ran a pass longer than the
+    # interval back to back with the next (hub on PR #39).
+    clock = [taipei(2, 11)]
+    monkeypatch.setattr(tracking.time, "time", lambda: clock[0])
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    store.add_watch(store.add_source("youtube", "UC1", "@one").id, 1, 2, 3, interval_minutes=15)
+    slept: list[float] = []
+
+    async def slow_fetch(_source):
+        clock[0] += 1000  # longer than the 900 s interval
+        return FetchResult(())
+
+    async def sleep(seconds):
+        slept.append(seconds)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tracking, "sleep_for", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await tracking.tracking_loop(store, slow_fetch, _nothing_new, _no_delivery, 900)
+    assert slept == [900.0]

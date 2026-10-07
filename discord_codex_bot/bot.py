@@ -614,6 +614,12 @@ class DiscordCodexClient(discord.Client):
         )
 
     async def setup_hook(self) -> None:
+        # Scratch files of writes killed mid-way (atomic_write only cleans up after its errors).
+        try:
+            if removed := await asyncio.to_thread(self.memory.sweep_scratch):
+                LOGGER.info("Removed %d stale memory scratch file(s)", removed)
+        except OSError:
+            LOGGER.exception("Memory scratch sweep failed")
         self.add_dynamic_items(AnswerButton)  # answer buttons keep working across restarts
         self._sweeper = self.loop.create_task(sweep_forever(self.config))
         self._backup_loop = self.loop.create_task(backup_forever(self.config))

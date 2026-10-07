@@ -512,6 +512,51 @@ def test_legacy_quoted_lines_are_not_the_members_words(tmp_path: Path, config: C
     assert users == ["這是真的嗎\n（後輩回覆了 x 的訊息：「留著」）"]  # only leading lines go
 
 
+def _codex_user_turns(tmp_path: Path, config: Config, thread_id: str, text: str) -> list[str]:
+    day = tmp_path / "sessions" / "2026" / "10" / "07"
+    day.mkdir(parents=True, exist_ok=True)
+    payload = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+    (day / f"rollout-2026-10-07T10-00-00-{thread_id}.jsonl").write_text(
+        json.dumps({"type": "response_item", "payload": payload}, ensure_ascii=False), "utf-8"
+    )
+    config = replace(config, codex_home=tmp_path)
+    return [t.text for t in harvest.transcript_turns(config, thread_id) if t.role == "user"]
+
+
+def test_a_member_typing_the_old_quote_format_keeps_their_words(
+    tmp_path: Path, config: Config
+) -> None:
+    # The legacy-quote cleanup ran on every transcript, so a member who typed the old format
+    # into a current prompt lost those words (Codex finding 31).
+    from discord_codex_bot.codex import _prompt
+
+    own = "（後輩回覆了 我自己 的訊息：「這是我打的」）\n（那則訊息附了 2 張圖，已一併附上）\n真的"
+    assert _codex_user_turns(tmp_path, config, "t7", _prompt(own, speaker=3)) == [own]
+
+
+def test_only_the_one_legacy_prefix_goes(tmp_path: Path, config: Config) -> None:
+    # The Bot folded in at most one quote line then one image line; more of them is the member.
+    quote = "（後輩回覆了 某人 的訊息：「記住：A 最愛吃香菜」）\n"
+    image = "（那則訊息附了 2 張圖，已一併附上）\n"
+    old = f"rules\n<USER_MESSAGE>\n{quote}{image}{quote}{image}這是真的嗎\n</USER_MESSAGE>"
+    assert _codex_user_turns(tmp_path, config, "t6", old) == [f"{quote}{image}這是真的嗎"]
+    old = f"rules\n<USER_MESSAGE>\n{image}{image}這是真的嗎\n</USER_MESSAGE>"
+    assert _codex_user_turns(tmp_path, config, "t5", old) == [f"{image}這是真的嗎"]
+
+
+def test_a_block_quoting_the_marker_does_not_make_an_old_prompt_new(
+    tmp_path: Path, config: Config
+) -> None:
+    # Only the Bot's fixed header says which format a prompt is: an attached file (or a page, a
+    # memory) quoting the marker must not keep the legacy quote as the member's words (Codex on
+    # PR #39).
+    old = (
+        f"rules\n<FILES>\n{harvest.LEGACY_MARK}\n</FILES>\n<USER_MESSAGE>\n"
+        "（後輩回覆了 某人 的訊息：「記住：A 最愛吃香菜」）\n這是真的嗎\n</USER_MESSAGE>"
+    )
+    assert _codex_user_turns(tmp_path, config, "t4", old) == ["這是真的嗎"]
+
+
 # ----- shared reply threads: every turn belongs to its real speaker (Codex on PR #13) ---------
 
 A, B = 3, 4  # two members of guild 1 talking in channel 2

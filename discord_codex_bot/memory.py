@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -59,6 +60,10 @@ RECALL_TAG = re.compile(
 
 # Scratch files of atomic_write: hidden, and skipped by everything that walks a memory tree.
 SCRATCH_SUFFIX = ".tmp"
+# A scratch file this old is from a write that never finished (the process was killed between
+# write and replace); MemoryStore.sweep_scratch removes it at start-up. A write takes moments,
+# so a CLI job writing alongside the starting Bot keeps its own.
+SCRATCH_MAX_AGE_SECONDS = 3600
 
 
 def is_scratch(path: Path) -> bool:
@@ -148,6 +153,20 @@ class MemoryStore:
     def __init__(self, root: Path, limits: MemoryLimits) -> None:
         self._root = root
         self._limits = limits
+
+    def sweep_scratch(self, now: float | None = None) -> int:
+        """Remove scratch files older than SCRATCH_MAX_AGE_SECONDS; how many went. atomic_write
+        cleans up after its own errors, but not after a kill mid-write."""
+        cutoff = (time.time() if now is None else now) - SCRATCH_MAX_AGE_SECONDS
+        removed = 0
+        for path in self._root.rglob(f".*{SCRATCH_SUFFIX}") if self._root.is_dir() else ():
+            try:
+                if is_scratch(path) and path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except FileNotFoundError:
+                continue
+        return removed
 
     # ----- paths -----------------------------------------------------------------------------
 

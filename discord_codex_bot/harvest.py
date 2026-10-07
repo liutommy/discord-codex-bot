@@ -53,6 +53,7 @@ class Turn:
     role: str
     text: str
     speaker: int | None = None  # Discord id the Bot tagged a user turn with; None when untagged
+    legacy: bool = False  # a member turn from a prompt older than QUOTED_MESSAGE (_LEGACY_QUOTE)
 
 
 def _member_turn(text: str) -> Turn | None:
@@ -62,7 +63,7 @@ def _member_turn(text: str) -> Turn | None:
     if match is None:
         return None
     speaker = match.group(1)
-    return Turn("user", match.group(2).strip(), int(speaker) if speaker else None)
+    return Turn("user", match.group(2).strip(), int(speaker) if speaker else None, _legacy(text))
 
 
 def rollout_path(config: Config, thread_id: str):
@@ -98,7 +99,7 @@ def _openrouter_turns(config: Config, thread_id: str) -> list[Turn]:
     for message in load_transcript(config, thread_id):
         text = message_text(message.get("content"))
         if message.get("role") == "user":
-            turns.append(_member_turn(text) or Turn("user", text.strip()))
+            turns.append(_member_turn(text) or Turn("user", text.strip(), legacy=True))
         elif message.get("role") == "assistant" and text.strip():
             turns.append(Turn("assistant", text.strip()))
     return turns
@@ -118,17 +119,36 @@ def _grok_turns(config: Config, thread_id: str) -> list[Turn]:
     return turns
 
 
-# Before QUOTED_MESSAGE (2026-10-01) a message the member replied to was folded into their own
-# USER_MESSAGE as these leading lines (bot.with_quoted_message). Transcripts from then are still
-# read, so the lines are dropped there: they are someone else's words, not the member's.
+# Before QUOTED_MESSAGE (b71add3, 2026-10-01) a message the member replied to was folded into
+# their own USER_MESSAGE as leading lines (bot.with_quoted_message at 4713b0d): at most one quote
+# line, whitespace collapsed so it never spans lines, then at most one image line. Transcripts
+# from then are still read, so those lines are dropped there: someone else's words, not the
+# member's. Only there: since b71add3 every prompt carries LEGACY_MARK's instruction line, and a
+# member typing the same text into a newer prompt is their own words.
 _LEGACY_QUOTE = re.compile(
-    r"\A(?:（後輩回覆了 .*? 的訊息：「.*」）\n|（那則訊息附了 \d+ 張圖，已一併附上）\n)+"
+    r"\A(?:（後輩回覆了 [^\n]*? 的訊息：「[^\n]*」）\n(?:（那則訊息附了 \d+ 張圖，已一併附上）\n)?"
+    r"|（那則訊息附了 \d+ 張圖，已一併附上）\n)"
 )
+LEGACY_MARK = "QUOTED_MESSAGE, when present, is someone else's message"
+# Where the prompt's fixed instructions end: the first block the Bot opens (codex._prompt puts
+# every block after them). Only that header is the Bot's own text; a block may carry anything,
+# LEGACY_MARK included (Codex on PR #39).
+_FIRST_BLOCK = re.compile(
+    r"^<(?:OUTPUT_STYLE|PERSONAL_STYLE|MEMORY|LINKS|FILES|HELP|EARLIER_CONVERSATION"
+    r"|QUOTED_MESSAGE|USER_MESSAGE)\b",
+    re.M,
+)
+
+
+def _legacy(prompt: str) -> bool:
+    """A prompt from before QUOTED_MESSAGE: its fixed header lacks LEGACY_MARK."""
+    block = _FIRST_BLOCK.search(prompt)
+    return LEGACY_MARK not in prompt[: block.start() if block else len(prompt)]
 
 
 def _own_words(turns: list[Turn]) -> list[Turn]:
     return [
-        replace(turn, text=_LEGACY_QUOTE.sub("", turn.text)) if turn.role == "user" else turn
+        replace(turn, text=_LEGACY_QUOTE.sub("", turn.text, count=1)) if turn.legacy else turn
         for turn in turns
     ]
 
@@ -370,9 +390,15 @@ def read_ledger(config: Config) -> list[dict]:
     return entries
 
 
-def record_retired(config: Config, key: str, thread_id: str, now: float | None = None) -> None:
-    """Add one harvested (member, thread) to the ledger, dropping entries past LEDGER_KEEP_DAYS."""
+def record_retired(
+    config: Config, key: str, thread_id: str, at: float | None = None, now: float | None = None
+) -> None:
+    """Add one harvested (member, thread) to the ledger, dropping entries past LEDGER_KEEP_DAYS.
+    `at` is when the member last used the thread: the weekly digest picks threads by it, and a
+    thread harvested days after it went quiet belongs to the week it was used in. Unknown (a
+    thread retired before the store kept that) falls back to now."""
     now = time.time() if now is None else now
+    at = now if at is None else at
     # One entry per (member, thread): a shared reply thread keeps every member who was on it.
     entries = [
         entry
@@ -380,7 +406,7 @@ def record_retired(config: Config, key: str, thread_id: str, now: float | None =
         if now - entry["at"] <= LEDGER_KEEP_DAYS * 86400
         and (entry["key"], entry["thread_id"]) != (key, thread_id)
     ]
-    entries.append({"key": key, "thread_id": thread_id, "at": now})
+    entries.append({"key": key, "thread_id": thread_id, "at": at})
     path = config.codex_home / LEDGER_FILE
     scratch = path.with_suffix(".tmp")
     try:
@@ -391,6 +417,7 @@ def record_retired(config: Config, key: str, thread_id: str, now: float | None =
 
 
 async def _harvest_one(threads, store, config, key, thread_id, runner) -> str:
+    used_at = threads.last_active(key, thread_id)  # mark_harvested drops the pending record
     try:
         shared = shared_thread(threads, read_ledger(config), thread_id)
         added = await harvest_thread(store, config, key, thread_id, runner, shared)
@@ -398,7 +425,7 @@ async def _harvest_one(threads, store, config, key, thread_id, runner) -> str:
         LOGGER.exception("Harvest failed for thread %s", thread_id)
         return f"{thread_id[:8]} {key}: failed ({error})"
     threads.mark_harvested(thread_id, key)  # other members on the thread still have theirs
-    record_retired(config, key, thread_id)
+    record_retired(config, key, thread_id, used_at)
     LOGGER.info("Harvested thread %s for %s: %d notes", thread_id[:8], key, added)
     return f"{thread_id[:8]} {key}: {added} notes"
 
