@@ -1415,7 +1415,12 @@ async def test_streamer_throttles_skips_tag_interims_and_clips(client, monkeypat
     await on_delta("你好，我是")  # within 1.5s: suppressed
     clock["t"] += 2
     await on_delta("A" * 3000)
-    assert shown == ["你好 ▌", "A" * 1900 + " ▌"]
+    clock["t"] += 2
+    emoji = "<:pepe:100000000000000001>"
+    await on_delta("B" * 100 + emoji + "C" * 1890)  # the cut falls inside the emoji
+    clock["t"] += 2
+    await on_delta(f" {emoji} 好")  # an answer that opens with an emoji is not a tag
+    assert shown == ["你好 ▌", "A" * 1900 + " ▌", "C" * 1890 + " ▌", f" {emoji} 好 ▌"]
 
 
 async def test_answer_passes_on_delta_to_the_backend(client, backends) -> None:

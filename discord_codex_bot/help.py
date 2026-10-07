@@ -216,17 +216,24 @@ EMOJI_FEATURE = (
     "理解意思；說明每天依 Bot 看得到的頻道裡的使用情形與表情圖片整理，"
     "用得少的只描述長相，動態表情只看名字。"
 )
+# With EMOJI_REPLY on as well (emoji.py `reply`).
+EMOJI_REPLY_FEATURE = (
+    "**回覆會用伺服器表情**：Bot 回答時偶爾會用本伺服器的靜態自訂表情，"
+    "只用意思清楚的，程式碼和連結裡不會換成表情。"
+)
 
 
-def _features(image_order: str, emoji: bool = False) -> list[str]:
+def _features(image_order: str, emoji: bool = False, emoji_reply: bool = False) -> list[str]:
     """The ability list; with routing on (`image_order` names the image list, from
-    config/routing.json) it also explains automatic model choice, and with emoji on how
-    the server's own emoji are read."""
+    config/routing.json) it also explains automatic model choice, with emoji on how the
+    server's own emoji are read, and with `emoji_reply` too that answers use them."""
     features = list(FEATURES)
     if image_order:
         features.append(ROUTING_FEATURE.replace("{image}", image_order))
     if emoji:
         features.append(EMOJI_FEATURE)
+        if emoji_reply:
+            features.append(EMOJI_REPLY_FEATURE)
     return features
 
 
@@ -240,6 +247,7 @@ def render_guide(
     default: str = "Codex",
     image_order: str = "",
     emoji: bool = False,
+    emoji_reply: bool = False,
 ) -> str:
     """The member-facing guide for /<prefix>-help, in registered-command order. `default`
     is DEFAULT_MODEL as members read it; it is configuration, so never written in the text."""
@@ -253,7 +261,7 @@ def render_guide(
         blocks.append("\n".join(lines))
     blocks.append(
         "**不用指令也能做的事**\n"
-        + "\n".join(f"・{_fill(f, p, default)}" for f in _features(image_order, emoji))
+        + "\n".join(f"・{_fill(f, p, default)}" for f in _features(image_order, emoji, emoji_reply))
     )
     return "\n\n".join(blocks)
 
@@ -264,6 +272,7 @@ def render_sheet(
     default: str = "Codex",
     image_order: str = "",
     emoji: bool = False,
+    emoji_reply: bool = False,
 ) -> str:
     """The compact sheet injected into the model's prompt: one line per command plus the
     feature list, Markdown stripped so it reads as facts rather than formatting."""
@@ -274,7 +283,8 @@ def render_sheet(
     lines.append(
         "其他用法："
         + " ".join(
-            _fill(f, prefix, default).replace("**", "") for f in _features(image_order, emoji)
+            _fill(f, prefix, default).replace("**", "")
+            for f in _features(image_order, emoji, emoji_reply)
         )
     )
     return "\n".join(lines)

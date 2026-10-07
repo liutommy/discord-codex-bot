@@ -101,7 +101,7 @@ from .memory import (
     extract_read_requests,
 )
 from .openrouter import ROUTERS, Catalog, run_router, trim_history
-from .output import format_reply, split_discord_message, truncate
+from .output import format_reply, split_discord_message, tail, truncate
 from .queue import QueueFullError, SerialQueue
 from .reminders import (
     ReminderStore,
@@ -1148,6 +1148,7 @@ class DiscordCodexClient(discord.Client):
             self._default_label(),
             image_order=self._image_order(),
             emoji=self.emoji is not None,
+            emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
         )
         doc = apis.render_doc(self.apis)
         return f"{sheet}\n{doc}" if doc else sheet
@@ -1160,6 +1161,7 @@ class DiscordCodexClient(discord.Client):
             self._default_label(),
             image_order=self._image_order(),
             emoji=self.emoji is not None,
+            emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
         )
 
     def _image_order(self) -> str:
@@ -1244,6 +1246,14 @@ class DiscordCodexClient(discord.Client):
             # `<:name:id>` as the model can read it; never the emoji's image, which would make
             # this an image turn (emoji.py).
             prompt = self.emoji.rewrite(prompt, guild_id)
+        emoji_out = self._emoji_reply(guild_id)
+        if emoji_out is not None and on_delta is not None:
+            painted = on_delta
+
+            async def on_delta(text: str) -> None:
+                # Each part-way answer too: a member never sees `:name:` turn into the emoji.
+                await painted(emoji_out(text, True))
+
         stored = self._stored(guild_id, user_id)
         choice = self._choice(stored)
         target = resolve(
@@ -1389,7 +1399,9 @@ class DiscordCodexClient(discord.Client):
                 for section in (
                     f"[永久記憶索引]\n{permanent}" if permanent else "",
                     self.memory.render(guild_id, user_id),
-                    self.emoji.block(guild_id) if self.emoji is not None else "",
+                    self.emoji.block(guild_id, emoji_out is not None)
+                    if self.emoji is not None
+                    else "",
                     f"[待辦提醒]\n{pending}" if pending else "",
                     f"[社群追蹤]\n{tracked}" if tracked else "",
                 )
@@ -1500,6 +1512,8 @@ class DiscordCodexClient(discord.Client):
                     "\n\n（⚠️ 上面說的操作其實沒有執行——我用了不存在的指令。"
                     "請直接用斜線指令，或再說一次。）"
                 )
+            if emoji_out is not None:
+                text = emoji_out(text, False)  # before any cut: `<:name:id>` is the longer one
             await self.alerts.record_success(target.backend)
             generated_dir = result.generated_dir
             outgoing = tuple(result.images)  # not `images`: that list is cleaned up in finally
@@ -1534,6 +1548,24 @@ class DiscordCodexClient(discord.Client):
             remove_dir(link_dir)
             if not delivered:
                 remove_dir(deliver_dir)
+
+    def _emoji_reply(self, guild_id: int | None) -> Callable[[str, bool], str] | None:
+        """How an answer's `:name:` becomes the emoji (EMOJI_REPLY), or None: off, a DM, or a
+        guild off the allowlist."""
+        store = self.emoji
+        if (
+            store is None
+            or not self.config.emoji_reply
+            or guild_id is None
+            or guild_id not in self.config.allowed_guild_ids
+        ):
+            return None
+        # Part-way versions share one lookup; the answer itself reads the server again, so an
+        # emoji deleted while it was being written is not sent (Codex on PR #42).
+        known = store.by_name(guild_id)
+        return lambda text, streaming: store.reply(
+            text, guild_id, streaming, known if streaming else None
+        )
 
     def _read(
         self,
@@ -2069,13 +2101,15 @@ class DiscordCodexClient(discord.Client):
         state = {"at": float("-inf")}
 
         async def on_delta(text: str) -> None:
-            if text.lstrip().startswith("<"):
+            opening = text.lstrip()
+            if opening.startswith("<") and not CUSTOM_EMOJI.match(opening):
+                # A tag-only interim; an answer that opens with an emoji is still an answer.
                 return
             now = time.monotonic()
             if now - state["at"] < STREAM_EDIT_SECONDS:
                 return
             state["at"] = now
-            await show(text[-STREAM_SHOW_CHARS:] + " ▌", view)
+            await show(tail(text, STREAM_SHOW_CHARS) + " ▌", view)
 
         return on_delta
 

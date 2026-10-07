@@ -125,6 +125,7 @@ def config() -> Config:
         emoji_describe_hour=4,
         emoji_describe_max=50,
         emoji_schema_path=Path("config/emoji-schema.json"),
+        emoji_reply=False,
         youtube_api_key="test-youtube",
         twitch_client_id="test-twitch-id",
         twitch_client_secret="test-twitch-secret",
