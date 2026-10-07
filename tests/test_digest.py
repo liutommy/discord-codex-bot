@@ -354,6 +354,20 @@ async def test_the_ledger_has_when_the_thread_was_used_not_when_it_was_harvested
     assert [(e["thread_id"], e["at"]) for e in read_ledger(config)] == [("t1", used)]
 
 
+def test_a_thread_retired_twice_counts_its_latest_use(tmp_path: Path, monkeypatch) -> None:
+    # Switched away from t1, back to it (a reply to an old answer), and away again before the
+    # harvest: t1 is pending twice, and the first time was the stale one (Codex on PR #39).
+    clock = [NOW - 10 * DAY]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    threads = ThreadStore(tmp_path / "threads.json", 3600, "v1")
+    for thread, at in (("t1", NOW - 10 * DAY), ("t2", NOW - 9 * DAY), ("t1", NOW - DAY)):
+        clock[0] = at
+        threads.remember("1:2:3", thread)
+    clock[0] = NOW
+    threads.remember("1:2:3", "t3")
+    assert threads.last_active("1:2:3", "t1") == NOW - DAY
+
+
 def test_a_thread_retired_before_its_time_was_kept_is_stamped_now(
     tmp_path: Path, config: Config
 ) -> None:

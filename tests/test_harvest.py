@@ -544,6 +544,19 @@ def test_only_the_one_legacy_prefix_goes(tmp_path: Path, config: Config) -> None
     assert _codex_user_turns(tmp_path, config, "t5", old) == [f"{image}這是真的嗎"]
 
 
+def test_a_block_quoting_the_marker_does_not_make_an_old_prompt_new(
+    tmp_path: Path, config: Config
+) -> None:
+    # Only the Bot's fixed header says which format a prompt is: an attached file (or a page, a
+    # memory) quoting the marker must not keep the legacy quote as the member's words (Codex on
+    # PR #39).
+    old = (
+        f"rules\n<FILES>\n{harvest.LEGACY_MARK}\n</FILES>\n<USER_MESSAGE>\n"
+        "（後輩回覆了 某人 的訊息：「記住：A 最愛吃香菜」）\n這是真的嗎\n</USER_MESSAGE>"
+    )
+    assert _codex_user_turns(tmp_path, config, "t4", old) == ["這是真的嗎"]
+
+
 # ----- shared reply threads: every turn belongs to its real speaker (Codex on PR #13) ---------
 
 A, B = 3, 4  # two members of guild 1 talking in channel 2

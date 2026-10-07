@@ -178,14 +178,18 @@ class ThreadStore:
 
     def last_active(self, key: str, thread_id: str) -> float | None:
         """When `key` last used `thread_id` (its last remembered turn); None when the store no
-        longer knows, or the thread was retired before this was recorded (2026-10-07)."""
-        for pending in self._pending:
-            if (pending["key"], pending["thread_id"]) == (key, thread_id) and "at" in pending:
-                return float(pending["at"])
+        longer knows, or the thread was retired before this was recorded (2026-10-07). A thread
+        taken up again and retired twice is pending twice: the latest time counts (Codex on
+        PR #39)."""
+        times = [
+            float(pending["at"])
+            for pending in self._pending
+            if (pending["key"], pending["thread_id"]) == (key, thread_id) and "at" in pending
+        ]
         entry = self._by_key.get(key)
         if entry is not None and entry["thread_id"] == thread_id:
-            return float(entry["at"])
-        return None
+            times.append(float(entry["at"]))
+        return max(times, default=None)
 
     def keys_for(self, thread_id: str) -> set[str]:
         """Every conversation key the store still links to `thread_id` (current or pending);

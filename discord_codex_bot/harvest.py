@@ -63,8 +63,7 @@ def _member_turn(text: str) -> Turn | None:
     if match is None:
         return None
     speaker = match.group(1)
-    legacy = LEGACY_MARK not in text[: match.start()]
-    return Turn("user", match.group(2).strip(), int(speaker) if speaker else None, legacy)
+    return Turn("user", match.group(2).strip(), int(speaker) if speaker else None, _legacy(text))
 
 
 def rollout_path(config: Config, thread_id: str):
@@ -131,6 +130,20 @@ _LEGACY_QUOTE = re.compile(
     r"|（那則訊息附了 \d+ 張圖，已一併附上）\n)"
 )
 LEGACY_MARK = "QUOTED_MESSAGE, when present, is someone else's message"
+# Where the prompt's fixed instructions end: the first block the Bot opens (codex._prompt puts
+# every block after them). Only that header is the Bot's own text; a block may carry anything,
+# LEGACY_MARK included (Codex on PR #39).
+_FIRST_BLOCK = re.compile(
+    r"^<(?:OUTPUT_STYLE|PERSONAL_STYLE|MEMORY|LINKS|FILES|HELP|EARLIER_CONVERSATION"
+    r"|QUOTED_MESSAGE|USER_MESSAGE)\b",
+    re.M,
+)
+
+
+def _legacy(prompt: str) -> bool:
+    """A prompt from before QUOTED_MESSAGE: its fixed header lacks LEGACY_MARK."""
+    block = _FIRST_BLOCK.search(prompt)
+    return LEGACY_MARK not in prompt[: block.start() if block else len(prompt)]
 
 
 def _own_words(turns: list[Turn]) -> list[Turn]:
