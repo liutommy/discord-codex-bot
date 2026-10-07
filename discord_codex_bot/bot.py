@@ -205,6 +205,9 @@ PROVIDER_CHOICES = [
     app_commands.Choice(name="OrcaRouter（免費模型）", value=ORCAROUTER),
 ]
 FREE_MODEL_NOTE = "免費模型可能隨時不穩或下架，失敗時請換一個。"
+# What /model with only provider Antigravity picks; checked against AGY_FAMILIES at use, so a
+# renamed family asks the member to pick instead of quietly saving the server default.
+AGY_DEFAULT_FAMILY = "gemini-3.8-flash"
 
 
 X_ITEM_KINDS = ("post", "reply", "repost")  # what XFetcher produces
@@ -2878,18 +2881,22 @@ class DiscordCodexClient(discord.Client):
 
     async def _provider_default(self, provider: str):
         """The model a provider picked alone stands for: Codex's one model, DEFAULT_MODEL's Grok
-        model (else the first in the plan's catalog), Gemini 3.8 Flash on Antigravity. None for
-        the routers, whose free models come and go: the member picks one."""
+        model when the plan still offers it (else the catalog's first), AGY_DEFAULT_FAMILY on
+        Antigravity. None for the routers, whose free models come and go (the member picks one),
+        and when Grok's catalog cannot be read or the Antigravity default is gone."""
         if provider == CODEX:
             return parse_choice(f"{CODEX}:{self.config.codex_model}", self.config.codex_model)
         if provider == GROK:
-            default = self._choice(self.config.default_model)
-            if default.backend == GROK:
-                return default
             catalog = await grok.models(self.config)
-            return grok_choice(catalog[0].id, catalog[0].name) if catalog else None
-        if provider == AGY:
-            return parse_choice(f"{AGY}:gemini-3.8-flash", self.config.codex_model)
+            if not catalog:
+                return None
+            default = self._choice(self.config.default_model)
+            if default.backend == GROK and grok.cached_model(default.family) is not None:
+                return default
+            return grok_choice(catalog[0].id, catalog[0].name)  # the default left the plan
+        if provider == AGY and AGY_DEFAULT_FAMILY in AGY_FAMILIES:
+            label = AGY_FAMILIES[AGY_DEFAULT_FAMILY][0]
+            return ModelChoice(f"{AGY}:{AGY_DEFAULT_FAMILY}", label, AGY, AGY_DEFAULT_FAMILY)
         return None
 
     def _chosen_model(self, provider: str, model: str):
@@ -2953,14 +2960,21 @@ class DiscordCodexClient(discord.Client):
                 # provider now means its default model.
                 chosen = await self._provider_default(source)
                 if chosen is None:
+                    why = (
+                        "這個來源的免費模型會變動" if source in ROUTER_BACKENDS
+                        else "Grok 的模型清單暫時讀不到" if source == GROK
+                        else "這個來源沒有預設模型"
+                    )  # fmt: skip
                     await interaction.response.send_message(
-                        "這個來源的免費模型會變動，請在 model 欄從清單選一個（打字可篩選）。",
-                        ephemeral=True,
+                        f"{why}，請在 model 欄從清單選一個（打字可篩選）。", ephemeral=True
                     )
                     return
             else:
                 chosen = self._choice(stored or self.config.default_model)
-            level = effort.value if effort else split_stored(stored)[1]
+            # A new provider without an effort starts at its default effort: the old provider's
+            # level saved as-is would read differently from what /status shows (hub on #38).
+            switched = chosen.backend != split_stored(stored)[0].split(":")[0]
+            level = effort.value if effort else "" if switched else split_stored(stored)[1]
             value = f"{chosen.value}|{level}" if level else chosen.value
             self.memory.set_model(guild_id, user_id, value)
             LOGGER.info("Model set guild=%s user=%s value=%s", guild_id, user_id, value)
