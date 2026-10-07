@@ -293,7 +293,9 @@ applies, with `config/agy-settings.json` denying commands, writes, URL access an
 sign-in lives in the `<name>_agy_home` volume: run `agy` inside the container once (SSH-style URL
 + code loop). Threads never cross backends; switching models starts a new thread and harvests the
 old one. Google's content policy may reject prompts on the Gemini models that the Claude models
-accept. Release announcements (`announce/latest.md`) are posted only to `ANNOUNCE_CHANNEL_IDS`.
+accept. Announcements are posted only on purpose, after the owner approves the text: `python -m
+discord_codex_bot.announce send` posts one now, `queue` holds one for a time or the next deploy
+(`CODEX_HOME/announce-queue`, each item posted at most once); nothing posts on start-up.
 
 When the ChatGPT subscription quota runs out or the selected model is temporarily at capacity,
 Codex reports it *inside* its JSONL stream (`codex_error_info: usage_limit_exceeded` or

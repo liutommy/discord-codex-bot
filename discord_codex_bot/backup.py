@@ -29,7 +29,6 @@ BACKUP_MEMBERS = (
     "openrouter",
     "discord_threads.json",
     "reminders.json",
-    "announced.json",
 )
 TRACKING_DB = "tracking.sqlite3"
 ARCHIVE_PREFIX = "discord-codex-bot-"

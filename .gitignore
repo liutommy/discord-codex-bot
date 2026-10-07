@@ -14,8 +14,6 @@ persona/*
 # The operator's own default style, like the persona, stays out of a repo meant to be published;
 # config/output-style.example.md is what a clone copies and edits.
 config/output-style.md
-announce/*
-!announce/README.md
 backups/
 logs/
 # Host-local: the bind-mounted homes (DB, memory, sign-ins), the override that mounts them, and

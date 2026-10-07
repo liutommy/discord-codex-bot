@@ -24,7 +24,7 @@ from . import apis, embedfix, gemini, grok, instructions, routing, sandbox, sear
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
-from .announce import announce_once
+from .announce import announce_loop
 from .attachments import (
     download_attachment,
     extract_text,
@@ -461,6 +461,7 @@ class DiscordCodexClient(discord.Client):
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.alerts = Alerter(self, config)
+        self._started_at = time.time()  # an --after-deploy announcement waits for a later start
         # The most recent request answered on a spare backend: (at, why, failed backend, spare).
         # Shown by /status only; the answer itself carries no notice.
         self._last_fallback: Fallback | None = None
@@ -684,10 +685,12 @@ class DiscordCodexClient(discord.Client):
                     self.config.alert_login_check_minutes * 60,
                 )
             )
-        try:
-            await announce_once(self, self.config)
-        except Exception:
-            LOGGER.exception("Announcement pass failed")
+        if not getattr(self, "_announce_task", None):
+            # The owner-approved queue (announce.py): posts each item at most once; nothing is
+            # posted just because the Bot started.
+            self._announce_task = asyncio.create_task(
+                announce_loop(self, self.config, self.alerts, self._started_at)
+            )
 
     async def _tracking_forever(self) -> None:
         await self.wait_until_ready()
