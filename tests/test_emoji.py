@@ -720,9 +720,11 @@ def test_an_edit_sends_the_emoji_back_for_a_new_description(store: EmojiStore) -
     # Codex on PR #40: an edit changed the evidence but the old description stayed for good.
     store.sync(GUILD, [(PEPE, "pepe", False), (CAT, "cat", False)])
     _sample(store, PEPE, 2, previous="前", previous_id=1)
-    _sample(store, CAT, 3)
+    _sample(store, CAT, 3, text=f"<:cat:{CAT}> 好耶")
     store.describe(PEPE, "x", False, "b")
     store.describe(CAT, "y", False, "b")
+    assert store.pending([GUILD]) == []
+    store.edit_message(GUILD, 3, 3, f"<:cat:{CAT}> 好耶", 5.0, True)  # a pin: same text
     assert store.pending([GUILD]) == []
     store.edit_message(GUILD, 1, 3, "前（改過）", 5.0, True)  # pepe's "previous" changed
     assert [e.emoji_id for e in store.pending([GUILD])] == [PEPE]
@@ -766,3 +768,13 @@ async def test_a_moderator_bot_lists_every_private_archive(bot, monkeypatch) -> 
     monkeypatch.setattr(DiscordCodexClient, "guilds", property(lambda self: [guild]))
     await bot._backfill_emoji()
     assert asked == [{}, {"private": True}]
+
+
+def test_an_emoji_taken_out_past_the_kept_text_is_described_again(store: EmojiStore) -> None:
+    # Codex on PR #41: both versions share their first TEXT_MAX characters, so the clipped text
+    # reads the same while the emoji at the end was removed.
+    head = "長" * emoji_module.TEXT_MAX
+    _sample(store, PEPE, 2, text=f"{head} <:pepe:{PEPE}>")
+    store.describe(PEPE, "x", False, "b")
+    store.edit_message(GUILD, 2, 3, f"{head} 沒了", 5.0, True)
+    assert store.samples(PEPE) == [] and [e.emoji_id for e in store.pending([GUILD])] == [PEPE]

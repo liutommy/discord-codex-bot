@@ -295,11 +295,14 @@ class EmojiStore:
         "previous"; an emoji taken out of a member's message is no longer sampled from it, and one
         put in is (Codex on PR #40). Uses already counted stay."""
         with self._connect() as connection:
-            # Every emoji whose evidence this changes is described again (Codex on PR #40).
+            # Every emoji whose evidence this changes is described again (Codex on PR #40); an
+            # update that leaves the text as it was (a pin, a streamed answer's same text) is not
+            # a change (hub on PR #40).
             connection.execute(
                 """UPDATE emojis SET added=added+1 WHERE emoji_id IN (
-                       SELECT emoji_id FROM samples WHERE message_id=? OR previous_id=?)""",
-                (message_id, message_id),
+                       SELECT emoji_id FROM samples
+                       WHERE (message_id=? AND text!=?) OR (previous_id=? AND previous!=?))""",
+                (message_id, clip(text), message_id, clip(text)),
             )
             connection.execute(
                 "UPDATE samples SET text=? WHERE message_id=?", (clip(text), message_id)
@@ -319,6 +322,9 @@ class EmojiStore:
                     "DELETE FROM samples WHERE message_id=? AND kind='message' AND emoji_id=?",
                     (message_id, emoji_id),
                 )
+                # Evidence gone is a change even when the clipped text reads the same (an emoji
+                # past TEXT_MAX taken out; Codex on PR #41).
+                connection.execute("UPDATE emojis SET added=added+1 WHERE emoji_id=?", (emoji_id,))
         before = rows[0] if rows else None
         for emoji_id in sorted(now - had):
             self.add_sample(
