@@ -223,9 +223,6 @@ class Config:
     openrouter_dir: Path
     openrouter_catalog_ttl_seconds: int
     openrouter_history_chars: int
-    announce_dir: Path
-    announce_channel_ids: frozenset[int]
-    announce_approved: str
     link_max_urls: int
     link_max_bytes: int
     link_max_chars: int
@@ -420,13 +417,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             values, "OPENROUTER_CATALOG_TTL_SECONDS", 3600
         ),
         openrouter_history_chars=_positive_int(values, "OPENROUTER_HISTORY_CHARS", 60_000),
-        # Release announcements: announce/latest.md is posted once per guild when it changes.
-        announce_dir=Path(values.get("ANNOUNCE_DIR", "/opt/discord-codex/announce")),
-        announce_channel_ids=parse_id_set(
-            values.get("ANNOUNCE_CHANNEL_IDS"), "ANNOUNCE_CHANNEL_IDS"
-        ),
-        # Hard gate: only the announcement whose content hash the owner approved is ever posted.
-        announce_approved=values.get("ANNOUNCE_APPROVED", "").strip(),
         # Bot-side link fetching (all backends): URLs in a message are fetched into the prompt and
         # the model may ask for more with <fetch url/>. Public addresses only.
         link_max_urls=_positive_int(values, "LINK_MAX_URLS", 3),

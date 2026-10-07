@@ -22,7 +22,6 @@ COPY config/consolidate-schema.json config/harvest-schema.json config/tracking-s
      /opt/discord-codex/
 COPY permanent /opt/discord-codex/permanent
 COPY persona /opt/discord-codex/persona
-COPY announce /opt/discord-codex/announce
 
 FROM python:3.12-slim-bookworm
 
