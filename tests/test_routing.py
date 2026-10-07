@@ -476,6 +476,20 @@ async def test_an_image_mid_conversation_goes_to_codex_and_leaves_the_route(
     assert result.via.backend == "agy" and "是一隻貓" in backends["agy"].calls[-1][2]["history"]
 
 
+async def test_an_image_follows_the_configured_first_backend_everywhere(
+    client, backends, monkeypatch
+) -> None:
+    # Codex on #35: keeping the cell was hard-coded to Codex, so with Grok first in `image` a
+    # Codex conversation's image skipped Grok while every other conversation's went there.
+    client.routing = replace(
+        client.routing, image=("grok:grok-4.7|high", "codex|medium", "agy:gemini-3.8-flash|medium")
+    )
+    verdicts(monkeypatch, ok("code", 8))
+    await ask(client, "修這個 bug")
+    plan, result = await ask_with_image(client, "這個錯誤截圖")
+    assert plan.target == Resolved("grok", "grok-4.7", "high") and result.via.backend == "grok"
+
+
 async def test_an_image_in_an_x_conversation_carries_no_no_x_note(
     client, backends, monkeypatch
 ) -> None:

@@ -1467,7 +1467,8 @@ class DiscordCodexClient(discord.Client):
         off, or the member chose a model with /model). Every message is judged; a conversation
         never drops a band and follows its latest message of substance (routing.decide). An
         image is not judged (Jev reads text only): that message goes down the table's `image`
-        list (Codex → Grok → agy by default; a conversation on a Codex cell keeps it), and the
+        list (Codex → Grok → agy by default; a conversation already on that list's first backend
+        keeps its cell), and the
         conversation's route is left for the next message. No judgement otherwise — a Jev
         timeout, error, odd answer or low confidence — keeps a routed conversation where it is
         and sends a new one to DEFAULT_MODEL, without retrying Jev."""
@@ -1507,8 +1508,11 @@ class DiscordCodexClient(discord.Client):
         # the conversation where it stays (an X conversation keeps its X handling).
         kind = verdict.kind if verdict.status == "ok" else route.kind
         entry, degraded = route.entry, []
-        if image_turn and routing.backend_of(entry) != CODEX:
-            entry = table.image[0]  # this message only: the route stays for the next one
+        first = table.image[0]
+        if image_turn and routing.backend_of(entry) != routing.backend_of(first):
+            # This message only (the route stays for the next one); a conversation already on
+            # the first image backend keeps its own cell and band there.
+            entry = first
         backend = routing.backend_of(entry)
         if backend == CODEX and not effort:  # an effort the member set is theirs
             limits = await asyncio.to_thread(read_rate_limits, self.config)
