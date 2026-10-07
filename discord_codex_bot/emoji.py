@@ -584,7 +584,7 @@ class EmojiStore:
             return text.replace(MARK, "")
         out: list[str] = []
         at = 0
-        for code in KEPT.finditer(text):
+        for code in (KEPT_STREAMING if streaming else KEPT).finditer(text):
             out.append(_emoji_out(text[at : code.start()], known))
             out.append(code.group())
             at = code.end()
@@ -599,6 +599,10 @@ class EmojiStore:
 CODE = re.compile(r"```[\s\S]*?(?:```|$)|``[^`]+?``|`[^`]+`")
 # Text whose colons are not emoji: code, and a link (`https://x/:pepe:` must stay a link).
 KEPT = re.compile(rf"{CODE.pattern}|https?://[^\s<>]+")
+# Part-way, a `code` span whose closing backtick has not arrived yet is code too: it would
+# otherwise show the emoji and then lose it (Codex on PR #42). A finished answer's lone
+# backtick is just a character in Discord, so the answer itself does not use this.
+KEPT_STREAMING = re.compile(rf"{KEPT.pattern}|``?[^`]*$")
 # `:name:` the model wrote, not already part of `<:name:id>` / `<a:name:id>`, with the bracket
 # right after it (a description it may have copied).
 WRITTEN = re.compile(

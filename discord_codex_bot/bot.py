@@ -1560,8 +1560,12 @@ class DiscordCodexClient(discord.Client):
             or guild_id not in self.config.allowed_guild_ids
         ):
             return None
-        known = store.by_name(guild_id)  # once per answer, not once per streamed version
-        return lambda text, streaming: store.reply(text, guild_id, streaming, known)
+        # Part-way versions share one lookup; the answer itself reads the server again, so an
+        # emoji deleted while it was being written is not sent (Codex on PR #42).
+        known = store.by_name(guild_id)
+        return lambda text, streaming: store.reply(
+            text, guild_id, streaming, known if streaming else None
+        )
 
     def _read(
         self,

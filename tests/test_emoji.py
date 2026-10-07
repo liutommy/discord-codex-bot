@@ -844,6 +844,9 @@ def test_a_part_way_answer_holds_back_what_may_still_become_an_emoji(store) -> N
     assert store.reply("好 :zz", GUILD, streaming=True) == "好 :zz"  # no emoji starts so
     assert store.reply("時間 12:3", GUILD, streaming=True) == "時間 12:3"
     assert store.reply("```\n:pe", GUILD, streaming=True) == "```\n:pe"
+    for unfinished in ("`例如 :pepe:", "``例如 :pepe:"):  # the closing backtick is still to come
+        assert store.reply(unfinished, GUILD, streaming=True) == unfinished
+    assert store.reply("`例如 :pepe:", GUILD) == f"`例如 <:pepe:{PEPE}>"  # a lone backtick
 
 
 def test_the_list_says_the_answer_may_use_them_only_with_replies_on(store) -> None:
@@ -854,7 +857,7 @@ def test_the_list_says_the_answer_may_use_them_only_with_replies_on(store) -> No
     assert INSUFFICIENT in REPLY_HINT
 
 
-async def _answered(bot, monkeypatch, said: str, guild_id, **settings):
+async def _answered(bot, monkeypatch, said: str, guild_id, before_end=None, **settings):
     from discord_codex_bot import bot as bot_module
     from discord_codex_bot.codex import CodexResult
 
@@ -864,6 +867,9 @@ async def _answered(bot, monkeypatch, said: str, guild_id, **settings):
 
     async def codex(prompt, config, **kw):
         seen.update(kw)
+        await kw["on_delta"](said)
+        if before_end is not None:
+            await before_end()
         await kw["on_delta"](said)
         return CodexResult(said, thread_id="t")
 
@@ -884,8 +890,18 @@ async def test_answers_send_the_emoji_while_streaming_and_at_the_end(bot, monkey
         bot.emoji, "by_name", lambda guild_id: looked.append(1) or by_name(guild_id)
     )
     text, painted, memory = await _answered(bot, monkeypatch, "好 :pepe:", GUILD, emoji_reply=True)
-    assert text == painted[0] == f"好 <:pepe:{PEPE}>" and REPLY_HINT in memory
-    assert len(looked) == 1  # once for the answer, not for each streamed version
+    assert text == painted[0] == painted[1] == f"好 <:pepe:{PEPE}>" and REPLY_HINT in memory
+    assert len(looked) == 2  # one for every streamed version, one for the answer
+
+
+async def test_an_emoji_deleted_while_answering_is_not_sent(bot, monkeypatch) -> None:
+    async def gone():
+        bot.emoji.sync(GUILD, [(CAT, "cat", False)])
+
+    text, painted, _memory = await _answered(
+        bot, monkeypatch, "好 :pepe:", GUILD, before_end=gone, emoji_reply=True
+    )
+    assert painted[0] == f"好 <:pepe:{PEPE}>" and text == "好 :pepe:"
 
 
 @pytest.mark.parametrize(
