@@ -645,6 +645,15 @@ def test_help_explains_emoji_only_while_it_is_on(bot, config) -> None:
     assert "看得懂伺服器表情" not in off.help_guide() + off.help_sheet()
 
 
+def test_help_says_answers_use_emoji_only_while_replies_are_on(bot) -> None:
+    said = "回覆會用伺服器表情"
+    assert said not in bot.help_guide() + bot.help_sheet()
+    on = DiscordCodexClient(replace(bot.config, emoji_reply=True))
+    assert said in on.help_guide() and said in on.help_sheet()
+    alone = DiscordCodexClient(replace(bot.config, emoji_enabled=False, emoji_reply=True))
+    assert said not in alone.help_guide() + alone.help_sheet()  # nothing to send without it
+
+
 async def test_private_archived_threads_the_bot_joined_are_read(bot, monkeypatch) -> None:
     # Codex on PR #40: archived_threads() lists public threads only by default.
     class Parent(_Text):

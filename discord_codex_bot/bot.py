@@ -1148,6 +1148,7 @@ class DiscordCodexClient(discord.Client):
             self._default_label(),
             image_order=self._image_order(),
             emoji=self.emoji is not None,
+            emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
         )
         doc = apis.render_doc(self.apis)
         return f"{sheet}\n{doc}" if doc else sheet
@@ -1160,6 +1161,7 @@ class DiscordCodexClient(discord.Client):
             self._default_label(),
             image_order=self._image_order(),
             emoji=self.emoji is not None,
+            emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
         )
 
     def _image_order(self) -> str:
