@@ -85,11 +85,13 @@ CREATE TABLE IF NOT EXISTS samples(
     channel_id INTEGER NOT NULL,
     text TEXT NOT NULL,
     previous TEXT NOT NULL DEFAULT '',
+    previous_id INTEGER,
     at REAL NOT NULL,
     UNIQUE(emoji_id, message_id, kind)
 );
 CREATE INDEX IF NOT EXISTS samples_by_emoji ON samples(emoji_id, at);
 CREATE INDEX IF NOT EXISTS samples_by_message ON samples(message_id);
+CREATE INDEX IF NOT EXISTS samples_by_previous ON samples(previous_id);
 CREATE TABLE IF NOT EXISTS backfill(
     guild_id INTEGER NOT NULL,
     channel_id INTEGER NOT NULL,
@@ -141,12 +143,16 @@ def tidy(description: str) -> str:
 
 
 # What `rewrite` adds to a member's message. The bracketed part is the Bot's, not the member's:
-# harvest and the digest take it out before reading a member's words (strip_descriptions).
-INLINE = re.compile(rf"(:[A-Za-z0-9_]{{2,32}}:)（[^（）\n]{{1,{DESCRIPTION_MAX + 20}}}）")
+# harvest and the digest take it out before reading a member's words (strip_descriptions). MARK
+# (invisible) opens every bracket the Bot writes, and `rewrite` first removes it from what the
+# member typed, so a member's own `:pepe:（…）` is never taken for one (Codex on PR #40).
+MARK = "\u2063"
+INLINE = re.compile(rf"(:[A-Za-z0-9_]{{2,32}}:)（{MARK}[^（）\n]{{1,{DESCRIPTION_MAX + 20}}}）")
 
 
 def strip_descriptions(text: str) -> str:
-    """A member's message as they wrote it, as far as emoji go: `:name:（…）` → `:name:`."""
+    """A member's message as they wrote it, as far as emoji go: the Bot's `:name:（…）` →
+    `:name:`; brackets the member wrote stay."""
     return INLINE.sub(r"\1", text)
 
 
@@ -226,16 +232,27 @@ class EmojiStore:
         previous: str,
         at: float,
         uses: int = 1,
+        previous_id: int | None = None,
     ) -> bool:
-        """Record one use; False when the emoji is not this guild's or the sample is known."""
+        """Record one use; False when the emoji is not this guild's or the sample is known.
+        `previous_id` is the message `previous` came from, so its deletion reaches it too."""
         if not self.known(guild_id, emoji_id):
             return False
         with self._connect() as connection:
             inserted = connection.execute(
                 """INSERT OR IGNORE INTO samples(emoji_id, kind, message_id, channel_id, text,
-                                                 previous, at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (emoji_id, kind, message_id, channel_id, clip(text), clip(previous), at),
+                                                 previous, previous_id, at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    emoji_id,
+                    kind,
+                    message_id,
+                    channel_id,
+                    clip(text),
+                    clip(previous),
+                    previous_id if previous else None,
+                    at,
+                ),
             ).rowcount
             if not inserted:
                 return False
@@ -267,14 +284,21 @@ class EmojiStore:
             connection.execute("UPDATE emojis SET uses=uses+1 WHERE emoji_id=?", (emoji_id,))
 
     def forget_messages(self, message_ids: Iterable[int]) -> int:
-        """A deleted message is not kept as a sample (its use count stays)."""
+        """A deleted message is kept nowhere: not as a sample (its use count stays), and not as
+        the message before another one's (Codex on PR #40); how many samples changed."""
         ids = list(message_ids)
         if not ids:
             return 0
+        marks = ",".join("?" * len(ids))
         with self._connect() as connection:
-            return connection.execute(
-                f"DELETE FROM samples WHERE message_id IN ({','.join('?' * len(ids))})", ids
+            gone = connection.execute(
+                f"DELETE FROM samples WHERE message_id IN ({marks})", ids
             ).rowcount
+            cleared = connection.execute(
+                f"UPDATE samples SET previous='', previous_id=NULL WHERE previous_id IN ({marks})",
+                ids,
+            ).rowcount
+        return gone + cleared
 
     def samples(self, emoji_id: int) -> list[Sample]:
         """Newest first."""
@@ -425,6 +449,7 @@ class EmojiStore:
         """`<:name:id>` → `:name:（description）` for `guild_id`'s own emoji; `:name:` alone for
         one without a description, another server's, one gone from the server, and an animated
         one (`<a:name:id>`), which is never described."""
+        text = text.replace(MARK, "")  # only the Bot's own brackets carry it
         found = CUSTOM.findall(text)
         if not found:
             return text
@@ -435,7 +460,7 @@ class EmojiStore:
             emoji = known.get(int(emoji_id))
             if animated or emoji is None or not emoji.description:
                 return f":{name}:"
-            return f":{name}:（{label(emoji.description, emoji.insufficient)}）"
+            return f":{name}:（{MARK}{label(emoji.description, emoji.insufficient)}）"
 
         return CUSTOM.sub(plain, text)
 
@@ -563,7 +588,8 @@ async def backfill_channel(
     waiting = None  # the newest message read, whose previous message is the next one
     messages = samples = 0
 
-    def take(message, previous: str) -> int:
+    def take(message, before_it) -> int:
+        previous = (before_it.content or "") if before_it is not None else ""
         added = 0
         for emoji_id, kind, uses in _uses(message, guild_id, store):
             added += store.add_sample(
@@ -576,6 +602,7 @@ async def backfill_channel(
                 previous if kind == "message" else "",
                 message.created_at.timestamp(),
                 uses,
+                before_it.id if before_it is not None and kind == "message" else None,
             )
         return added
 
@@ -585,7 +612,7 @@ async def backfill_channel(
         limit=None, before=Object(id=before), after=horizon, oldest_first=False
     ):
         if waiting is not None:
-            samples += take(waiting, message.content or "")
+            samples += take(waiting, message)
             messages += 1
             if messages >= BACKFILL_PAGE:
                 store.save_progress(guild_id, channel.id, name, waiting.id, 0, messages, samples)
@@ -595,7 +622,7 @@ async def backfill_channel(
         waiting = message
     cursor = before
     if waiting is not None:
-        samples += take(waiting, "")
+        samples += take(waiting, None)
         messages += 1
         cursor = waiting.id
     store.save_progress(guild_id, channel.id, name, cursor, days, messages, samples)

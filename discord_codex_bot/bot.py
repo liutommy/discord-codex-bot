@@ -470,7 +470,8 @@ class DiscordCodexClient(discord.Client):
         self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
         # The server's custom emoji and how members use them (emoji.py); None while off.
         self.emoji = EmojiStore(config.emoji_db_path) if config.emoji_enabled else None
-        self._last_message: dict[int, str] = {}  # channel id -> its latest message, for samples
+        # channel id -> (id, text) of its latest message: the "previous" of an emoji sample.
+        self._last_message: dict[int, tuple[int, str]] = {}
         self.active: dict[str, asyncio.Task] = {}  # in-flight request per member+channel
         self.alerts = Alerter(self, config)
         self._started_at = time.time()  # an --after-deploy announcement waits for a later start
@@ -706,8 +707,8 @@ class DiscordCodexClient(discord.Client):
         if not self._samples_from(guild_id, message.channel):
             return
         channel_id = message.channel.id
-        previous = self._last_message.get(channel_id)
-        self._last_message[channel_id] = message.content or ""
+        before = self._last_message.get(channel_id)
+        self._last_message[channel_id] = (message.id, message.content or "")
         if message.author.bot:
             return
         ids = sorted(
@@ -720,11 +721,11 @@ class DiscordCodexClient(discord.Client):
         ids = [emoji_id for emoji_id in ids if self.emoji.known(guild_id, emoji_id)]
         if not ids:
             return
-        if previous is None:  # the first message seen in this channel since the Bot started
-            previous = ""
+        if before is None:  # the first message seen in this channel since the Bot started
+            before = (None, "")
             try:
                 async for earlier in message.channel.history(limit=1, before=message):
-                    previous = earlier.content or ""
+                    before = (earlier.id, earlier.content or "")
             except discord.HTTPException:
                 pass
         for emoji_id in ids:
@@ -735,9 +736,18 @@ class DiscordCodexClient(discord.Client):
                 message.id,
                 channel_id,
                 message.content or "",
-                previous,
+                before[1],
                 message.created_at.timestamp(),
+                previous_id=before[0],
             )
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        """The channel's latest message changed (an answer replacing its 「思考中」 placeholder,
+        a member's edit): the next sample's "previous" is what it says now (Codex on PR #40)."""
+        latest = self._last_message.get(payload.channel_id)
+        content = payload.data.get("content")
+        if latest is not None and latest[0] == payload.message_id and isinstance(content, str):
+            self._last_message[payload.channel_id] = (payload.message_id, content)
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         """Someone reacted with one of the server's emoji: the message it was put on is a sample

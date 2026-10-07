@@ -19,6 +19,7 @@ from discord_codex_bot.config import Config, load_config
 from discord_codex_bot.emoji import (
     INSUFFICIENT,
     KEEP_SAMPLES,
+    MARK,
     EmojiStore,
     backfill_channel,
     describe_pending,
@@ -30,6 +31,11 @@ GUILD, OTHER = 111111111111111111, 999999999999999999
 PEPE, CAT, PARTY, FOREIGN = (100000000000000001, 100000000000000002, 100000000000000003,
                              100000000000000009)  # fmt: skip
 NOW = datetime(2026, 10, 7, 12, tzinfo=UTC)
+
+
+def shown(text: str) -> str:
+    """As a reader sees it: MARK is invisible."""
+    return text.replace(MARK, "")
 
 
 @pytest.fixture
@@ -91,7 +97,7 @@ def test_a_message_reads_its_emoji_by_meaning(store: EmojiStore) -> None:
     store.describe(PARTY, "不該出現", False, "bot:x")  # animated: never shown
     text = "<:pepe:100000000000000001> 和 <:cat:100000000000000002> <a:party:100000000000000003>"
     text += " <:theirs:100000000000000009> <:new:123456789012345678>"
-    assert store.rewrite(text, GUILD) == (
+    assert shown(store.rewrite(text, GUILD)) == (
         f":pepe:（綠色青蛙，用來表示無奈） 和 :cat:（一隻貓；{INSUFFICIENT}） :party:"
         " :theirs: :new:"
     )
@@ -104,10 +110,10 @@ def test_another_servers_emoji_never_brings_its_description(store: EmojiStore) -
     store.describe(FOREIGN, "那邊的用法", False, "bot:x")
     store.describe(PEPE, "青蛙", False, "bot:x")
     text = f"<:theirs:{FOREIGN}> <:pepe:{PEPE}>"
-    assert store.rewrite(text, GUILD) == ":theirs: :pepe:（青蛙）"
-    assert store.rewrite(text, OTHER) == ":theirs:（那邊的用法） :pepe:"
+    assert shown(store.rewrite(text, GUILD)) == ":theirs: :pepe:（青蛙）"
+    assert shown(store.rewrite(text, OTHER)) == ":theirs:（那邊的用法） :pepe:"
     store.sync(GUILD, [(CAT, "cat", False)])  # pepe was taken off the server
-    assert store.rewrite(text, GUILD) == ":theirs: :pepe:"
+    assert shown(store.rewrite(text, GUILD)) == ":theirs: :pepe:"
 
 
 def test_the_list_carries_short_descriptions_and_a_message_the_whole(store) -> None:
@@ -115,7 +121,7 @@ def test_the_list_carries_short_descriptions_and_a_message_the_whole(store) -> N
     store.describe(PEPE, "長" * 100, False, "bot:x")
     (listed,) = [line for line in store.block(GUILD).splitlines() if line.startswith(":pepe:")]
     assert listed == ":pepe:（" + "長" * (emoji_module.LISTED_MAX - 1) + "…）"
-    assert store.rewrite(f"<:pepe:{PEPE}>", GUILD) == ":pepe:（" + "長" * 100 + "）"
+    assert shown(store.rewrite(f"<:pepe:{PEPE}>", GUILD)) == ":pepe:（" + "長" * 100 + "）"
 
 
 def test_the_bots_descriptions_are_not_the_members_words(store, tmp_path, config) -> None:
@@ -127,7 +133,7 @@ def test_the_bots_descriptions_are_not_the_members_words(store, tmp_path, config
     store.describe(PEPE, "綠色青蛙（很有名）\n表示無奈", False, "bot:x")
     assert store.get(PEPE).description == "綠色青蛙(很有名) 表示無奈"
     asked = store.rewrite(f"我覺得 <:pepe:{PEPE}> 這很好笑 <:cat:{CAT}>", GUILD)
-    assert asked == "我覺得 :pepe:（綠色青蛙(很有名) 表示無奈） 這很好笑 :cat:"
+    assert shown(asked) == "我覺得 :pepe:（綠色青蛙(很有名) 表示無奈） 這很好笑 :cat:"
     day = tmp_path / "sessions" / "2026" / "10" / "07"
     day.mkdir(parents=True)
     payload = {"type": "message", "role": "user",
@@ -148,6 +154,28 @@ def test_memory_lists_the_most_used_static_emoji(store: EmojiStore, monkeypatch)
     assert store.block(None) == "" and store.block(42) == ""
     monkeypatch.setattr(emoji_module, "PROMPT_MAX", 1)
     assert store.listing(GUILD, 1)[0].name == "cat"
+
+
+def test_a_members_own_brackets_stay_theirs(store, tmp_path, config) -> None:
+    # Codex on PR #40: a member literally writing :pepe:（…） lost those words in harvest, the
+    # digest and replays. Only the Bot's brackets (MARK) are taken out, and a MARK the member
+    # typed is dropped before the Bot adds its own.
+    from discord_codex_bot.emoji import strip_descriptions
+
+    store.describe(PEPE, "青蛙", False, "bot:x")
+    typed = f"我說 :pepe:（我很喜歡這個） 跟 <:pepe:{PEPE}> 還有 :cat:（{MARK}假的）"
+    asked = store.rewrite(typed, GUILD)
+    assert strip_descriptions(asked) == "我說 :pepe:（我很喜歡這個） 跟 :pepe: 還有 :cat:（假的）"
+
+
+def test_a_deleted_message_is_not_kept_as_the_one_before_another(store: EmojiStore) -> None:
+    # Codex on PR #40: the sample is keyed by the later message, so deleting the earlier one
+    # left its text in the database.
+    _sample(store, PEPE, 2, previous="被刪的那則", previous_id=1)
+    _sample(store, CAT, 3, previous="留著", previous_id=9)
+    assert store.forget_messages([1]) == 1
+    assert [(s.text, s.previous) for s in store.samples(PEPE)] == [("好耶", "")]
+    assert store.samples(CAT)[0].previous == "留著"
 
 
 # ----------------------------------------------------------------------------- descriptions
@@ -428,6 +456,22 @@ async def test_members_messages_in_every_channel_the_bot_sees_are_sampled(bot) -
     assert public.reads == 1  # only the first message asked Discord for the one before it
 
 
+async def test_an_edited_latest_message_is_the_next_samples_previous(bot) -> None:
+    # Codex on PR #40: an answer replaces its 「思考中」 placeholder by an edit, so the next
+    # sample recorded the placeholder as the message before it.
+    channel = _Text(3, "閒聊")
+    placeholder = _incoming(1, channel, "🤔 思考中", bot=True)
+    await bot._collect_emoji(placeholder)
+    edit = types.SimpleNamespace(channel_id=3, message_id=placeholder.id, data={"content": "答案"})
+    await bot.on_raw_message_edit(edit)
+    other = types.SimpleNamespace(channel_id=3, message_id=5, data={"content": "別則"})
+    await bot.on_raw_message_edit(other)  # not the latest: no change
+    await bot._collect_emoji(_incoming(2, channel, f"<:pepe:{PEPE}> 好"))
+    assert bot.emoji.samples(PEPE)[0].previous == "答案"
+    await bot.on_raw_message_delete(types.SimpleNamespace(message_id=placeholder.id))
+    assert bot.emoji.samples(PEPE)[0].previous == ""  # the deleted answer goes too
+
+
 async def test_a_reaction_samples_the_message_it_was_put_on_once(bot, monkeypatch) -> None:
     channel = _Text(3, "閒聊")
     target = _incoming(1, channel, "今天下雨")
@@ -488,7 +532,7 @@ async def test_answers_read_emoji_by_meaning_and_memory_lists_them(bot, monkeypa
     monkeypatch.setattr(bot_module, "run_codex", codex)
     await bot._answer(f"這是什麼意思 <:pepe:{PEPE}>", [], GUILD, 5)
     prompt, kw = seen[0]
-    assert prompt == "這是什麼意思 :pepe:（綠色青蛙，表示無奈）"
+    assert shown(prompt) == "這是什麼意思 :pepe:（綠色青蛙，表示無奈）"
     assert "[伺服器表情]\n:cat:\n:pepe:（綠色青蛙，表示無奈）" in kw["memory"]  # by name at 0 uses
     assert kw["images"] == []  # never the emoji's picture
 
