@@ -1484,10 +1484,12 @@ class DiscordCodexClient(discord.Client):
         own = own.strip()
         said = [t.text for t in turns if t.role == "user" and t.speaker in (None, user_id)]
         images = any((a.content_type or "").startswith("image/") for a in attachments)
-        if effort:
-            verdict = Verdict("effort")  # the member set this message's effort: no move
-        elif images:
+        if images:
+            # Before the effort check: an image always takes the image list (a member's effort
+            # then only sets the strength there, below).
             verdict = Verdict("image")
+        elif effort:
+            verdict = Verdict("effort")  # the member set this message's effort: no move
         elif not own:
             verdict = Verdict("no-text")
         else:
@@ -1582,7 +1584,8 @@ class DiscordCodexClient(discord.Client):
                 # with `quoted`, a holdout can tell the two cases apart.
                 "files": len(attachments),
             },
-            no_x=kind == "live-x",
+            # An image goes the owner's order, not because Grok is out: no "no X search" note.
+            no_x=kind == "live-x" and not image_turn,
         )
 
     def _routed_memo(

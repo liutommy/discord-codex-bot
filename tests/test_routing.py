@@ -476,6 +476,26 @@ async def test_an_image_mid_conversation_goes_to_codex_and_leaves_the_route(
     assert result.via.backend == "agy" and "是一隻貓" in backends["agy"].calls[-1][2]["history"]
 
 
+async def test_an_image_in_an_x_conversation_carries_no_no_x_note(
+    client, backends, monkeypatch
+) -> None:
+    # hub on #35: the image turn kept route.kind live-x and Codex answered, so the answer said
+    # Grok could not be used — false; the image simply goes the owner's order.
+    verdicts(monkeypatch, ok("live-x", 5))
+    await ask(client, "馬斯克今天發了什麼")
+    plan, result = await ask_with_image(client, "這張截圖是他發的嗎")
+    assert result.via.backend == "codex" and plan.no_x is False
+    assert NO_X_NOTE not in client._routed_text(plan, result)
+
+
+async def test_an_image_with_a_slash_effort_takes_codex_at_that_effort(client, monkeypatch) -> None:
+    # hub on #35: the effort check came first, so a new conversation fell to DEFAULT.
+    asked = verdicts(monkeypatch, ok("code", 9))
+    plan = await client._route(KEY, None, GUILD, USER, "這是什麼", [PICTURE], False, effort="high")
+    assert asked == [] and plan.target == Resolved("codex", "gpt-5.6-luna", "high")
+    assert plan.log["status"] == "image"
+
+
 async def test_an_image_on_a_codex_conversation_keeps_its_cell(
     client, backends, monkeypatch
 ) -> None:
