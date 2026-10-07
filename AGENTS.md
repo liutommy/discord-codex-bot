@@ -43,14 +43,14 @@ Flag only what the diff shows: a wrong result, a broken boundary, or a rule belo
 ### State and time
 
 - Memory notes are replaced atomically: write a scratch file, then `os.replace` (`memory.atomic_write`). Tracking state lives in SQLite and changes inside a transaction. Flag a change that writes either in place. The small JSON stores (`ThreadStore`, `ReminderStore`, router transcripts) are still overwritten in place today; moving one of them to `atomic_write` is welcome, and new state should use it.
-- New persistent state is added to the nightly backup (`backup.py`).
+- New persistent state is added to the nightly backup (`backup.py`), except `CODEX_HOME/announce-queue`: a restored copy would re-post announcements already sent (owner: a missed post over a repeated one).
 - A fetch that fails, or was not checked (`FetchResult.checked` is false), must not complete a baseline or advance a cursor. Fetches bounded by design — the Ruten baseline's single page, capped Ruten and X paging — log the gap they leave and may advance. Flag a new truncation that is neither retried nor logged.
 - The host is frozen while idle, and `asyncio.sleep` does not count the frozen time. A wait toward a clock time that can be longer than `clock.STEP_SECONDS` (the nightly jobs, the tracking loop's wait for a watch's fixed time) uses `clock.sleep_until` or `clock.sleep_for`. Polls and periodic chores whose interval is at most a step (the 30 s reminder poll) or that aim at no clock time (login watch, attachment sweep, retry back-off) may use `asyncio.sleep`: they end at most one interval after the host resumes, which is all `sleep_for` would give them.
 - No host-specific paths (the sandbox host's home, absolute paths outside the containers) in code, scripts or compose files. Paths the images define inside the containers (`/home/node`, `/opt/discord-codex`) are fine.
 
 ### Owner-gated behaviour
 
-- Announcements post only from `python -m discord_codex_bot.announce send` or the queue in `CODEX_HOME/announce-queue`, which only the operator writes after the owner approves the text. A queued item is claimed (renamed `.sending`) before it is posted and never retried after an unclear failure. Flag any path that posts on start-up, from content baked into the image, from text a model or member supplied, or that can post an item twice.
+- Announcements post only from `python -m discord_codex_bot.announce send` or the queue in `CODEX_HOME/announce-queue`, which only the operator writes after the owner approves the text. A queued item is claimed (renamed `.sending`) before it is posted and never retried after an unclear failure. Flag any path that makes a start of the Bot post anything but an item already due in the queue, that posts from content baked into the image, from text a model or member supplied, or that can post an item twice.
 - A new member-facing feature updates the help text in `help.py` in the same pull request; members read it, and the model receives it as the `<HELP>` block.
 
 ### Do not flag

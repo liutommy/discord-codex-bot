@@ -224,3 +224,10 @@ async def test_send_now_checks_the_guild_and_pings_no_one(cfg, monkeypatch) -> N
     with pytest.raises(RuntimeError, match="allowed guild"):
         await announce.send_now(cfg, 10, "公告")
     assert [c[0] for c in calls].count("POST") == 1
+
+
+def test_list_says_an_after_deploy_item_waits_for_any_next_start(cfg) -> None:
+    # It fires on the next start of the Bot, deploy or restart (hub on #36): say so.
+    write_item(queue_dir(cfg), make_item(10, "更新好了", after_deploy=True), "d.json")
+    (line,) = announce.list_items(cfg)
+    assert "下次啟動（部署或重啟）後" in line
