@@ -574,6 +574,47 @@ turn fall back down the chain as before. After changing `GROK_VERSION`, also run
 be seen; a shell attempt in an image session must be denied and refused; and with the shell put
 back on the command line, the hook alone must deny it when dispatched through `use_tool`).
 
+### Custom emoji (optional, `EMOJI_ENABLED`)
+
+The model reads the server's own emoji by how its members use them. Samples go into
+`EMOJI_DB_FILE` (default `CODEX_HOME/emoji.sqlite3`, in the daily backup):
+
+- a member's message with one of the server's static emoji, together with the channel's message
+  before it;
+- a message someone reacted to with one (further reactions on it only count as uses).
+
+Only public channels are sampled (what `@everyone` can read), because the descriptions reach
+every prompt of the server, just like server memory. The newest 100 samples are kept per emoji,
+and a deleted message takes its samples with it. Animated emoji and stickers are not described.
+
+**History.** The history is read once, in the background:
+
+- It goes back `EMOJI_BACKFILL_DAYS` (default 90; 0 = none) from the first start. A page of 100
+  messages at a time, with a pause between pages.
+- It is resumable: a restart goes on where it stopped. A larger value later reads further back
+  from where it ended.
+- Each guild logs the channels it may not read (no Read Message History) and the non-public
+  ones it skipped, by name, along with its totals.
+
+**Descriptions.** Daily at `EMOJI_DESCRIBE_HOUR` (default 04:00 in the consolidation timezone;
+-1 = off), behind the same quota gate as harvest:
+
+- Up to `EMOJI_DESCRIBE_MAX` emoji with new samples are described from their image and samples,
+  in one or two sentences: what each looks like, and what members use it to say.
+- With fewer than 3 samples an emoji is described by its looks only and marked 用法樣本不足. It
+  is described again once new samples come in.
+- Descriptions written elsewhere go in with `python -m discord_codex_bot.emoji import <file>` (JSON
+  lines: guild_id, emoji_id, description, insufficient, source, generated_at). Each must name a
+  static emoji that is still on that guild, and the sample-count rule is applied to it.
+- `python -m discord_codex_bot.emoji export <dir>` writes each emoji waiting for a description
+  (its samples, its image and the shared instructions) for that.
+- `python -m discord_codex_bot.emoji status` shows counts and backfill progress.
+
+**In answers.** `<:name:id>` in a message, the replied-to message included, becomes
+`:name:（description）`, or just `:name:` while there is none and for animated emoji. MEMORY
+lists the server's 50 most used emoji in a `[伺服器表情]` section. No emoji picture is ever sent
+along: that would make the message an image turn, which skips the router.
+
 ### X lookup and X accounts (optional, Grok subscription)
 
 X has no free API, so X posts are read through the fxtwitter API, and X accounts could not be

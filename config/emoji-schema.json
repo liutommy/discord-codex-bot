@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "insufficient": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "description",
+    "insufficient"
+  ],
+  "additionalProperties": false
+}

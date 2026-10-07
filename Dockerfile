@@ -18,7 +18,7 @@ COPY config/output-style*.md /opt/discord-codex/
 COPY config/consolidate-schema.json config/harvest-schema.json config/tracking-schema.json \
      config/digest-user-schema.json config/digest-guild-schema.json \
      config/apis.json config/lol-names.json config/clearurls.json config/agy-settings.json \
-     config/routing.json \
+     config/routing.json config/emoji-schema.json \
      /opt/discord-codex/
 COPY permanent /opt/discord-codex/permanent
 COPY persona /opt/discord-codex/persona
