@@ -2,8 +2,11 @@ from discord_codex_bot.output import (
     PROMPT_ECHO_CHARS,
     format_reply,
     split_discord_message,
+    tail,
     truncate,
 )
+
+EMOJI = "<:pepe:100000000000000001>"
 
 
 def test_splits_every_message_below_limit() -> None:
@@ -48,3 +51,14 @@ def test_format_reply_lists_every_tag_and_handles_empty_prompt() -> None:
 def test_truncate_keeps_text_at_or_below_the_limit() -> None:
     assert truncate("abc", 3) == "abc"
     assert truncate("", 5) == ""
+
+
+def test_a_hard_cut_never_splits_a_custom_emoji() -> None:
+    text = "字" * 15 + EMOJI + "尾" * 5
+    for at in range(len(EMOJI) + 5, 15 + len(EMOJI)):  # inside the emoji; the rest fits
+        assert split_discord_message(text, at) == ["字" * 15, EMOJI + "尾" * 5], at
+    assert split_discord_message(EMOJI * 2, 10)[0] == EMOJI[:10]  # shorter than one: still ends
+    cut = truncate(text, 15 + len("\n\n[輸出已截斷]") + 3)
+    assert cut == "字" * 15 + "\n\n[輸出已截斷]"
+    assert tail(text, 5 + len(EMOJI) - 2) == "尾" * 5
+    assert tail(text, 5 + len(EMOJI)) == EMOJI + "尾" * 5

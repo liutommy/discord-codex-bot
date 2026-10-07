@@ -778,3 +778,123 @@ def test_an_emoji_taken_out_past_the_kept_text_is_described_again(store: EmojiSt
     store.describe(PEPE, "x", False, "b")
     store.edit_message(GUILD, 2, 3, f"{head} 沒了", 5.0, True)
     assert store.samples(PEPE) == [] and [e.emoji_id for e in store.pending([GUILD])] == [PEPE]
+
+
+# ----------------------------------------------------------------------------- answers
+# Hub 2026-10-07: the model writes :name:, the Bot sends the server's own emoji.
+
+
+def test_an_answer_shows_only_the_servers_own_static_emoji(store: EmojiStore) -> None:
+    said = ":pepe: 好 :party: :theirs: :nope: :cat:"
+    assert store.reply(said, GUILD) == f"<:pepe:{PEPE}> 好 :party: :theirs: :nope: <:cat:{CAT}>"
+    assert store.reply(said, OTHER) == f":pepe: 好 :party: <:theirs:{FOREIGN}> :nope: :cat:"
+
+
+def test_an_emoji_gone_from_the_server_stays_as_written(store: EmojiStore) -> None:
+    store.sync(GUILD, [(PEPE, "pepe", False)])
+    assert store.reply(":pepe: :cat:", GUILD) == f"<:pepe:{PEPE}> :cat:"
+
+
+def test_code_keeps_its_colons(store: EmojiStore) -> None:
+    said = "`:pepe:` ``a :pepe: b`` :pepe:\n```\n:pepe:\n```\n:pepe: ```py\n:pepe:"
+    want = f"`:pepe:` ``a :pepe: b`` <:pepe:{PEPE}>\n```\n:pepe:\n```\n<:pepe:{PEPE}> ```py\n:pepe:"
+    assert store.reply(said, GUILD) == want
+
+
+def test_an_emoji_already_sent_whole_or_in_text_is_left_alone(store: EmojiStore) -> None:
+    whole = f"<:pepe:{PEPE}> <a:party:{PARTY}> 12:30:45 a:pepe:"
+    assert store.reply(whole, GUILD) == whole
+
+
+def test_a_copied_description_goes_and_the_answers_own_brackets_stay(store) -> None:
+    long = "綠色青蛙張大嘴巴，" * 10
+    store.describe(PEPE, "綠色青蛙，表示無奈", False, "b")
+    store.describe(CAT, long, True, "b")
+    short = emoji_module._short(long)
+    cases = {
+        ":pepe:（綠色青蛙，表示無奈）好": f"<:pepe:{PEPE}>好",  # from a member's message
+        f":pepe:（{MARK}綠色青蛙，表示無奈）": f"<:pepe:{PEPE}>",
+        ":pepe:(綠色青蛙，表示無奈)": f"<:pepe:{PEPE}>",
+        f":cat:（{short}；{INSUFFICIENT}）": f"<:cat:{CAT}>",  # from the list
+        f":cat:（{long.strip()}）": f"<:cat:{CAT}>",
+        f":pepe:（{MARK}別的）": f"<:pepe:{PEPE}>",  # MARK: the Bot's bracket, whatever it says
+        ":pepe:（真的）": f"<:pepe:{PEPE}>（真的）",
+        ":pepe:(笑)": f"<:pepe:{PEPE}>(笑)",
+        ":nope:（綠色青蛙，表示無奈）": ":nope:（綠色青蛙，表示無奈）",
+    }
+    for said, want in cases.items():
+        assert store.reply(said, GUILD) == want, said
+
+
+def test_a_part_way_answer_holds_back_what_may_still_become_an_emoji(store) -> None:
+    store.describe(PEPE, "綠色青蛙，表示無奈", False, "b")
+    assert store.reply("好 :pe", GUILD, streaming=True) == "好 "
+    assert store.reply("好 :pe", GUILD) == "好 :pe"
+    assert store.reply("好 :pepe:（綠色青", GUILD, streaming=True) == f"好 <:pepe:{PEPE}>"
+    assert store.reply("好 :pepe:（真", GUILD, streaming=True) == f"好 <:pepe:{PEPE}>（真"
+    assert store.reply("好 :zz", GUILD, streaming=True) == "好 :zz"  # no emoji starts so
+    assert store.reply("時間 12:3", GUILD, streaming=True) == "時間 12:3"
+    assert store.reply("```\n:pe", GUILD, streaming=True) == "```\n:pe"
+
+
+def test_the_list_says_the_answer_may_use_them_only_with_replies_on(store) -> None:
+    from discord_codex_bot.emoji import REPLY_HINT
+
+    assert REPLY_HINT not in store.block(GUILD)
+    assert store.block(GUILD, reply=True).startswith(f"{BLOCK_HEADER} {REPLY_HINT}\n")
+    assert INSUFFICIENT in REPLY_HINT
+
+
+async def _answered(bot, monkeypatch, said: str, guild_id, **settings):
+    from discord_codex_bot import bot as bot_module
+    from discord_codex_bot.codex import CodexResult
+
+    bot.config = replace(bot.config, **settings)
+    seen: dict = {}
+    painted: list[str] = []
+
+    async def codex(prompt, config, **kw):
+        seen.update(kw)
+        await kw["on_delta"](said)
+        return CodexResult(said, thread_id="t")
+
+    async def on_delta(text: str) -> None:
+        painted.append(text)
+
+    monkeypatch.setattr(bot_module, "run_codex", codex)
+    result = await bot._answer("嗨", [], guild_id, 5, on_delta=on_delta)
+    return result.text, painted, seen.get("memory", "")
+
+
+async def test_answers_send_the_emoji_while_streaming_and_at_the_end(bot, monkeypatch) -> None:
+    from discord_codex_bot.emoji import REPLY_HINT
+
+    text, painted, memory = await _answered(bot, monkeypatch, "好 :pepe:", GUILD, emoji_reply=True)
+    assert text == painted[0] == f"好 <:pepe:{PEPE}>" and REPLY_HINT in memory
+
+
+@pytest.mark.parametrize(
+    ("guild_id", "settings"),
+    [
+        (GUILD, {"emoji_reply": False}),  # the switch
+        (None, {"emoji_reply": True}),  # a DM
+        (GUILD, {"emoji_reply": True, "allowed_guild_ids": frozenset({OTHER})}),
+    ],
+)
+async def test_answers_keep_the_text_where_replies_are_off(
+    bot, monkeypatch, guild_id, settings
+) -> None:
+    from discord_codex_bot.emoji import REPLY_HINT
+
+    text, painted, memory = await _answered(bot, monkeypatch, "好 :pepe:", guild_id, **settings)
+    assert text == painted[0] == "好 :pepe:" and REPLY_HINT not in memory
+
+
+async def test_the_emoji_is_in_place_before_the_answer_is_cut(bot, monkeypatch) -> None:
+    from discord_codex_bot.output import DISCORD_MESSAGE_LIMIT, split_discord_message
+
+    said = "字" * (DISCORD_MESSAGE_LIMIT - 10) + ":pepe:" + "尾" * 20
+    text, _painted, _memory = await _answered(bot, monkeypatch, said, GUILD, emoji_reply=True)
+    chunks = split_discord_message(text)
+    assert chunks[0] == "字" * (DISCORD_MESSAGE_LIMIT - 10)
+    assert chunks[1] == f"<:pepe:{PEPE}>" + "尾" * 20

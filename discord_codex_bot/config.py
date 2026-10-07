@@ -264,6 +264,7 @@ class Config:
     emoji_describe_hour: int
     emoji_describe_max: int
     emoji_schema_path: Path
+    emoji_reply: bool
     youtube_api_key: str
     twitch_client_id: str
     twitch_client_secret: str
@@ -517,6 +518,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         emoji_schema_path=Path(
             values.get("EMOJI_SCHEMA_FILE", "/opt/discord-codex/emoji-schema.json")
         ),
+        # Answers may use the server's emoji (`:name:` → `<:name:id>`); off on its own.
+        emoji_reply=_boolean(values, "EMOJI_REPLY"),
         youtube_api_key=values.get("YOUTUBE_API_KEY", "").strip(),
         twitch_client_id=values.get("TWITCH_CLIENT_ID", "").strip(),
         twitch_client_secret=values.get("TWITCH_CLIENT_SECRET", "").strip(),

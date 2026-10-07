@@ -141,6 +141,15 @@ BLOCK_HEADER = (
 )
 
 
+# With EMOJI_REPLY on, after BLOCK_HEADER: the answer may use the emoji too (hub 2026-10-07;
+# hub's suggestion, kept: not one marked INSUFFICIENT).
+REPLY_HINT = (
+    "You may use a few of these emoji in your answer, written as :name: alone (no brackets, no"
+    " description); they show as the emoji. Skip one whose meaning you are unsure of, one"
+    f" marked {INSUFFICIENT}, and one with no description."
+)
+
+
 def label(description: str, insufficient: bool) -> str:
     return f"{description}；{INSUFFICIENT}" if insufficient else description
 
@@ -530,8 +539,9 @@ class EmojiStore:
 
         return CUSTOM.sub(plain, text)
 
-    def block(self, guild_id: int | None) -> str:
-        """The MEMORY section: the server's most used emoji with what they mean."""
+    def block(self, guild_id: int | None, reply: bool = False) -> str:
+        """The MEMORY section: the server's most used emoji with what they mean; with `reply`
+        (EMOJI_REPLY), also that the answer may use them."""
         if guild_id is None:
             return ""
         lines = [
@@ -542,7 +552,104 @@ class EmojiStore:
         ]
         if not lines:
             return ""
-        return f"{BLOCK_HEADER}\n" + "\n".join(lines)
+        header = f"{BLOCK_HEADER} {REPLY_HINT}" if reply else BLOCK_HEADER
+        return f"{header}\n" + "\n".join(lines)
+
+    def by_name(self, guild_id: int) -> dict[str, Emoji]:
+        """`guild_id`'s static emoji still on it, by name; the most used takes a shared name."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM emojis WHERE guild_id=? AND present=1 AND animated=0
+                   ORDER BY uses, name""",
+                (guild_id,),
+            ).fetchall()
+        return {row["name"]: self._emoji(row) for row in rows}
+
+    def reply(self, text: str, guild_id: int, streaming: bool = False) -> str:
+        """The model's `:name:` → `<:name:id>` for `guild_id`'s own static emoji still on it,
+        outside code; any other `:name:` stays as written. A description the model copied after
+        it (`:name:（…）`, from the list or a member's message) goes. `streaming`: a part-way
+        answer, so a trailing `:na` that may still become an emoji, or the start of a copied
+        description, is held back rather than shown and taken away again."""
+        known = self.by_name(guild_id)
+        if not known:
+            return text.replace(MARK, "")
+        out: list[str] = []
+        at = 0
+        for code in CODE.finditer(text):
+            out.append(_emoji_out(text[at : code.start()], known))
+            out.append(code.group())
+            at = code.end()
+        tail = text[at:]
+        out.append(_emoji_out(tail, known))
+        if streaming and tail:
+            out[-1] = _held_back(out[-1], known)
+        return "".join(out).replace(MARK, "")
+
+
+# Discord's code: ``` blocks (one not closed yet runs to the end) and `inline` spans.
+CODE = re.compile(r"```[\s\S]*?(?:```|$)|``[^`]+?``|`[^`]+`")
+# `:name:` the model wrote, not already part of `<:name:id>` / `<a:name:id>`, with the bracket
+# right after it (a description it may have copied).
+WRITTEN = re.compile(
+    r"(?<![A-Za-z0-9_<]):([A-Za-z0-9_]{2,32}):(?![0-9]{15,21}>)"
+    r"(（[^（）\n]*）|\([^()\n]*\))?"
+)
+PARTIAL_NAME = re.compile(r"(?<![A-Za-z0-9_<]):([A-Za-z0-9_]{0,32})$")
+PARTIAL_BRACKET = re.compile(r"<:([A-Za-z0-9_]{2,32}):\d{15,21}>(?:（([^（）\n]*)|\(([^()\n]*))$")
+
+
+def _copied(emoji: Emoji, said: str) -> bool:
+    """Whether bracketed text after `:name:` is the emoji's description as the prompt gave it:
+    in a member's message (whole, MARK first) or in the list (short)."""
+    if said.startswith(MARK):
+        return True
+    said = said.strip()
+    if not emoji.description or not said:
+        return False
+    whole, short = tidy(emoji.description), _short(emoji.description)
+    return said in {
+        whole,
+        short,
+        label(whole, emoji.insufficient),
+        label(short, emoji.insufficient),
+        emoji.description,
+    }
+
+
+def _emoji_out(text: str, known: dict[str, Emoji]) -> str:
+    def swap(match: re.Match) -> str:
+        name, bracket = match.groups()
+        emoji = known.get(name)
+        if emoji is None:
+            return match.group()
+        shown = f"<:{name}:{emoji.emoji_id}>"
+        if bracket is None or _copied(emoji, bracket[1:-1]):
+            return shown
+        return shown + bracket
+
+    return WRITTEN.sub(swap, text)
+
+
+def _held_back(text: str, known: dict[str, Emoji]) -> str:
+    partial = PARTIAL_NAME.search(text)
+    if partial and any(name.startswith(partial.group(1)) for name in known):
+        return text[: partial.start()]
+    bracket = PARTIAL_BRACKET.search(text)
+    if bracket:
+        emoji = known.get(bracket.group(1))
+        said = bracket.group(2) if bracket.group(2) is not None else bracket.group(3)
+        if emoji is not None and (
+            said.startswith(MARK) or (emoji.description and _copy_prefix(emoji, said))
+        ):
+            return text[: bracket.start() + len(f"<:{emoji.name}:{emoji.emoji_id}>")]
+    return text
+
+
+def _copy_prefix(emoji: Emoji, said: str) -> bool:
+    whole = tidy(emoji.description)
+    candidates = (whole, _short(emoji.description), label(whole, emoji.insufficient))
+    return any(candidate.startswith(said) for candidate in candidates)
 
 
 def _short(description: str) -> str:
