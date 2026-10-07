@@ -495,7 +495,13 @@ def describe_prompt(emoji: Emoji, samples: Sequence[Sample]) -> str:
         else {"kind": s.kind, "text": names_only(s.text)}
         for s in samples
     ]
-    data = json.dumps({"name": emoji.name, "examples": examples}, ensure_ascii=False)
+    # < and > escaped (as digest._data does): a member writing </EMOJI> cannot close the block
+    # and have the rest read as instructions (Codex on PR #40).
+    data = (
+        json.dumps({"name": emoji.name, "examples": examples}, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
     return f"{DESCRIBE_INSTRUCTIONS}\n\n<EMOJI>\n{data}\n</EMOJI>"
 
 

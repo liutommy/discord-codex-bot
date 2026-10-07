@@ -783,12 +783,21 @@ class DiscordCodexClient(discord.Client):
         )
 
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
-        if self.emoji is not None:
-            self.emoji.forget_messages([payload.message_id])
+        self._forget_messages(payload.channel_id, [payload.message_id])
 
     async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
-        if self.emoji is not None:
-            self.emoji.forget_messages(payload.message_ids)
+        self._forget_messages(payload.channel_id, payload.message_ids)
+
+    def _forget_messages(self, channel_id: int, message_ids) -> None:
+        """Deleted messages leave no trace: not in samples, and not as the cached latest message
+        the next sample would take as its "previous" (Codex on PR #40)."""
+        if self.emoji is None:
+            return
+        ids = set(message_ids)
+        latest = self._last_message.get(channel_id)
+        if latest is not None and latest[0] in ids:
+            del self._last_message[channel_id]
+        self.emoji.forget_messages(ids)
 
     async def _backfill_emoji(self) -> None:
         """The one-off history read (emoji.backfill_channel) of every allowed guild: each
