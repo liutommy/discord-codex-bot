@@ -295,7 +295,8 @@ sign-in lives in the `<name>_agy_home` volume: run `agy` inside the container on
 old one. Google's content policy may reject prompts on the Gemini models that the Claude models
 accept. Announcements are posted only on purpose, after the owner approves the text: `python -m
 discord_codex_bot.announce send` posts one now, `queue` holds one for a time or the Bot's next start (deploy or restart)
-(`CODEX_HOME/announce-queue`, each item posted at most once); nothing posts on start-up.
+(`CODEX_HOME/announce-queue`, each item posted at most once). Starting the Bot never creates an
+announcement: a start only lets due items already in the queue (an `--after-deploy` one) go out.
 
 When the ChatGPT subscription quota runs out or the selected model is temporarily at capacity,
 Codex reports it *inside* its JSONL stream (`codex_error_info: usage_limit_exceeded` or

@@ -50,7 +50,7 @@ Flag only what the diff shows: a wrong result, a broken boundary, or a rule belo
 
 ### Owner-gated behaviour
 
-- Announcements post only from `python -m discord_codex_bot.announce send` or the queue in `CODEX_HOME/announce-queue`, which only the operator writes after the owner approves the text. A queued item is claimed (renamed `.sending`) before it is posted and never retried after an unclear failure. Flag any path that posts on start-up, from content baked into the image, from text a model or member supplied, or that can post an item twice.
+- Announcements post only from `python -m discord_codex_bot.announce send` or the queue in `CODEX_HOME/announce-queue`, which only the operator writes after the owner approves the text. A queued item is claimed (renamed `.sending`) before it is posted and never retried after an unclear failure. Flag any path that makes a start of the Bot post anything but an item already due in the queue, that posts from content baked into the image, from text a model or member supplied, or that can post an item twice.
 - A new member-facing feature updates the help text in `help.py` in the same pull request; members read it, and the model receives it as the `<HELP>` block.
 
 ### Do not flag

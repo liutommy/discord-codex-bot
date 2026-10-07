@@ -12,7 +12,8 @@ Run inside the bot container, where the Bot's token and guild allowlist are:
 `--after-deploy` means the next start of the Bot after the item was queued — a deploy, or any
 restart (a reboot of the host, a crash brought back by dcb-up) — whichever comes first.
 
-Nothing is baked into the image and nothing posts on start-up by itself: the old start-up
+Nothing is baked into the image and a start never creates an announcement — it only lets items
+already in the queue go out when due (an `--after-deploy` one is due then). The old start-up
 announcement kept its "already posted" record in a file and re-posted on 2026-10-02 when that
 record was lost (owner 2026-10-07: replace it with this). The queue lives in
 CODEX_HOME/announce-queue — persistent, outside git, the image and the nightly backup, and not
