@@ -2255,38 +2255,41 @@ async def test_each_ruten_source_keeps_its_own_failure_count(client, monkeypatch
     assert len(sent) == 1 and "store/a" in sent[0]
 
 
-def test_public_channel_needs_everyone_to_read_it(client, monkeypatch) -> None:
+def test_server_memory_reads_every_channel_the_bot_sees(client, monkeypatch) -> None:
+    # Owner 2026-10-07: 「伺服器記憶也改成 Bot 看得到的都收」 — private channels included.
     from unittest.mock import MagicMock
 
     import discord
 
-    everyone = object()
+    me, everyone = object(), object()
 
-    def channel(kind, readable=True, private=False, parent=None):
+    def channel(kind, bot_sees=True, everyone_sees=True):
         made = MagicMock(spec=kind)
-        made.permissions_for.side_effect = lambda role: MagicMock(
-            view_channel=readable and role is everyone
+        made.permissions_for.side_effect = lambda who: MagicMock(
+            view_channel=bot_sees if who is me else everyone_sees
         )
-        if kind is discord.Thread:
-            made.is_private.return_value = private
-            made.parent = parent
         return made
 
-    public, hidden = channel(discord.TextChannel), channel(discord.TextChannel, readable=False)
+    orphan = channel(discord.Thread)
+    orphan.permissions_for.side_effect = discord.ClientException("parent not cached")
     channels = {
-        1: public,
-        2: hidden,
-        3: channel(discord.Thread, parent=public),
-        4: channel(discord.Thread, parent=hidden),
-        5: channel(discord.Thread, private=True, parent=public),
-        6: channel(discord.Thread, parent=None),
+        1: channel(discord.TextChannel),
+        2: channel(discord.TextChannel, everyone_sees=False),  # private, the Bot is in it
+        3: channel(discord.TextChannel, bot_sees=False, everyone_sees=False),
+        4: channel(discord.Thread, everyone_sees=False),  # a private thread the Bot is in
+        5: channel(discord.Thread, bot_sees=False),
+        6: channel(discord.ForumChannel, everyone_sees=False),
+        7: object(),  # not a channel
     }
-    guild = MagicMock(default_role=everyone)
+    guild = MagicMock(me=me, default_role=everyone)
     guild.get_channel_or_thread.side_effect = channels.get
     monkeypatch.setattr(client, "get_guild", lambda gid: guild if gid == GUILD else None)
-    verdicts = {cid: client._public_channel(GUILD, cid) for cid in [*channels, 99]}
-    assert verdicts == {1: True, 2: False, 3: True, 4: False, 5: False, 6: False, 99: False}
-    assert client._public_channel(GUILD + 1, 1) is False  # a guild the Bot does not see
+    verdicts = {cid: client._visible_channel(GUILD, cid) for cid in [*channels, 99]}
+    assert verdicts == {1: True, 2: True, 3: False, 4: True, 5: False, 6: True, 7: False, 99: False}
+    assert client._visible_channel(GUILD + 1, 1) is False  # a guild the Bot does not see
+    channels[8] = orphan
+    with pytest.raises(discord.ClientException):  # the digest leaves it out (_is_visible)
+        client._visible_channel(GUILD, 8)
 
 
 async def test_tracking_tags_set_fixed_times(client, tmp_path, monkeypatch) -> None:

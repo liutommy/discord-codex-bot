@@ -457,10 +457,11 @@ read, never the assistant's.
 - **Per server** with at least two members talking: facts about the server itself (recurring
   events, shared games, the server's own terms, running jokes, house rules) that at least two
   different members mention. The name starts with `（多人提及）`. Nothing about an individual
-  member goes there. Server notes reach every channel's prompt, so only conversations in
-  channels `@everyone` can read feed them (checked against the gateway cache; a private thread,
-  a channel the Bot cannot see or any doubt counts as private). The operator CLI below has no
-  Discord connection, so it writes personal notes only.
+  member goes there. Conversations in every channel the Bot can see feed them, private channels
+  and private threads the Bot is in included (owner, 2026-10-07; checked against the gateway
+  cache; a channel the Bot cannot see, or any doubt, is left out). Server notes reach every
+  channel's prompt of the server. The operator CLI below has no Discord connection, so it
+  writes personal notes only.
 
 Each note must quote the members' own words: one exact quote from each of at least two different
 conversations (personal) or members (server), every quote found character for character in the

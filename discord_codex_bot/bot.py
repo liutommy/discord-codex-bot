@@ -643,7 +643,7 @@ class DiscordCodexClient(discord.Client):
         )
         self._digester = self.loop.create_task(
             digest_forever(
-                self.threads, self.memory, self.config, self.queue.run, self._public_channel
+                self.threads, self.memory, self.config, self.queue.run, self._visible_channel
             )
         )
         self._harvest_wakeup = asyncio.Event()
@@ -2863,19 +2863,18 @@ class DiscordCodexClient(discord.Client):
             lines.append("備份：" + "、".join(path.name for path in kept))
         return "\n".join(lines)
 
-    def _public_channel(self, guild_id: int, channel_id: int) -> bool:
-        """True only when @everyone can read the channel, from the gateway cache. A channel the
-        Bot cannot see, a private thread, or anything unexpected counts as not public: server
-        memory written from it would reach every channel's prompt."""
+    def _visible_channel(self, guild_id: int, channel_id: int) -> bool:
+        """True when the Bot itself can see the channel, from the gateway cache: server memory
+        is gathered from every such channel, private ones and the private threads the Bot is in
+        included (owner, 2026-10-07: 「伺服器記憶也改成 Bot 看得到的都收」, the rule emoji samples
+        follow). A conversation in a private thread means the Bot posted there, which joins it.
+        A channel the Bot cannot see or cannot find counts as not visible; an error (a thread
+        whose parent is not cached) reaches the digest, which leaves the channel out."""
         guild = self.get_guild(guild_id)
         channel = guild.get_channel_or_thread(channel_id) if guild else None
-        if isinstance(channel, discord.Thread):
-            if channel.is_private():
-                return False
-            channel = channel.parent
-        if guild is None or not isinstance(channel, discord.abc.GuildChannel):
+        if guild is None or not isinstance(channel, (discord.abc.GuildChannel, discord.Thread)):
             return False
-        return bool(channel.permissions_for(guild.default_role).view_channel)
+        return bool(channel.permissions_for(guild.me).view_channel)
 
     def _is_guild_admin(self, interaction: discord.Interaction) -> bool:
         """Who may change operator settings: the server owner, a guild admin, or an id the
