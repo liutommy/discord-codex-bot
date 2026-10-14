@@ -41,6 +41,11 @@ STYLE_SUFFIXES = (".md", ".markdown")
 LIST_NAME = "list"
 _SLUG = re.compile(r"[^\w-]+", re.UNICODE)
 _INDEX_LINE = re.compile(r"^- \[(?P<name>[^\]]+)\]\((?P<file>[^)]+)\) — (?P<hook>.*)$")
+# A note's file is a bare slug in topics/: what slugify makes, nothing else. Names come from
+# members (/remember, 👍, the model's <memory>), so a name like `x](../../4/style.md) — y` must
+# never turn into a path (hub, 2026-10-15: it read and deleted files outside topics/).
+_TOPIC_FILE = re.compile(r"^[\w-]+\.md$", re.UNICODE)
+_NAME_UNSAFE = re.compile(r"[\[\]()]")
 
 # Mode B: the model appends these after an answer when it noticed a durable fact.
 MEMORY_TAG = re.compile(
@@ -117,6 +122,16 @@ class Note:
 def _hook(text: str) -> str:
     hook = " ".join(text.split())
     return hook if len(hook) <= 80 else f"{hook[:80]}…"
+
+
+def clean_name(name: str) -> str:
+    """A note name as it may stand in an index line: one line, no `[]()` (which would end the
+    name or start the file field early)."""
+    return " ".join(_NAME_UNSAFE.sub(" ", name).split())
+
+
+def safe_topic_file(file: str) -> bool:
+    return file == Path(file).name and bool(_TOPIC_FILE.fullmatch(file))
 
 
 def slugify(name: str) -> str:
@@ -236,7 +251,7 @@ class MemoryStore:
         text = text.strip()
         if not text:
             return "記憶內容不能是空的。"
-        name = marker + (unmarked(name.strip()) or "記憶")
+        name = marker + (clean_name(unmarked(name.strip())) or "記憶")
         directory = self.scope_dir(scope, guild_id, user_id)
         body = f"# {name.strip()}\n\n{date.today().isoformat()}\n\n{text}\n"
         needed = len(body.encode("utf-8")) + 120
@@ -279,7 +294,7 @@ class MemoryStore:
             directory / INDEX_FILE
         ):
             try:
-                raw = (directory / TOPIC_DIR / entry.file).read_text("utf-8")
+                raw = self._topic_path(directory, entry.file).read_text("utf-8")
             except OSError:
                 continue
             parts = raw.split("\n\n", 2)
@@ -306,6 +321,7 @@ class MemoryStore:
         entries: list[Entry] = []
         used: set[str] = set()
         for note in notes:
+            note = Note(clean_name(note.name) or "記憶", note.date, note.text)
             slug = slugify(note.name)
             file = f"{slug}.md"
             counter = 2
@@ -334,7 +350,7 @@ class MemoryStore:
             keep = [e for e in entries if e.file != name and (by_file or e.name != name)]
             for entry in entries:
                 if entry not in keep:
-                    (directory / TOPIC_DIR / entry.file).unlink(missing_ok=True)
+                    self._topic_path(directory, entry.file).unlink(missing_ok=True)
                     removed = True
             if len(keep) != len(entries):
                 self._write_file(directory / index_name, [e.line() for e in keep])
@@ -348,7 +364,7 @@ class MemoryStore:
         sources = []
         for entry in self.all_entries(scope, guild_id, user_id):
             try:
-                lines = (directory / TOPIC_DIR / entry.file).read_text("utf-8").splitlines()
+                lines = self._topic_path(directory, entry.file).read_text("utf-8").splitlines()
             except OSError:
                 continue
             sources.append((entry.name, entry.file, lines))
@@ -375,7 +391,7 @@ class MemoryStore:
         if match is None:
             return f"（找不到記憶「{name}」）"
         try:
-            all_lines = (directory / TOPIC_DIR / match.file).read_text("utf-8").splitlines()
+            all_lines = self._topic_path(directory, match.file).read_text("utf-8").splitlines()
         except OSError:
             return f"（記憶「{name}」的檔案遺失）"
         page = min(lines or self._limits.read_max_lines, self._limits.read_max_lines)
@@ -457,10 +473,20 @@ class MemoryStore:
             entries = self._read_index(directory / index_name)
             if entries:
                 oldest = entries.pop(0)
-                (directory / TOPIC_DIR / oldest.file).unlink(missing_ok=True)
+                self._topic_path(directory, oldest.file).unlink(missing_ok=True)
                 self._write_file(directory / index_name, [e.line() for e in entries])
                 return True
         return False
+
+    @staticmethod
+    def _topic_path(directory: Path, file: str) -> Path:
+        """The note file `file` of `directory`. Raises ValueError for anything but a bare file
+        directly in topics/; _read_index already drops such entries, this is the last guard."""
+        topics = directory / TOPIC_DIR
+        path = topics / file
+        if not safe_topic_file(file) or path.resolve().parent != topics.resolve():
+            raise ValueError(f"memory note outside topics/: {file!r}")
+        return path
 
     def _read_index(self, path: Path) -> list[Entry]:
         try:
@@ -470,7 +496,7 @@ class MemoryStore:
         entries = []
         for line in lines:
             match = _INDEX_LINE.match(line)
-            if match:
+            if match and safe_topic_file(match["file"]):
                 entries.append(Entry(match["name"], match["file"], match["hook"]))
         return entries
 
