@@ -126,8 +126,10 @@ def _hook(text: str) -> str:
 
 def clean_name(name: str) -> str:
     """A note name as it may stand in an index line: one line, no `[]()` (which would end the
-    name or start the file field early)."""
-    return " ".join(_NAME_UNSAFE.sub(" ", name).split())
+    name or start the file field early). Keeps the reserved marker the name starts with, and
+    never uncovers one: `(（推測）x` stays unmarked."""
+    name = name.strip()
+    return marker_of(name) + unmarked(" ".join(_NAME_UNSAFE.sub(" ", name).split()))
 
 
 def safe_topic_file(file: str) -> bool:
@@ -135,7 +137,8 @@ def safe_topic_file(file: str) -> bool:
 
 
 def slugify(name: str) -> str:
-    slug = _SLUG.sub("-", name.strip()).strip("-").lower()[:40]
+    # Lower first: "İ".lower() adds U+0307, which is not \w and would fail safe_topic_file.
+    slug = _SLUG.sub("-", name.strip().lower()).strip("-")[:40]
     return slug or "memory"
 
 
@@ -295,7 +298,7 @@ class MemoryStore:
         ):
             try:
                 raw = self._topic_path(directory, entry.file).read_text("utf-8")
-            except OSError:
+            except (OSError, ValueError):
                 continue
             parts = raw.split("\n\n", 2)
             note_date = parts[1].strip() if len(parts) > 1 else ""
@@ -350,7 +353,10 @@ class MemoryStore:
             keep = [e for e in entries if e.file != name and (by_file or e.name != name)]
             for entry in entries:
                 if entry not in keep:
-                    self._topic_path(directory, entry.file).unlink(missing_ok=True)
+                    try:
+                        self._topic_path(directory, entry.file).unlink(missing_ok=True)
+                    except ValueError:
+                        pass  # a link out of topics/: drop the line, never touch the target
                     removed = True
             if len(keep) != len(entries):
                 self._write_file(directory / index_name, [e.line() for e in keep])
@@ -365,7 +371,7 @@ class MemoryStore:
         for entry in self.all_entries(scope, guild_id, user_id):
             try:
                 lines = self._topic_path(directory, entry.file).read_text("utf-8").splitlines()
-            except OSError:
+            except (OSError, ValueError):
                 continue
             sources.append((entry.name, entry.file, lines))
         return search_snippets(sources, query, self._limits, f"（「{query}」沒有命中任何記憶）")
@@ -392,7 +398,7 @@ class MemoryStore:
             return f"（找不到記憶「{name}」）"
         try:
             all_lines = self._topic_path(directory, match.file).read_text("utf-8").splitlines()
-        except OSError:
+        except (OSError, ValueError):
             return f"（記憶「{name}」的檔案遺失）"
         page = min(lines or self._limits.read_max_lines, self._limits.read_max_lines)
         start = max(1, offset)
@@ -473,7 +479,10 @@ class MemoryStore:
             entries = self._read_index(directory / index_name)
             if entries:
                 oldest = entries.pop(0)
-                self._topic_path(directory, oldest.file).unlink(missing_ok=True)
+                try:
+                    self._topic_path(directory, oldest.file).unlink(missing_ok=True)
+                except ValueError:
+                    pass  # a link out of topics/: drop the line, never touch the target
                 self._write_file(directory / index_name, [e.line() for e in entries])
                 return True
         return False

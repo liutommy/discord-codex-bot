@@ -458,3 +458,42 @@ def test_rewrite_cannot_be_steered_by_a_note_name(tmp_path: Path) -> None:
     [entry] = store.all_entries("user", 1, 2)
     assert "VICTIM STYLE" not in store.recall("user", 1, 2, entry.name)
     assert store.forget("user", 1, 2, entry.name) and victim.exists()
+
+
+def test_cleaning_a_name_never_uncovers_a_reserved_marker(tmp_path: Path) -> None:
+    """`(（推測）x` must not become a digest note once the `(` is cleaned (review of #45)."""
+    from discord_codex_bot.memory import Note, marker_of
+
+    store = MemoryStore(tmp_path, LIMITS)
+    store.add("user", 1, 2, "(（推測）偽造", "t")
+    store.rewrite("user", 1, 3, [Note("[（多人提及）偽造", "2026-10-15", "t")])
+    store.rewrite("user", 1, 4, [Note("（推測）真(的)", "2026-10-15", "t")])
+    assert [marker_of(e.name) for e in store.all_entries("user", 1, 2)] == [""]
+    assert [marker_of(e.name) for e in store.all_entries("user", 1, 3)] == [""]
+    assert [e.name for e in store.all_entries("user", 1, 4)] == ["（推測）真 的"]
+
+
+def test_every_slug_is_a_valid_topic_file(tmp_path: Path) -> None:
+    """slugify after .lower(): "İ" lowers to i + U+0307, which is not \\w (review of #45)."""
+    store = MemoryStore(tmp_path, LIMITS)
+    store.add("user", 1, 2, "İstanbul", "t")
+    assert [e.name for e in store.all_entries("user", 1, 2)] == ["İstanbul"]
+    assert store.forget("user", 1, 2, "İstanbul")
+
+
+def test_a_note_symlinked_out_of_topics_is_skipped_not_followed(tmp_path: Path) -> None:
+    root = tmp_path / "memory"
+    store = MemoryStore(root, LIMITS)
+    secret = tmp_path / "secret.md"
+    secret.write_text("TOKEN=abc\n", "utf-8")
+    store.add("user", 1, 2, "a", "x" * 150)
+    topic = root / "1" / "users" / "2" / "topics" / "a.md"
+    topic.unlink()
+    topic.symlink_to(secret)
+    assert "TOKEN=abc" not in store.recall("user", 1, 2, "a")
+    assert store.search("user", 1, 2, "TOKEN").endswith("沒有命中任何記憶）")
+    assert store.notes("user", 1, 2) == []
+    store.add("user", 1, 2, "b", "y" * 150)
+    store.add("user", 1, 2, "c", "z" * 150)  # full: evicting "a" drops its line, not the target
+    assert "a" not in [e.name for e in store.all_entries("user", 1, 2)]
+    assert secret.read_text("utf-8") == "TOKEN=abc\n"
