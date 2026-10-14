@@ -43,7 +43,7 @@ _SLUG = re.compile(r"[^\w-]+", re.UNICODE)
 _INDEX_LINE = re.compile(r"^- \[(?P<name>[^\]]+)\]\((?P<file>[^)]+)\) — (?P<hook>.*)$")
 # A note's file is a bare slug in topics/: what slugify makes, nothing else. Names come from
 # members (/remember, 👍, the model's <memory>), so a name like `x](../../4/style.md) — y` must
-# never turn into a path (hub, 2026-10-15: it read and deleted files outside topics/).
+# never turn into a path outside topics/: reads and deletes go only through _topic_path.
 _TOPIC_FILE = re.compile(r"^[\w-]+\.md$", re.UNICODE)
 _NAME_UNSAFE = re.compile(r"[\[\]()]")
 

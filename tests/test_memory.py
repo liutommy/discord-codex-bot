@@ -388,7 +388,7 @@ async def test_the_bot_sweeps_memory_scratch_when_it_starts(tmp_path: Path, conf
 )
 def test_a_note_name_cannot_choose_the_file_it_reads_or_deletes(tmp_path: Path, name: str) -> None:
     """A name carrying `](…) — ` must never become the note's file: recall and search would read,
-    forget and eviction would delete, whatever it points at (hub, 2026-10-15)."""
+    forget and eviction would delete, whatever it points at."""
     root = tmp_path / "memory"
     store = MemoryStore(root, LIMITS)
     secret = tmp_path / "secret.md"
@@ -461,7 +461,7 @@ def test_rewrite_cannot_be_steered_by_a_note_name(tmp_path: Path) -> None:
 
 
 def test_cleaning_a_name_never_uncovers_a_reserved_marker(tmp_path: Path) -> None:
-    """`(（推測）x` must not become a digest note once the `(` is cleaned (review of #45)."""
+    """`(（推測）x` must not become a digest note once the `(` is cleaned."""
     from discord_codex_bot.memory import Note, marker_of
 
     store = MemoryStore(tmp_path, LIMITS)
@@ -474,7 +474,7 @@ def test_cleaning_a_name_never_uncovers_a_reserved_marker(tmp_path: Path) -> Non
 
 
 def test_every_slug_is_a_valid_topic_file(tmp_path: Path) -> None:
-    """slugify after .lower(): "İ" lowers to i + U+0307, which is not \\w (review of #45)."""
+    """slugify after .lower(): "İ" lowers to i + U+0307, which is not \\w."""
     store = MemoryStore(tmp_path, LIMITS)
     store.add("user", 1, 2, "İstanbul", "t")
     assert [e.name for e in store.all_entries("user", 1, 2)] == ["İstanbul"]
