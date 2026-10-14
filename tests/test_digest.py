@@ -410,7 +410,7 @@ async def test_server_notes_come_only_from_channels_the_bot_sees(tmp_path, confi
     await digest_all(config, None, store, runner, now=NOW, visible=lambda g, c: c == 20)
     assert seen == []
 
-    # A predicate that cannot answer counts as private; without one, no server notes at all.
+    # A predicate that cannot answer leaves the channel out; without one, no server notes at all.
     await digest_all(config, None, store, runner, now=NOW, visible=lambda g, c: visible(g, 30))
     await digest_all(config, None, store, runner, now=NOW)
     assert seen == []

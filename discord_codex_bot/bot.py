@@ -357,6 +357,16 @@ def _for_other(item: dict) -> bool:
     return item.get("target_id", item["user_id"]) != item["user_id"]
 
 
+def _bot_sees(guild: discord.Guild | None, channel) -> bool:
+    """True when the Bot itself can view `channel` in `guild`: the one rule server memory and
+    emoji samples share. No guild or no channel means not seen. A thread whose parent is not
+    cached raises discord.ClientException, which each caller treats as not seen (the digest
+    leaves the channel out; an emoji event handler stops there)."""
+    if guild is None or not isinstance(channel, (discord.abc.GuildChannel, discord.Thread)):
+        return False
+    return bool(channel.permissions_for(guild.me).view_channel)
+
+
 def _reply_reference(message: discord.Message) -> discord.MessageReference | None:
     """The reference a repost of `message` must carry to stay a reply to the same message.
     Replacing a link-only reply would otherwise drop it out of its conversation, which is why
@@ -695,10 +705,7 @@ class DiscordCodexClient(discord.Client):
         ones included (owner, 2026-10-07: 「只要bot能看到的頻道都算可以運用的」)."""
         if self.emoji is None or guild_id not in self.config.allowed_guild_ids:
             return False
-        guild = self.get_guild(guild_id)
-        if guild is None or not isinstance(channel, (discord.abc.GuildChannel, discord.Thread)):
-            return False
-        return bool(channel.permissions_for(guild.me).view_channel)
+        return _bot_sees(self.get_guild(guild_id), channel)
 
     async def _collect_emoji(self, message: discord.Message) -> None:
         """A member message with the server's own emoji is a sample, with the channel's message
@@ -2871,10 +2878,7 @@ class DiscordCodexClient(discord.Client):
         A channel the Bot cannot see or cannot find counts as not visible; an error (a thread
         whose parent is not cached) reaches the digest, which leaves the channel out."""
         guild = self.get_guild(guild_id)
-        channel = guild.get_channel_or_thread(channel_id) if guild else None
-        if guild is None or not isinstance(channel, (discord.abc.GuildChannel, discord.Thread)):
-            return False
-        return bool(channel.permissions_for(guild.me).view_channel)
+        return _bot_sees(guild, guild.get_channel_or_thread(channel_id) if guild else None)
 
     def _is_guild_admin(self, interaction: discord.Interaction) -> bool:
         """Who may change operator settings: the server owner, a guild admin, or an id the
