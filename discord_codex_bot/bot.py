@@ -2156,6 +2156,11 @@ class DiscordCodexClient(discord.Client):
         self, interaction: discord.Interaction, action: str, user_id: int
     ) -> None:
         """🔁 / 👍 on an answer (owner already checked by the button)."""
+        # The button outlives the channel's place on the allowlist, so it is checked like a command.
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
         question, answer = await self._exchange_of(interaction.message)
         if action == "remember":
             LOGGER.info("Button remember guild=%s user=%s", interaction.guild_id, user_id)
@@ -2190,6 +2195,10 @@ class DiscordCodexClient(discord.Client):
         if pointed is not None and pointed.author != self.user:
             # The quoted images are not re-downloaded here, so they are not announced as attached.
             prompt = with_quoted_message(question, pointed.author.display_name, pointed.content, 0)
+        reason = self._validate(prompt, [])
+        if reason:
+            await interaction.followup.send(reason, ephemeral=True)
+            return
         if asked is not None:
             previews = await self._previews(asked, pointed)
         routed = await self._route(
@@ -2540,11 +2549,26 @@ class DiscordCodexClient(discord.Client):
         channel = self.get_channel(item["channel_id"]) or await self.fetch_channel(
             item["channel_id"]
         )
+        # Checked again when it fires, like a tracking post: the allowlist may have changed since
+        # the reminder was set, and the channel must still be in the guild it was set in.
+        channel_guild = getattr(getattr(channel, "guild", None), "id", None)
+        if channel_guild != item.get("guild_id") or self._access(
+            item.get("guild_id"), channel, item["channel_id"]
+        ):
+            LOGGER.warning(
+                "Reminder %s dropped: channel %s is no longer allowed",
+                item.get("id"),
+                item["channel_id"],
+            )
+            return
         target = item.get("target_id") or item["user_id"]
         by = f"（{'<@' + str(item['user_id']) + '>'} 設的）" if target != item["user_id"] else ""
+        # Only the target is pinged; a mention inside the reminder text is shown, not sent.
         await channel.send(
             f"⏰ <@{target}> 提醒：{item['text']}{by}",
-            allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False),
+            allowed_mentions=discord.AllowedMentions(
+                users=[discord.Object(id=target)], everyone=False, roles=False
+            ),
         )
 
     @app_commands.describe(

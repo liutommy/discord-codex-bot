@@ -104,6 +104,18 @@ def test_extract_reminder_tags_and_render_pending() -> None:
     assert creates == [("2026-09-14 09:30", "倒垃圾", None), ("30分鐘後", "開團", 777)]
     assert cancels == [3]
     assert extract_reminder_tags("沒有標籤") == ("沒有標籤", [], [])
+    # a tag the answer only shows (a code block, inline code, a quoted line) is not acted on
+    shown = (
+        '用法：`<remind when="1小時後" text="a"/>`\n'
+        '```\n<cancel_reminder id="4"/>\n```\n'
+        '> <remind when="明天 9:00" text="b"/>\n'
+        '<remind when="30分鐘後" text="c"/>'
+    )
+    clean, creates, cancels = extract_reminder_tags(shown)
+    assert creates == [("30分鐘後", "c", None)] and cancels == []
+    assert clean == shown.rsplit("\n", 1)[0]
+    # a code block the answer never closed runs to the end of it
+    assert extract_reminder_tags('看：\n```\n<remind when="1小時後" text="a"/>')[1] == []
     items = [
         {
             "id": 1,
