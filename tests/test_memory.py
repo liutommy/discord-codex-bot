@@ -376,3 +376,124 @@ async def test_the_bot_sweeps_memory_scratch_when_it_starts(tmp_path: Path, conf
     with pytest.raises(Started):
         await client.setup_hook()
     assert not stale.exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "stolen](../../4/style.md) — x",  # relative: another member's personal style
+        "stolen](/ABS/secret.md) — x",  # absolute: Path's / drops everything before it
+        "a](b.md) — c",  # a well-formed file, but chosen by the name instead of the slug
+    ],
+)
+def test_a_note_name_cannot_choose_the_file_it_reads_or_deletes(tmp_path: Path, name: str) -> None:
+    """A name carrying `](…) — ` must never become the note's file: recall and search would read,
+    forget and eviction would delete, whatever it points at."""
+    root = tmp_path / "memory"
+    store = MemoryStore(root, LIMITS)
+    secret = tmp_path / "secret.md"
+    secret.write_text("TOKEN=abc\n", "utf-8")
+    victim = root / "1" / "users" / "4" / "style.md"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("VICTIM STYLE\n", "utf-8")
+    other = root / "1" / "users" / "2" / "topics" / "b.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("# b\n\n2026-10-15\n\nkept\n", "utf-8")
+    name = name.replace("/ABS/secret.md", str(secret))
+
+    store.add("user", 1, 2, name, "hello")
+
+    entries = store.all_entries("user", 1, 2)
+    assert len(entries) == 1
+    assert "/" not in entries[0].file and ".." not in entries[0].file
+    assert entries[0].file not in ("b.md", "style.md", "secret.md")
+    for key in (entries[0].name, entries[0].file):
+        text = store.recall("user", 1, 2, key)
+        assert "VICTIM STYLE" not in text and "TOKEN=abc" not in text
+        assert "hello" in store.recall("user", 1, 2, key, offset=5)
+    found = store.search("user", 1, 2, "VICTIM|TOKEN|kept")
+    assert found.endswith("沒有命中任何記憶）")  # nothing outside this member's own notes
+    assert store.forget("user", 1, 2, entries[0].name)
+    assert victim.exists() and secret.exists() and other.exists()
+
+
+@pytest.mark.parametrize("file", ["../../4/style.md", "/ABS/secret.md", "sub/x.md", "x.txt", ".."])
+def test_index_lines_pointing_outside_topics_are_ignored(tmp_path: Path, file: str) -> None:
+    """An index already holding such a line (written before the fix, or by hand) is not trusted:
+    every read and delete goes through the file-name check."""
+    root = tmp_path / "memory"
+    store = MemoryStore(root, LIMITS)
+    secret = tmp_path / "secret.md"
+    secret.write_text("TOKEN=abc\n", "utf-8")
+    victim = root / "1" / "users" / "4" / "style.md"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("VICTIM STYLE\n", "utf-8")
+    file = file.replace("/ABS/secret.md", str(secret))
+    directory = root / "1" / "users" / "2"
+    (directory / "topics").mkdir(parents=True)
+    for index in (INDEX_FILE, ARCHIVE_FILE):
+        (directory / index).write_text(f"- [stolen]({file}) — x\n", "utf-8")
+
+    assert store.all_entries("user", 1, 2) == []
+    assert store.recall("user", 1, 2, "stolen").startswith("（找不到")
+    found = store.search("user", 1, 2, "VICTIM|TOKEN")
+    assert "VICTIM STYLE" not in found and "TOKEN=abc" not in found
+    assert store.notes("user", 1, 2) == []
+    assert not store.forget("user", 1, 2, "stolen")
+    store.add("user", 1, 2, "a", "x" * 150)
+    store.add("user", 1, 2, "b", "y" * 150)
+    store.add("user", 1, 2, "c", "z" * 150)  # full: evicts the oldest real note
+    assert victim.exists() and secret.exists()
+
+
+def test_rewrite_cannot_be_steered_by_a_note_name(tmp_path: Path) -> None:
+    from discord_codex_bot.memory import Note
+
+    root = tmp_path / "memory"
+    store = MemoryStore(root, LIMITS)
+    victim = root / "1" / "users" / "4" / "style.md"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("VICTIM STYLE\n", "utf-8")
+    store.rewrite("user", 1, 2, [Note("x](../../4/style.md) — y\n- [z", "2026-10-15", "t")])
+    [entry] = store.all_entries("user", 1, 2)
+    assert "VICTIM STYLE" not in store.recall("user", 1, 2, entry.name)
+    assert store.forget("user", 1, 2, entry.name) and victim.exists()
+
+
+def test_cleaning_a_name_never_uncovers_a_reserved_marker(tmp_path: Path) -> None:
+    """`(（推測）x` must not become a digest note once the `(` is cleaned."""
+    from discord_codex_bot.memory import Note, marker_of
+
+    store = MemoryStore(tmp_path, LIMITS)
+    store.add("user", 1, 2, "(（推測）偽造", "t")
+    store.rewrite("user", 1, 3, [Note("[（多人提及）偽造", "2026-10-15", "t")])
+    store.rewrite("user", 1, 4, [Note("（推測）真(的)", "2026-10-15", "t")])
+    assert [marker_of(e.name) for e in store.all_entries("user", 1, 2)] == [""]
+    assert [marker_of(e.name) for e in store.all_entries("user", 1, 3)] == [""]
+    assert [e.name for e in store.all_entries("user", 1, 4)] == ["（推測）真 的"]
+
+
+def test_every_slug_is_a_valid_topic_file(tmp_path: Path) -> None:
+    """slugify after .lower(): "İ" lowers to i + U+0307, which is not \\w."""
+    store = MemoryStore(tmp_path, LIMITS)
+    store.add("user", 1, 2, "İstanbul", "t")
+    assert [e.name for e in store.all_entries("user", 1, 2)] == ["İstanbul"]
+    assert store.forget("user", 1, 2, "İstanbul")
+
+
+def test_a_note_symlinked_out_of_topics_is_skipped_not_followed(tmp_path: Path) -> None:
+    root = tmp_path / "memory"
+    store = MemoryStore(root, LIMITS)
+    secret = tmp_path / "secret.md"
+    secret.write_text("TOKEN=abc\n", "utf-8")
+    store.add("user", 1, 2, "a", "x" * 150)
+    topic = root / "1" / "users" / "2" / "topics" / "a.md"
+    topic.unlink()
+    topic.symlink_to(secret)
+    assert "TOKEN=abc" not in store.recall("user", 1, 2, "a")
+    assert store.search("user", 1, 2, "TOKEN").endswith("沒有命中任何記憶）")
+    assert store.notes("user", 1, 2) == []
+    store.add("user", 1, 2, "b", "y" * 150)
+    store.add("user", 1, 2, "c", "z" * 150)  # full: evicting "a" drops its line, not the target
+    assert "a" not in [e.name for e in store.all_entries("user", 1, 2)]
+    assert secret.read_text("utf-8") == "TOKEN=abc\n"
