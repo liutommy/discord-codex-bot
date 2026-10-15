@@ -846,7 +846,7 @@ class DiscordCodexClient(discord.Client):
             channels: list = [*guild.text_channels, *guild.threads]
             unlisted = []  # parents whose archived threads Discord would not list
             # Public archived threads, and the private ones the Bot joined (only text channels have
-            # private threads; Codex on PR #40).
+            # private threads).
             listings = [(parent, {}) for parent in [*guild.text_channels, *guild.forums]]
             # All private archives need Manage Threads; without it, the ones the Bot joined.
             listings += [

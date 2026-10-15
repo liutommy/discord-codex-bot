@@ -336,7 +336,7 @@ class EmojiStore:
                     (message_id, emoji_id),
                 )
                 # Evidence gone is a change even when the clipped text reads the same (an emoji
-                # past TEXT_MAX taken out; Codex on PR #41).
+                # past TEXT_MAX taken out).
                 connection.execute("UPDATE emojis SET added=added+1 WHERE emoji_id=?", (emoji_id,))
         before = rows[0] if rows else None
         for emoji_id in sorted(now - had):
@@ -388,7 +388,7 @@ class EmojiStore:
 
     def pending(self, guild_ids: Iterable[int], limit: int | None = None) -> list[Emoji]:
         """Static emoji of `guild_ids` (the allowed guilds now: a guild taken off the allowlist
-        sends nothing more out, Codex on PR #40) still on their server with samples added since
+        sends nothing more out) still on their server with samples added since
         their description: never described first, then the most used."""
         guilds = list(guild_ids)
         if not guilds:
