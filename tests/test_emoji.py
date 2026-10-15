@@ -879,6 +879,11 @@ def test_the_list_says_the_answer_may_use_them_only_with_replies_on(store) -> No
     assert REPLY_HINT not in store.block(GUILD)
     assert store.block(GUILD, reply=True).startswith(f"{BLOCK_HEADER} {REPLY_HINT}\n")
     assert INSUFFICIENT in REPLY_HINT
+    # "written as :name: alone" was read as "on a line of its own": an answer ended with a blank
+    # line and the emoji by itself. It goes in the sentence, as a member would type it.
+    assert "alone" not in REPLY_HINT
+    assert "in the middle or at the end of a sentence" in REPLY_HINT
+    assert "never on a line of its own" in REPLY_HINT
 
 
 async def _answered(bot, monkeypatch, said: str, guild_id, before_end=None, **settings):
