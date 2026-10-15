@@ -2823,7 +2823,7 @@ async def test_a_summary_fits_discord_and_reads_the_newest_messages(client, monk
     await client.summary_command(interaction, hours=24)
     assert edits[-1].startswith("**頻道摘要") and "最新" in edits[-1].split("\n", 1)[0]
     assert sent and "".join([edits[-1].split("\n", 1)[1], *sent]) == "摘" * 1995
-    assert f"訊息{MAX_MESSAGES + 100}" in prompts[0] and "訊息1\n" not in prompts[0]
+    assert f'"訊息{MAX_MESSAGES + 100}"' in prompts[0] and '"訊息1"' not in prompts[0]
     # a summary Discord refuses does not leave the placeholder standing
     refuse["next"] = True
     await client.summary_command(interaction, hours=24)
