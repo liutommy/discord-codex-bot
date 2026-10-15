@@ -439,8 +439,9 @@ def _arguments(
     image_flags = tuple(flag for image in images for flag in ("-i", str(image)))
     schema_flags = ("--output-schema", str(schema)) if schema else ()
     head = ("exec", "resume", resume) if resume else ("exec",)
-    # The persona lives in /workspace/AGENTS.md (loaded by Codex from cwd); a member with a
-    # personal style gets the persona-free workspace instead. A resumed thread keeps its cwd.
+    # The persona lives in the workspace's AGENTS.md (loaded by Codex from cwd); a member who
+    # turned the persona off gets the persona-free workspace instead. A personal style is a
+    # separate prompt block either way. A resumed thread keeps its cwd.
     workspace = config.codex_workspace_plain if plain else config.codex_workspace
     tail = () if resume else ("--color", "never", "--cd", str(workspace))
     tail += schema_flags
