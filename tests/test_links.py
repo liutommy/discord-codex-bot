@@ -950,3 +950,24 @@ async def test_render_link_gives_up_at_once_on_an_interactive_turnstile(
 )
 def test_strip_tracking_preserves_application_ids_signatures_and_bad_input(url):
     assert strip_tracking(url) == url
+
+
+def test_a_malformed_href_is_skipped_not_fatal() -> None:
+    from discord_codex_bot.links import html_to_text
+
+    page = '<a href="http://[bad">壞</a> <a href="/ok">好</a>'
+    _title, text = html_to_text(page, "https://site.example/")
+    assert "<https://site.example/ok>" in text and "壞" in text
+
+
+async def test_one_failing_link_does_not_fail_the_others(monkeypatch, config) -> None:
+    from discord_codex_bot import links
+
+    async def fetch(url, *args, **kw):
+        if "bad" in url:
+            raise ValueError("boom")
+        return f"讀到 {url}", []
+
+    monkeypatch.setattr(links, "fetch_or_render", fetch)
+    blocks, _shots = await links.link_blocks(["https://a.example/", "https://bad.example/"], config)
+    assert "讀到 https://a.example/" in blocks and '<LINK url="https://bad.example/">' in blocks
