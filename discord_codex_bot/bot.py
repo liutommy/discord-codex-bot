@@ -1220,13 +1220,14 @@ class DiscordCodexClient(discord.Client):
 
         task = asyncio.create_task(describe())
         try:
-            blocks = await asyncio.wait_for(
-                asyncio.shield(task), self.config.video_interim_after_seconds
-            )
-        except TimeoutError:
-            if on_video_slow is not None:
-                await on_video_slow()
-            blocks = await task
+            try:
+                blocks = await asyncio.wait_for(
+                    asyncio.shield(task), self.config.video_interim_after_seconds
+                )
+            except TimeoutError:
+                if on_video_slow is not None:
+                    await on_video_slow()
+                blocks = await task
         except asyncio.CancelledError:
             task.cancel()  # the shield is against the timer only, not against the member's ❌
             raise
@@ -1414,6 +1415,7 @@ class DiscordCodexClient(discord.Client):
         link_dir = request_dir(self.config)
         deliver_dir = request_dir(self.config)
         delivered: list[Path] = []  # sandbox-made files handed to the member with the answer
+        handed_over = False  # deliver_dir became the answer's generated_dir: the caller removes it
         try:
             documents: list[str] = []
             for attachment in attachments:
@@ -1424,9 +1426,13 @@ class DiscordCodexClient(discord.Client):
                     images.append(await download_attachment(attachment, suffix, self.config))
                 elif kind == "document":
                     saved = await download_attachment(attachment, suffix, self.config, "doc")
-                    text = await asyncio.to_thread(extract_text, saved, self.config.link_max_chars)
+                    try:
+                        text = await asyncio.to_thread(
+                            extract_text, saved, self.config.link_max_chars
+                        )
+                    finally:
+                        remove_request_dir(saved)
                     documents.append(f'<FILE name="{attachment.filename}">\n{text}\n</FILE>')
-                    remove_request_dir(saved)
             files = "\n\n".join(documents)
             permanent = self.permanent.index_text()
             pending = render_pending(self.reminders.for_user(user_id))
@@ -1556,7 +1562,7 @@ class DiscordCodexClient(discord.Client):
             outgoing = tuple(result.images)  # not `images`: that list is cleaned up in finally
             if delivered:
                 if generated_dir is None:
-                    generated_dir = deliver_dir  # the caller removes it after sending
+                    generated_dir, handed_over = deliver_dir, True  # removed after sending
                 else:
                     delivered = [self._keep_for_member(path, generated_dir) for path in delivered]
                 outgoing += tuple(delivered)
@@ -1583,7 +1589,7 @@ class DiscordCodexClient(discord.Client):
             for path in images:
                 remove_request_dir(path)
             remove_dir(link_dir)
-            if not delivered:
+            if not handed_over:  # the sweep skips a live directory, so every path releases it
                 remove_dir(deliver_dir)
 
     def _emoji_reply(self, guild_id: int | None) -> Callable[[str, bool], str] | None:

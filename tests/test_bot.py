@@ -2852,3 +2852,61 @@ def test_files_with_the_same_name_from_one_request_are_all_kept(tmp_path) -> Non
         kept.append(DiscordCodexClient._keep_for_member(made, into))
     assert [p.read_bytes() for p in kept] == [b"first", b"second", b"third"]
     assert [p.name for p in kept] == ["out.png", "out-2.png", "out-3.png"]
+
+
+async def test_request_directories_are_released_on_every_path(
+    client, monkeypatch, tmp_path
+) -> None:
+    """The sweep skips directories a request still uses, so a request must release every one it
+    made: one left behind would stay until the process restarts."""
+    from discord_codex_bot import attachments, sandbox
+
+    monkeypatch.setattr(bot_module.sandbox, "available", lambda config: True)
+
+    async def run_code(lang, code, config, out_dir):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        made = out_dir / "out.png"
+        made.write_bytes(b"png")
+        return sandbox.RunResult(0, False, "", "", [made])
+
+    monkeypatch.setattr(bot_module.sandbox, "run_code", run_code)
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    replies = iter(
+        [
+            CodexResult('<run lang="python">x</run>', thread_id="t1"),
+            CodexResult("答案", generated_dir=generated, thread_id="t1"),
+        ]
+    )
+
+    async def codex(prompt, config, **kw):
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", codex)
+    attachments.LIVE.clear()
+    result = await client._answer("畫圖", [], GUILD, USER)
+    assert result.generated_dir == generated and attachments.LIVE == set()
+
+    async def broken(prompt, config, **kw):
+        if "<RESULT" in prompt:
+            raise RuntimeError("down")
+        return CodexResult('<run lang="python">x</run>', thread_id="t2")
+
+    monkeypatch.setattr(bot_module, "run_codex", broken)
+    await client._answer("畫圖", [], GUILD, USER)  # the request fails after a delivery
+    assert attachments.LIVE == set()
+
+
+async def test_a_failed_download_leaves_no_directory(config, tmp_path) -> None:
+    from discord_codex_bot import attachments
+
+    config = replace(config, attachment_dir=tmp_path / "att")
+
+    class Broken:
+        async def save(self, path):
+            raise OSError("network")
+
+    attachments.LIVE.clear()
+    with pytest.raises(OSError):
+        await attachments.download_attachment(Broken(), ".png", config)
+    assert attachments.LIVE == set() and list((tmp_path / "att").iterdir()) == []

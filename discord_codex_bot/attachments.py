@@ -108,7 +108,11 @@ async def download_attachment(
 ) -> Path:
     """Save the attachment into a fresh per-request directory; the caller removes it."""
     path = request_dir(config) / f"{stem}{suffix}"
-    await attachment.save(path)
+    try:
+        await attachment.save(path)
+    except BaseException:
+        remove_dir(path.parent)
+        raise
     return path
 
 

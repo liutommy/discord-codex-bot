@@ -781,7 +781,7 @@ async def link_blocks(
         if isinstance(result, asyncio.CancelledError):
             raise result
         if isinstance(result, BaseException):
-            LOGGER.warning("Link %s failed: %s", url, type(result).__name__)
+            LOGGER.warning("Link %s failed", url, exc_info=result)
             results[i] = (f"（{url}：讀取失敗——{type(result).__name__}）", [])
     pairs = zip(urls, results, strict=True)
     blocks = [f'<LINK url="{url}">\n{text}\n</LINK>' for url, (text, _) in pairs]
