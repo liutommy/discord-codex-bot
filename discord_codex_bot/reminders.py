@@ -41,7 +41,15 @@ _DATE = re.compile(
 def parse_when(text: str, now: datetime | None = None) -> datetime | None:
     """A Taipei-local time expression → aware UTC datetime, or None when not understood.
     Accepts "30分鐘後" / "2小時後" / "3天後", "明天 9:30" / "後天下午3點" / "21:00" (today, else
-    tomorrow when already past), and "9/15 14:30" / "2026-10-01 08:00"."""
+    tomorrow when already past), and "9/15 14:30" / "2026-10-01 08:00". A time past what a date
+    can hold ("99999999999天後") is not understood either, not an error."""
+    try:
+        return _parse_when(text, now)
+    except OverflowError:
+        return None
+
+
+def _parse_when(text: str, now: datetime | None) -> datetime | None:
     now = (now or datetime.now(UTC)).astimezone(TAIPEI)
     text = text.strip()
     if match := _ISO.match(text):  # what a model most reliably produces
