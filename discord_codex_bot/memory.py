@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from . import tags
+
 SCOPES = {"user": "個人", "guild": "伺服器"}
 # Name prefixes that say how a note was made: inferred by the weekly digest from several of a
 # member's conversations, or gathered from several members (digest.py). Reserved: only the
@@ -651,15 +653,15 @@ def _truncate(text: str, max_bytes: int) -> str:
 
 def extract_memory_tags(answer: str) -> tuple[str, list[tuple[str, str, str]]]:
     """Split an answer into (visible text, [(scope, name, fact), ...])."""
-    found = [(s, n, f) for s, n, f in MEMORY_TAG.findall(answer) if f.strip()]
-    return MEMORY_TAG.sub("", answer).strip(), found
+    found = [(s, n, f) for s, n, f in tags.findall(MEMORY_TAG, answer) if f.strip()]
+    return tags.strip(MEMORY_TAG, answer).strip(), found
 
 
 def extract_read_requests(answer: str) -> list[tuple[str, str, str, int, int | None]]:
     """[(kind, scope, target, offset, lines)] for every <search/> and <recall/> in an answer."""
     requests: list[tuple[str, str, str, int, int | None]] = [
-        ("search", scope, query, 1, None) for scope, query in SEARCH_TAG.findall(answer)
+        ("search", scope, query, 1, None) for scope, query in tags.findall(SEARCH_TAG, answer)
     ]
-    for scope, name, offset, lines in RECALL_TAG.findall(answer):
+    for scope, name, offset, lines in tags.findall(RECALL_TAG, answer):
         requests.append(("recall", scope, name, int(offset or 1), int(lines) if lines else None))
     return requests

@@ -20,6 +20,7 @@ from pathlib import Path
 import aiohttp
 from yarl import URL
 
+from . import tags
 from .config import Config
 from .links import _read_bounded, html_to_text
 
@@ -137,7 +138,7 @@ def localize(text: str, names: dict[str, str]) -> str:
 
 def extract_api_calls(answer: str) -> list[tuple[str, str]]:
     seen: list[tuple[str, str]] = []
-    for name, path in API_TAG.findall(answer):
+    for name, path in tags.findall(API_TAG, answer):
         if (name, path) not in seen:
             seen.append((name, path))
     return seen[:MAX_CALLS_PER_ROUND]

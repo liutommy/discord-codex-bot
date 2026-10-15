@@ -11,6 +11,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
+from . import tags
+
 LOGGER = logging.getLogger(__name__)
 TAIPEI = timezone(timedelta(hours=8))
 MAX_PER_USER = 20
@@ -29,13 +31,6 @@ REMIND_TAG = re.compile(
     r"(?:\s*</remind>)?"
 )
 CANCEL_TAG = re.compile(r'<cancel_reminder\s+id="([0-9]{1,9})"\s*/?>(?:\s*</cancel_reminder>)?')
-# Text an answer shows rather than does: Discord code (``` blocks, a block not closed yet running
-# to the end, `inline` spans, which may cross lines) and quotes (a > line; >>> quotes the rest of
-# the message). A tag in there is an example or a quote of someone else's words, never a request.
-_SHOWN = re.compile(
-    r"```[\s\S]*?(?:```|\Z)|``(?:(?!``)[\s\S])+?``|`[^`]+`|^[ \t]*>>>[ \t][\s\S]*|^[ \t]*>.*$",
-    re.M,
-)
 _ISO = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})\s*$")
 _DATE = re.compile(
     r"^\s*(?:(?P<y>\d{4})[-/.])?(?P<mo>\d{1,2})[-/.](?P<d>\d{1,2})"
@@ -111,21 +106,14 @@ def extract_reminder_tags(
     answer: str,
 ) -> tuple[str, list[tuple[str, str, int | None]], list[int]]:
     """(answer without the tags, [(when, text, target_id)], [ids to cancel]). Tags inside code or
-    quoted lines are left in the text and not acted on."""
-    shown = [m.span() for m in _SHOWN.finditer(answer)]
-
-    def live(pattern: re.Pattern[str]) -> list[re.Match[str]]:
-        return [
-            m for m in pattern.finditer(answer) if not any(a <= m.start() < b for a, b in shown)
-        ]
-
-    reminds, cancel_tags = live(REMIND_TAG), live(CANCEL_TAG)
-    creates = [(m[1], m[2], int(m[3]) if m[3] else None) for m in reminds]
-    cancels = [int(m[1]) for m in cancel_tags]
-    clean = answer
-    for m in sorted(reminds + cancel_tags, key=lambda m: m.start(), reverse=True):
-        clean = clean[: m.start()] + clean[m.end() :]
-    return clean.strip(), creates, cancels
+    quoted lines are left in the text and not acted on (tags.py)."""
+    creates = [
+        (when, text, int(who) if who else None)
+        for when, text, who in tags.findall(REMIND_TAG, answer)
+    ]
+    cancels = [int(i) for i in tags.findall(CANCEL_TAG, answer)]
+    clean = tags.strip(CANCEL_TAG, tags.strip(REMIND_TAG, answer)).strip()
+    return clean, creates, cancels
 
 
 def render_pending(items: list[dict]) -> str:
