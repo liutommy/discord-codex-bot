@@ -1,7 +1,9 @@
 """Backups and exports of what the Bot keeps for people. Daily, the Bot's own state (member and
-server memories, router and Grok transcripts, thread map, reminders) is tarred into BACKUP_DIR — a
-bind-mounted host directory — and old archives are pruned; a member can also export their own
-memories with /<prefix>-export. Codex's own files (sessions, auth.json) are not ours to copy."""
+server memories, router and Grok transcripts, thread map, reminders, uploaded persona and style,
+the harvest ledger, and the tracking, emoji and link-cleaning databases) is tarred into
+BACKUP_DIR — a bind-mounted host directory — and old archives are pruned; a member can also
+export their own memories with /<prefix>-export. Codex's own files (sessions, auth.json) are not
+ours to copy."""
 
 from __future__ import annotations
 
@@ -29,9 +31,12 @@ BACKUP_MEMBERS = (
     "openrouter",
     "discord_threads.json",
     "reminders.json",
+    "instructions",  # an uploaded persona / default style (instructions.uploaded_path)
+    "harvest_ledger.jsonl",  # which conversations were distilled: without it, all are again
 )
 TRACKING_DB = "tracking.sqlite3"
 EMOJI_DB = "emoji.sqlite3"  # emoji.py's samples and descriptions
+LINKCLEAN_DB = "linkclean.sqlite3"  # each server's link-cleaning mode (always in CODEX_HOME)
 ARCHIVE_PREFIX = "discord-codex-bot-"
 # A file that vanished while the archive was written means the tree was moving under it (memory
 # rewrite moves MEMORY.md and topics/ into .backup/): list it again and start over, a few times.
@@ -89,7 +94,11 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
     # SQLite files go in through SQLite's online backup API, never as raw files mid-write.
     databases = [
         (path, name)
-        for path, name in ((config.tracking_db_path, TRACKING_DB), (config.emoji_db_path, EMOJI_DB))
+        for path, name in (
+            (config.tracking_db_path, TRACKING_DB),
+            (config.emoji_db_path, EMOJI_DB),
+            (config.codex_home / LINKCLEAN_DB, LINKCLEAN_DB),
+        )
         if path.exists()
     ]
     if not present and not databases:

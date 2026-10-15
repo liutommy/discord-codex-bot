@@ -271,6 +271,9 @@ Codex side. Memory consolidation follows the same rule through
 environment.
 Tracking state and its durable notification outbox live in `CODEX_HOME/tracking.sqlite3` and are
 included in the daily backup through SQLite's online backup API.
+The daily backup also holds memories, router and Grok transcripts, the thread map, reminders, an
+uploaded persona or style (`instructions/`), the harvest ledger, and the emoji and link-cleaning
+databases (`backup.py`).
 
 Social titles and descriptions remain untrusted even though they are JSON-encoded in the prompt:
 the output schema prevents structural escape, but it cannot guarantee that a model will never make
