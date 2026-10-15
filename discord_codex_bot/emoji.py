@@ -9,7 +9,7 @@ Descriptions: once a day (EMOJI_DESCRIBE_HOUR, behind the same quota gate as the
 jobs) every static emoji with new samples is described from its image and its samples — what it
 looks like and what members use it to say. Under MIN_SAMPLES samples it is described by its looks
 alone and marked INSUFFICIENT, and new samples get it described again later. Descriptions made
-elsewhere (the one-off backfill was described by a Claude agent, owner 2026-10-07) come in through
+elsewhere (e.g. a one-off backfill described outside the Bot) come in through
 `python -m discord_codex_bot.emoji import`, with the same rules (DESCRIBE_INSTRUCTIONS).
 
 In answers: a message's `<:name:id>` becomes `:name:（description）` (only `:name:` while there is

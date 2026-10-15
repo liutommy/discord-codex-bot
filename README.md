@@ -463,8 +463,8 @@ read, never the assistant's.
   events, shared games, the server's own terms, running jokes, house rules) that at least two
   different members mention. The name starts with `（多人提及）`. Nothing about an individual
   member goes there. Conversations in every channel the Bot can see feed them, private channels
-  and private threads the Bot is in included (owner, 2026-10-07; checked against the gateway
-  cache; a channel the Bot cannot see, or any doubt, is left out). Server notes reach every
+  and private threads the Bot is in included (checked against the gateway cache; a channel the
+  Bot cannot see, or any doubt, is left out). Server notes reach every
   channel's prompt of the server. The operator CLI below has no Discord connection, so it
   writes personal notes only.
 
@@ -589,7 +589,7 @@ The model reads the server's own emoji by how its members use them. Samples go i
   before it;
 - a message someone reacted to with one (further reactions on it only count as uses).
 
-Every channel the Bot can see is sampled, private ones included (owner, 2026-10-07). The
+Every channel the Bot can see is sampled, private ones included. The
 newest 100 samples are kept per emoji, and a deleted message takes its samples with it. Animated emoji and stickers are not described.
 
 **History.** The history is read once, in the background:
