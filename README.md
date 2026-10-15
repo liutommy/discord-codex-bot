@@ -43,8 +43,11 @@ UV_CACHE_DIR=.uv-cache uv run ruff check .
 
 1. Open the Discord Developer Portal and select **New Application**.
 2. Open **Bot**, select **Reset Token**, and copy the token once.
-3. Under **Privileged Gateway Intents** enable only **Message Content Intent** (needed for the
-   `@mention` entry point). Leave Presence and Server Members off.
+3. Under **Privileged Gateway Intents** enable only **Message Content Intent**. Leave Presence and
+   Server Members off. The Bot reads more than the messages that `@mention` it: in an allowed
+   guild, link cleaning and emoji sampling (when on) look at every message in every channel it can
+   see, before any mention check, and server memory is distilled from the conversations there.
+   Tell the members.
 4. Open **OAuth2 > URL Generator**.
 5. Select scopes `bot` and `applications.commands`.
 6. Grant the bot permission to view channels and send messages, then open the generated URL and
