@@ -44,9 +44,10 @@ UV_CACHE_DIR=.uv-cache uv run ruff check .
 1. Open the Discord Developer Portal and select **New Application**.
 2. Open **Bot**, select **Reset Token**, and copy the token once.
 3. Under **Privileged Gateway Intents** enable only **Message Content Intent**. Leave Presence and
-   Server Members off. The Bot reads more than the messages that `@mention` it: in an allowed
-   guild, link cleaning and emoji sampling (when on) look at every message in every channel it can
-   see, before any mention check, and server memory is distilled from the conversations there.
+   Server Members off. The Bot reads more than the messages that `@mention` it, before any
+   mention check: link cleaning (unless a server turns it off) looks at every message in the
+   allowed channels, emoji sampling (when on) at every message in every channel of an allowed
+   guild the Bot can see, and server memory is distilled from the conversations there.
    Tell the members.
 4. Open **OAuth2 > URL Generator**.
 5. Select scopes `bot` and `applications.commands`.
@@ -193,8 +194,8 @@ A Ruten store is not a web source. Its store page is a script shell, and read as
 links labelled only 「預購」 — the classifier had no product name to judge, and a busy store adds
 about twenty listings an hour. `https://www.ruten.com.tw/store/<account>/` is resolved once to the
 seller's numeric id (`rapi.ruten.com.tw/api/users/v1/index.php/<account>/storeinfo`); each pass then
-reads the newest 30 listing ids (up to 4 pages of them when the store added more than a page
-since the last pass) (`rtapi.ruten.com.tw/api/search/v3/index.php/core/seller/<id>/prod`)
+reads the newest 30 listing ids — up to 4 pages of them when the store added more than a page
+since the last pass — (`rtapi.ruten.com.tw/api/search/v3/index.php/core/seller/<id>/prod`)
 and their names, prices and pre-order months (`rapi.ruten.com.tw/api/items/v2/list`). Track the
 whole store and let the interest carry every spelling a name might use (rurudo / るるど / 露露多):
 the model matches those, while the store's own search (`…/store/<account>/find?q=rurudo`, a
@@ -366,8 +367,8 @@ The `@mention` form keeps the question visible as the member's own message, supp
 `MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Replying to another
 member's message while mentioning the Bot points it at that message: its text is quoted into the
 request and its images are attached, so "@Bot what is this?" as a reply to a picture works.
-Messages that do not mention the Bot get no answer; link cleaning and emoji sampling still look
-at them (see the privacy note in step 3).
+Messages that do not mention the Bot get no answer; link cleaning and emoji sampling may still
+look at them (see the privacy note in step 3).
 
 `/codex-status` must report `ChatGPT 訂閱登入有效` and the member's model. With `.env.example`
 copied as is, that is `DEFAULT_MODEL` (Grok, which needs `XSEARCH_URL`), or 「自動挑選」 when

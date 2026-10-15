@@ -145,7 +145,7 @@ _LEGACY_QUOTE = re.compile(
 LEGACY_MARK = "QUOTED_MESSAGE, when present, is someone else's message"
 # Where the prompt's fixed instructions end: the first block the Bot opens (codex._prompt puts
 # every block after them). Only that header is the Bot's own text; a block may carry anything,
-# LEGACY_MARK included (Codex on PR #39).
+# LEGACY_MARK included.
 _FIRST_BLOCK = re.compile(
     r"^<(?:OUTPUT_STYLE|PERSONAL_STYLE|MEMORY|LINKS|FILES|HELP|EARLIER_CONVERSATION"
     r"|QUOTED_MESSAGE|USER_MESSAGE)\b",

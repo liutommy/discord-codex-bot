@@ -136,7 +136,7 @@ def clip(text: str) -> str:
 
 
 # The section explains itself, so the explanation reaches a prompt only with the section: with
-# the feature off, a member's own :name: text is never said to be the Bot's (Codex on PR #40).
+# the feature off, a member's own :name: text is never said to be the Bot's.
 BLOCK_HEADER = (
     "[伺服器表情] This server's own custom emoji, most used first, as :name:（what it looks like"
     " and what members use it to say）. In the messages, :name: or :name:（…） is such an emoji"
@@ -168,7 +168,7 @@ def tidy(description: str) -> str:
 # What `rewrite` adds to a member's message. The bracketed part is the Bot's, not the member's:
 # harvest and the digest take it out before reading a member's words (strip_descriptions). MARK
 # (invisible) opens every bracket the Bot writes, and `rewrite` first removes it from what the
-# member typed, so a member's own `:pepe:（…）` is never taken for one (Codex on PR #40).
+# member typed, so a member's own `:pepe:（…）` is never taken for one.
 MARK = "\u2063"
 INLINE = re.compile(rf"(:[A-Za-z0-9_]{{2,32}}:)（{MARK}[^（）\n]{{1,{DESCRIPTION_MAX + 20}}}）")
 
@@ -306,11 +306,11 @@ class EmojiStore:
     ) -> None:
         """An edited message: every sample says what it says now, as a sample and as another's
         "previous"; an emoji taken out of a member's message is no longer sampled from it, and one
-        put in is (Codex on PR #40). Uses already counted stay."""
+        put in is. Uses already counted stay."""
         with self._connect() as connection:
-            # Every emoji whose evidence this changes is described again (Codex on PR #40); an
+            # Every emoji whose evidence this changes is described again; an
             # update that leaves the text as it was (a pin, a streamed answer's same text) is not
-            # a change (hub on PR #40).
+            # a change.
             connection.execute(
                 """UPDATE emojis SET added=added+1 WHERE emoji_id IN (
                        SELECT emoji_id FROM samples
@@ -359,7 +359,7 @@ class EmojiStore:
 
     def forget_messages(self, message_ids: Iterable[int]) -> int:
         """A deleted message is kept nowhere: not as a sample (its use count stays), and not as
-        the message before another one's (Codex on PR #40); how many samples changed."""
+        the message before another one's; how many samples changed."""
         ids = list(message_ids)
         if not ids:
             return 0
@@ -444,7 +444,7 @@ class EmojiStore:
     def lookup(self, guild_id: int, emoji_ids: Iterable[int]) -> dict[int, Emoji]:
         """`guild_id`'s own emoji among `emoji_ids` that are still on it. Another server's emoji
         (Nitro) is not looked up even when that server is ours too: its description is a summary
-        of what that server's members say (hub on PR #40)."""
+        of what that server's members say."""
         ids = list(set(emoji_ids))
         if not ids:
             return {}
@@ -600,12 +600,12 @@ class EmojiStore:
 
 
 # Discord's code: ``` blocks (one not closed yet runs to the end) and `inline` spans.
-# A ``…`` span may hold single backticks; only `` closes it (Codex on PR #42).
+# A ``…`` span may hold single backticks; only `` closes it.
 CODE = re.compile(r"```[\s\S]*?(?:```|$)|``(?:(?!``)[\s\S])+?``|`[^`]+`")
 # Text whose colons are not emoji: code, and a link (`https://x/:pepe:` must stay a link).
 KEPT = re.compile(rf"{CODE.pattern}|(?i:https?)://[^\s<>]+")
 # Part-way, a `code` span whose closing backtick has not arrived yet is code too: it would
-# otherwise show the emoji and then lose it (Codex on PR #42). A finished answer's lone
+# otherwise show the emoji and then lose it. A finished answer's lone
 # backtick is just a character in Discord, so the answer itself does not use this.
 KEPT_STREAMING = re.compile(rf"{KEPT.pattern}|``(?:(?!``)[\s\S])*$|`[^`]*$")
 # `:name:` the model wrote, not already part of `<:name:id>` / `<a:name:id>`, with the bracket
@@ -695,7 +695,7 @@ def describe_prompt(emoji: Emoji, samples: Sequence[Sample]) -> str:
         for s in samples
     ]
     # < and > escaped (as digest._data does): a member writing </EMOJI> cannot close the block
-    # and have the rest read as instructions (Codex on PR #40).
+    # and have the rest read as instructions.
     data = (
         json.dumps({"name": emoji.name, "examples": examples}, ensure_ascii=False)
         .replace("<", "\\u003c")

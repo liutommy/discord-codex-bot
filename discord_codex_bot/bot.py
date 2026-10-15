@@ -458,7 +458,7 @@ class DiscordCodexClient(discord.Client):
         if config.emoji_enabled:
             intents.guild_reactions = True  # emoji.py: a reaction with the server's emoji
         # What the model writes is sent as is: an answer quoting @everyone, a role or a member
-        # must not ping them (hub on PR #25). Only replying pings the member who asked; a send
+        # must not ping them. Only replying pings the member who asked; a send
         # that means to mention someone (reminders, tracking) says so with its own value.
         mentions = discord.AllowedMentions(everyone=False, users=False, roles=False)
         super().__init__(intents=intents, allowed_mentions=mentions)
@@ -755,7 +755,7 @@ class DiscordCodexClient(discord.Client):
 
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
         """The channel's latest message changed (an answer replacing its 「思考中」 placeholder,
-        a member's edit): the next sample's "previous" is what it says now (Codex on PR #40)."""
+        a member's edit): the next sample's "previous" is what it says now."""
         content = payload.data.get("content")
         if not isinstance(content, str):
             return  # an embed resolving, not a text change
@@ -820,7 +820,7 @@ class DiscordCodexClient(discord.Client):
 
     def _forget_messages(self, channel_id: int, message_ids) -> None:
         """Deleted messages leave no trace: not in samples, and not as the cached latest message
-        the next sample would take as its "previous" (Codex on PR #40)."""
+        the next sample would take as its "previous"."""
         if self.emoji is None:
             return
         ids = set(message_ids)
@@ -1046,7 +1046,7 @@ class DiscordCodexClient(discord.Client):
             return await fetcher.fetch(source)
         # Ruten is read through an undocumented API: a change there must reach the operator,
         # not just the log, or a broken source looks exactly like a quiet store. Counted per
-        # source: one shared streak was reset by any healthy store (Codex on PR #7).
+        # source: one shared streak was reset by any healthy store.
         alert_key = f"露天追蹤 {source.external_id}"
         try:
             result = await fetcher.fetch(source)
@@ -1604,7 +1604,7 @@ class DiscordCodexClient(discord.Client):
         ):
             return None
         # Part-way versions share one lookup; the answer itself reads the server again, so an
-        # emoji deleted while it was being written is not sent (Codex on PR #42).
+        # emoji deleted while it was being written is not sent.
         known = store.by_name(guild_id)
         return lambda text, streaming: store.reply(
             text, guild_id, streaming, known if streaming else None
@@ -2047,9 +2047,9 @@ class DiscordCodexClient(discord.Client):
         }
 
     def _log_route(self, route_plan: RoutePlan, result: CodexResult) -> None:
-        """One structured line per routed message. It carries the member's text (owner,
-        2026-10-06: nothing private is said in the server) with the thread id and the turn, so a
-        holdout can be lined up with what Jev said at the time."""
+        """One structured line per routed message. It carries the member's text (nothing private
+        is said in the server) with the thread id and the turn, so a holdout can be lined up with
+        what Jev said at the time."""
         via = result.via
         record = {
             **route_plan.log,
@@ -2965,8 +2965,8 @@ class DiscordCodexClient(discord.Client):
         """Who may change operator settings: the server owner, a guild admin, or an id the
         operator listed in LINKCLEAN_ADMIN_IDS (covers a delegated owner who is not the
         Discord account that owns the server). Note this is a per-guild test applied to the
-        persona, which is global: an admin of any allowed guild changes it for all of them.
-        Owner's ruling, 2026-09-17."""
+        persona, which is global: an admin of any allowed guild changes it for all of them, by
+        design."""
         user_id = interaction.user.id
         guild = interaction.guild
         if guild is not None and guild.owner_id == user_id:
@@ -3071,7 +3071,7 @@ class DiscordCodexClient(discord.Client):
         codex = await codex_login_status(self.config)
         limits = await probe_rate_limits(self.config)
         # Where a Codex turn goes right now, worked out as _answer does: from MODEL_CHAIN, not
-        # just CODEX_FALLBACK_MODEL, and never into Grok (Codex on PR #3).
+        # just CODEX_FALLBACK_MODEL, and never into Grok.
         codex_choice = parse_choice(f"{CODEX}:{self.config.codex_model}", self.config.codex_model)
         spares = fallback_chain(
             codex_choice,
@@ -3403,7 +3403,7 @@ class DiscordCodexClient(discord.Client):
             else:
                 chosen = self._choice(stored or self.config.default_model)
             # A new provider without an effort starts at its default effort: the old provider's
-            # level saved as-is would read differently from what /status shows (hub on #38).
+            # level saved as-is would read differently from what /status shows.
             switched = chosen.backend != split_stored(stored)[0].split(":")[0]
             level = effort.value if effort else "" if switched else split_stored(stored)[1]
             value = f"{chosen.value}|{level}" if level else chosen.value

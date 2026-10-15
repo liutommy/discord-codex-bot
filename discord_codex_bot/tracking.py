@@ -303,7 +303,7 @@ TrackAdd = tuple[str, str, tuple[int, ...], int, tuple[str, ...] | None]
 
 def _pending_minutes(keep_days: int = 0) -> str:
     """How long an item may wait for its watch `w`, in minutes, as SQL. "Every 3 days" against
-    a flat 48 hours expired everything before the watch was ever judged (Codex on PR #6): an
+    a flat 48 hours expired everything before the watch was ever judged: an
     interval watch keeps its items for two intervals, one missed pass of slack. Unchanged up to
     a daily interval, and for fixed-time watches, which are judged every day. Capped half a day
     short of the prune horizon, so a long wait still ends as a logged `expired` instead of the
@@ -317,7 +317,7 @@ def _pending_minutes(keep_days: int = 0) -> str:
 
 def _prune_floor(keep_days: int) -> str:
     """Nothing observed before the prune horizon is pending or expirable: its decision may have
-    been pruned, and it would be judged or logged as `expired` all over again (Codex on PR #9).
+    been pruned, and it would be judged or logged as `expired` all over again.
     A decision is never older than its item, so this keeps every pruned one gone."""
     if keep_days <= 0:
         return ""
@@ -717,7 +717,7 @@ class TrackerStore:
         """A fixed time that came and went with nothing to judge is used up all the same:
         otherwise an item arriving at 13:00 would find 12:01 still owed and be judged at once.
         Not when the watch's source (in `unread`) could not be read this pass: nothing to judge
-        then says nothing, and what the next pass finds would wait a day (Codex on PR #15)."""
+        then says nothing, and what the next pass finds would wait a day."""
         now = time.time() if now is None else now
         for watch in self.watches(active_only=True):
             if only is not None and watch.id not in only:
@@ -1533,7 +1533,7 @@ class XFetcher:
         posts = {str(post["id"]): post for post in page}
         # A full page may not reach back to the cursor: the account posted more than a page
         # since the last check, and jumping the cursor to the newest post would lose the rest
-        # for good (Codex on PR #2). Read back older pages, each one more Grok session, until a
+        # for good. Read back older pages, each one more Grok session, until a
         # page comes back short (it reached the cursor) — at most `max_extra_pages`. With no
         # cursor (first sight) there is no gap: the baseline is one page.
         extra = 0
@@ -2080,5 +2080,5 @@ async def tracking_loop(
         delay = max(0.0, full_at - time.time())
         delay = delay if upcoming is None else min(delay, upcoming + 2)
         # Wall-clock steps: a VM frozen through a watch's fixed time runs the pass when it resumes,
-        # not late by the whole pause (Codex on PR #25).
+        # not late by the whole pause.
         await sleep_for(max(1.0, delay))
