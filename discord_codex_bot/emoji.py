@@ -38,7 +38,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
-CUSTOM = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d{15,21})>")
+# The id must fit SQLite's 64-bit INTEGER: anyone can type `<:xx:99999999999999999999>`, and a
+# bigger id raised OverflowError out of the prompt rewrite, the sampling and the backfill. Up to
+# 18 digits, or 19 starting 1-8 (below 2**63; Discord ids reach that around 2083), is an emoji;
+# anything else stays text.
+CUSTOM = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d{15,18}|[1-8]\d{18})>")
 KEEP_SAMPLES = 100  # per emoji (owner, 2026-10-07)
 MIN_SAMPLES = 3
 PROMPT_MAX = 50
