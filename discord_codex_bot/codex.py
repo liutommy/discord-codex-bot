@@ -155,6 +155,16 @@ def _rollout_events(codex_home: Path, thread_id: str):
     yield from _events(text)
 
 
+def _current_turn(events: list[dict]) -> list[dict]:
+    """The rollout's events from the last turn's task_started on. A rollout keeps every turn of
+    the thread, and an error from an earlier one says nothing about this one."""
+    for at in range(len(events) - 1, -1, -1):
+        payload = events[at].get("payload")
+        if isinstance(payload, dict) and payload.get("type") == "task_started":
+            return events[at:]
+    return events
+
+
 def _turn_failure(events) -> str:
     """The message of a failed exec turn (`error` / `turn.failed` events), else ""."""
     for event in events:
@@ -166,7 +176,7 @@ def _turn_failure(events) -> str:
 
 
 def parse_fallback_error(
-    stdout: str, codex_home: Path | None = None, thread_id: str = ""
+    stdout: str, codex_home: Path | None = None, thread_id: str = "", exit_code: int = 0
 ) -> CodexFallbackError | None:
     """Return a typed remote failure that may use the spare backend, if one is present.
 
@@ -177,15 +187,17 @@ def parse_fallback_error(
     resumed turn that announces nothing, the `thread_id` the caller already knows. Three sources
     of one fact, in decreasing trust: a code in the stream, the code in the rollout, then the one
     message actually observed. stderr is never consulted: on the real failure it held nothing but
-    the stdin prompt.
+    the stdin prompt. The rollout is read only for a turn that failed (a non-zero exit, or an
+    `error` / `turn.failed` event), and only that turn's part of it.
     """
     events = list(_events(stdout))
     for error in _error_payloads(events):
         if found := _classify(error):
             return found
     thread_id = parse_thread_id(stdout) or thread_id
-    if codex_home and thread_id:
-        for error in _error_payloads(list(_rollout_events(codex_home, thread_id))):
+    failed = exit_code != 0 or any(e.get("type") in ("error", "turn.failed") for e in events)
+    if failed and codex_home and thread_id:
+        for error in _error_payloads(_current_turn(list(_rollout_events(codex_home, thread_id)))):
             if found := _classify(error):
                 return found
     message = _turn_failure(events)
@@ -572,7 +584,7 @@ async def run_codex(
     code, output, stderr = await _exec(
         prompt, config, images, effort, resume, schema, plain, isolated
     )
-    if unavailable := parse_fallback_error(output, config.codex_home, resume):
+    if unavailable := parse_fallback_error(output, config.codex_home, resume, code):
         raise unavailable  # before the resume retry: a fresh thread cannot fix a remote outage
     if code != 0 and resume:
         # The stored thread may have been rotated away or be unreadable; answer fresh instead.
@@ -581,7 +593,7 @@ async def run_codex(
         code, output, stderr = await _exec(
             prompt, config, images, effort, resume, schema, plain, isolated
         )
-        if unavailable := parse_fallback_error(output, config.codex_home, resume):
+        if unavailable := parse_fallback_error(output, config.codex_home, resume, code):
             raise unavailable
     if code != 0:
         summary = " | ".join(stderr.splitlines()[-3:])
