@@ -507,3 +507,27 @@ async def test_a_prompt_that_cannot_fit_goes_down_the_chain(sidecar, config, tmp
     with pytest.raises(grok.GrokUnavailable):
         await grok.run_grok("長" * (LIMIT + 1), cfg, "grok-4.7", raw=True)
     assert sidecar.state["calls"] == []  # never sent: the sidecar would answer 400
+
+
+def test_a_failed_transcript_write_keeps_the_conversation_so_far(
+    config, tmp_path, monkeypatch
+) -> None:
+    """A Grok conversation lives only in its transcript; a write that dies part-way (disk full,
+    a kill) used to leave half a JSON file, and the next turn read it as no history at all."""
+    from dataclasses import replace as _replace
+    from pathlib import Path as _Path
+
+    cfg = _replace(config, grok_dir=tmp_path / "grok")
+    thread = "gk-0123456789abcdef"
+    grok._save_transcript_to(cfg, thread, "m", [], "早安", "早")
+    real = _Path.write_text
+
+    def dies_halfway(self, text, *args, **kw):
+        real(self, text[: len(text) // 2], *args, **kw)
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(_Path, "write_text", dies_halfway)
+    with pytest.raises(OSError):
+        grok._save_transcript_to(cfg, thread, "m", grok.load_transcript(cfg, thread), "再問", "答")
+    monkeypatch.undo()
+    assert [m["content"] for m in grok.load_transcript(cfg, thread)] == ["早安", "早"]

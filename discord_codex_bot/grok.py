@@ -29,6 +29,7 @@ import aiohttp
 from .backends import BackendUnavailable
 from .codex import CodexResult, _prompt, output_style
 from .config import Config
+from .memory import atomic_write
 from .openrouter import _system_prompt, message_text, trim_history
 
 LOGGER = logging.getLogger(__name__)
@@ -340,7 +341,6 @@ def _save_transcript_to(
         {"role": "user", "content": prompt},
         {"role": "assistant", "content": text},
     ]
-    path = transcript_path(config, thread_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"model": model, "at": time.time(), "messages": messages}
-    path.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
+    # The conversation lives only here: a write that dies part-way must leave the old file.
+    atomic_write(transcript_path(config, thread_id), json.dumps(payload, ensure_ascii=False))
