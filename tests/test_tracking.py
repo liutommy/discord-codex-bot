@@ -352,7 +352,7 @@ async def test_web_source_turns_new_links_into_items(tmp_path: Path) -> None:
     ]
 
     async def read_page(_url):
-        return pages[-1]
+        return pages[-1], True
 
     fetcher = WebFetcher(read_page)
     url, state = await fetcher.resolve("https://yu-gi-oh.jp/news/?x=1")
@@ -398,7 +398,7 @@ async def test_web_source_does_not_depend_on_where_posts_live() -> None:
     )
 
     async def read_page(_url):
-        return page
+        return page, True
 
     result = await WebFetcher(read_page).fetch(
         Source(1, "web", "https://blog.python.org/", "https://blog.python.org/")
@@ -408,6 +408,38 @@ async def test_web_source_does_not_depend_on_where_posts_live() -> None:
         "Python 3.15.0 candidate 2 is here!"
     )
     assert "https://blog.python.org/blog" in found  # kept; the model decides it is not news
+
+
+async def test_an_unreadable_page_is_not_a_check(tmp_path: Path) -> None:
+    """A failed read is not an empty page: taken as one, it completed the baseline with no links,
+    and once the site came back every link on it was new and went to the model."""
+    pages = [("（https://site.example/：無法連線——timeout）", False)]
+
+    async def read_page(_url):
+        return pages[-1]
+
+    fetcher = WebFetcher(read_page)
+    with pytest.raises(ProviderError):
+        await fetcher.resolve("https://site.example/")
+    store = TrackerStore(tmp_path / "tracking.sqlite3")
+    source = store.add_source("web", "https://site.example/", "https://site.example/")
+    failed = await fetcher.fetch(source)
+    assert not failed.checked and failed.items == ()
+    store.ingest(source, failed)
+    assert not store.get_source(source.id).baseline_complete
+    pages.append(("標題：站\n <https://site.example/a> \n A \n", True))
+    store.ingest(store.get_source(source.id), await fetcher.fetch(store.get_source(source.id)))
+    assert store.get_source(source.id).baseline_complete
+
+
+def test_unreadable_tells_a_failed_read_from_a_page() -> None:
+    from discord_codex_bot.links import unreadable
+
+    url = "https://site.example/"
+    assert unreadable(f"（{url}：HTTP 404，打不開）", url)
+    assert unreadable("標題：站\n（頁面沒有可讀文字，請看截圖）", url)
+    assert not unreadable("標題：站\n內文（括號）", url)
+    assert not unreadable(f"（{url}：只是引言）\n然後是內文", url)
 
 
 def test_web_locator_requires_a_public_http_url() -> None:

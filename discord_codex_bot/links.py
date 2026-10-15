@@ -31,6 +31,7 @@ URL_RE = re.compile(r"https?://[^\s<>()\[\]\"'`]+")
 FETCH_TAG = re.compile(
     r'<fetch\s+url="(https?://[^"]{1,2000})"(?:\s+render="([^"]*)")?\s*/?>(?:\s*</fetch>)?'
 )
+NO_TEXT = "（頁面沒有可讀文字，請看截圖）"
 BLOCKED_MARKERS = (
     "被網站的機器人驗證擋住",
     "HTTP 403",
@@ -980,7 +981,14 @@ async def render_link(url: str, config: Config, out_dir: Path | None) -> tuple[s
     clipped = text if len(text) <= limit else f"{text[:limit]}\n[已截斷至 {limit} 字]"
     head = f"標題：{title}\n" if title else ""
     note = "（整頁截圖已附上）\n" if shot else ""
-    return f"{head}{note}{clipped or '（頁面沒有可讀文字，請看截圖）'}", shot
+    return f"{head}{note}{clipped or NO_TEXT}", shot
+
+
+def unreadable(text: str, url: str) -> bool:
+    """A read that got no page: the one-line failure fetch_link / render_link return in its place
+    (always `（{url}：…）`), or a render with no text at all. Not an empty page."""
+    failed = text.startswith(f"（{url}：") and text.endswith("）") and "\n" not in text
+    return failed or text.endswith(NO_TEXT)
 
 
 def blocked(result: str) -> bool:

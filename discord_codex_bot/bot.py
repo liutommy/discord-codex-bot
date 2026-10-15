@@ -88,6 +88,7 @@ from .links import (
     link_blocks,
     strip_tracking,
     understand_video,
+    unreadable,
 )
 from .memory import (
     RECALL_TAG,
@@ -1021,11 +1022,11 @@ class DiscordCodexClient(discord.Client):
             self.config.tracking_keep_days,
         )
 
-    async def _read_page(self, url: str) -> str:
-        """One page as text, with its links kept inline. No out_dir: a background poll has
-        nobody to show a screenshot to, and nothing to clean up afterwards."""
+    async def _read_page(self, url: str) -> tuple[str, bool]:
+        """(one page as text with its links kept inline, whether it was read at all). No out_dir:
+        a background poll has nobody to show a screenshot to, and nothing to clean up afterwards."""
         text, _shots = await fetch_or_render(url, self.config, None, False)
-        return text
+        return text, not unreadable(text, url)
 
     async def _fetch_tracking_source(self, source: Source):
         fetcher = {

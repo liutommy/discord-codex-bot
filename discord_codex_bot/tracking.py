@@ -1789,21 +1789,30 @@ class WebFetcher:
     # model ever sees — on a menu-heavy page the site's navigation comes first in document order
     # and would spend the whole budget before a single article, which is a code decision wearing
     # the costume of a model decision. The only bound left is the one that exists for prompt size.
-    def __init__(self, read_page: Callable[[str], Awaitable[str]], max_items: int = 120) -> None:
-        self.read_page = read_page  # async (url) -> page text with links kept inline as <url>
+    def __init__(
+        self, read_page: Callable[[str], Awaitable[tuple[str, bool]]], max_items: int = 120
+    ) -> None:
+        # async (url) -> (page text with links kept inline as <url>, whether the page was read)
+        self.read_page = read_page
         self.max_items = max_items
 
     async def resolve(self, locator: str) -> tuple[str, Mapping[str, Any]]:
         url = parse_web_locator(locator)
-        text = (await self.read_page(url)).strip()
-        if not text:
+        text, ok = await self.read_page(url)
+        text = text.strip()
+        if not ok or not text:
             raise ProviderError("這個網址讀不到內容")
         first = text.splitlines()[0]
         title = first.removeprefix("標題：").strip() if first.startswith("標題：") else ""
         return url, {"title": title or url}
 
     async def fetch(self, source: Source) -> FetchResult:
-        text = await self.read_page(source.external_id)
+        text, ok = await self.read_page(source.external_id)
+        if not ok:
+            # Not an empty page: as one it would complete the baseline with no links, and every
+            # link would be new once the site is back.
+            LOGGER.warning("Web source %s could not be read", source.id)
+            return FetchResult((), source.cursor, dict(source.state), checked=False)
         host = urlsplit(source.external_id).hostname or ""
         page = source.external_id.rstrip("/")
         best: dict[str, str] = {}
