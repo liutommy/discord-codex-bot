@@ -223,7 +223,7 @@ quota. Each watch stores its own interval, an attempt stamps its clock (failures
 broken source cannot burn quota every pass), and a member can change theirs by asking.
 
 A watch can be judged at fixed times of day instead (Taiwan time, up to six, e.g. 12:01 and
-20:01): `/track times:12:01,20:01` when adding it, or by asking. It is then judged once per time,
+20:01): `/codex-track times:12:01,20:01` when adding it, or by asking. It is then judged once per time,
 on the first pass at or after it — the tracking loop wakes for the next fixed time instead of
 waiting out `TRACKING_INTERVAL_MINUTES`, and a Bot that slept through one judges at wake-up. A
 time with nothing new to judge is used up all the same, so an item arriving afterwards waits for
@@ -308,7 +308,7 @@ Codex reports it *inside* its JSONL stream (`codex_error_info: usage_limit_excee
 conditions apart from a crash. The Bot recognises both and answers the rest of the request on
 `CODEX_FALLBACK_MODEL` (default `agy:gemini-3.8-flash|medium`, written like a member's stored
 model; empty disables it and the member gets the usual failure message). The reply does not say
-that a spare answered — the member gains nothing from it; `/status` shows the last fallback. That
+that a spare answered — the member gains nothing from it; `/codex-status` shows the last fallback. That
 thread is not remembered as resumable — a Codex thread id means nothing to another backend —
 except on a turn whose model the Bot picked (routing), which keeps the spare's thread and goes on
 from there. The member's own model choice is untouched; the next request tries Codex again. Background classification and memory jobs use the same fallback while preserving their
@@ -402,7 +402,7 @@ CODEX_HOME/memory/<guild>/users/<member>/     seen only in that member's request
     topics/<slug>.md     the note itself, read on demand
 ```
 
-Notes get in two ways: `/remember scope name text` (explicit) and automatically, when the model
+Notes get in two ways: `/codex-remember scope name text` (explicit) and automatically, when the model
 ends an answer with `<memory scope="user|guild" name="…">…</memory>` because the member stated a
 durable fact (the tag is stored and stripped). Reading is snippet-first, like pi-context: the
 model sees only the index; it can reply with `<search scope="…" query="regex"/>` to get matching
@@ -411,11 +411,11 @@ lines with `MEMORY_SEARCH_CONTEXT_LINES` of context (up to `MEMORY_SEARCH_MAX_MA
 fed back into the same thread and bounded like pi's tool output (`MEMORY_READ_MAX_LINES` 2000 /
 `MEMORY_READ_MAX_BYTES` 50 KB per page, with the total line count in the header so the model can
 page on); at most `MEMORY_RECALL_ROUNDS` (10) rounds per request. `<recall name="list"/>` lists
-archived notes. `/memory` lists all stored notes, including archived notes. `/forget` offers
+archived notes. `/codex-memory` lists all stored notes, including archived notes. `/codex-forget` offers
 a searchable name picker after selecting a scope, and deletes only the selected note. Duplicate
-titles require selecting a specific entry. Tracking and reminder IDs are separate: use `/track
-cancel:<id>` or `/remind cancel:<id>`; entering these IDs in `/forget` gives guidance without
-cancelling anything. Deleting a note does not erase existing conversation context; `/reset`
+titles require selecting a specific entry. Tracking and reminder IDs are separate: use `/codex-track
+cancel:<id>` or `/codex-remind cancel:<id>`; entering these IDs in `/codex-forget` gives guidance without
+cancelling anything. Deleting a note does not erase existing conversation context; `/codex-reset`
 starts a fresh conversation. Capacity is capped per
 scope (`MEMORY_USER_MAX_BYTES` 50 MB, `MEMORY_GUILD_MAX_BYTES` 200 MB); a full scope evicts its
 oldest notes.
@@ -493,7 +493,7 @@ run, and a failed scope is left untouched. Codex's own background memory consoli
 The persona is a fourth operator-only layer: `persona/*.md` (gitignored except its README and
 the sample) is appended to the runtime rules to make the `AGENTS.md` Codex loads as project
 instructions on every request — the place with the most weight this deployment can give it. A
-member who wants the plain assistant turns it off with `/style persona:關閉人設`, which serves
+member who wants the plain assistant turns it off with `/codex-style persona:關閉人設`, which serves
 them from the persona-free working directory; a thread keeps the one it started in. Setting a
 personal style does not do this by itself: style and persona are separate settings, so asking for
 shorter answers does not also discard the character.
@@ -519,12 +519,12 @@ them at runtime. A clone with neither runs with no persona and no default style.
 
 Output style has two layers. `config/output-style.md` is the operator's default; when it has
 content it is injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
-Each member can set their own with `/style text:…` for a one-liner, or `/style upload:True` to
+Each member can set their own with `/codex-style text:…` for a one-liner, or `/codex-style upload:True` to
 send one Markdown file — a slash-command option is a single line, so anything longer belongs in a
 file. The upload is UTF-8 `.md` bounded by 4000 characters, the same ceiling Discord puts on a
 modal paragraph. Either way it is stored as `memory/<guild>/users/<member>/style.md` and injected
-as `<PERSONAL_STYLE>`, which wins over the default where they conflict. Inspect it with `/style`
-and return to the default with `/style clear:True`.
+as `<PERSONAL_STYLE>`, which wins over the default where they conflict. Inspect it with `/codex-style`
+and return to the default with `/codex-style clear:True`.
 
 Codex can also generate images (`image_generation = true`). The built-in tool writes them to
 `CODEX_HOME/generated_images/<thread_id>/`; the Bot attaches them to the reply (up to 10) and
@@ -558,7 +558,7 @@ end). The member's message is never cut; a prompt still too long goes down the c
 is logged.
 
 When Grok cannot answer, the turn moves down `MODEL_CHAIN` (grok → codex → agy), the same way
-Codex already fell back to agy, and `/status` shows the last fallback. A turn skips Grok
+Codex already fell back to agy, and `/codex-status` shows the last fallback. A turn skips Grok
 outright when the plan's weekly usage is past `GROK_CHAT_MAX_WEEKLY_PERCENT` (chat and X lookups share one weekly quota;
 the rest is left for X), or for an hour after three refused sessions in ten minutes (one alert,
 not one per message). A request the sidecar rejects as malformed is reported, not hidden by a
