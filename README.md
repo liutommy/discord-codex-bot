@@ -651,8 +651,8 @@ whose snowflake id disagrees with its time is dropped (otherwise one injected po
 id would become the tracking cursor and hide every real post), and posts read for a link are
 labelled unverified, with a note when the author differs from the link's account. Grok's own `--sandbox`
 needs user namespaces that the hardened container does not grant, so there the container is the
-sandbox (read-only rootfs, non-root, no capabilities, and the host firewall described in
-Operations). Note the gotcha that motivated layer 3: `--disallowed-tools run_terminal_command`,
+sandbox (read-only rootfs, non-root, no capabilities). Its network is not restricted by this
+repo: it needs xAI, and limiting what else it can reach is up to the host. Note the gotcha that motivated layer 3: `--disallowed-tools run_terminal_command`,
 spelled as the tool list spells it, leaves the shell in place.
 
 Sign-in, once: sign in to Grok Build on any machine (`grok login`), then copy its
