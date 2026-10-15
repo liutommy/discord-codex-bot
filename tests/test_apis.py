@@ -327,3 +327,8 @@ async def test_redirects_never_carry_credentials_to_another_origin(config) -> No
             finally:
                 apis._LOGGED_IN.discard("wiki")
             assert stolen == []
+
+
+async def test_an_encoded_dot_dot_is_refused_like_a_plain_one(config) -> None:
+    registry = {"lol": Api("lol", "https://api.example/gw/", {}, "")}
+    assert "只能是相對" in await call_api("lol", "%2e%2e/%2E%2E/admin", registry, config)

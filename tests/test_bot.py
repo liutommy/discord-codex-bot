@@ -1600,6 +1600,7 @@ async def test_answer_buttons_obey_the_channel_allowlist_and_prompt_limits(
         reference=NS(message_id=1, resolved=None),
         channel=NS(fetch_message=fetch_asked),
     )
+    sent.clear()
     await client.handle_answer_button(quoting, "redo", USER)
     assert "prompt 必須介於" in sent[-1][1] and backends[0].calls == []
 

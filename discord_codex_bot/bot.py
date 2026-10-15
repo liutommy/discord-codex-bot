@@ -22,7 +22,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from . import apis, embedfix, gemini, grok, instructions, routing, sandbox, search, xsearch
+from . import apis, embedfix, gemini, grok, instructions, routing, sandbox, search, tags, xsearch
 from .access import check_access
 from .agy import run_agy
 from .alerts import Alerter, login_watch
@@ -334,8 +334,9 @@ def request_only(answer: str) -> bool:
     return bool(answer.strip()) and not rest.strip()
 
 
-# A control tag the model made up. Every real one is handled and stripped before this runs, so
-# whatever is still here is an operation the Bot cannot perform — and the sentence above it has
+# A control tag the model made up. Every real one it wrote is handled and stripped before this
+# runs, and one it only shows (tags.py) is left alone here too, so whatever is still here is an
+# operation the Bot cannot perform — and the sentence above it has
 # already told the member it was performed. The underscore is what makes this safe to match on:
 # the Bot's own vocabulary uses it (track_every, cancel_reminder, cancel_track) and no HTML or
 # XML element a member might be shown does, so quoted markup is never mistaken for an order.
@@ -352,8 +353,8 @@ def strip_invented_tags(text: str) -> tuple[str, list[str]]:
     Stripping alone would make that worse — the visible tag is the only reason this was caught
     at all — so the member gets told, and the log gets the name to fix next.
     """
-    names = list(dict.fromkeys(INVENTED_TAG.findall(text)))
-    return (INVENTED_TAG.sub("", text).strip(), names) if names else (text, [])
+    names = list(dict.fromkeys(tags.findall(INVENTED_TAG, text)))
+    return (tags.strip(INVENTED_TAG, text).strip(), names) if names else (text, [])
 
 
 def _for_other(item: dict) -> bool:

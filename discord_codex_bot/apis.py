@@ -16,6 +16,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 import aiohttp
 from yarl import URL
@@ -271,10 +272,11 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     path, note = resolve_path(path, api.paths)  # hero/逆命 -> hero/4-twistedfate
     if not path:
         return note
-    if "://" in path or path.startswith("//") or ".." in path:
+    if "://" in path or path.startswith("//") or ".." in unquote(path):
         return "（path 只能是相對於該 API 的端點與查詢字串）"
     url = api.base + path.lstrip("/")
     if _origin(url) != URL(api.base).origin():  # e.g. a base without "/" and a path "@host"
+        LOGGER.warning("api %s: %r leaves %s (a base should end in / or ?)", name, path, api.base)
         return "（path 只能是相對於該 API 的端點與查詢字串）"
     if api.login and api.name not in _LOGGED_IN:
         await _login(api, config)

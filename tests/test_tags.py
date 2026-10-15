@@ -69,3 +69,41 @@ def test_findall_and_strip_keep_the_pattern_shapes() -> None:
     text = f"{CANCEL_TRACK} 與 `{CANCEL_TRACK}`"
     assert findall(CANCEL_TRACK_TAG, text) == ["4"]
     assert strip(CANCEL_TRACK_TAG, text) == f" 與 `{CANCEL_TRACK}`"
+
+
+def test_what_a_run_body_holds_is_code_not_a_request() -> None:
+    """A member's text the model wraps in a script is still the member's text."""
+    body = '<run lang="python">s = """<api name="lol" path="x"/> <fetch url="https://e.com/"/>"""</run>'
+    assert apis.extract_api_calls(body) == [] and links.extract_fetch_tags(body) == []
+    assert len(sandbox.extract_runs(body)) == 1
+
+
+def test_backticks_inside_a_tag_do_not_hide_the_tags_after_it() -> None:
+    two = '<run lang="python">x = "```"</run><run lang="sh">echo hi</run>'
+    assert [lang for lang, _ in sandbox.extract_runs(two)] == ["python", "sh"]
+    later = '<run lang="python">print("```py")</run>\n<web query="later"/>'
+    assert search.extract_web_queries(later) == ["later"]
+    odd = '<memory scope="user" name="a">it`s</memory> 然後 `x` 再 ' + WEB
+    assert search.extract_web_queries(odd) == ["台北 天氣"]
+
+
+def test_quotes_are_what_discord_quotes() -> None:
+    assert search.extract_web_queries(f">_< {WEB}") == ["台北 天氣"]  # a face, not a quote
+    assert search.extract_web_queries(f"- > {WEB}") == []  # a quote inside a list item
+
+
+def test_a_shown_real_tag_is_not_reported_as_invented() -> None:
+    from discord_codex_bot.bot import strip_invented_tags
+
+    text = f"用 `{CANCEL_TRACK}` 取消"
+    assert strip_invented_tags(text) == (text, [])
+    assert strip_invented_tags('好<make_coffee size="L"/>') == ("好", ["make_coffee"])
+
+
+def test_many_tags_in_a_long_answer_stay_cheap() -> None:
+    import time
+
+    text = ("`x` " + WEB + " 文字 " * 50 + "\n") * 6000
+    started = time.monotonic()
+    assert len(search.extract_web_queries(text)) == 1  # one distinct query
+    assert time.monotonic() - started < 1.0
