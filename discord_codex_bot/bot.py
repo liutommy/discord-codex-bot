@@ -148,6 +148,8 @@ from .ui import (
 from .usage import probe_rate_limits, read_rate_limits
 
 LOGGER = logging.getLogger(__name__)
+# Closes every recall round; a spare taking over mid-recall gets the round's results without it.
+ANSWER_NOW = "\n\nNow answer the member's question."
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
 FAILURE_MESSAGE = (
     "Codex 執行失敗。請用 /{prefix}-status 檢查登入狀態，並通知 Bot 管理者查看 container log。"
@@ -1311,6 +1313,8 @@ class DiscordCodexClient(discord.Client):
             # the same `_grok_usable` gate the Grok default turn goes through (`next_spare`).
             spares = [spare for spare in spares if spare.backend != GROK]
         drop_resume = fell_back  # only the caller's id is foreign; later recall rounds chain
+        first: tuple[str, dict] | None = None  # the question as first asked, for a spare
+        results: list[str] = []  # every recall round's results so far, oldest first
 
         async def next_spare():
             nonlocal spares
@@ -1344,8 +1348,12 @@ class DiscordCodexClient(discord.Client):
             return await run_codex(text, self.config, effort=via.effort, **kw)
 
         async def turn(text: str, **kw) -> CodexResult:
-            nonlocal target, fell_back, spares, drop_resume
+            nonlocal target, fell_back, spares, drop_resume, first
             kw.setdefault("on_delta", on_delta)
+            if kw.get("raw"):
+                results.append(text.removesuffix(ANSWER_NOW))
+            else:
+                first = (text, dict(kw))
             if drop_resume:
                 kw.pop("resume", None)  # a thread id means nothing to another backend
                 drop_resume = False
@@ -1377,7 +1385,21 @@ class DiscordCodexClient(discord.Client):
                         await self.alerts.login_lost("Grok", str(unavailable))
                     elif isinstance(unavailable, grok.GrokRefused):
                         await self._grok_refused(unavailable)
-                    if kw.pop("resume", None) and spare_history and not kw.get("raw"):
+                    if kw.get("raw") and first is not None:
+                        # A recall round is only results and "now answer" for the thread that
+                        # asked; the spare holds none of it. Ask it the whole question again,
+                        # with every result read so far.
+                        text, asked = first
+                        kw = {
+                            **asked,
+                            "on_delta": kw["on_delta"],
+                            "images": [*asked.get("images", ()), *kw.get("images", ())],
+                            "links": "\n\n".join(b for b in (asked.get("links"), *results) if b),
+                        }
+                        kw.pop("resume", None)
+                        if spare_history:
+                            kw.setdefault("history", spare_history)
+                    elif kw.pop("resume", None) and spare_history and not kw.get("raw"):
                         kw.setdefault("history", spare_history)  # the thread stays behind
 
         images: list[Path] = []
@@ -1494,7 +1516,7 @@ class DiscordCodexClient(discord.Client):
                 recalled = defang(recalled)  # results are not the member: no USER_MESSAGE in them
                 result = await self.queue.run(
                     lambda text=recalled, thread=result.thread_id, imgs=tuple(extra): turn(
-                        text + "\n\nNow answer the member's question.",
+                        text + ANSWER_NOW,
                         images=imgs,
                         resume=thread,
                         raw=True,

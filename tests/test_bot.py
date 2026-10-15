@@ -2651,3 +2651,27 @@ def test_model_text_cannot_ping_everyone_roles_or_users(config: Config, tmp_path
         content=text, allowed_mentions=own, previous_allowed_mentions=client.allowed_mentions
     )
     assert sent.payload["allowed_mentions"]["parse"] == ["users"]
+
+
+async def test_a_spare_taking_over_mid_recall_gets_the_question_not_just_the_results(
+    client, monkeypatch
+) -> None:
+    """A recall round is sent raw (results and "now answer") into the thread that asked for
+    them. A spare holds none of that thread: given the raw text, it never saw the question."""
+    client.memory.add("guild", GUILD, None, "飲料", "週五聚會喝綠茶")
+    calls = []
+
+    async def codex(prompt, config, **kw):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return CodexResult('<search scope="guild" query="綠茶"/>', thread_id="t1")
+        raise CodexUsageLimit("quota spent")
+
+    agy = FakeBackend("備援答案")
+    monkeypatch.setattr(bot_module, "run_codex", codex)
+    monkeypatch.setattr(bot_module, "run_agy", agy)
+    result = await client._answer("週五喝什麼？", [], GUILD, USER)
+    assert result.text == "備援答案" and len(calls) == 2
+    prompt, _args, kw = agy.calls[0]
+    assert prompt == "週五喝什麼？" and not kw.get("raw") and "resume" not in kw
+    assert "週五聚會喝綠茶" in kw["links"] and kw["memory"]
