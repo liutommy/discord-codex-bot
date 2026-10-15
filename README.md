@@ -407,7 +407,8 @@ CODEX_HOME/memory/<guild>/users/<member>/     seen only in that member's request
 Notes get in two ways: `/codex-remember scope name text` (explicit) and automatically, when the model
 ends an answer with `<memory scope="user|guild" name="…">…</memory>` because the member stated a
 durable fact (the tag is stored and stripped). Reading is snippet-first, like pi-context: the
-model sees only the index; it can reply with `<search scope="…" query="regex"/>` to get matching
+model sees only the index; it can reply with `<search scope="…" query="詞|詞"/>` (words
+separated by `|`, each matched literally and case-insensitively, never as a regex) to get matching
 lines with `MEMORY_SEARCH_CONTEXT_LINES` of context (up to `MEMORY_SEARCH_MAX_MATCHES` hits), or
 `<recall scope="…" name="…" offset="1" lines="200"/>` to read one page of a note. Every result is
 fed back into the same thread and bounded like pi's tool output (`MEMORY_READ_MAX_LINES` 2000 /
@@ -681,8 +682,8 @@ Cost and pace: one lookup at a time (others wait up to 30 s, then get a 429); a 
 for an hour; the link fallback is capped at 30 lookups an hour; a failed account check waits the
 full interval before the next. Tracking passes run sources one after another, so each X account
 adds its 10–100 s to every pass that checks it, delaying the YouTube/Twitch/web sources behind
-it. The service has no authentication of its own: anything on the compose `default` network can
-spend the plan's quota through it (today: only this stack's containers). The token refreshes itself in
+it. The service has no authentication of its own: anything on its compose network can spend the
+plan's quota through it, so it sits alone on `xsearch_net`, shared only with the Bot. The token refreshes itself in
 the volume; if the machine you copied it from refreshes the same login, one of the two may have
 to sign in again.
 
