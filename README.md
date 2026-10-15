@@ -254,7 +254,8 @@ slash-only it invented `<cancel_track/>`, told a member the watch was cancelled,
 kept notifying. The vocabulary now matches the operations one-for-one, and anything left over is
 reported rather than posted as if it had worked.
 
-Classification always uses the operator-controlled Codex model and `high` effort. It runs with
+Classification always uses the operator-controlled Codex model at `TRACKING_REASONING_EFFORT`
+(default `high`). It runs with
 Codex memories, history persistence, web search, apps, browser/computer use, image generation, and
 multi-agent features disabled. Before each classifier call the Bot reads
 `account/rateLimits/read`; if either the five-hour or weekly window has less than
