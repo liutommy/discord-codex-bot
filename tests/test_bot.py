@@ -2675,3 +2675,86 @@ async def test_a_spare_taking_over_mid_recall_gets_the_question_not_just_the_res
     prompt, _args, kw = agy.calls[0]
     assert prompt == "週五喝什麼？" and not kw.get("raw") and "resume" not in kw
     assert "週五聚會喝綠茶" in kw["links"] and kw["memory"]
+
+
+async def test_a_summary_fits_discord_and_reads_the_newest_messages(client, monkeypatch) -> None:
+    """The header went on after the answer was cut to 2000 characters, so Discord refused the
+    first part and the placeholder stayed. A window with more than the cap kept its oldest
+    messages, not the newest, and never said it was cut."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace as NS
+
+    from discord_codex_bot.summary import MAX_MESSAGES
+
+    edits, sent, asked = [], [], {}
+
+    class Channel:
+        name, parent_id = "閒聊", None
+
+        def history(self, *, limit, after=None, oldest_first=None):
+            asked.update(limit=limit, oldest_first=oldest_first)
+            newest_first = list(range(MAX_MESSAGES + 100, 0, -1))
+            ids = newest_first if oldest_first is False else newest_first[::-1]
+
+            async def gen():
+                for i in ids[:limit]:
+                    yield NS(
+                        id=i,
+                        content=f"訊息{i}",
+                        author=NS(display_name="甲", bot=False),
+                        created_at=datetime(2026, 10, 15, tzinfo=UTC),
+                        attachments=[],
+                        embeds=[],
+                        clean_content=f"訊息{i}",
+                    )
+
+            return gen()
+
+    class Response:
+        async def defer(self, thinking=False):
+            pass
+
+        async def send_message(self, text, ephemeral=False):
+            edits.append(text)
+
+    refuse = {"next": False}
+
+    async def edit_original_response(content=None, view=None):
+        if refuse["next"] or (content is not None and len(content) > 2000):
+            refuse["next"] = False
+            raise discord.HTTPException(NS(status=400, reason="refused"), "refused")
+        edits.append(content)
+
+    class Followup:
+        async def send(self, text):
+            assert len(text) <= 2000
+            sent.append(text)
+
+    interaction = NS(
+        guild_id=GUILD,
+        channel_id=ALLOWED,
+        channel=Channel(),
+        user=NS(id=USER),
+        response=Response(),
+        followup=Followup(),
+        edit_original_response=edit_original_response,
+    )
+    prompts = []
+
+    async def run_tracked(key, owner, show, start):
+        return await start(None, None)
+
+    async def answer(prompt, *args, **kw):
+        prompts.append(prompt)
+        return CodexResult("摘" * 1995)
+
+    monkeypatch.setattr(client, "_run_tracked", run_tracked)
+    monkeypatch.setattr(client, "_answer", answer)
+    await client.summary_command(interaction, hours=24)
+    assert edits[-1].startswith("**頻道摘要") and "最新" in edits[-1].split("\n", 1)[0]
+    assert sent and "".join([edits[-1].split("\n", 1)[1], *sent]) == "摘" * 1995
+    assert f"訊息{MAX_MESSAGES + 100}" in prompts[0] and "訊息1\n" not in prompts[0]
+    # a summary Discord refuses does not leave the placeholder standing
+    refuse["next"] = True
+    await client.summary_command(interaction, hours=24)
+    assert edits[-1] == "摘要送不出去，請再試一次。"

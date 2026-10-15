@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
@@ -2303,12 +2304,14 @@ class DiscordCodexClient(discord.Client):
         await interaction.response.defer(thinking=True)
         try:
             if hours is not None:
+                # Newest first, so a window with more than the cap keeps its latest messages.
                 fetched = [
                     m
                     async for m in interaction.channel.history(
-                        limit=MAX_MESSAGES, after=since(hours), oldest_first=True
+                        limit=MAX_MESSAGES, after=since(hours), oldest_first=False
                     )
                 ]
+                fetched.reverse()
             else:
                 fetched = [m async for m in interaction.channel.history(limit=count)]
                 fetched.reverse()
@@ -2346,16 +2349,25 @@ class DiscordCodexClient(discord.Client):
         )
         if result is None:
             return
-        chunks = split_discord_message(result.text)
+        if hours is None:
+            label = f"（最近 {len(fetched)} 則）"
+        elif len(fetched) >= MAX_MESSAGES:
+            label = f"（最近 {hours} 小時，訊息太多，只摘要最新 {MAX_MESSAGES} 則）"
+        else:
+            label = f"（最近 {hours} 小時）"
+        # The header is part of the first message: split after adding it, or that part is over
+        # Discord's limit and refused.
+        chunks = split_discord_message(f"**頻道摘要{label}**\n{result.text}")
         try:
-            label = f"（最近 {hours} 小時）" if hours is not None else f"（最近 {len(fetched)} 則）"
-            await interaction.edit_original_response(
-                content=f"**頻道摘要{label}**\n{chunks[0]}", view=None
-            )
+            await interaction.edit_original_response(content=chunks[0], view=None)
             for chunk in chunks[1:]:
                 await interaction.followup.send(chunk)
         except discord.HTTPException:
             LOGGER.exception("Summary delivery failed guild=%s", interaction.guild_id)
+            with contextlib.suppress(discord.HTTPException):
+                await interaction.edit_original_response(
+                    content="摘要送不出去，請再試一次。", view=None
+                )
         finally:
             remove_dir(result.generated_dir)
 
