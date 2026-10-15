@@ -2386,7 +2386,10 @@ class DiscordCodexClient(discord.Client):
         """Copy a sandbox-made file out of the per-request scratch dir so it survives cleanup
         until the answer (and the file) has been sent."""
         into.mkdir(parents=True, exist_ok=True)
-        target = into / path.name
+        target, counter = into / path.name, 2
+        while target.exists():  # two runs in one request may both write out.png
+            target = into / f"{path.stem}-{counter}{path.suffix}"
+            counter += 1
         target.write_bytes(path.read_bytes())
         return target
 

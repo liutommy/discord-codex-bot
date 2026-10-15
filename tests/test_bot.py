@@ -2804,3 +2804,18 @@ async def test_the_bot_reads_a_failed_page_as_unread(client, monkeypatch) -> Non
 
     monkeypatch.setattr(bot_module, "fetch_or_render", failed)
     assert (await client._read_page("https://twitter.com/u/status/1?s=20"))[1] is False
+
+
+def test_files_with_the_same_name_from_one_request_are_all_kept(tmp_path) -> None:
+    """Two sandbox runs in one request that both write out.png used to leave only the last."""
+    from discord_codex_bot.bot import DiscordCodexClient
+
+    into = tmp_path / "deliver"
+    kept = []
+    for run, data in enumerate((b"first", b"second", b"third")):
+        made = tmp_path / f"run{run}" / "out.png"
+        made.parent.mkdir()
+        made.write_bytes(data)
+        kept.append(DiscordCodexClient._keep_for_member(made, into))
+    assert [p.read_bytes() for p in kept] == [b"first", b"second", b"third"]
+    assert [p.name for p in kept] == ["out.png", "out-2.png", "out-3.png"]
