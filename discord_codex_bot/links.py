@@ -268,14 +268,14 @@ def strip_tracking(url: str) -> str:
         return url
     if parts.scheme not in ("http", "https") or not parts.netloc:
         return url
-    if _signed(parts.query):
+    if clearurls.signed(parts.query):
         return url
     url = clearurls.clean(url)
     try:
         parts = urlsplit(url)
     except ValueError:
         return url
-    if not parts.query:
+    if not parts.query or clearurls.signed(parts.query):  # a signed link a redirector wrapped
         return url
     host = (parts.hostname or "").removeprefix("www.")
     scoped = {
@@ -294,12 +294,6 @@ def strip_tracking(url: str) -> str:
     if len(kept) == len(segments):
         return url
     return urlunsplit(parts._replace(query="&".join(kept)))
-
-
-def _signed(query: str) -> bool:
-    """A signed URL is one page only as written; dropping any param would break it."""
-    keys = {unquote(segment.split("=", 1)[0]).lower() for segment in query.split("&")}
-    return bool(keys & {"signature", "sig", "x-amz-signature", "x-goog-signature"})
 
 
 def find_urls(text: str, limit: int, clean: bool = True) -> list[str]:

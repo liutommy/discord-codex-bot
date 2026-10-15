@@ -102,12 +102,20 @@ class Rules:
                 match = redirect.search(url)
                 target = unquote(match.group(1)) if match and match.lastindex else ""
                 if target.startswith(("http://", "https://")) and depth < MAX_REDIRECT_DEPTH:
+                    if signed(urlsplit(target).query):
+                        return target  # unwrapped, but every parameter is under the signature
                     return self.clean(target, depth + 1)
             for raw in provider.raw_rules:
                 url = raw.sub("", url)
             if provider.rules:
                 url = _drop_params(url, provider.rules)
         return url
+
+
+def signed(query: str) -> bool:
+    """A signed URL is one page only as written; dropping any param would break it."""
+    keys = {unquote(segment.split("=", 1)[0]).lower() for segment in query.split("&")}
+    return bool(keys & {"signature", "sig", "x-amz-signature", "x-goog-signature"})
 
 
 def _drop_params(url: str, rules: tuple[re.Pattern[str], ...]) -> str:
