@@ -313,7 +313,8 @@ that a spare answered — the member gains nothing from it; `/codex-status` show
 thread is not remembered as resumable — a Codex thread id means nothing to another backend —
 except on a turn whose model the Bot picked (routing), which keeps the spare's thread and goes on
 from there. The member's own model choice is untouched; the next request tries Codex again. Background classification and memory jobs use the same fallback while preserving their
-isolated/fresh-run settings.
+isolated/fresh-run settings. With `MODEL_CHAIN` set, member turns follow `MODEL_CHAIN` instead
+(below), and `CODEX_FALLBACK_MODEL` only backs those background jobs (an agy entry only).
 
 Links are read by the Bot itself, so both backends see the same thing: every http(s) URL in a
 member's message (up to `LINK_MAX_URLS`) is fetched, converted to text (`LINK_MAX_CHARS` per page)
