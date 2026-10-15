@@ -517,7 +517,9 @@ personal memory as usual.
 
 Both files are the operator's own, so neither is in git: copy `persona/AGENTS.example.md` to
 `persona/AGENTS.md` and `config/output-style.example.md` to `config/output-style.md`, or upload
-them at runtime. A clone with neither runs with no persona and no default style.
+them at runtime. A clone with neither runs with no persona, and with the example as its default
+style: the image copies `config/output-style.example.md` (a short zh-TW style) when
+`config/output-style.md` is missing. Empty `config/output-style.md` for no default style.
 
 Output style has two layers. `config/output-style.md` is the operator's default; when it has
 content it is injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
