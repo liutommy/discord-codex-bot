@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import aiohttp
 
+from . import tags
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ class Hit:
 
 def extract_web_queries(answer: str) -> list[str]:
     seen: list[str] = []
-    for query in WEB_TAG.findall(answer):
+    for query in tags.findall(WEB_TAG, answer):
         query = query.strip()
         if query and query not in seen:
             seen.append(query)

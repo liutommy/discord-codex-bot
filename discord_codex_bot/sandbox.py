@@ -13,6 +13,7 @@ from pathlib import Path
 
 import aiohttp
 
+from . import tags
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
@@ -41,7 +42,8 @@ def available(config: Config) -> bool:
 
 def extract_runs(answer: str) -> list[tuple[str, str]]:
     """[(lang, code)] in order; code is taken verbatim (the model writes real newlines)."""
-    return [(lang, code.strip("\n")) for lang, code in RUN_TAG.findall(answer)][:MAX_RUNS_PER_ROUND]
+    runs = tags.findall(RUN_TAG, answer)
+    return [(lang, code.strip("\n")) for lang, code in runs][:MAX_RUNS_PER_ROUND]
 
 
 async def run_code(lang: str, code: str, config: Config, out_dir: Path | None) -> RunResult:

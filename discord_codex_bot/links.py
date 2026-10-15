@@ -17,7 +17,7 @@ import aiohttp
 from aiohttp.resolver import ThreadedResolver
 from yarl import URL
 
-from . import clearurls, gemini, xsearch
+from . import clearurls, gemini, tags, xsearch
 from .config import Config, IPNetwork
 from .fetchproxy import FilterProxy
 
@@ -321,7 +321,7 @@ def find_urls(text: str, limit: int, clean: bool = True) -> list[str]:
 def extract_fetch_tags(answer: str) -> list[tuple[str, bool]]:
     """[(url, render)] — render=True when the model asked for the page as rendered (screenshot)."""
     out: dict[str, bool] = {}
-    for url, render in FETCH_TAG.findall(answer):
+    for url, render in tags.findall(FETCH_TAG, answer):
         out[url] = out.get(url, False) or render.strip().lower() in ("1", "true", "yes")
     return list(out.items())
 

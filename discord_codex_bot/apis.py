@@ -16,10 +16,12 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 import aiohttp
 from yarl import URL
 
+from . import tags
 from .config import Config
 from .links import _read_bounded, html_to_text
 
@@ -137,7 +139,7 @@ def localize(text: str, names: dict[str, str]) -> str:
 
 def extract_api_calls(answer: str) -> list[tuple[str, str]]:
     seen: list[tuple[str, str]] = []
-    for name, path in API_TAG.findall(answer):
+    for name, path in tags.findall(API_TAG, answer):
         if (name, path) not in seen:
             seen.append((name, path))
     return seen[:MAX_CALLS_PER_ROUND]
@@ -167,6 +169,13 @@ def _api_error(body: str) -> tuple[str, str]:
     if not isinstance(error, dict):
         return "", ""
     return str(error.get("code") or "unknown"), str(error.get("info") or "")[:200]
+
+
+def _origin(url: str) -> URL | None:
+    try:
+        return URL(url).origin()
+    except ValueError:
+        return None
 
 
 async def _get(url: str, api: Api, config: Config) -> tuple[int, str, str]:
@@ -263,9 +272,12 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     path, note = resolve_path(path, api.paths)  # hero/逆命 -> hero/4-twistedfate
     if not path:
         return note
-    if "://" in path or path.startswith("//") or ".." in path:
+    if "://" in path or path.startswith("//") or ".." in unquote(path):
         return "（path 只能是相對於該 API 的端點與查詢字串）"
     url = api.base + path.lstrip("/")
+    if _origin(url) != URL(api.base).origin():  # e.g. a base without "/" and a path "@host"
+        LOGGER.warning("api %s: %r leaves %s (a base should end in / or ?)", name, path, api.base)
+        return "（path 只能是相對於該 API 的端點與查詢字串）"
     if api.login and api.name not in _LOGGED_IN:
         await _login(api, config)
     body = ""

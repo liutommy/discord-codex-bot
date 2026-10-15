@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
+from . import tags
 from .clock import sleep_for
 from .links import strip_tracking
 
@@ -377,7 +378,7 @@ def extract_track_tags(
     """(answer without the tags, watches to add, (id, minutes) interval changes, (id, times)
     fixed-time changes, ids to cancel). A watch is live from the moment it is made."""
     adds: list[TrackAdd] = []
-    for body in TRACK_TAG.findall(answer):
+    for body in tags.findall(TRACK_TAG, answer):
         attrs = dict(_ATTR.findall(body))
         source = attrs.get("source", "").strip()
         if not source:
@@ -395,22 +396,23 @@ def extract_track_tags(
             )
         )
     every_changes = []
-    for body in TRACK_EVERY_TAG.findall(answer):
+    for body in tags.findall(TRACK_EVERY_TAG, answer):
         attrs = dict(_ATTR.findall(body))
         watch_id, minutes = attrs.get("id", "").strip(), attrs.get("minutes", "").strip()
         if watch_id.isdigit() and len(watch_id) <= 9 and minutes.isdigit() and len(minutes) <= 5:
             every_changes.append((int(watch_id), int(minutes)))
     time_changes = []
-    for body in TRACK_AT_TAG.findall(answer):
+    for body in tags.findall(TRACK_AT_TAG, answer):
         attrs = dict(_ATTR.findall(body))
         watch_id = attrs.get("id", "").strip()
         if watch_id.isdigit() and len(watch_id) <= 9:
             time_changes.append((int(watch_id), parse_times(attrs.get("times", ""))))
     every_changes, time_changes = every_changes[:MAX_TRACK_TAGS], time_changes[:MAX_TRACK_TAGS]
-    cancels = [int(watch_id) for watch_id in CANCEL_TRACK_TAG.findall(answer)][:MAX_TRACK_TAGS]
+    cancels = [int(watch_id) for watch_id in tags.findall(CANCEL_TRACK_TAG, answer)]
+    cancels = cancels[:MAX_TRACK_TAGS]
     clean = answer
     for pattern in (CANCEL_TRACK_TAG, TRACK_EVERY_TAG, TRACK_AT_TAG, TRACK_TAG):
-        clean = pattern.sub("", clean)
+        clean = tags.strip(pattern, clean)
     return clean.strip(), adds[:MAX_TRACK_TAGS], every_changes, time_changes, cancels
 
 

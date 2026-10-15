@@ -1570,6 +1570,39 @@ async def test_answer_buttons_obey_the_channel_allowlist_and_prompt_limits(
     too_long = f"**問**：\n> {'字' * (client.config.max_prompt_chars + 1)}\n\n答"
     await client.handle_answer_button(press(too_long, ALLOWED), "redo", USER)
     assert "prompt 必須介於" in sent[-1][1] and backends[0].calls == []
+    # short words, but the message they replied to brings the prompt over the limit
+    pointed = NS(
+        content="長" * client.config.max_prompt_chars,
+        author=NS(display_name="030", id=6),
+        reference=None,
+        embeds=[],
+        attachments=[],
+    )
+
+    async def fetch_pointed(message_id):
+        return pointed
+
+    asked = NS(
+        content="<@999> 整理一下",
+        reference=NS(message_id=2, resolved=None),
+        channel=NS(fetch_message=fetch_pointed),
+        embeds=[],
+        attachments=[],
+    )
+
+    async def fetch_asked(message_id):
+        return asked
+
+    quoting = press(answer, ALLOWED)
+    quoting.message = NS(
+        content=answer,
+        id=4243,
+        reference=NS(message_id=1, resolved=None),
+        channel=NS(fetch_message=fetch_asked),
+    )
+    sent.clear()
+    await client.handle_answer_button(quoting, "redo", USER)
+    assert "prompt 必須介於" in sent[-1][1] and backends[0].calls == []
 
 
 async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monkeypatch) -> None:
