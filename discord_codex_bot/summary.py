@@ -39,7 +39,8 @@ def render_transcript(messages: Iterable[Any], max_chars: int = TRANSCRIPT_MAX_C
             line["attachments"] = attachments
         if embeds:
             line["embeds"] = embeds
-        lines.append(json.dumps(line, ensure_ascii=False))
+        # "\u003c" is still "<" to a JSON reader, but no "</CHANNEL>" can close the block.
+        lines.append(json.dumps(line, ensure_ascii=False).replace("<", "\\u003c"))
     kept: list[str] = []
     size = 0
     for line in reversed(lines):

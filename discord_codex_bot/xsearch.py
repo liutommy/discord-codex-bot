@@ -52,8 +52,8 @@ def enabled(config: Config) -> bool:
 
 # The sidecar runs one lookup session at a time and turns away a request that waited past its
 # own 30 s queue (429). This bot's lookups — several X links in one message, a tracking check —
-# take turns here instead (Codex on PR #2), within one deadline for the wait and the request
-# together (Codex on PR #29). A request is only sent with the time the sidecar may take to
+# take turns here instead, within one deadline for the wait and the request
+# together. A request is only sent with the time the sidecar may take to
 # answer it (xsearch_sidecar_seconds) still left: once a session starts it runs to the end
 # whether anyone waits or not, so one given up on early is quota spent for nothing. The rest of
 # the deadline is the wait. For the same reason a turn is held until the sidecar has answered,

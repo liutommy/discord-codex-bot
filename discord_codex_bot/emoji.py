@@ -3,13 +3,13 @@
 Samples (EmojiStore, one SQLite file keyed by guild): a member message that carries one of the
 server's emoji, with the channel's message before it; and a message someone reacted to with one.
 The newest KEEP_SAMPLES per emoji are kept. They come from every channel the Bot can see, private
-ones included (owner, 2026-10-07). A deleted message takes its samples with it.
+ones included. A deleted message takes its samples with it.
 
 Descriptions: once a day (EMOJI_DESCRIBE_HOUR, behind the same quota gate as the other background
 jobs) every static emoji with new samples is described from its image and its samples — what it
 looks like and what members use it to say. Under MIN_SAMPLES samples it is described by its looks
 alone and marked INSUFFICIENT, and new samples get it described again later. Descriptions made
-elsewhere (the one-off backfill was described by a Claude agent, owner 2026-10-07) come in through
+elsewhere (e.g. a one-off backfill described outside the Bot) come in through
 `python -m discord_codex_bot.emoji import`, with the same rules (DESCRIBE_INSTRUCTIONS).
 
 In answers: a message's `<:name:id>` becomes `:name:（description）` (only `:name:` while there is
@@ -43,7 +43,7 @@ LOGGER = logging.getLogger(__name__)
 # 18 digits, or 19 starting 1-8 (below 2**63; Discord ids reach that around 2083), is an emoji;
 # anything else stays text.
 CUSTOM = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d{15,18}|[1-8]\d{18})>")
-KEEP_SAMPLES = 100  # per emoji (owner, 2026-10-07)
+KEEP_SAMPLES = 100  # per emoji
 MIN_SAMPLES = 3
 PROMPT_MAX = 50
 TEXT_MAX = 500  # characters kept of a sample's message, and of the one before it
@@ -136,7 +136,7 @@ def clip(text: str) -> str:
 
 
 # The section explains itself, so the explanation reaches a prompt only with the section: with
-# the feature off, a member's own :name: text is never said to be the Bot's (Codex on PR #40).
+# the feature off, a member's own :name: text is never said to be the Bot's.
 BLOCK_HEADER = (
     "[伺服器表情] This server's own custom emoji, most used first, as :name:（what it looks like"
     " and what members use it to say）. In the messages, :name: or :name:（…） is such an emoji"
@@ -145,8 +145,8 @@ BLOCK_HEADER = (
 )
 
 
-# With EMOJI_REPLY on, after BLOCK_HEADER: the answer may use the emoji too (hub 2026-10-07;
-# hub's suggestion, kept: not one marked INSUFFICIENT).
+# With EMOJI_REPLY on, after BLOCK_HEADER: the answer may use the emoji too, but not one marked
+# INSUFFICIENT (too few samples to know what it means).
 REPLY_HINT = (
     "You may use a few of these emoji in your answer, written as :name: alone (no brackets, no"
     " description); they show as the emoji. Skip one whose meaning you are unsure of, one"
@@ -168,7 +168,7 @@ def tidy(description: str) -> str:
 # What `rewrite` adds to a member's message. The bracketed part is the Bot's, not the member's:
 # harvest and the digest take it out before reading a member's words (strip_descriptions). MARK
 # (invisible) opens every bracket the Bot writes, and `rewrite` first removes it from what the
-# member typed, so a member's own `:pepe:（…）` is never taken for one (Codex on PR #40).
+# member typed, so a member's own `:pepe:（…）` is never taken for one.
 MARK = "\u2063"
 INLINE = re.compile(rf"(:[A-Za-z0-9_]{{2,32}}:)（{MARK}[^（）\n]{{1,{DESCRIPTION_MAX + 20}}}）")
 
@@ -306,11 +306,11 @@ class EmojiStore:
     ) -> None:
         """An edited message: every sample says what it says now, as a sample and as another's
         "previous"; an emoji taken out of a member's message is no longer sampled from it, and one
-        put in is (Codex on PR #40). Uses already counted stay."""
+        put in is. Uses already counted stay."""
         with self._connect() as connection:
-            # Every emoji whose evidence this changes is described again (Codex on PR #40); an
+            # Every emoji whose evidence this changes is described again; an
             # update that leaves the text as it was (a pin, a streamed answer's same text) is not
-            # a change (hub on PR #40).
+            # a change.
             connection.execute(
                 """UPDATE emojis SET added=added+1 WHERE emoji_id IN (
                        SELECT emoji_id FROM samples
@@ -336,7 +336,7 @@ class EmojiStore:
                     (message_id, emoji_id),
                 )
                 # Evidence gone is a change even when the clipped text reads the same (an emoji
-                # past TEXT_MAX taken out; Codex on PR #41).
+                # past TEXT_MAX taken out).
                 connection.execute("UPDATE emojis SET added=added+1 WHERE emoji_id=?", (emoji_id,))
         before = rows[0] if rows else None
         for emoji_id in sorted(now - had):
@@ -359,7 +359,7 @@ class EmojiStore:
 
     def forget_messages(self, message_ids: Iterable[int]) -> int:
         """A deleted message is kept nowhere: not as a sample (its use count stays), and not as
-        the message before another one's (Codex on PR #40); how many samples changed."""
+        the message before another one's; how many samples changed."""
         ids = list(message_ids)
         if not ids:
             return 0
@@ -388,7 +388,7 @@ class EmojiStore:
 
     def pending(self, guild_ids: Iterable[int], limit: int | None = None) -> list[Emoji]:
         """Static emoji of `guild_ids` (the allowed guilds now: a guild taken off the allowlist
-        sends nothing more out, Codex on PR #40) still on their server with samples added since
+        sends nothing more out) still on their server with samples added since
         their description: never described first, then the most used."""
         guilds = list(guild_ids)
         if not guilds:
@@ -444,7 +444,7 @@ class EmojiStore:
     def lookup(self, guild_id: int, emoji_ids: Iterable[int]) -> dict[int, Emoji]:
         """`guild_id`'s own emoji among `emoji_ids` that are still on it. Another server's emoji
         (Nitro) is not looked up even when that server is ours too: its description is a summary
-        of what that server's members say (hub on PR #40)."""
+        of what that server's members say."""
         ids = list(set(emoji_ids))
         if not ids:
             return {}
@@ -600,12 +600,12 @@ class EmojiStore:
 
 
 # Discord's code: ``` blocks (one not closed yet runs to the end) and `inline` spans.
-# A ``…`` span may hold single backticks; only `` closes it (Codex on PR #42).
+# A ``…`` span may hold single backticks; only `` closes it.
 CODE = re.compile(r"```[\s\S]*?(?:```|$)|``(?:(?!``)[\s\S])+?``|`[^`]+`")
 # Text whose colons are not emoji: code, and a link (`https://x/:pepe:` must stay a link).
 KEPT = re.compile(rf"{CODE.pattern}|(?i:https?)://[^\s<>]+")
 # Part-way, a `code` span whose closing backtick has not arrived yet is code too: it would
-# otherwise show the emoji and then lose it (Codex on PR #42). A finished answer's lone
+# otherwise show the emoji and then lose it. A finished answer's lone
 # backtick is just a character in Discord, so the answer itself does not use this.
 KEPT_STREAMING = re.compile(rf"{KEPT.pattern}|``(?:(?!``)[\s\S])*$|`[^`]*$")
 # `:name:` the model wrote, not already part of `<:name:id>` / `<a:name:id>`, with the bracket
@@ -695,7 +695,7 @@ def describe_prompt(emoji: Emoji, samples: Sequence[Sample]) -> str:
         for s in samples
     ]
     # < and > escaped (as digest._data does): a member writing </EMOJI> cannot close the block
-    # and have the rest read as instructions (Codex on PR #40).
+    # and have the rest read as instructions.
     data = (
         json.dumps({"name": emoji.name, "examples": examples}, ensure_ascii=False)
         .replace("<", "\\u003c")
@@ -768,7 +768,7 @@ def _uses(message, guild_id: int, store: EmojiStore) -> list[tuple[int, str, int
         ids = {
             int(emoji_id)
             for animated, _n, emoji_id in CUSTOM.findall(message.content or "")
-            if not animated  # animated emoji are not described (owner, 2026-10-07)
+            if not animated  # animated emoji are not described
         }
         found += [(emoji_id, "message", 1) for emoji_id in sorted(ids)]
     for reaction in getattr(message, "reactions", ()) or ():

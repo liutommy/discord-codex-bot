@@ -204,9 +204,9 @@ def load_table(path: Path) -> Table:
     if not table.image:
         raise ValueError("routing: image needs at least one target")
     if backend_of(table.image[0]) != CODEX:
-        # Owner 2026-10-07: an image goes Codex first (then Grok, agy). Codex cells have no
+        # An image goes Codex first (then Grok, agy). Codex cells have no
         # type stand-ins, so keeping a conversation's Codex cell for its image stays simple.
-        raise ValueError("routing: image must start with codex (owner: codex → grok → agy)")
+        raise ValueError("routing: image must start with codex (the order is codex → grok → agy)")
     for kind in table.claude_failed:
         if kind not in TYPES:
             raise ValueError(f"routing: claude_failed names an unknown type {kind!r}")
@@ -291,7 +291,7 @@ def decide(table: Table, kind: str, level: str, current: Route | None) -> tuple[
     it as it is, type and all, so a thank-you inside an X conversation keeps it an X one; any
     other type goes to its own cell at the higher of the two bands. That also covers the types
     only one backend can answer (`needs`, checked at load), and keeps a hard question from staying
-    on the weak cell an easier type left the conversation on (hub on #33)."""
+    on the weak cell an easier type left the conversation on."""
     if current is None:
         return Route(table.types[kind][BANDS.index(level)], level, kind), "new"
     if kind == "chat":

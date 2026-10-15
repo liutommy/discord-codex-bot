@@ -43,8 +43,12 @@ UV_CACHE_DIR=.uv-cache uv run ruff check .
 
 1. Open the Discord Developer Portal and select **New Application**.
 2. Open **Bot**, select **Reset Token**, and copy the token once.
-3. Under **Privileged Gateway Intents** enable only **Message Content Intent** (needed for the
-   `@mention` entry point). Leave Presence and Server Members off.
+3. Under **Privileged Gateway Intents** enable only **Message Content Intent**. Leave Presence and
+   Server Members off. The Bot reads more than the messages that `@mention` it, before any
+   mention check: link cleaning (unless a server turns it off) looks at every message in the
+   allowed channels, emoji sampling (when on) at every message in every channel of an allowed
+   guild the Bot can see, and server memory is distilled from the conversations there.
+   Tell the members.
 4. Open **OAuth2 > URL Generator**.
 5. Select scopes `bot` and `applications.commands`.
 6. Grant the bot permission to view channels and send messages, then open the generated URL and
@@ -190,7 +194,8 @@ A Ruten store is not a web source. Its store page is a script shell, and read as
 links labelled only 「預購」 — the classifier had no product name to judge, and a busy store adds
 about twenty listings an hour. `https://www.ruten.com.tw/store/<account>/` is resolved once to the
 seller's numeric id (`rapi.ruten.com.tw/api/users/v1/index.php/<account>/storeinfo`); each pass then
-reads the newest 30 listing ids (`rtapi.ruten.com.tw/api/search/v3/index.php/core/seller/<id>/prod`)
+reads the newest 30 listing ids — up to 4 pages of them when the store added more than a page
+since the last pass — (`rtapi.ruten.com.tw/api/search/v3/index.php/core/seller/<id>/prod`)
 and their names, prices and pre-order months (`rapi.ruten.com.tw/api/items/v2/list`). Track the
 whole store and let the interest carry every spelling a name might use (rurudo / るるど / 露露多):
 the model matches those, while the store's own search (`…/store/<account>/find?q=rurudo`, a
@@ -220,7 +225,7 @@ quota. Each watch stores its own interval, an attempt stamps its clock (failures
 broken source cannot burn quota every pass), and a member can change theirs by asking.
 
 A watch can be judged at fixed times of day instead (Taiwan time, up to six, e.g. 12:01 and
-20:01): `/track times:12:01,20:01` when adding it, or by asking. It is then judged once per time,
+20:01): `/codex-track times:12:01,20:01` when adding it, or by asking. It is then judged once per time,
 on the first pass at or after it — the tracking loop wakes for the next fixed time instead of
 waiting out `TRACKING_INTERVAL_MINUTES`, and a Bot that slept through one judges at wake-up. A
 time with nothing new to judge is used up all the same, so an item arriving afterwards waits for
@@ -251,7 +256,8 @@ slash-only it invented `<cancel_track/>`, told a member the watch was cancelled,
 kept notifying. The vocabulary now matches the operations one-for-one, and anything left over is
 reported rather than posted as if it had worked.
 
-Classification always uses the operator-controlled Codex model and `high` effort. It runs with
+Classification always uses the operator-controlled Codex model at `TRACKING_REASONING_EFFORT`
+(default `high`). It runs with
 Codex memories, history persistence, web search, apps, browser/computer use, image generation, and
 multi-agent features disabled. Before each classifier call the Bot reads
 `account/rateLimits/read`; if either the five-hour or weekly window has less than
@@ -304,11 +310,13 @@ Codex reports it *inside* its JSONL stream (`codex_error_info: usage_limit_excee
 `server_overloaded`, often with an empty stderr), so the exit code alone cannot tell these remote
 conditions apart from a crash. The Bot recognises both and answers the rest of the request on
 `CODEX_FALLBACK_MODEL` (default `agy:gemini-3.8-flash|medium`, written like a member's stored
-model; empty disables it and the member gets the usual failure message). The reply says which
-model answered, and that thread is not remembered as resumable — a Codex thread id means nothing
-to another backend. The member's own model choice is untouched; the next request tries Codex
-again. Background classification and memory jobs use the same fallback while preserving their
-isolated/fresh-run settings.
+model; empty disables it and the member gets the usual failure message). The reply does not say
+that a spare answered — the member gains nothing from it; `/codex-status` shows the last fallback. That
+thread is not remembered as resumable — a Codex thread id means nothing to another backend —
+except on a turn whose model the Bot picked (routing), which keeps the spare's thread and goes on
+from there. The member's own model choice is untouched; the next request tries Codex again. Background classification and memory jobs use the same fallback while preserving their
+isolated/fresh-run settings. With `MODEL_CHAIN` set, member turns follow `MODEL_CHAIN` instead
+(below), and `CODEX_FALLBACK_MODEL` only backs those background jobs (an agy entry only).
 
 Links are read by the Bot itself, so both backends see the same thing: every http(s) URL in a
 member's message (up to `LINK_MAX_URLS`) is fetched, converted to text (`LINK_MAX_CHARS` per page)
@@ -359,10 +367,13 @@ The `@mention` form keeps the question visible as the member's own message, supp
 `MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Replying to another
 member's message while mentioning the Bot points it at that message: its text is quoted into the
 request and its images are attached, so "@Bot what is this?" as a reply to a picture works.
-Messages that do not mention the Bot are discarded without processing.
+Messages that do not mention the Bot get no answer; link cleaning and emoji sampling may still
+look at them (see the privacy note in step 3).
 
-`/codex-status` must report `ChatGPT 訂閱登入有效`, model `gpt-6-luna`, and the default reasoning
-effort (`Medium`). A command in another server or outside the configured test channel must not execute.
+`/codex-status` must report `ChatGPT 訂閱登入有效` and the member's model. With `.env.example`
+copied as is, that is `DEFAULT_MODEL` (Grok, which needs `XSEARCH_URL`), or 「自動挑選」 when
+`JEV_ENABLED` routing is on; with `DEFAULT_MODEL` empty it is Codex `gpt-6-luna` at
+`CODEX_REASONING_EFFORT` (`medium`). A command in another server or outside the configured test channel must not execute.
 
 The Bot serializes Codex work to one request at a time and caps the queue, prompt, response, and
 runtime. `/codex` has an optional `effort` choice — Low, Medium (default), High, Extra high, Max —
@@ -380,7 +391,7 @@ falls back to a fresh one. Codex bakes the instruction files (`AGENTS.md`, outpu
 thread when it starts and does not re-read them on resume, so every stored thread carries a
 fingerprint of those files; after a rebuild that changes them, old threads are not resumed and
 the next message starts fresh with the new persona/style. The same applies to the workspace a
-thread was started in: setting or clearing a personal style switches between the persona and
+thread was started in: turning the persona off or back on switches between the persona and
 persona-free workspaces, so the member's next message starts a new thread rather than
 continuing under the old `AGENTS.md`. This is conversation memory, not
 Codex's background "memories" feature,
@@ -398,20 +409,21 @@ CODEX_HOME/memory/<guild>/users/<member>/     seen only in that member's request
     topics/<slug>.md     the note itself, read on demand
 ```
 
-Notes get in two ways: `/remember scope name text` (explicit) and automatically, when the model
+Notes get in two ways: `/codex-remember scope name text` (explicit) and automatically, when the model
 ends an answer with `<memory scope="user|guild" name="…">…</memory>` because the member stated a
 durable fact (the tag is stored and stripped). Reading is snippet-first, like pi-context: the
-model sees only the index; it can reply with `<search scope="…" query="regex"/>` to get matching
+model sees only the index; it can reply with `<search scope="…" query="詞|詞"/>` (words
+separated by `|`, each matched literally and case-insensitively, never as a regex) to get matching
 lines with `MEMORY_SEARCH_CONTEXT_LINES` of context (up to `MEMORY_SEARCH_MAX_MATCHES` hits), or
 `<recall scope="…" name="…" offset="1" lines="200"/>` to read one page of a note. Every result is
 fed back into the same thread and bounded like pi's tool output (`MEMORY_READ_MAX_LINES` 2000 /
 `MEMORY_READ_MAX_BYTES` 50 KB per page, with the total line count in the header so the model can
 page on); at most `MEMORY_RECALL_ROUNDS` (10) rounds per request. `<recall name="list"/>` lists
-archived notes. `/memory` lists all stored notes, including archived notes. `/forget` offers
+archived notes. `/codex-memory` lists all stored notes, including archived notes. `/codex-forget` offers
 a searchable name picker after selecting a scope, and deletes only the selected note. Duplicate
-titles require selecting a specific entry. Tracking and reminder IDs are separate: use `/track
-cancel:<id>` or `/remind cancel:<id>`; entering these IDs in `/forget` gives guidance without
-cancelling anything. Deleting a note does not erase existing conversation context; `/reset`
+titles require selecting a specific entry. Tracking and reminder IDs are separate: use `/codex-track
+cancel:<id>` or `/codex-remind cancel:<id>`; entering these IDs in `/codex-forget` gives guidance without
+cancelling anything. Deleting a note does not erase existing conversation context; `/codex-reset`
 starts a fresh conversation. Capacity is capped per
 scope (`MEMORY_USER_MAX_BYTES` 50 MB, `MEMORY_GUILD_MAX_BYTES` 200 MB); a full scope evicts its
 oldest notes.
@@ -458,8 +470,8 @@ read, never the assistant's.
   events, shared games, the server's own terms, running jokes, house rules) that at least two
   different members mention. The name starts with `（多人提及）`. Nothing about an individual
   member goes there. Conversations in every channel the Bot can see feed them, private channels
-  and private threads the Bot is in included (owner, 2026-10-07; checked against the gateway
-  cache; a channel the Bot cannot see, or any doubt, is left out). Server notes reach every
+  and private threads the Bot is in included (checked against the gateway cache; a channel the
+  Bot cannot see, or any doubt, is left out). Server notes reach every
   channel's prompt of the server. The operator CLI below has no Discord connection, so it
   writes personal notes only.
 
@@ -489,7 +501,7 @@ run, and a failed scope is left untouched. Codex's own background memory consoli
 The persona is a fourth operator-only layer: `persona/*.md` (gitignored except its README and
 the sample) is appended to the runtime rules to make the `AGENTS.md` Codex loads as project
 instructions on every request — the place with the most weight this deployment can give it. A
-member who wants the plain assistant turns it off with `/style persona:關閉人設`, which serves
+member who wants the plain assistant turns it off with `/codex-style persona:關閉人設`, which serves
 them from the persona-free working directory; a thread keeps the one it started in. Setting a
 personal style does not do this by itself: style and persona are separate settings, so asking for
 shorter answers does not also discard the character.
@@ -497,7 +509,7 @@ shorter answers does not also discard the character.
 That composition happens when the Bot starts, not when the image is built, so the persona and the
 default output style can be replaced while it runs: `/<prefix>-persona action:上傳` opens a modal
 taking one `.md` for each (either alone is fine, UTF-8, 20000 characters). An uploaded file lives
-in the Codex volume and wins over the image copy until `action:還原…` deletes it, so a rebuild no
+in the Codex volume and takes precedence over the image copy until `action:還原…` deletes it, so a rebuild no
 longer discards it — and editing the repo then rebuilding has no visible effect while an upload is
 in force, which is what the status action is for. Whatever the upload replaced is written to
 `BACKUP_DIR/instructions/<kind>-<timestamp>.md` first. The command is gated like the other
@@ -511,16 +523,18 @@ personal memory as usual.
 
 Both files are the operator's own, so neither is in git: copy `persona/AGENTS.example.md` to
 `persona/AGENTS.md` and `config/output-style.example.md` to `config/output-style.md`, or upload
-them at runtime. A clone with neither runs with no persona and no default style.
+them at runtime. A clone with neither runs with no persona, and with the example as its default
+style: the image copies `config/output-style.example.md` (a short zh-TW style) when
+`config/output-style.md` is missing. Empty `config/output-style.md` for no default style.
 
 Output style has two layers. `config/output-style.md` is the operator's default; when it has
 content it is injected as `<OUTPUT_STYLE>` into every prompt (rebuild the image after editing).
-Each member can set their own with `/style text:…` for a one-liner, or `/style upload:True` to
+Each member can set their own with `/codex-style text:…` for a one-liner, or `/codex-style upload:True` to
 send one Markdown file — a slash-command option is a single line, so anything longer belongs in a
 file. The upload is UTF-8 `.md` bounded by 4000 characters, the same ceiling Discord puts on a
 modal paragraph. Either way it is stored as `memory/<guild>/users/<member>/style.md` and injected
-as `<PERSONAL_STYLE>`, which wins over the default where they conflict. Inspect it with `/style`
-and return to the default with `/style clear:True`.
+as `<PERSONAL_STYLE>`, which takes precedence over the default where they conflict. Inspect it with `/codex-style`
+and return to the default with `/codex-style clear:True`.
 
 Codex can also generate images (`image_generation = true`). The built-in tool writes them to
 `CODEX_HOME/generated_images/<thread_id>/`; the Bot attaches them to the reply (up to 10) and
@@ -537,7 +551,7 @@ also clears the tmpfs.
 
 With `XSEARCH_URL` set, Grok is also a backend members can pick (`/codex-model provider:Grok`):
 the models and effort levels are the plan's own catalog, read from the sidecar's `/models` and
-refreshed every six hours (today grok-4.7, grok-4.7-build-fast, grok-4.6 at low/medium/high/
+refreshed every six hours (as of 2026-10: grok-4.7, grok-4.7-build-fast, grok-4.6 at low/medium/high/
 xhigh, and grok-4.5 without xhigh); an effort a model does not offer maps to the closest one
 below it. `DEFAULT_MODEL=grok:grok-4.7|medium` makes it what members get until they choose.
 
@@ -554,7 +568,7 @@ end). The member's message is never cut; a prompt still too long goes down the c
 is logged.
 
 When Grok cannot answer, the turn moves down `MODEL_CHAIN` (grok → codex → agy), the same way
-Codex already fell back to agy, and `/status` shows the last fallback. A turn skips Grok
+Codex already fell back to agy, and `/codex-status` shows the last fallback. A turn skips Grok
 outright when the plan's weekly usage is past `GROK_CHAT_MAX_WEEKLY_PERCENT` (chat and X lookups share one weekly quota;
 the rest is left for X), or for an hour after three refused sessions in ten minutes (one alert,
 not one per message). A request the sidecar rejects as malformed is reported, not hidden by a
@@ -584,7 +598,7 @@ The model reads the server's own emoji by how its members use them. Samples go i
   before it;
 - a message someone reacted to with one (further reactions on it only count as uses).
 
-Every channel the Bot can see is sampled, private ones included (owner, 2026-10-07). The
+Every channel the Bot can see is sampled, private ones included. The
 newest 100 samples are kept per emoji, and a deleted message takes its samples with it. Animated emoji and stickers are not described.
 
 **History.** The history is read once, in the background:
@@ -642,8 +656,8 @@ whose snowflake id disagrees with its time is dropped (otherwise one injected po
 id would become the tracking cursor and hide every real post), and posts read for a link are
 labelled unverified, with a note when the author differs from the link's account. Grok's own `--sandbox`
 needs user namespaces that the hardened container does not grant, so there the container is the
-sandbox (read-only rootfs, non-root, no capabilities, and the host firewall described in
-Operations). Note the gotcha that motivated layer 3: `--disallowed-tools run_terminal_command`,
+sandbox (read-only rootfs, non-root, no capabilities). Its network is not restricted by this
+repo: it needs xAI, and limiting what else it can reach is up to the host. Note the pitfall that motivated layer 3: `--disallowed-tools run_terminal_command`,
 spelled as the tool list spells it, leaves the shell in place.
 
 Sign-in, once: sign in to Grok Build on any machine (`grok login`), then copy its
@@ -673,8 +687,8 @@ Cost and pace: one lookup at a time (others wait up to 30 s, then get a 429); a 
 for an hour; the link fallback is capped at 30 lookups an hour; a failed account check waits the
 full interval before the next. Tracking passes run sources one after another, so each X account
 adds its 10–100 s to every pass that checks it, delaying the YouTube/Twitch/web sources behind
-it. The service has no authentication of its own: anything on the compose `default` network can
-spend the plan's quota through it (today: only this stack's containers). The token refreshes itself in
+it. The service has no authentication of its own: anything on its compose network can spend the
+plan's quota through it, so it sits alone on `xsearch_net`, shared only with the Bot. The token refreshes itself in
 the volume; if the machine you copied it from refreshes the same login, one of the two may have
 to sign in again.
 
@@ -747,7 +761,8 @@ operators listed in `LINKCLEAN_ADMIN_IDS` may use this command.
 
 Two layers remove tracking parameters. The [ClearURLs](https://gitlab.com/ClearURLs/rules)
 rule set (LGPL-3.0, 200+ site-scoped providers, fetched daily by `scripts/fetch_clearurls.py`
-into `config/clearurls.json`) is applied first, including its known redirector unwrapping
+into `config/clearurls.json`; a change is committed locally and rebuilds the image, restarting the Bot,
+through `scripts/daily_rebuild.sh`) is applied first, including its known redirector unwrapping
 (for example `google.com/url?q=`); its affiliate-id (`referralMarketing`) and request-blocking
 (`completeProvider`) rules are not used. The Bot's own blocklist (`utm_*`, click ids such as
 `fbclid`, `gclid`, `ttclid`, `igsh`) is then applied as the floor, so cleaning still works

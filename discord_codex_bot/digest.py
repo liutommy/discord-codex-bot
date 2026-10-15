@@ -9,7 +9,7 @@ pass reads the last DIGEST_DAYS of conversations together:
   treat them as hints (codex._prompt);
 - per server, facts about the server itself that at least two different members mention. Their
   names start with GUILD_MARK. Nothing about an individual member goes there. Conversations in
-  every channel the Bot can see feed them, private ones included (owner, 2026-10-07); a channel
+  every channel the Bot can see feed them, private ones included; a channel
   the Bot cannot see, or whose visibility cannot be established, is left out.
 
 Every note must quote the members' own words: an exact substring of a message in each cited
