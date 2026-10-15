@@ -15,7 +15,7 @@ restart (a reboot of the host, a crash brought back by dcb-up) — whichever com
 Nothing is baked into the image and a start never creates an announcement — it only lets items
 already in the queue go out when due (an `--after-deploy` one is due then). The old start-up
 announcement kept its "already posted" record in a file and re-posted on 2026-10-02 when that
-record was lost (owner 2026-10-07: replace it with this). The queue lives in
+record was lost; this queue replaces it. The queue lives in
 CODEX_HOME/announce-queue — persistent, outside git, the image and the nightly backup, and not
 writable by the models (Codex runs read-only, agy denies writes). Times are Asia/Taipei.
 

@@ -707,7 +707,7 @@ class DiscordCodexClient(discord.Client):
 
     def _samples_from(self, guild_id: int | None, channel) -> bool:
         """Emoji samples come from every channel of an allowed guild the Bot can see, private
-        ones included (owner, 2026-10-07: 「只要bot能看到的頻道都算可以運用的」)."""
+        ones included: anything the Bot can read may inform how the server uses its emoji."""
         if self.emoji is None or guild_id not in self.config.allowed_guild_ids:
             return False
         return _bot_sees(self.get_guild(guild_id), channel)
@@ -1314,9 +1314,9 @@ class DiscordCodexClient(discord.Client):
             target, spares, fell_back = spares[0], spares[1:], True
         if routed is None:
             # A member's own model never falls *into* Grok: the weekly quota it would spend is
-            # shared with X lookups. A routed turn may (owner, 2026-10-06: X lookups may now
-            # use the whole weekly quota, so the reserve is no longer absolute), but only past
-            # the same `_grok_usable` gate the Grok default turn goes through (`next_spare`).
+            # shared with X lookups. A routed turn may (X lookups may use the whole weekly
+            # quota, so the reserve is not absolute), but only past the same `_grok_usable`
+            # gate the Grok default turn goes through (`next_spare`).
             spares = [spare for spare in spares if spare.backend != GROK]
         drop_resume = fell_back  # only the caller's id is foreign; later recall rounds chain
         first: tuple[str, dict] | None = None  # the question as first asked, for a spare
@@ -1566,9 +1566,9 @@ class DiscordCodexClient(discord.Client):
                 else:
                     delivered = [self._keep_for_member(path, generated_dir) for path in delivered]
                 outgoing += tuple(delivered)
-            # A fallback is not announced in the answer (owner ruling 2026-09-14: the member
-            # gains nothing from it; /status shows the last one). The thread id is dropped so
-            # nothing tries to resume it back on Codex.
+            # A fallback is not announced in the answer: the member gains nothing from it, and
+            # /status shows the last one. The thread id is dropped so nothing tries to resume it
+            # back on Codex.
             return CodexResult(
                 truncate(text, self.config.max_response_chars),
                 outgoing,
@@ -1850,7 +1850,7 @@ class DiscordCodexClient(discord.Client):
 
     def _grok_alive(self) -> bool:
         """Whether Grok can take an X question at all: configured and the breaker closed. The
-        weekly chat share does not apply (owner, 2026-10-06: X questions may use it all up)."""
+        weekly chat share does not apply: X questions may use the whole weekly quota."""
         return grok.enabled(self.config) and time.time() >= self._grok_off_until
 
     def _default_entry(self) -> str:
@@ -2954,10 +2954,10 @@ class DiscordCodexClient(discord.Client):
     def _visible_channel(self, guild_id: int, channel_id: int) -> bool:
         """True when the Bot itself can see the channel, from the gateway cache: server memory
         is gathered from every such channel, private ones and the private threads the Bot is in
-        included (owner, 2026-10-07: 「伺服器記憶也改成 Bot 看得到的都收」, the rule emoji samples
-        follow). A conversation in a private thread means the Bot posted there, which joins it.
-        A channel the Bot cannot see or cannot find counts as not visible; an error (a thread
-        whose parent is not cached) reaches the digest, which leaves the channel out."""
+        included, the same rule emoji samples follow: whatever the Bot can read may inform
+        server memory. A conversation in a private thread means the Bot posted there, which
+        joins it. A channel the Bot cannot see or cannot find counts as not visible; an error
+        (a thread whose parent is not cached) reaches the digest, which leaves the channel out."""
         guild = self.get_guild(guild_id)
         return _bot_sees(guild, guild.get_channel_or_thread(channel_id) if guild else None)
 

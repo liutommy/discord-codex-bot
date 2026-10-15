@@ -3,7 +3,7 @@
 Samples (EmojiStore, one SQLite file keyed by guild): a member message that carries one of the
 server's emoji, with the channel's message before it; and a message someone reacted to with one.
 The newest KEEP_SAMPLES per emoji are kept. They come from every channel the Bot can see, private
-ones included (owner, 2026-10-07). A deleted message takes its samples with it.
+ones included. A deleted message takes its samples with it.
 
 Descriptions: once a day (EMOJI_DESCRIBE_HOUR, behind the same quota gate as the other background
 jobs) every static emoji with new samples is described from its image and its samples — what it
@@ -43,7 +43,7 @@ LOGGER = logging.getLogger(__name__)
 # 18 digits, or 19 starting 1-8 (below 2**63; Discord ids reach that around 2083), is an emoji;
 # anything else stays text.
 CUSTOM = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d{15,18}|[1-8]\d{18})>")
-KEEP_SAMPLES = 100  # per emoji (owner, 2026-10-07)
+KEEP_SAMPLES = 100  # per emoji
 MIN_SAMPLES = 3
 PROMPT_MAX = 50
 TEXT_MAX = 500  # characters kept of a sample's message, and of the one before it
@@ -145,8 +145,8 @@ BLOCK_HEADER = (
 )
 
 
-# With EMOJI_REPLY on, after BLOCK_HEADER: the answer may use the emoji too (hub 2026-10-07;
-# hub's suggestion, kept: not one marked INSUFFICIENT).
+# With EMOJI_REPLY on, after BLOCK_HEADER: the answer may use the emoji too, but not one marked
+# INSUFFICIENT (too few samples to know what it means).
 REPLY_HINT = (
     "You may use a few of these emoji in your answer, written as :name: alone (no brackets, no"
     " description); they show as the emoji. Skip one whose meaning you are unsure of, one"
@@ -768,7 +768,7 @@ def _uses(message, guild_id: int, store: EmojiStore) -> list[tuple[int, str, int
         ids = {
             int(emoji_id)
             for animated, _n, emoji_id in CUSTOM.findall(message.content or "")
-            if not animated  # animated emoji are not described (owner, 2026-10-07)
+            if not animated  # animated emoji are not described
         }
         found += [(emoji_id, "message", 1) for emoji_id in sorted(ids)]
     for reaction in getattr(message, "reactions", ()) or ():
