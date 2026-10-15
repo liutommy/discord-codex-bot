@@ -229,8 +229,9 @@ def collect_generated_images(
 
 
 def output_style(config: Config) -> str:
-    """The operator default, from wherever it is in force: an uploaded copy wins over the image."""
-    return instructions.style_text(config)
+    """The operator default, from wherever it is in force: an uploaded copy wins over the image.
+    HTML comments are notes to the operator (the sample's header is one) and are not sent."""
+    return re.sub(r"<!--[\s\S]*?-->", "", instructions.style_text(config)).strip()
 
 
 # Harvest and the weekly digest read a member's words back out of transcripts from between the

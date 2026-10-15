@@ -151,3 +151,16 @@ def test_the_working_directories_are_left_read_only(config: Config, tmp_path: Pa
     for folder in (cfg.codex_workspace, cfg.codex_workspace_plain):
         folder.chmod(0o755)  # so pytest can clean its tmp dir up afterwards
         (folder / "AGENTS.md").chmod(0o644)
+
+
+def test_the_style_reaches_the_model_without_its_html_comments(config: Config, tmp_path) -> None:
+    """The sample's header says only what is outside HTML comments is injected; the comment is a
+    note to the operator, not an instruction."""
+    from discord_codex_bot.codex import output_style
+
+    cfg = _config(config, tmp_path)
+    cfg.output_style_path.write_text(
+        "<!--\nnote to the operator\n-->\n\n- 繁體中文\n<!-- x -->", "utf-8"
+    )
+    assert output_style(cfg) == "- 繁體中文"
+    assert "note to the operator" in instructions.style_text(cfg)  # the operator still sees it
