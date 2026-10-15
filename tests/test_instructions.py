@@ -164,3 +164,14 @@ def test_the_style_reaches_the_model_without_its_html_comments(config: Config, t
     )
     assert output_style(cfg) == "- 繁體中文"
     assert "note to the operator" in instructions.style_text(cfg)  # the operator still sees it
+
+
+def test_a_write_does_not_share_its_scratch_file_with_another_writer(
+    config: Config, tmp_path: Path
+) -> None:
+    """Two writers of the same AGENTS.md (an upload and a reset at once) used one fixed
+    `<name>.tmp`: one replaced the other's half-written scratch, or found it gone."""
+    target = tmp_path / "AGENTS.md"
+    (tmp_path / "AGENTS.md.tmp").mkdir()  # another writer's scratch, still in use
+    instructions._write(target, "new")
+    assert target.read_text("utf-8") == "new"

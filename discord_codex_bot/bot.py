@@ -509,6 +509,9 @@ class DiscordCodexClient(discord.Client):
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
         self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
+        # Persona uploads and resets run one at a time: backup, save and the rebuild interleaved
+        # could leave the older text built last.
+        self._instructions_lock = asyncio.Lock()
         self.youtube_tracker = YouTubeFetcher(config.youtube_api_key)
         self.twitch_tracker = TwitchFetcher(config.twitch_client_id, config.twitch_client_secret)
         self.web_tracker = WebFetcher(self._read_page)
@@ -2911,9 +2914,10 @@ class DiscordCodexClient(discord.Client):
             return
         if action in ("reset_persona", "reset_style"):
             kind = instructions.PERSONA if action == "reset_persona" else instructions.OUTPUT_STYLE
-            removed, kept = await asyncio.to_thread(instructions.reset, self.config, kind)
-            if removed:
-                await self._apply_instructions()
+            async with self._instructions_lock:
+                removed, kept = await asyncio.to_thread(instructions.reset, self.config, kind)
+                if removed:
+                    await self._apply_instructions()
             label = instructions.LABELS[kind]
             head = (
                 f"{label}已還原成 image 預設，所有對話串重新開始。"
@@ -2939,12 +2943,13 @@ class DiscordCodexClient(discord.Client):
     async def _save_instructions(self, uploads: dict[str, str], who: int) -> str:
         """Store one or both uploaded files, keep what they replaced, then rebuild and retire."""
         kept: list[Path] = []
-        for kind, text in uploads.items():
-            backup = await asyncio.to_thread(instructions.save, self.config, kind, text)
-            if backup is not None:
-                kept.append(backup)
-            LOGGER.info("instructions uploaded kind=%s chars=%d by=%s", kind, len(text), who)
-        await self._apply_instructions()
+        async with self._instructions_lock:
+            for kind, text in uploads.items():
+                backup = await asyncio.to_thread(instructions.save, self.config, kind, text)
+                if backup is not None:
+                    kept.append(backup)
+                LOGGER.info("instructions uploaded kind=%s chars=%d by=%s", kind, len(text), who)
+            await self._apply_instructions()
         names = "、".join(instructions.LABELS[kind] for kind in uploads)
         lines = [f"已更新 {names}，所有對話串重新開始。", self._instructions_status()]
         if kept:

@@ -2910,3 +2910,30 @@ async def test_a_failed_download_leaves_no_directory(config, tmp_path) -> None:
     with pytest.raises(OSError):
         await attachments.download_attachment(Broken(), ".png", config)
     assert attachments.LIVE == set() and list((tmp_path / "att").iterdir()) == []
+
+
+async def test_persona_changes_run_one_at_a_time(client, monkeypatch) -> None:
+    """Two admins uploading (or one uploading while another resets) ran backup, save and the
+    rebuild of the working directories interleaved: the older text could be built last."""
+    import time as _time
+
+    from discord_codex_bot import instructions
+
+    order = []
+
+    def step(name):
+        def run(*args, **kw):
+            order.append(name)
+            _time.sleep(0.05)  # in a worker thread, as asyncio.to_thread runs it
+
+        return run
+
+    monkeypatch.setattr(instructions, "save", step("save"))
+    monkeypatch.setattr(instructions, "compose_workspaces", step("compose"))
+    monkeypatch.setattr(bot_module, "instructions_version", lambda config: "v")
+
+    async def upload(text):
+        await client._save_instructions({instructions.PERSONA: text}, USER)
+
+    await asyncio.gather(upload("a"), upload("b"))
+    assert order == ["save", "compose", "save", "compose"]
