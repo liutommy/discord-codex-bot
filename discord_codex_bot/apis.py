@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiohttp
+from yarl import URL
 
 from .config import Config
 from .links import _read_bounded, html_to_text
@@ -32,6 +33,10 @@ _ENV = re.compile(r"\$\{([A-Z0-9_]+)\}")
 # with HTTP 200 and {"error":{"code":"ratelimited"}}), so the status code alone cannot be trusted.
 RATE_LIMIT_CODES = {"ratelimited", "rate_limited", "toomanyrequests"}
 RETRY_AFTER_SECONDS = 3
+# Redirects are followed by hand and only within the API's own origin: the registered headers
+# (API keys) and the login form must never reach another host.
+MAX_REDIRECTS = 5
+_REDIRECTS = {301, 302, 303, 307, 308}
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,14 +170,45 @@ def _api_error(body: str) -> tuple[str, str]:
 
 
 async def _get(url: str, api: Api, config: Config) -> tuple[int, str, str]:
+    """(status, content type, body). A redirect off the API's origin comes back as its own 3xx
+    status with a note instead of being followed."""
     timeout = aiohttp.ClientTimeout(total=config.link_timeout_seconds)
     jar = _JARS.setdefault(api.name, aiohttp.CookieJar())
+    origin = URL(api.base).origin()
     async with aiohttp.ClientSession(
         timeout=timeout, headers=api.headers, cookie_jar=jar
     ) as session:
-        async with session.get(url) as response:
-            raw = await _read_bounded(response, config.link_max_bytes)
-            return response.status, response.content_type, raw.decode("utf-8", errors="replace")
+        for _ in range(MAX_REDIRECTS + 1):
+            async with session.get(url, allow_redirects=False) as response:
+                location = response.headers.get("Location")
+                if response.status in _REDIRECTS and location:
+                    try:
+                        target = response.url.join(URL(location))
+                        elsewhere = target.origin() != origin
+                    except ValueError:  # an unparsable Location goes nowhere
+                        elsewhere = True
+                    if elsewhere:
+                        return response.status, "text/plain", "轉址到其他網站，未跟隨"
+                    url = str(target)
+                    continue
+                raw = await _read_bounded(response, config.link_max_bytes)
+                return (
+                    response.status,
+                    response.content_type,
+                    raw.decode("utf-8", errors="replace"),
+                )
+    return 310, "text/plain", f"轉址超過 {MAX_REDIRECTS} 次"
+
+
+async def _login_reply(response: aiohttp.ClientResponse) -> dict:
+    """The JSON object one login step answered; ValueError for anything else, a redirect
+    included (redirects are not followed here)."""
+    if response.status != 200:
+        raise ValueError(f"HTTP {response.status}")
+    payload = await response.json(content_type=None)
+    if not isinstance(payload, dict):
+        raise ValueError("reply is not a JSON object")
+    return payload
 
 
 async def _login(api: Api, config: Config) -> bool:
@@ -187,9 +223,10 @@ async def _login(api: Api, config: Config) -> bool:
             timeout=timeout, headers=api.headers, cookie_jar=jar
         ) as session:
             async with session.get(
-                f"{endpoint}?action=query&meta=tokens&type=login&format=json"
+                f"{endpoint}?action=query&meta=tokens&type=login&format=json",
+                allow_redirects=False,
             ) as response:
-                payload = await response.json(content_type=None)
+                payload = await _login_reply(response)
             token = ((payload.get("query") or {}).get("tokens") or {}).get("logintoken")
             if not token:
                 LOGGER.warning("%s login: no token in reply", api.name)
@@ -199,10 +236,13 @@ async def _login(api: Api, config: Config) -> bool:
                 "lgpassword": api.login["password"],
                 "lgtoken": token,
             }
-            async with session.post(f"{endpoint}?action=login&format=json", data=form) as response:
-                result = (await response.json(content_type=None)).get("login") or {}
+            async with session.post(
+                f"{endpoint}?action=login&format=json", data=form, allow_redirects=False
+            ) as response:
+                result = (await _login_reply(response)).get("login") or {}
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
-        LOGGER.warning("%s login failed: %s", api.name, type(error).__name__)
+        detail = error if isinstance(error, ValueError) else type(error).__name__
+        LOGGER.warning("%s login failed: %s", api.name, detail)
         return False
     if result.get("result") != "Success":
         LOGGER.warning("%s login refused: %s", api.name, result.get("result"))
@@ -251,7 +291,7 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
                 f"會成功。不要改寫成「沒有紀錄」，也不要換到查不到這類資料的來源硬答；"
                 f"告訴成員稍後再問即可。{info}）"
             )
-        if status >= 400:
+        if status >= 300:
             return f"（{name} 回 HTTP {status}：{_bounded(body, 300)}）"
         if code:
             return f"（{name} 回報錯誤 {code}：{info}）"

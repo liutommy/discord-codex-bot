@@ -45,6 +45,7 @@ class Response:
     def __init__(self, body: bytes, status=200, content_type="application/json"):
         self.body, self.status, self.content_type = body, status, content_type
         self.content = self
+        self.headers = {}
 
     async def read(self, n):
         return self.body[:n]
@@ -63,7 +64,7 @@ class Session:
     def __init__(self, response):
         self.response, self.calls = response, []
 
-    def get(self, url):
+    def get(self, url, **kw):
         self.calls.append(url)
         return self.response
 
@@ -252,3 +253,72 @@ async def test_call_api_hands_a_page_over_as_text_not_markup(monkeypatch, config
     assert body.startswith("Yasuo - Hexdata\n\n") and "胜率 57.5%" in body
     assert "<style>" not in body and "margin:0" not in body and "<td>" not in body
     assert "https://hx.example/augment/1030-eureka" in body  # links survive, absolute
+
+
+async def test_redirects_never_carry_credentials_to_another_origin(config) -> None:
+    """The registered headers (API keys) and the login form are only for the API's own origin; a
+    redirect to anywhere else is refused, not followed."""
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    stolen = []
+
+    async def steal(request: web.Request) -> web.Response:
+        stolen.append((dict(request.headers), await request.text()))
+        return web.json_response({"ok": True})
+
+    other = web.Application()
+    other.add_routes([web.get("/steal", steal), web.post("/steal", steal)])
+    async with TestServer(other) as thief:
+        away = f"http://127.0.0.1:{thief.port}/steal"
+
+        async def bounce(request: web.Request) -> web.Response:
+            return web.Response(status=302, headers={"Location": away})
+
+        async def broken(request: web.Request) -> web.Response:
+            return web.Response(status=302, headers={"Location": "http://[bad"})
+
+        async def moved(request: web.Request) -> web.Response:
+            return web.Response(status=301, headers={"Location": "/gw/new"})
+
+        async def new(request: web.Request) -> web.Response:
+            return web.json_response({"key": request.headers.get("x-api-key")})
+
+        async def token(request: web.Request) -> web.Response:
+            return web.json_response({"query": {"tokens": {"logintoken": "t"}}})
+
+        async def login(request: web.Request) -> web.Response:
+            return web.Response(status=307, headers={"Location": away})
+
+        home = web.Application()
+        home.add_routes(
+            [
+                web.get("/gw/bounce", bounce),
+                web.get("/gw/broken", broken),
+                web.get("/gw/old", moved),
+                web.get("/gw/new", new),
+                web.get("/api.php", token),
+                web.post("/api.php", login),
+            ]
+        )
+        async with TestServer(home) as server:
+            base = f"http://127.0.0.1:{server.port}/gw/"
+            registry = {"lol": Api("lol", base, {"x-api-key": "k"}, "")}
+            body = await call_api("lol", "bounce", registry, config)
+            assert stolen == [] and "302" in body
+            # an unparsable Location is a failed call, not an exception out of the answer
+            assert "302" in await call_api("lol", "broken", registry, config)
+            # a hop within the API's own origin is still followed, headers included
+            assert await call_api("lol", "old", registry, config) == '{"key":"k"}'
+            wiki = Api(
+                "wiki",
+                base,
+                {},
+                "",
+                {"api": f"http://127.0.0.1:{server.port}/api.php", "user": "u", "password": "pw"},
+            )
+            try:
+                assert await apis._login(wiki, config) is False
+            finally:
+                apis._LOGGED_IN.discard("wiki")
+            assert stolen == []

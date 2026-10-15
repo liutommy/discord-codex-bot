@@ -354,6 +354,7 @@ from discord_codex_bot.tracking import (  # noqa: E402
 from discord_codex_bot.usage import RateLimits  # noqa: E402
 
 GUILD, USER = 111111111111111111, 5
+ALLOWED = 222222222222222222  # the conftest allowlisted channel
 
 
 class FakeBackend:
@@ -1383,20 +1384,36 @@ async def test_answer_reads_attached_documents_into_a_files_block(
 
 
 async def test_fire_reminder_mentions_only_the_member(client) -> None:
+    from types import SimpleNamespace as NS
 
     sent = []
 
     class Channel:
-        async def send(self, text, allowed_mentions=None):
-            sent.append((text, allowed_mentions.users, allowed_mentions.everyone))
+        def __init__(self, guild_id):
+            self.guild = NS(id=guild_id)
 
-    client.get_channel = lambda cid: Channel() if cid == 555 else None
-    await client._fire_reminder({"channel_id": 555, "user_id": USER, "text": "收衣服"})
-    assert sent == [(f"⏰ <@{USER}> 提醒：收衣服", True, False)]
-    await client._fire_reminder(
-        {"channel_id": 555, "user_id": USER, "target_id": 777, "text": "開團"}
-    )
+        async def send(self, text, allowed_mentions=None):
+            users = allowed_mentions.users
+            ids = users if isinstance(users, bool) else [u.id for u in users]
+            sent.append((text, ids, allowed_mentions.everyone))
+
+    channels = {ALLOWED: Channel(GUILD), 555: Channel(GUILD), 666: Channel(999)}
+    client.get_channel = channels.get
+    item = {"guild_id": GUILD, "channel_id": ALLOWED, "user_id": USER}
+    await client._fire_reminder({**item, "text": "收衣服"})
+    assert sent == [(f"⏰ <@{USER}> 提醒：收衣服", [USER], False)]
+    await client._fire_reminder({**item, "target_id": 777, "text": "開團"})
     assert sent[-1][0] == f"⏰ <@777> 提醒：開團（<@{USER}> 設的）"
+    # a mention inside the reminder text is shown, never pinged
+    await client._fire_reminder({**item, "target_id": 777, "text": "叫 <@888> 一起"})
+    assert sent[-1][1] == [777]
+    # a reminder is posted only where the Bot is still allowed, in the guild it was set in
+    sent.clear()
+    await client._fire_reminder({**item, "channel_id": 555, "text": "x"})
+    await client._fire_reminder({**item, "channel_id": 666, "text": "x"})
+    channels[ALLOWED] = Channel(999)
+    await client._fire_reminder({**item, "text": "x"})
+    assert sent == []
 
 
 async def test_streamer_throttles_skips_tag_interims_and_clips(client, monkeypatch) -> None:
@@ -1479,7 +1496,12 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
 
     message = NS(content="**問**：\n> 今天吃什麼\n\n吃咖哩", reference=None, id=4242)
     interaction = NS(
-        message=message, guild_id=GUILD, channel_id=555, response=Response(), followup=Followup()
+        message=message,
+        guild_id=GUILD,
+        channel_id=ALLOWED,
+        channel=None,
+        response=Response(),
+        followup=Followup(),
     )
     await client.handle_answer_button(interaction, "remember", USER)
     assert sent[-1][0] == "msg" and sent[-1][1].startswith("已記進你的個人記憶：")
@@ -1489,7 +1511,7 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
     from discord_codex_bot.threads import ThreadStore
 
     plain, model = bool(client.memory.get_style(GUILD, USER)), client._model(GUILD, USER)
-    key = ThreadStore.key(GUILD, 555, USER)
+    key = ThreadStore.key(GUILD, ALLOWED, USER)
     client.threads.remember(key, "thread-abc", 4242, plain=plain, model=model)
     await client.handle_answer_button(interaction, "redo", USER)
     assert interaction.response.deferred
@@ -1500,12 +1522,54 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
     empty = NS(
         message=NS(content="沒有引用", reference=None),
         guild_id=GUILD,
-        channel_id=555,
+        channel_id=ALLOWED,
+        channel=None,
         response=Response(),
         followup=Followup(),
     )
     await client.handle_answer_button(empty, "redo", USER)
     assert sent[-1][1].startswith("找不到原本的問題")
+
+
+async def test_answer_buttons_obey_the_channel_allowlist_and_prompt_limits(
+    client, backends
+) -> None:
+    """A button outlives the channel's place on the allowlist; pressing it must be checked like
+    any command, and a redo is a new request that passes the same validation."""
+    from types import SimpleNamespace as NS
+
+    sent = []
+
+    class Response:
+        async def send_message(self, text, ephemeral=False):
+            sent.append(("msg", text))
+
+        async def defer(self, thinking=False):
+            sent.append(("defer",))
+
+    class Followup:
+        async def send(self, text, files=None, view=None, ephemeral=False):
+            sent.append(("followup", text))
+            return NS(id=9999)
+
+    def press(content, channel_id):
+        return NS(
+            message=NS(content=content, reference=None, id=4242),
+            guild_id=GUILD,
+            channel_id=channel_id,
+            channel=None,
+            response=Response(),
+            followup=Followup(),
+        )
+
+    answer = "**問**：\n> 今天吃什麼\n\n吃咖哩"
+    for action in ("remember", "redo"):
+        await client.handle_answer_button(press(answer, 555), action, USER)
+        assert sent[-1][0] == "msg" and "頻道" in sent[-1][1]
+    assert client.memory.entries("user", GUILD, USER) == [] and backends[0].calls == []
+    too_long = f"**問**：\n> {'字' * (client.config.max_prompt_chars + 1)}\n\n答"
+    await client.handle_answer_button(press(too_long, ALLOWED), "redo", USER)
+    assert "prompt 必須介於" in sent[-1][1] and backends[0].calls == []
 
 
 async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monkeypatch) -> None:
@@ -1758,7 +1822,12 @@ async def test_redo_puts_back_the_message_the_question_pointed_at(
         channel=NS(fetch_message=fetch_asked),
     )
     interaction = NS(
-        message=answer, guild_id=GUILD, channel_id=555, response=Response(), followup=Followup()
+        message=answer,
+        guild_id=GUILD,
+        channel_id=ALLOWED,
+        channel=None,
+        response=Response(),
+        followup=Followup(),
     )
     await client.handle_answer_button(interaction, "redo", USER)
     prompt = backends[0].calls[-1][0]
