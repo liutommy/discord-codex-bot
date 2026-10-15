@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -1426,3 +1427,28 @@ async def test_the_ruten_cursor_stops_before_a_listing_that_came_without_its_nam
     assert [i.external_id for i in result.items] == ["22640792418162"]
     assert int(result.cursor) < 22640792418151  # the nameless one is still ahead of it
     assert int(result.cursor) >= 22640792418100  # never behind where it was
+
+
+async def test_a_full_page_without_the_last_newest_item_is_logged_as_a_gap(
+    monkeypatch, caplog
+) -> None:
+    """Twenty items a pass: a channel that posted more than that between two passes loses the
+    rest without a trace. The pass says so when it may have happened."""
+    entries = [
+        {"contentDetails": {"videoId": f"v{i}", "videoPublishedAt": "2026-10-01T00:00:00Z"},
+         "snippet": {"title": f"t{i}"}}
+        for i in range(20)
+    ]  # fmt: skip
+
+    async def fake_json_request(_session, _method, url, params=None, limit=0):
+        return {"items": entries} if url.endswith("/playlistItems") else {"items": []}
+
+    monkeypatch.setattr("discord_codex_bot.tracking._json_request", fake_json_request)
+    fetcher = YouTubeFetcher("key", session_factory=lambda **kw: EmptySession())
+    with caplog.at_level(logging.WARNING, logger="discord_codex_bot.tracking"):
+        await fetcher.fetch(Source(1, "youtube", "UC5CwaMl1eIgY8h02uZw7u8A", "@x", cursor="old"))
+        assert "may have been missed" in caplog.text
+        caplog.clear()
+        await fetcher.fetch(Source(1, "youtube", "UC5CwaMl1eIgY8h02uZw7u8A", "@x", cursor="v5"))
+        await fetcher.fetch(Source(1, "youtube", "UC5CwaMl1eIgY8h02uZw7u8A", "@x"))  # baseline
+        assert "may have been missed" not in caplog.text

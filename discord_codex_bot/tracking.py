@@ -286,6 +286,7 @@ MAX_MESSAGE_CHARS = 600
 # for the next call. A source that floods (a shop listing, a busy page) used to send its whole
 # backlog in one prompt, and one item missing from the answer threw every judgement away.
 MAX_CLASSIFY_BATCH = 30
+PAGE_SIZE = 20  # items a YouTube or Twitch pass reads (one page)
 # Items the Bot first saw longer ago than this are no longer worth a notification: they leave
 # the queue unjudged instead of piling up behind a watch that cannot keep pace. An interval
 # watch keeps its items for twice its interval when that is longer (see _pending_minutes).
@@ -1196,7 +1197,7 @@ class YouTubeFetcher:
                     # the classifier judging blind.
                     "part": "snippet,contentDetails",
                     "playlistId": uploads,
-                    "maxResults": "20",
+                    "maxResults": str(PAGE_SIZE),
                     "key": self.api_key,
                 },
                 limit=self.max_response_bytes,
@@ -1235,6 +1236,7 @@ class YouTubeFetcher:
                 )
                 by_id = {str(item.get("id")): item for item in details.get("items", [])}
                 items = [_hydrate_youtube(item, by_id.get(item.external_id, {})) for item in items]
+        _warn_gap(source, [item.external_id for item in items], len(listing.get("items", [])))
         cursor = items[0].external_id if items else source.cursor
         return FetchResult(tuple(items), cursor, source.state)
 
@@ -1389,7 +1391,7 @@ class TwitchFetcher:
                 self._helix(
                     session,
                     "videos",
-                    {"user_id": source.external_id, "first": "20", "type": "archive"},
+                    {"user_id": source.external_id, "first": str(PAGE_SIZE), "type": "archive"},
                 ),
             )
         items: list[ContentItem] = []
@@ -1428,10 +1430,27 @@ class TwitchFetcher:
                     )
                 )
         items.sort(key=lambda item: item.published_at, reverse=True)
+        if source.cursor.startswith("video:"):  # a live stream's id is gone once it ends
+            videos_seen = [item.external_id for item in items if item.kind == "video"]
+            _warn_gap(source, videos_seen, len(videos.get("data", [])))
         cursor = items[0].external_id if items else source.cursor
         state = dict(source.state)
         state["online"] = bool(streams.get("data"))
         return FetchResult(tuple(items), cursor, state)
+
+
+def _warn_gap(source: Source, ids: Sequence[str], listed: int) -> None:
+    """A full page that no longer reaches the newest item the last pass saw: the source posted
+    more than a page in between, and the older new items were not read. Logged, not fetched: a
+    page is all a pass reads (a deleted item can also cause this, so it says "may")."""
+    if source.cursor and listed >= PAGE_SIZE and source.cursor not in ids:
+        LOGGER.warning(
+            "%s source %s: a full page of %d without the last pass's newest item; "
+            "older new items may have been missed",
+            source.provider,
+            source.id,
+            PAGE_SIZE,
+        )
 
 
 X_PROFILE_HOSTS = {
