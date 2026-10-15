@@ -1227,6 +1227,9 @@ class DiscordCodexClient(discord.Client):
             if on_video_slow is not None:
                 await on_video_slow()
             blocks = await task
+        except asyncio.CancelledError:
+            task.cancel()  # the shield is against the timer only, not against the member's ❌
+            raise
         return "\n\n".join(blocks)
 
     async def _answer(

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import logging.handlers
 import time
@@ -1020,6 +1021,38 @@ async def test_understand_videos_races_the_timer_and_fires_the_interim(client, m
     block = await client._understand_videos(["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), on_slow)
     assert block == '<VIDEO url="https://youtu.be/dQw4w9WgXcQ">\n描述\n</VIDEO>'
     assert notices == [1]  # the slow clip fired the interim exactly once
+
+
+async def test_a_cancelled_request_stops_its_video_work(client, monkeypatch) -> None:
+    """The work is shielded from the interim timer; a ❌ inside that window used to leave the
+    video download and description running to the end."""
+    import asyncio
+
+    from discord_codex_bot import bot as bm
+
+    monkeypatch.setattr(bm.gemini, "available", lambda config: True)
+    client.config = replace(client.config, video_interim_after_seconds=30)
+    started, stopped = asyncio.Event(), []
+
+    async def endless(url, config, out_dir):
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            stopped.append(url)
+            raise
+        return "描述"
+
+    monkeypatch.setattr(bm, "understand_video", endless)
+    request = asyncio.create_task(
+        client._understand_videos(["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), None)
+    )
+    await started.wait()
+    request.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await request
+    await asyncio.sleep(0)
+    assert stopped == ["https://youtu.be/dQw4w9WgXcQ"]
 
 
 async def test_understand_videos_stays_silent_when_fast_or_disabled(client, monkeypatch) -> None:
