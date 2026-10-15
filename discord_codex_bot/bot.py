@@ -8,7 +8,6 @@ import json
 import logging
 import logging.handlers
 import re
-import tempfile
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -32,6 +31,7 @@ from .attachments import (
     extract_text,
     remove_dir,
     remove_request_dir,
+    request_dir,
     sweep_forever,
     validate_attachment,
 )
@@ -1411,8 +1411,8 @@ class DiscordCodexClient(discord.Client):
 
         images: list[Path] = []
         self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
-        link_dir = Path(tempfile.mkdtemp(prefix="req-", dir=self.config.attachment_dir))
-        deliver_dir = Path(tempfile.mkdtemp(prefix="req-", dir=self.config.attachment_dir))
+        link_dir = request_dir(self.config)
+        deliver_dir = request_dir(self.config)
         delivered: list[Path] = []  # sandbox-made files handed to the member with the answer
         try:
             documents: list[str] = []

@@ -117,3 +117,20 @@ def test_extract_text_handles_text_binary_and_pdf(tmp_path) -> None:
     assert "Hello PDF" in extract_text(tmp_path / "c.pdf", 1000)
     (tmp_path / "d.pdf").write_bytes(b"not really a pdf")
     assert extract_text(tmp_path / "d.pdf", 1000) == "（PDF 讀不出文字：可能是掃描圖檔或加密）"
+
+
+def test_a_request_still_waiting_keeps_its_directory(config: Config, tmp_path: Path) -> None:
+    """A request queued behind others for longer than the sweep's age limit lost its pictures
+    and pages before the model ever saw them. A directory in use is never swept."""
+    from discord_codex_bot import attachments
+
+    config = replace(config, attachment_dir=tmp_path / "att")
+    waiting = attachments.request_dir(config)
+    (waiting / "image.png").write_bytes(b"x")
+    old = 1_000_000.0
+    os.utime(waiting, (old, old))
+    sweep = attachments.sweep_stale
+    assert sweep(config.attachment_dir, 60, prefix=REQUEST_DIR_PREFIX, keep=attachments.LIVE) == 0
+    assert (waiting / "image.png").exists()
+    attachments.remove_dir(waiting)  # done with it: no longer kept
+    assert waiting.name not in attachments.LIVE
