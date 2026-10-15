@@ -67,6 +67,10 @@ def project_id(config: Config, workspace: Path) -> str:
     return ""
 
 
+class _OutputTooLong(Exception):
+    """A streamed line longer than the process output cap."""
+
+
 async def _read_stream(process, on_delta) -> tuple[bytes, bytes]:
     """Read stdout line by line, reporting the accumulated agent text as each `step_update`
     text_delta lands; stderr is drained alongside so neither pipe can fill up and stall agy."""
@@ -76,7 +80,10 @@ async def _read_stream(process, on_delta) -> tuple[bytes, bytes]:
     async def stdout_lines() -> None:
         nonlocal accumulated
         while True:
-            line = await process.stdout.readline()
+            try:
+                line = await process.stdout.readline()
+            except ValueError as error:  # one line over the reader's limit
+                raise _OutputTooLong from error
             if not line:
                 return
             out.append(line)
@@ -107,6 +114,9 @@ async def _run(
         stderr=asyncio.subprocess.PIPE,
         env=_environment(config),
         start_new_session=True,
+        # One streamed event can carry a long answer in one line; the default 64 KiB line limit
+        # raised ValueError. The whole output is bounded by the same cap below.
+        limit=MAX_PROCESS_OUTPUT_BYTES,
     )
     try:
         if on_delta is None:
@@ -123,6 +133,9 @@ async def _run(
     except TimeoutError:
         await _kill_process_group(process)
         raise AgyUnavailable("agy request timed out") from None
+    except _OutputTooLong:  # one line over the cap: the output is over it too
+        await _kill_process_group(process)
+        raise RuntimeError("agy output exceeded the process limit") from None
     except asyncio.CancelledError:
         await _kill_process_group(process)  # a cancelled request must not leave agy running
         raise

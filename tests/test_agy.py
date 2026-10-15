@@ -290,3 +290,34 @@ async def test_run_agy_marks_only_availability_failures_for_fallback(
     with pytest.raises(RuntimeError) as raised:
         await run_agy("q", agy_config, "gemini-3.8-flash-high")
     assert isinstance(raised.value, agy.AgyUnavailable) is unavailable
+
+
+async def test_a_streamed_line_longer_than_64_kib_is_read(
+    tmp_path: Path, config: Config, monkeypatch
+) -> None:
+    """asyncio's line reader stops at 64 KiB by default; one long agy event (a long answer in
+    one text_delta) raised ValueError, which neither fell back nor reaped agy."""
+    import sys
+
+    real = asyncio.create_subprocess_exec
+    text = "長" * 40_000  # 120 KB of UTF-8 in one line
+    event = json.dumps(
+        {
+            "event": "step_update",
+            "step_update": {"step_type": "agent_response", "text_delta": text},
+        },
+        ensure_ascii=False,
+    )
+    script = f"import sys; sys.stdout.write({event!r} + '\\n')"
+
+    async def fake_exec(program, *args, **kw):
+        return await real(sys.executable, "-c", script, **{**kw, "env": None})
+
+    monkeypatch.setattr(agy.asyncio, "create_subprocess_exec", fake_exec)
+    seen = []
+
+    async def on_delta(accumulated):
+        seen.append(len(accumulated))
+
+    code, out, _err = await agy._run([], "", tmp_path, config, on_delta=on_delta)
+    assert code == 0 and seen == [len(text)] and text in out

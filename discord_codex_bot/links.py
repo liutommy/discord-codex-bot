@@ -344,7 +344,10 @@ class _Text(HTMLParser):
         href = next((v for k, v in attrs if k == "href" and v), "")
         if not href or href.startswith(("#", "javascript:", "mailto:", "data:")):
             return
-        absolute = urljoin(self._base, href)
+        try:
+            absolute = urljoin(self._base, href)
+        except ValueError:  # a malformed href (e.g. "http://[bad") is no link to keep
+            return
         if not absolute.startswith(("http://", "https://")) or absolute in self._seen:
             return
         self._seen.add(absolute)
@@ -771,8 +774,15 @@ async def link_blocks(
                 x_lookup=True,  # the member posted these links
             )
             for i, url in enumerate(urls)
-        )
+        ),
+        return_exceptions=True,  # one broken link must not fail the whole answer
     )
+    for i, (url, result) in enumerate(zip(urls, results, strict=True)):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, BaseException):
+            LOGGER.warning("Link %s failed", url, exc_info=result)
+            results[i] = (f"（{url}：讀取失敗——{type(result).__name__}）", [])
     pairs = zip(urls, results, strict=True)
     blocks = [f'<LINK url="{url}">\n{text}\n</LINK>' for url, (text, _) in pairs]
     shots = [shot for _, shots in results for shot in shots]

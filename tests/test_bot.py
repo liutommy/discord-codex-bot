@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import logging.handlers
 import time
@@ -1022,6 +1023,38 @@ async def test_understand_videos_races_the_timer_and_fires_the_interim(client, m
     assert notices == [1]  # the slow clip fired the interim exactly once
 
 
+async def test_a_cancelled_request_stops_its_video_work(client, monkeypatch) -> None:
+    """The work is shielded from the interim timer; a ❌ inside that window used to leave the
+    video download and description running to the end."""
+    import asyncio
+
+    from discord_codex_bot import bot as bm
+
+    monkeypatch.setattr(bm.gemini, "available", lambda config: True)
+    client.config = replace(client.config, video_interim_after_seconds=30)
+    started, stopped = asyncio.Event(), []
+
+    async def endless(url, config, out_dir):
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            stopped.append(url)
+            raise
+        return "描述"
+
+    monkeypatch.setattr(bm, "understand_video", endless)
+    request = asyncio.create_task(
+        client._understand_videos(["https://youtu.be/dQw4w9WgXcQ"], Path("/tmp"), None)
+    )
+    await started.wait()
+    request.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await request
+    await asyncio.sleep(0)
+    assert stopped == ["https://youtu.be/dQw4w9WgXcQ"]
+
+
 async def test_understand_videos_stays_silent_when_fast_or_disabled(client, monkeypatch) -> None:
     from discord_codex_bot import bot as bm
 
@@ -1515,7 +1548,11 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
     client.threads.remember(key, "thread-abc", 4242, plain=plain, model=model)
     await client.handle_answer_button(interaction, "redo", USER)
     assert interaction.response.deferred
-    assert sent[-1] == ("followup", "答案", "AnswerView")
+    assert sent[-1][0] == "followup" and sent[-1][2] == "AnswerView"
+    # the new answer quotes the question too, so 🔁 / 👍 on *it* still find what was asked
+    from discord_codex_bot.ui import recover_exchange
+
+    assert recover_exchange(sent[-1][1]) == ("今天吃什麼", "答案")
     assert backends[0].calls[-1][0] == "今天吃什麼"
     assert backends[0].calls[-1][2]["resume"] == "thread-abc"
     assert client.threads.by_message(9999, plain=plain, model=model) == "t1"  # redo answer linked
@@ -2786,7 +2823,7 @@ async def test_a_summary_fits_discord_and_reads_the_newest_messages(client, monk
     await client.summary_command(interaction, hours=24)
     assert edits[-1].startswith("**頻道摘要") and "最新" in edits[-1].split("\n", 1)[0]
     assert sent and "".join([edits[-1].split("\n", 1)[1], *sent]) == "摘" * 1995
-    assert f"訊息{MAX_MESSAGES + 100}" in prompts[0] and "訊息1\n" not in prompts[0]
+    assert f'"訊息{MAX_MESSAGES + 100}"' in prompts[0] and '"訊息1"' not in prompts[0]
     # a summary Discord refuses does not leave the placeholder standing
     refuse["next"] = True
     await client.summary_command(interaction, hours=24)
@@ -2800,3 +2837,76 @@ async def test_the_bot_reads_a_failed_page_as_unread(client, monkeypatch) -> Non
 
     monkeypatch.setattr(bot_module, "fetch_or_render", failed)
     assert (await client._read_page("https://twitter.com/u/status/1?s=20"))[1] is False
+
+
+def test_files_with_the_same_name_from_one_request_are_all_kept(tmp_path) -> None:
+    """Two sandbox runs in one request that both write out.png used to leave only the last."""
+    from discord_codex_bot.bot import DiscordCodexClient
+
+    into = tmp_path / "deliver"
+    kept = []
+    for run, data in enumerate((b"first", b"second", b"third")):
+        made = tmp_path / f"run{run}" / "out.png"
+        made.parent.mkdir()
+        made.write_bytes(data)
+        kept.append(DiscordCodexClient._keep_for_member(made, into))
+    assert [p.read_bytes() for p in kept] == [b"first", b"second", b"third"]
+    assert [p.name for p in kept] == ["out.png", "out-2.png", "out-3.png"]
+
+
+async def test_request_directories_are_released_on_every_path(
+    client, monkeypatch, tmp_path
+) -> None:
+    """The sweep skips directories a request still uses, so a request must release every one it
+    made: one left behind would stay until the process restarts."""
+    from discord_codex_bot import attachments, sandbox
+
+    monkeypatch.setattr(bot_module.sandbox, "available", lambda config: True)
+
+    async def run_code(lang, code, config, out_dir):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        made = out_dir / "out.png"
+        made.write_bytes(b"png")
+        return sandbox.RunResult(0, False, "", "", [made])
+
+    monkeypatch.setattr(bot_module.sandbox, "run_code", run_code)
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    replies = iter(
+        [
+            CodexResult('<run lang="python">x</run>', thread_id="t1"),
+            CodexResult("答案", generated_dir=generated, thread_id="t1"),
+        ]
+    )
+
+    async def codex(prompt, config, **kw):
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", codex)
+    attachments.LIVE.clear()
+    result = await client._answer("畫圖", [], GUILD, USER)
+    assert result.generated_dir == generated and attachments.LIVE == set()
+
+    async def broken(prompt, config, **kw):
+        if "<RESULT" in prompt:
+            raise RuntimeError("down")
+        return CodexResult('<run lang="python">x</run>', thread_id="t2")
+
+    monkeypatch.setattr(bot_module, "run_codex", broken)
+    await client._answer("畫圖", [], GUILD, USER)  # the request fails after a delivery
+    assert attachments.LIVE == set()
+
+
+async def test_a_failed_download_leaves_no_directory(config, tmp_path) -> None:
+    from discord_codex_bot import attachments
+
+    config = replace(config, attachment_dir=tmp_path / "att")
+
+    class Broken:
+        async def save(self, path):
+            raise OSError("network")
+
+    attachments.LIVE.clear()
+    with pytest.raises(OSError):
+        await attachments.download_attachment(Broken(), ".png", config)
+    assert attachments.LIVE == set() and list((tmp_path / "att").iterdir()) == []

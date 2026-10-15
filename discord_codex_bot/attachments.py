@@ -5,6 +5,7 @@ import logging
 import shutil
 import tempfile
 import time
+from collections.abc import Collection
 from pathlib import Path
 
 import discord
@@ -13,6 +14,9 @@ from .config import Config
 
 LOGGER = logging.getLogger(__name__)
 REQUEST_DIR_PREFIX = "req-"
+# Request directories a request in this process still uses. The sweep's age limit cannot tell a
+# crash leftover from a request queued behind others for longer than that; this set can.
+LIVE: set[str] = set()
 IMAGE_SUFFIXES = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -103,10 +107,12 @@ async def download_attachment(
     attachment: discord.Attachment, suffix: str, config: Config, stem: str = "image"
 ) -> Path:
     """Save the attachment into a fresh per-request directory; the caller removes it."""
-    config.attachment_dir.mkdir(parents=True, exist_ok=True)
-    request_dir = Path(tempfile.mkdtemp(prefix=REQUEST_DIR_PREFIX, dir=config.attachment_dir))
-    path = request_dir / f"{stem}{suffix}"
-    await attachment.save(path)
+    path = request_dir(config) / f"{stem}{suffix}"
+    try:
+        await attachment.save(path)
+    except BaseException:
+        remove_dir(path.parent)
+        raise
     return path
 
 
@@ -139,12 +145,21 @@ def extract_text(path: Path, max_chars: int, max_pdf_pages: int = 50) -> str:
     return text if len(text) <= max_chars else f"{text[:max_chars]}\n[已截斷至 {max_chars} 字]"
 
 
+def request_dir(config: Config) -> Path:
+    """A fresh per-request directory, kept from the sweep until removed with remove_dir."""
+    config.attachment_dir.mkdir(parents=True, exist_ok=True)
+    path = Path(tempfile.mkdtemp(prefix=REQUEST_DIR_PREFIX, dir=config.attachment_dir))
+    LIVE.add(path.name)
+    return path
+
+
 def remove_request_dir(path: Path) -> None:
-    shutil.rmtree(path.parent, ignore_errors=True)
+    remove_dir(path.parent)
 
 
 def remove_dir(path: Path | None) -> None:
     if path is not None:
+        LIVE.discard(path.name)
         shutil.rmtree(path, ignore_errors=True)
 
 
@@ -153,14 +168,21 @@ def generated_images_root(config: Config) -> Path:
 
 
 def sweep_stale(
-    root: Path, max_age_seconds: float, now: float | None = None, prefix: str = ""
+    root: Path,
+    max_age_seconds: float,
+    now: float | None = None,
+    prefix: str = "",
+    keep: Collection[str] = (),
 ) -> int:
-    """Delete subdirectories older than max_age_seconds (crash leftovers); return count."""
+    """Delete subdirectories older than max_age_seconds (crash leftovers), except those named in
+    `keep`; return count."""
     if not root.is_dir():
         return 0
     cutoff = (time.time() if now is None else now) - max_age_seconds
     removed = 0
     for entry in root.iterdir():
+        if entry.name in keep:
+            continue
         if entry.is_dir() and entry.name.startswith(prefix) and entry.stat().st_mtime < cutoff:
             shutil.rmtree(entry, ignore_errors=True)
             removed += 1
@@ -172,7 +194,7 @@ async def sweep_forever(config: Config) -> None:
     # Anything older than one request timeout plus one sweep interval cannot belong to a live job.
     max_age = config.codex_timeout_seconds + interval
     while True:
-        removed = sweep_stale(config.attachment_dir, max_age, prefix=REQUEST_DIR_PREFIX)
+        removed = sweep_stale(config.attachment_dir, max_age, prefix=REQUEST_DIR_PREFIX, keep=LIVE)
         removed += sweep_stale(generated_images_root(config), max_age)
         if removed:
             LOGGER.info("Swept %d stale attachment/generated-image directories", removed)

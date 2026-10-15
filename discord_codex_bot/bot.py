@@ -8,7 +8,6 @@ import json
 import logging
 import logging.handlers
 import re
-import tempfile
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -32,6 +31,7 @@ from .attachments import (
     extract_text,
     remove_dir,
     remove_request_dir,
+    request_dir,
     sweep_forever,
     validate_attachment,
 )
@@ -1220,13 +1220,17 @@ class DiscordCodexClient(discord.Client):
 
         task = asyncio.create_task(describe())
         try:
-            blocks = await asyncio.wait_for(
-                asyncio.shield(task), self.config.video_interim_after_seconds
-            )
-        except TimeoutError:
-            if on_video_slow is not None:
-                await on_video_slow()
-            blocks = await task
+            try:
+                blocks = await asyncio.wait_for(
+                    asyncio.shield(task), self.config.video_interim_after_seconds
+                )
+            except TimeoutError:
+                if on_video_slow is not None:
+                    await on_video_slow()
+                blocks = await task
+        except asyncio.CancelledError:
+            task.cancel()  # the shield is against the timer only, not against the member's ❌
+            raise
         return "\n\n".join(blocks)
 
     async def _answer(
@@ -1408,9 +1412,10 @@ class DiscordCodexClient(discord.Client):
 
         images: list[Path] = []
         self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
-        link_dir = Path(tempfile.mkdtemp(prefix="req-", dir=self.config.attachment_dir))
-        deliver_dir = Path(tempfile.mkdtemp(prefix="req-", dir=self.config.attachment_dir))
+        link_dir = request_dir(self.config)
+        deliver_dir = request_dir(self.config)
         delivered: list[Path] = []  # sandbox-made files handed to the member with the answer
+        handed_over = False  # deliver_dir became the answer's generated_dir: the caller removes it
         try:
             documents: list[str] = []
             for attachment in attachments:
@@ -1421,9 +1426,13 @@ class DiscordCodexClient(discord.Client):
                     images.append(await download_attachment(attachment, suffix, self.config))
                 elif kind == "document":
                     saved = await download_attachment(attachment, suffix, self.config, "doc")
-                    text = await asyncio.to_thread(extract_text, saved, self.config.link_max_chars)
+                    try:
+                        text = await asyncio.to_thread(
+                            extract_text, saved, self.config.link_max_chars
+                        )
+                    finally:
+                        remove_request_dir(saved)
                     documents.append(f'<FILE name="{attachment.filename}">\n{text}\n</FILE>')
-                    remove_request_dir(saved)
             files = "\n\n".join(documents)
             permanent = self.permanent.index_text()
             pending = render_pending(self.reminders.for_user(user_id))
@@ -1553,7 +1562,7 @@ class DiscordCodexClient(discord.Client):
             outgoing = tuple(result.images)  # not `images`: that list is cleaned up in finally
             if delivered:
                 if generated_dir is None:
-                    generated_dir = deliver_dir  # the caller removes it after sending
+                    generated_dir, handed_over = deliver_dir, True  # removed after sending
                 else:
                     delivered = [self._keep_for_member(path, generated_dir) for path in delivered]
                 outgoing += tuple(delivered)
@@ -1580,7 +1589,7 @@ class DiscordCodexClient(discord.Client):
             for path in images:
                 remove_request_dir(path)
             remove_dir(link_dir)
-            if not delivered:
+            if not handed_over:  # the sweep skips a live directory, so every path releases it
                 remove_dir(deliver_dir)
 
     def _emoji_reply(self, guild_id: int | None) -> Callable[[str, bool], str] | None:
@@ -2274,8 +2283,10 @@ class DiscordCodexClient(discord.Client):
     async def send_answer(self, destination, prompt: str, result, guild_id, user_id):
         """Post an answer (with its buttons) through any `.send`-able destination — used by the
         🔁 button, which lands the new answer as a follow-up. Returns the message the destination
-        handed back (when it does), so the caller can link it to the thread."""
-        chunks = split_discord_message(result.text)
+        handed back (when it does), so the caller can link it to the thread. The question is
+        quoted on top as on a slash answer: a follow-up is no reply, and 🔁 / 👍 on it find the
+        question there."""
+        chunks = split_discord_message(format_reply(prompt, result.text, resumed=result.resumed))
         try:
             sent = await destination.send(
                 chunks[0],
@@ -2384,7 +2395,10 @@ class DiscordCodexClient(discord.Client):
         """Copy a sandbox-made file out of the per-request scratch dir so it survives cleanup
         until the answer (and the file) has been sent."""
         into.mkdir(parents=True, exist_ok=True)
-        target = into / path.name
+        target, counter = into / path.name, 2
+        while target.exists():  # two runs in one request may both write out.png
+            target = into / f"{path.stem}-{counter}{path.suffix}"
+            counter += 1
         target.write_bytes(path.read_bytes())
         return target
 
