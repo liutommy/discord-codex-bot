@@ -366,10 +366,13 @@ The `@mention` form keeps the question visible as the member's own message, supp
 `MAX_ATTACHMENTS` images per message, and the Bot answers as a reply. Replying to another
 member's message while mentioning the Bot points it at that message: its text is quoted into the
 request and its images are attached, so "@Bot what is this?" as a reply to a picture works.
-Messages that do not mention the Bot are discarded without processing.
+Messages that do not mention the Bot get no answer; link cleaning and emoji sampling still look
+at them (see the privacy note in step 3).
 
-`/codex-status` must report `ChatGPT 訂閱登入有效`, model `gpt-6-luna`, and the default reasoning
-effort (`Medium`). A command in another server or outside the configured test channel must not execute.
+`/codex-status` must report `ChatGPT 訂閱登入有效` and the member's model. With `.env.example`
+copied as is, that is `DEFAULT_MODEL` (Grok, which needs `XSEARCH_URL`), or 「自動挑選」 when
+`JEV_ENABLED` routing is on; with `DEFAULT_MODEL` empty it is Codex `gpt-6-luna` at
+`CODEX_REASONING_EFFORT` (`medium`). A command in another server or outside the configured test channel must not execute.
 
 The Bot serializes Codex work to one request at a time and caps the queue, prompt, response, and
 runtime. `/codex` has an optional `effort` choice — Low, Medium (default), High, Extra high, Max —
