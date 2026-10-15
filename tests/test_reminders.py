@@ -116,6 +116,9 @@ def test_extract_reminder_tags_and_render_pending() -> None:
     assert clean == shown.rsplit("\n", 1)[0]
     # a code block the answer never closed runs to the end of it
     assert extract_reminder_tags('看：\n```\n<remind when="1小時後" text="a"/>')[1] == []
+    # Discord's >>> quotes the rest of the message, and inline code can run across lines
+    assert extract_reminder_tags('>>> 他說：\nhi\n<remind when="1小時後" text="a"/>')[1] == []
+    assert extract_reminder_tags('`a\n<cancel_reminder id="5"/>\nb`')[2] == []
     items = [
         {
             "id": 1,

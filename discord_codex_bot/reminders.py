@@ -30,9 +30,12 @@ REMIND_TAG = re.compile(
 )
 CANCEL_TAG = re.compile(r'<cancel_reminder\s+id="([0-9]{1,9})"\s*/?>(?:\s*</cancel_reminder>)?')
 # Text an answer shows rather than does: Discord code (``` blocks, a block not closed yet running
-# to the end, `inline` spans) and > quoted lines. A tag in there is an example or a quote of
-# someone else's words, never a request.
-_SHOWN = re.compile(r"```[\s\S]*?(?:```|\Z)|``(?:(?!``)[\s\S])+?``|`[^`\n]+`|^[ \t]*>.*$", re.M)
+# to the end, `inline` spans, which may cross lines) and quotes (a > line; >>> quotes the rest of
+# the message). A tag in there is an example or a quote of someone else's words, never a request.
+_SHOWN = re.compile(
+    r"```[\s\S]*?(?:```|\Z)|``(?:(?!``)[\s\S])+?``|`[^`]+`|^[ \t]*>>>[ \t][\s\S]*|^[ \t]*>.*$",
+    re.M,
+)
 _ISO = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})\s*$")
 _DATE = re.compile(
     r"^\s*(?:(?P<y>\d{4})[-/.])?(?P<mo>\d{1,2})[-/.](?P<d>\d{1,2})"

@@ -2196,8 +2196,8 @@ class DiscordCodexClient(discord.Client):
             # The quoted images are not re-downloaded here, so they are not announced as attached.
             prompt = with_quoted_message(question, pointed.author.display_name, pointed.content, 0)
         reason = self._validate(prompt, [])
-        if reason:
-            await interaction.followup.send(reason, ephemeral=True)
+        if reason:  # after the public defer, so the refusal is public too (as on_message)
+            await interaction.followup.send(reason)
             return
         if asked is not None:
             previews = await self._previews(asked, pointed)

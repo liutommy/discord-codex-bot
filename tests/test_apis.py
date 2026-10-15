@@ -275,6 +275,9 @@ async def test_redirects_never_carry_credentials_to_another_origin(config) -> No
         async def bounce(request: web.Request) -> web.Response:
             return web.Response(status=302, headers={"Location": away})
 
+        async def broken(request: web.Request) -> web.Response:
+            return web.Response(status=302, headers={"Location": "http://[bad"})
+
         async def moved(request: web.Request) -> web.Response:
             return web.Response(status=301, headers={"Location": "/gw/new"})
 
@@ -291,6 +294,7 @@ async def test_redirects_never_carry_credentials_to_another_origin(config) -> No
         home.add_routes(
             [
                 web.get("/gw/bounce", bounce),
+                web.get("/gw/broken", broken),
                 web.get("/gw/old", moved),
                 web.get("/gw/new", new),
                 web.get("/api.php", token),
@@ -302,6 +306,8 @@ async def test_redirects_never_carry_credentials_to_another_origin(config) -> No
             registry = {"lol": Api("lol", base, {"x-api-key": "k"}, "")}
             body = await call_api("lol", "bounce", registry, config)
             assert stolen == [] and "302" in body
+            # an unparsable Location is a failed call, not an exception out of the answer
+            assert "302" in await call_api("lol", "broken", registry, config)
             # a hop within the API's own origin is still followed, headers included
             assert await call_api("lol", "old", registry, config) == '{"key":"k"}'
             wiki = Api(

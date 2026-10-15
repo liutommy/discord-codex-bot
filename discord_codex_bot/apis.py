@@ -182,8 +182,12 @@ async def _get(url: str, api: Api, config: Config) -> tuple[int, str, str]:
             async with session.get(url, allow_redirects=False) as response:
                 location = response.headers.get("Location")
                 if response.status in _REDIRECTS and location:
-                    target = response.url.join(URL(location))
-                    if target.origin() != origin:
+                    try:
+                        target = response.url.join(URL(location))
+                        elsewhere = target.origin() != origin
+                    except ValueError:  # an unparsable Location goes nowhere
+                        elsewhere = True
+                    if elsewhere:
                         return response.status, "text/plain", "轉址到其他網站，未跟隨"
                     url = str(target)
                     continue
