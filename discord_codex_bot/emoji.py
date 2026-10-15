@@ -148,10 +148,10 @@ BLOCK_HEADER = (
 # With EMOJI_REPLY on, after BLOCK_HEADER: the answer may use the emoji too, but not one marked
 # INSUFFICIENT (too few samples to know what it means).
 REPLY_HINT = (
-    "You may use a few of these emoji in your answer. Write one as :name: only (no brackets, no"
-    " description), inside the sentence where it fits, usually at the end of that sentence, as a"
-    " member would type it — never on a line of its own; they show as the emoji. Skip one whose"
-    f" meaning you are unsure of, one marked {INSUFFICIENT}, and one with no description."
+    "You may use a few of these emoji in your answer. Write each as :name: and nothing more (no"
+    " brackets, no description), in the middle or at the end of a sentence, never on a line of"
+    " its own; Discord shows it as the emoji. Skip one whose meaning you are unsure of, one"
+    f" marked {INSUFFICIENT}, and one with no description."
 )
 
 
