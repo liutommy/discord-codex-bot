@@ -304,10 +304,11 @@ Codex reports it *inside* its JSONL stream (`codex_error_info: usage_limit_excee
 `server_overloaded`, often with an empty stderr), so the exit code alone cannot tell these remote
 conditions apart from a crash. The Bot recognises both and answers the rest of the request on
 `CODEX_FALLBACK_MODEL` (default `agy:gemini-3.8-flash|medium`, written like a member's stored
-model; empty disables it and the member gets the usual failure message). The reply says which
-model answered, and that thread is not remembered as resumable — a Codex thread id means nothing
-to another backend. The member's own model choice is untouched; the next request tries Codex
-again. Background classification and memory jobs use the same fallback while preserving their
+model; empty disables it and the member gets the usual failure message). The reply does not say
+that a spare answered — the member gains nothing from it; `/status` shows the last fallback. That
+thread is not remembered as resumable — a Codex thread id means nothing to another backend —
+except on a turn whose model the Bot picked (routing), which keeps the spare's thread and goes on
+from there. The member's own model choice is untouched; the next request tries Codex again. Background classification and memory jobs use the same fallback while preserving their
 isolated/fresh-run settings.
 
 Links are read by the Bot itself, so both backends see the same thing: every http(s) URL in a
