@@ -147,3 +147,11 @@ def test_strip_tracking_leaves_an_unwrapped_signed_link_whole(monkeypatch, rules
     monkeypatch.setattr(clearurls, "clean", rules.clean)
     signed = "https://b.example/f?utm_source=x&sig=abc"
     assert links.strip_tracking("https://hop.example/out?u=" + quote(signed, safe="")) == signed
+
+
+def test_a_malformed_redirect_target_is_not_fatal(rules):
+    from discord_codex_bot import links
+
+    url = "https://hop.example/out?u=http%3A%2F%2F%5Bx"
+    assert rules.clean(url) == "http://[x"  # unwrapped as before, not raised
+    assert links.find_urls(f"看 {url}", 3)  # a member's message is still handled

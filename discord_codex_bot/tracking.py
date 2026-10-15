@@ -1760,7 +1760,8 @@ class RutenFetcher:
             if not name:
                 # Not stored: items are deduplicated by id, so one stored without its name
                 # would never be read again. Still listed next pass, it is retried then.
-                skipped.append(int(item_id))
+                if int(item_id) > seen:  # an older one is not waiting on the cursor
+                    skipped.append(int(item_id))
                 continue
             price = product.get("goods_price")
             ship = str(product.get("pre_order_ship_date") or "").strip()

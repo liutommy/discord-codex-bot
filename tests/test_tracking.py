@@ -1452,3 +1452,13 @@ async def test_a_full_page_without_the_last_newest_item_is_logged_as_a_gap(
         await fetcher.fetch(Source(1, "youtube", "UC5CwaMl1eIgY8h02uZw7u8A", "@x", cursor="v5"))
         await fetcher.fetch(Source(1, "youtube", "UC5CwaMl1eIgY8h02uZw7u8A", "@x"))  # baseline
         assert "may have been missed" not in caplog.text
+
+
+async def test_an_older_nameless_ruten_listing_does_not_hold_the_cursor_back(monkeypatch) -> None:
+    """Only a listing newer than the last cursor is waiting to be read; an older one without a
+    name kept the cursor where it was, and every pass read the same pages again."""
+    items = {"status": "success", "data": [RUTEN_ITEMS["data"][0]]}  # 151 comes back nameless
+    _ruten(monkeypatch, {"/prod": RUTEN_LISTING, "/list": items})
+    source = Source(7, "ruten", "x", "x", cursor="22640792418155", state={"user_id": "4761983"})
+    result = await _fetcher().fetch(source)
+    assert result.cursor == "22640792418162"

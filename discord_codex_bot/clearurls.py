@@ -102,7 +102,8 @@ class Rules:
                 match = redirect.search(url)
                 target = unquote(match.group(1)) if match and match.lastindex else ""
                 if target.startswith(("http://", "https://")) and depth < MAX_REDIRECT_DEPTH:
-                    if signed(urlsplit(target).query):
+                    # partition, not urlsplit: a malformed target ("http://[x") must not raise
+                    if signed(target.partition("?")[2].partition("#")[0]):
                         return target  # unwrapped, but every parameter is under the signature
                     return self.clean(target, depth + 1)
             for raw in provider.raw_rules:

@@ -45,7 +45,7 @@ def parse_when(text: str, now: datetime | None = None) -> datetime | None:
     can hold ("99999999999天後") is not understood either, not an error."""
     try:
         return _parse_when(text, now)
-    except OverflowError:
+    except (OverflowError, ValueError):  # ValueError: a number past Python's 4300-digit limit
         return None
 
 

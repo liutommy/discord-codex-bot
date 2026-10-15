@@ -139,3 +139,9 @@ def test_a_huge_relative_time_is_not_understood_rather_than_an_error() -> None:
 
     for text in ("99999999999天後", "999999999999999999999分鐘後", "9999999天後"):
         assert parse_when(text, NOW) is None
+
+
+def test_a_number_too_long_for_python_is_not_understood_either() -> None:
+    from discord_codex_bot.reminders import parse_when
+
+    assert parse_when("1" * 5000 + "天後", NOW) is None
