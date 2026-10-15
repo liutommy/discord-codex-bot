@@ -213,3 +213,30 @@ def test_backup_includes_grok_transcripts_wherever_grok_dir_is(tmp_path: Path, c
     target = make_backup(cfg, now=1_700_000_000)
     with tarfile.open(target) as tar:
         assert "grok/gk-1.json" in tar.getnames()
+
+
+def test_backup_keeps_uploaded_instructions_link_modes_and_the_harvest_ledger(
+    tmp_path: Path, config
+) -> None:
+    """An uploaded persona or style, each server's link-cleaning mode and the record of which
+    conversations were already distilled into memory are all the Bot's own state: lost with the
+    volume, the persona falls back to the image, servers lose their mode, and every conversation
+    is harvested into memory a second time."""
+    import sqlite3
+
+    home = _home(tmp_path)
+    (home / "instructions").mkdir()
+    (home / "instructions" / "persona.md").write_text("uploaded persona", "utf-8")
+    (home / "harvest_ledger.jsonl").write_text('{"thread": "t1"}\n', "utf-8")
+    with sqlite3.connect(home / "linkclean.sqlite3") as db:
+        db.execute("CREATE TABLE modes (guild INTEGER, mode TEXT)")
+        db.execute("INSERT INTO modes VALUES (1, 'links')")
+    cfg = replace(config, codex_home=home, backup_dir=tmp_path / "backups")
+    target = make_backup(cfg, now=1_700_000_000)
+    with tarfile.open(target) as tar:
+        names = set(tar.getnames())
+        snapshot = tmp_path / "restored.sqlite3"
+        snapshot.write_bytes(tar.extractfile("linkclean.sqlite3").read())
+    assert {"instructions/persona.md", "harvest_ledger.jsonl", "linkclean.sqlite3"} <= names
+    with sqlite3.connect(snapshot) as db:
+        assert db.execute("SELECT mode FROM modes").fetchall() == [("links",)]
