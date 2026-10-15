@@ -15,11 +15,11 @@ thread, or old threads keep answering with the old persona: see `instructions_ve
 from __future__ import annotations
 
 import logging
-import os
 import time
 from pathlib import Path
 
 from .config import Config
+from .memory import atomic_write
 
 LOGGER = logging.getLogger(__name__)
 
@@ -102,11 +102,9 @@ def parse_upload(filename: str, data: bytes, limit: int = MAX_CHARS) -> str:
 
 
 def _write(path: Path, text: str) -> None:
-    """Atomic. A thread starting mid-write must never read half an AGENTS.md."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    scratch = path.with_name(path.name + ".tmp")
-    scratch.write_text(text, "utf-8")
-    os.replace(scratch, path)
+    """Atomic. A thread starting mid-write must never read half an AGENTS.md, and two writers
+    never share a scratch file (memory.atomic_write)."""
+    atomic_write(path, text)
 
 
 def backup(config: Config, kind: str, now: float | None = None) -> Path | None:

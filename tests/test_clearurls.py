@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -130,3 +131,27 @@ def test_shipped_rules_cover_the_common_share_links(shipped, dirty, clean):
 def test_shipped_rules_leave_a_plain_link_byte_identical(shipped):
     url = "https://a.example/?source=article&ref=revision&src=image&feature=preview&si=id"
     assert shipped.clean(url) == url
+
+
+def test_a_signed_link_behind_a_redirector_is_unwrapped_but_left_whole(rules):
+    """The signature covers every parameter: unwrapping is fine, cleaning the target is not."""
+    signed = "https://b.example/f?utm_source=x&X-Amz-Signature=abc&id=1"
+    wrapped = "https://hop.example/out?u=" + quote(signed, safe="")
+    assert rules.clean(wrapped) == signed
+
+
+def test_strip_tracking_leaves_an_unwrapped_signed_link_whole(monkeypatch, rules):
+    from discord_codex_bot import clearurls, links
+
+    monkeypatch.setattr(clearurls, "_RULES", rules, raising=False)
+    monkeypatch.setattr(clearurls, "clean", rules.clean)
+    signed = "https://b.example/f?utm_source=x&sig=abc"
+    assert links.strip_tracking("https://hop.example/out?u=" + quote(signed, safe="")) == signed
+
+
+def test_a_malformed_redirect_target_is_not_fatal(rules):
+    from discord_codex_bot import links
+
+    url = "https://hop.example/out?u=http%3A%2F%2F%5Bx"
+    assert rules.clean(url) == "http://[x"  # unwrapped as before, not raised
+    assert links.find_urls(f"看 {url}", 3)  # a member's message is still handled

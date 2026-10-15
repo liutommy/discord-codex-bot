@@ -286,6 +286,7 @@ MAX_MESSAGE_CHARS = 600
 # for the next call. A source that floods (a shop listing, a busy page) used to send its whole
 # backlog in one prompt, and one item missing from the answer threw every judgement away.
 MAX_CLASSIFY_BATCH = 30
+PAGE_SIZE = 20  # items a YouTube or Twitch pass reads (one page)
 # Items the Bot first saw longer ago than this are no longer worth a notification: they leave
 # the queue unjudged instead of piling up behind a watch that cannot keep pace. An interval
 # watch keeps its items for twice its interval when that is longer (see _pending_minutes).
@@ -1196,7 +1197,7 @@ class YouTubeFetcher:
                     # the classifier judging blind.
                     "part": "snippet,contentDetails",
                     "playlistId": uploads,
-                    "maxResults": "20",
+                    "maxResults": str(PAGE_SIZE),
                     "key": self.api_key,
                 },
                 limit=self.max_response_bytes,
@@ -1235,6 +1236,7 @@ class YouTubeFetcher:
                 )
                 by_id = {str(item.get("id")): item for item in details.get("items", [])}
                 items = [_hydrate_youtube(item, by_id.get(item.external_id, {})) for item in items]
+        _warn_gap(source, [item.external_id for item in items], len(listing.get("items", [])))
         cursor = items[0].external_id if items else source.cursor
         return FetchResult(tuple(items), cursor, source.state)
 
@@ -1389,7 +1391,7 @@ class TwitchFetcher:
                 self._helix(
                     session,
                     "videos",
-                    {"user_id": source.external_id, "first": "20", "type": "archive"},
+                    {"user_id": source.external_id, "first": str(PAGE_SIZE), "type": "archive"},
                 ),
             )
         items: list[ContentItem] = []
@@ -1428,10 +1430,27 @@ class TwitchFetcher:
                     )
                 )
         items.sort(key=lambda item: item.published_at, reverse=True)
+        if source.cursor.startswith("video:"):  # a live stream's id is gone once it ends
+            videos_seen = [item.external_id for item in items if item.kind == "video"]
+            _warn_gap(source, videos_seen, len(videos.get("data", [])))
         cursor = items[0].external_id if items else source.cursor
         state = dict(source.state)
         state["online"] = bool(streams.get("data"))
         return FetchResult(tuple(items), cursor, state)
+
+
+def _warn_gap(source: Source, ids: Sequence[str], listed: int) -> None:
+    """A full page that no longer reaches the newest item the last pass saw: the source posted
+    more than a page in between, and the older new items were not read. Logged, not fetched: a
+    page is all a pass reads (a deleted item can also cause this, so it says "may")."""
+    if source.cursor and listed >= PAGE_SIZE and source.cursor not in ids:
+        LOGGER.warning(
+            "%s source %s: a full page of %d without the last pass's newest item; "
+            "older new items may have been missed",
+            source.provider,
+            source.id,
+            PAGE_SIZE,
+        )
 
 
 X_PROFILE_HOSTS = {
@@ -1734,12 +1753,15 @@ class RutenFetcher:
                     raise ProviderError("露天商品資料的格式看不懂（介面可能改了）")
                 products.update((str(p.get("id")), p) for p in data if isinstance(p, dict))
         items = []
+        skipped: list[int] = []
         for item_id in reversed(ids):  # oldest first, like a feed
             product = products.get(item_id, {})
             name = " ".join(str(product.get("name") or "").split())[:300]
             if not name:
                 # Not stored: items are deduplicated by id, so one stored without its name
                 # would never be read again. Still listed next pass, it is retried then.
+                if int(item_id) > seen:  # an older one is not waiting on the cursor
+                    skipped.append(int(item_id))
                 continue
             price = product.get("goods_price")
             ship = str(product.get("pre_order_ship_date") or "").strip()
@@ -1761,8 +1783,11 @@ class RutenFetcher:
             )
         if not items:  # listed, but not one name came back: the item format moved
             raise ProviderError("露天商品資料裡沒有任何商品名（介面可能改了）")
-        cursor = max(ids, key=int)
-        return FetchResult(tuple(items), cursor, dict(source.state))
+        # The cursor decides how far back the next pass reads: never past a skipped listing, or a
+        # busy store could push it beyond the pages read before it is retried.
+        newest = max(map(int, ids))
+        cursor = min(newest, min(skipped) - 1) if skipped else newest
+        return FetchResult(tuple(items), str(max(cursor, seen)), dict(source.state))
 
 
 def parse_web_locator(locator: str) -> str:

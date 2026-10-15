@@ -130,3 +130,18 @@ def test_extract_reminder_tags_and_render_pending() -> None:
         {"id": 2, "user_id": 3, "target_id": 9, "due": "2026-09-14T02:00:00+00:00", "text": "開團"},
     ]
     assert render_pending(items) == "#1 09/14 09:30 倒垃圾\n#2 09/14 10:00 開團（提醒 <@9>）"
+
+
+def test_a_huge_relative_time_is_not_understood_rather_than_an_error() -> None:
+    """「99999999999天後」 is past what a date can hold: timedelta or the addition raised
+    OverflowError out of the command and out of the answer that carried the tag."""
+    from discord_codex_bot.reminders import parse_when
+
+    for text in ("99999999999天後", "999999999999999999999分鐘後", "9999999天後"):
+        assert parse_when(text, NOW) is None
+
+
+def test_a_number_too_long_for_python_is_not_understood_either() -> None:
+    from discord_codex_bot.reminders import parse_when
+
+    assert parse_when("1" * 5000 + "天後", NOW) is None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -975,7 +976,7 @@ async def test_a_listing_without_a_name_is_left_for_the_next_pass(monkeypatch) -
     source = Source(7, "ruten", "x", "x", state={"user_id": "4761983", "keyword": ""})
     result = await _fetcher().fetch(source)
     assert [i.external_id for i in result.items] == ["22640792418162"]
-    assert result.cursor == "22640792418162"
+    assert result.cursor == "22640792418150"  # just before the nameless one, so it is read again
 
 
 async def test_listings_that_come_back_without_any_name_raise(monkeypatch) -> None:
@@ -1408,3 +1409,56 @@ async def test_a_slow_full_pass_still_waits_an_interval_before_the_next(
     with pytest.raises(asyncio.CancelledError):
         await tracking.tracking_loop(store, slow_fetch, _nothing_new, _no_delivery, 900)
     assert slept == [900.0]
+
+
+async def test_the_ruten_cursor_stops_before_a_listing_that_came_without_its_name(
+    monkeypatch,
+) -> None:
+    """A listing whose name did not come back is not stored, to be read again next pass. The
+    cursor decides how far back that pass reads; past the skipped id, a busy store could push it
+    beyond the pages read and it was never seen again."""
+    nameless = {
+        "status": "success",
+        "data": [{"id": "22640792418162", "name": "新品", "goods_price": 1}],
+    }
+    _ruten(monkeypatch, {"/prod": RUTEN_LISTING, "/list": nameless})
+    source = Source(7, "ruten", "x", "x", cursor="22640792418100", state={"user_id": "4761983"})
+    result = await _fetcher().fetch(source)
+    assert [i.external_id for i in result.items] == ["22640792418162"]
+    assert int(result.cursor) < 22640792418151  # the nameless one is still ahead of it
+    assert int(result.cursor) >= 22640792418100  # never behind where it was
+
+
+async def test_a_full_page_without_the_last_newest_item_is_logged_as_a_gap(
+    monkeypatch, caplog
+) -> None:
+    """Twenty items a pass: a channel that posted more than that between two passes loses the
+    rest without a trace. The pass says so when it may have happened."""
+    entries = [
+        {"contentDetails": {"videoId": f"v{i}", "videoPublishedAt": "2026-10-01T00:00:00Z"},
+         "snippet": {"title": f"t{i}"}}
+        for i in range(20)
+    ]  # fmt: skip
+
+    async def fake_json_request(_session, _method, url, params=None, limit=0):
+        return {"items": entries} if url.endswith("/playlistItems") else {"items": []}
+
+    monkeypatch.setattr("discord_codex_bot.tracking._json_request", fake_json_request)
+    fetcher = YouTubeFetcher("key", session_factory=lambda **kw: EmptySession())
+    with caplog.at_level(logging.WARNING, logger="discord_codex_bot.tracking"):
+        await fetcher.fetch(Source(1, "youtube", "UC5CwaMl1eIgY8h02uZw7u8A", "@x", cursor="old"))
+        assert "may have been missed" in caplog.text
+        caplog.clear()
+        await fetcher.fetch(Source(1, "youtube", "UC5CwaMl1eIgY8h02uZw7u8A", "@x", cursor="v5"))
+        await fetcher.fetch(Source(1, "youtube", "UC5CwaMl1eIgY8h02uZw7u8A", "@x"))  # baseline
+        assert "may have been missed" not in caplog.text
+
+
+async def test_an_older_nameless_ruten_listing_does_not_hold_the_cursor_back(monkeypatch) -> None:
+    """Only a listing newer than the last cursor is waiting to be read; an older one without a
+    name kept the cursor where it was, and every pass read the same pages again."""
+    items = {"status": "success", "data": [RUTEN_ITEMS["data"][0]]}  # 151 comes back nameless
+    _ruten(monkeypatch, {"/prod": RUTEN_LISTING, "/list": items})
+    source = Source(7, "ruten", "x", "x", cursor="22640792418155", state={"user_id": "4761983"})
+    result = await _fetcher().fetch(source)
+    assert result.cursor == "22640792418162"

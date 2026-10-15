@@ -90,6 +90,22 @@ def test_a_deleted_message_takes_its_samples_with_it(store: EmojiStore) -> None:
     assert [s.text for s in store.samples(PEPE)] == ["好耶"] and store.samples(CAT) == []
 
 
+def test_a_deleted_message_sends_its_emoji_back_for_a_new_description(store) -> None:
+    """A description summarises the samples. With one deleted it no longer matches them, and
+    with all of them gone it would keep saying what deleted messages said."""
+    store.describe(PEPE, "綠色青蛙，常用來表示無奈", False, "bot:x")
+    store.describe(CAT, "一隻貓", False, "bot:x")
+    _sample(store, PEPE, 1)
+    _sample(store, PEPE, 2)
+    _sample(store, CAT, 1)
+    store.describe(PEPE, "綠色青蛙，常用來表示無奈", False, "bot:x", seen=2)
+    store.describe(CAT, "一隻貓", False, "bot:x", seen=1)
+    assert store.get(PEPE).added == 0 and store.get(CAT).added == 0
+    store.forget_messages([1])
+    assert store.get(PEPE).added == 1 and store.get(PEPE).description  # samples left: redo
+    assert store.get(CAT).added == 1 and store.get(CAT).description == ""  # none left: cleared
+
+
 # ----------------------------------------------------------------------------- prompts
 
 
