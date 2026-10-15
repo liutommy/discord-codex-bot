@@ -193,7 +193,8 @@ A Ruten store is not a web source. Its store page is a script shell, and read as
 links labelled only 「預購」 — the classifier had no product name to judge, and a busy store adds
 about twenty listings an hour. `https://www.ruten.com.tw/store/<account>/` is resolved once to the
 seller's numeric id (`rapi.ruten.com.tw/api/users/v1/index.php/<account>/storeinfo`); each pass then
-reads the newest 30 listing ids (`rtapi.ruten.com.tw/api/search/v3/index.php/core/seller/<id>/prod`)
+reads the newest 30 listing ids (up to 4 pages of them when the store added more than a page
+since the last pass) (`rtapi.ruten.com.tw/api/search/v3/index.php/core/seller/<id>/prod`)
 and their names, prices and pre-order months (`rapi.ruten.com.tw/api/items/v2/list`). Track the
 whole store and let the interest carry every spelling a name might use (rurudo / るるど / 露露多):
 the model matches those, while the store's own search (`…/store/<account>/find?q=rurudo`, a
@@ -756,7 +757,8 @@ operators listed in `LINKCLEAN_ADMIN_IDS` may use this command.
 
 Two layers remove tracking parameters. The [ClearURLs](https://gitlab.com/ClearURLs/rules)
 rule set (LGPL-3.0, 200+ site-scoped providers, fetched daily by `scripts/fetch_clearurls.py`
-into `config/clearurls.json`) is applied first, including its known redirector unwrapping
+into `config/clearurls.json`; a change is committed locally and rebuilds the image, restarting the Bot,
+through `scripts/daily_rebuild.sh`) is applied first, including its known redirector unwrapping
 (for example `google.com/url?q=`); its affiliate-id (`referralMarketing`) and request-blocking
 (`completeProvider`) rules are not used. The Bot's own blocklist (`utm_*`, click ids such as
 `fbclid`, `gclid`, `ttclid`, `igsh`) is then applied as the floor, so cleaning still works
