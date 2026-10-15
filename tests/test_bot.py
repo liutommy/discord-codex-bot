@@ -1515,7 +1515,11 @@ async def test_handle_answer_button_remember_and_redo(client, backends, monkeypa
     client.threads.remember(key, "thread-abc", 4242, plain=plain, model=model)
     await client.handle_answer_button(interaction, "redo", USER)
     assert interaction.response.deferred
-    assert sent[-1] == ("followup", "答案", "AnswerView")
+    assert sent[-1][0] == "followup" and sent[-1][2] == "AnswerView"
+    # the new answer quotes the question too, so 🔁 / 👍 on *it* still find what was asked
+    from discord_codex_bot.ui import recover_exchange
+
+    assert recover_exchange(sent[-1][1]) == ("今天吃什麼", "答案")
     assert backends[0].calls[-1][0] == "今天吃什麼"
     assert backends[0].calls[-1][2]["resume"] == "thread-abc"
     assert client.threads.by_message(9999, plain=plain, model=model) == "t1"  # redo answer linked

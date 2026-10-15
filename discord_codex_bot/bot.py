@@ -2274,8 +2274,10 @@ class DiscordCodexClient(discord.Client):
     async def send_answer(self, destination, prompt: str, result, guild_id, user_id):
         """Post an answer (with its buttons) through any `.send`-able destination — used by the
         🔁 button, which lands the new answer as a follow-up. Returns the message the destination
-        handed back (when it does), so the caller can link it to the thread."""
-        chunks = split_discord_message(result.text)
+        handed back (when it does), so the caller can link it to the thread. The question is
+        quoted on top as on a slash answer: a follow-up is no reply, and 🔁 / 👍 on it find the
+        question there."""
+        chunks = split_discord_message(format_reply(prompt, result.text, resumed=result.resumed))
         try:
             sent = await destination.send(
                 chunks[0],
