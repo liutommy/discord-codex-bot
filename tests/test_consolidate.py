@@ -156,3 +156,43 @@ async def test_consolidate_scope_batches_large_input(tmp_path: Path) -> None:
     assert await consolidate_scope(store, "guild", 1, None, echo, 320) == (4, 4)
     assert len(prompts) == 2
     assert [n.name for n in store.notes("guild", 1, None)] == ["n0", "n1", "n2", "n3"]
+
+
+async def test_a_scope_changed_while_the_model_works_is_left_alone(tmp_path: Path) -> None:
+    """The rewrite replaces the scope wholesale. A /remember, 👍 or /forget that lands while the
+    model is still working would be lost (or the forgotten note brought back) by it."""
+    store = MemoryStore(tmp_path, LIMITS)
+    store.add("guild", 1, None, "a", "old")
+    store.add("guild", 1, None, "gone", "forget me")
+    store.add("user", 1, 7, "b", "mine")
+
+    async def runner(prompt: str) -> str:
+        incoming = json.loads(prompt.split("\n\n", 1)[1])["notes"]
+        if any(note["name"] == "a" for note in incoming):
+            store.add("guild", 1, None, "new", "added meanwhile")
+            store.forget("guild", 1, None, "gone")
+        return json.dumps({"notes": incoming})
+
+    summary = await consolidate_all(store, runner, max_input_bytes=100_000)
+    assert "1/伺服器: skipped" in summary and "1/個人/7: 1 → 1" in summary
+    assert [n.text for n in store.notes("guild", 1, None)] == ["old", "added meanwhile"]
+    assert not (tmp_path / "1" / "guild" / ".backup").exists()
+
+
+async def test_one_empty_batch_keeps_the_whole_scope(tmp_path: Path) -> None:
+    """A batch the model answered with no notes would silently drop every note in it, even when
+    the other batches came back fine."""
+    store = MemoryStore(tmp_path, LIMITS)
+    for i in range(4):
+        store.add("guild", 1, None, f"n{i}", "x" * 100)
+    calls = 0
+
+    async def runner(prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        incoming = json.loads(prompt.split("\n\n", 1)[1])["notes"]
+        return json.dumps({"notes": incoming if calls == 1 else []})
+
+    summary = await consolidate_all(store, runner, max_input_bytes=320)
+    assert calls == 2 and "1/伺服器: failed" in summary
+    assert len(store.notes("guild", 1, None)) == 4
