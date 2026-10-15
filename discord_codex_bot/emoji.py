@@ -358,13 +358,23 @@ class EmojiStore:
             connection.execute("UPDATE emojis SET uses=uses+1 WHERE emoji_id=?", (emoji_id,))
 
     def forget_messages(self, message_ids: Iterable[int]) -> int:
-        """A deleted message is kept nowhere: not as a sample (its use count stays), and not as
-        the message before another one's; how many samples changed."""
+        """A deleted message is kept nowhere: not as a sample (its use count stays), not as the
+        message before another one's, and not in a description: every emoji it was evidence
+        for is described again, and one left with no samples loses its description now.
+        Returns how many samples changed."""
         ids = list(message_ids)
         if not ids:
             return 0
         marks = ",".join("?" * len(ids))
         with self._connect() as connection:
+            touched = [
+                row["emoji_id"]
+                for row in connection.execute(
+                    f"""SELECT DISTINCT emoji_id FROM samples
+                        WHERE message_id IN ({marks}) OR previous_id IN ({marks})""",
+                    [*ids, *ids],
+                )
+            ]
             gone = connection.execute(
                 f"DELETE FROM samples WHERE message_id IN ({marks})", ids
             ).rowcount
@@ -372,6 +382,17 @@ class EmojiStore:
                 f"UPDATE samples SET previous='', previous_id=NULL WHERE previous_id IN ({marks})",
                 ids,
             ).rowcount
+            if touched:
+                emoji_marks = ",".join("?" * len(touched))
+                connection.execute(
+                    f"UPDATE emojis SET added=added+1 WHERE emoji_id IN ({emoji_marks})", touched
+                )
+                connection.execute(
+                    f"""UPDATE emojis SET description='', insufficient=0
+                        WHERE emoji_id IN ({emoji_marks})
+                        AND NOT EXISTS (SELECT 1 FROM samples WHERE emoji_id=emojis.emoji_id)""",
+                    touched,
+                )
         return gone + cleared
 
     def samples(self, emoji_id: int) -> list[Sample]:
