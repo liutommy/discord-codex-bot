@@ -308,6 +308,11 @@ async def test_redirects_never_carry_credentials_to_another_origin(config) -> No
             assert stolen == [] and "302" in body
             # an unparsable Location is a failed call, not an exception out of the answer
             assert "302" in await call_api("lol", "broken", registry, config)
+            # a base written without its trailing slash: a path starting "@host" would make the
+            # base the userinfo and send the key to that host
+            bare = {"lol": Api("lol", f"http://127.0.0.1:{server.port}", {"x-api-key": "k"}, "")}
+            body = await call_api("lol", f"@127.0.0.1:{thief.port}/steal", bare, config)
+            assert stolen == [] and "（" in body
             # a hop within the API's own origin is still followed, headers included
             assert await call_api("lol", "old", registry, config) == '{"key":"k"}'
             wiki = Api(

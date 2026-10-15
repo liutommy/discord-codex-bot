@@ -170,6 +170,13 @@ def _api_error(body: str) -> tuple[str, str]:
     return str(error.get("code") or "unknown"), str(error.get("info") or "")[:200]
 
 
+def _origin(url: str) -> URL | None:
+    try:
+        return URL(url).origin()
+    except ValueError:
+        return None
+
+
 async def _get(url: str, api: Api, config: Config) -> tuple[int, str, str]:
     """(status, content type, body). A redirect off the API's origin comes back as its own 3xx
     status with a note instead of being followed."""
@@ -267,6 +274,8 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     if "://" in path or path.startswith("//") or ".." in path:
         return "（path 只能是相對於該 API 的端點與查詢字串）"
     url = api.base + path.lstrip("/")
+    if _origin(url) != URL(api.base).origin():  # e.g. a base without "/" and a path "@host"
+        return "（path 只能是相對於該 API 的端點與查詢字串）"
     if api.login and api.name not in _LOGGED_IN:
         await _login(api, config)
     body = ""
