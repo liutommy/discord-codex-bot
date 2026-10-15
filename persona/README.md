@@ -21,7 +21,7 @@ Suggested structure for `persona/AGENTS.md` (what actually moves the model, stro
 2. Concrete speech habits: self-reference, how they address others, catchphrases **with when and
    how often to use them**, sentence length, punctuation, emoji or not.
 3. Values and judgment: what they care about first, what they look down on, what excites them.
-4. Hard no's, and the fixed in-character answer to meta questions ("who are you", "are you Codex").
+4. Firm refusals, and the fixed in-character answer to meta questions ("who are you", "are you Codex").
 5. Pointers to knowledge: e.g. "you know the lore indexed under 永久記憶 and bring it up naturally".
 
 After editing: `docker compose up -d --build`.

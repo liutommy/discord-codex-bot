@@ -508,7 +508,7 @@ shorter answers does not also discard the character.
 That composition happens when the Bot starts, not when the image is built, so the persona and the
 default output style can be replaced while it runs: `/<prefix>-persona action:上傳` opens a modal
 taking one `.md` for each (either alone is fine, UTF-8, 20000 characters). An uploaded file lives
-in the Codex volume and wins over the image copy until `action:還原…` deletes it, so a rebuild no
+in the Codex volume and takes precedence over the image copy until `action:還原…` deletes it, so a rebuild no
 longer discards it — and editing the repo then rebuilding has no visible effect while an upload is
 in force, which is what the status action is for. Whatever the upload replaced is written to
 `BACKUP_DIR/instructions/<kind>-<timestamp>.md` first. The command is gated like the other
@@ -532,7 +532,7 @@ Each member can set their own with `/codex-style text:…` for a one-liner, or `
 send one Markdown file — a slash-command option is a single line, so anything longer belongs in a
 file. The upload is UTF-8 `.md` bounded by 4000 characters, the same ceiling Discord puts on a
 modal paragraph. Either way it is stored as `memory/<guild>/users/<member>/style.md` and injected
-as `<PERSONAL_STYLE>`, which wins over the default where they conflict. Inspect it with `/codex-style`
+as `<PERSONAL_STYLE>`, which takes precedence over the default where they conflict. Inspect it with `/codex-style`
 and return to the default with `/codex-style clear:True`.
 
 Codex can also generate images (`image_generation = true`). The built-in tool writes them to
@@ -550,7 +550,7 @@ also clears the tmpfs.
 
 With `XSEARCH_URL` set, Grok is also a backend members can pick (`/codex-model provider:Grok`):
 the models and effort levels are the plan's own catalog, read from the sidecar's `/models` and
-refreshed every six hours (today grok-4.7, grok-4.7-build-fast, grok-4.6 at low/medium/high/
+refreshed every six hours (as of 2026-10: grok-4.7, grok-4.7-build-fast, grok-4.6 at low/medium/high/
 xhigh, and grok-4.5 without xhigh); an effort a model does not offer maps to the closest one
 below it. `DEFAULT_MODEL=grok:grok-4.7|medium` makes it what members get until they choose.
 
@@ -656,7 +656,7 @@ id would become the tracking cursor and hide every real post), and posts read fo
 labelled unverified, with a note when the author differs from the link's account. Grok's own `--sandbox`
 needs user namespaces that the hardened container does not grant, so there the container is the
 sandbox (read-only rootfs, non-root, no capabilities). Its network is not restricted by this
-repo: it needs xAI, and limiting what else it can reach is up to the host. Note the gotcha that motivated layer 3: `--disallowed-tools run_terminal_command`,
+repo: it needs xAI, and limiting what else it can reach is up to the host. Note the pitfall that motivated layer 3: `--disallowed-tools run_terminal_command`,
 spelled as the tool list spells it, leaves the shell in place.
 
 Sign-in, once: sign in to Grok Build on any machine (`grok login`), then copy its
