@@ -975,7 +975,7 @@ async def test_a_listing_without_a_name_is_left_for_the_next_pass(monkeypatch) -
     source = Source(7, "ruten", "x", "x", state={"user_id": "4761983", "keyword": ""})
     result = await _fetcher().fetch(source)
     assert [i.external_id for i in result.items] == ["22640792418162"]
-    assert result.cursor == "22640792418162"
+    assert result.cursor == "22640792418150"  # just before the nameless one, so it is read again
 
 
 async def test_listings_that_come_back_without_any_name_raise(monkeypatch) -> None:
@@ -1408,3 +1408,21 @@ async def test_a_slow_full_pass_still_waits_an_interval_before_the_next(
     with pytest.raises(asyncio.CancelledError):
         await tracking.tracking_loop(store, slow_fetch, _nothing_new, _no_delivery, 900)
     assert slept == [900.0]
+
+
+async def test_the_ruten_cursor_stops_before_a_listing_that_came_without_its_name(
+    monkeypatch,
+) -> None:
+    """A listing whose name did not come back is not stored, to be read again next pass. The
+    cursor decides how far back that pass reads; past the skipped id, a busy store could push it
+    beyond the pages read and it was never seen again."""
+    nameless = {
+        "status": "success",
+        "data": [{"id": "22640792418162", "name": "新品", "goods_price": 1}],
+    }
+    _ruten(monkeypatch, {"/prod": RUTEN_LISTING, "/list": nameless})
+    source = Source(7, "ruten", "x", "x", cursor="22640792418100", state={"user_id": "4761983"})
+    result = await _fetcher().fetch(source)
+    assert [i.external_id for i in result.items] == ["22640792418162"]
+    assert int(result.cursor) < 22640792418151  # the nameless one is still ahead of it
+    assert int(result.cursor) >= 22640792418100  # never behind where it was

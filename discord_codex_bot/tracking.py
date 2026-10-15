@@ -1734,12 +1734,14 @@ class RutenFetcher:
                     raise ProviderError("露天商品資料的格式看不懂（介面可能改了）")
                 products.update((str(p.get("id")), p) for p in data if isinstance(p, dict))
         items = []
+        skipped: list[int] = []
         for item_id in reversed(ids):  # oldest first, like a feed
             product = products.get(item_id, {})
             name = " ".join(str(product.get("name") or "").split())[:300]
             if not name:
                 # Not stored: items are deduplicated by id, so one stored without its name
                 # would never be read again. Still listed next pass, it is retried then.
+                skipped.append(int(item_id))
                 continue
             price = product.get("goods_price")
             ship = str(product.get("pre_order_ship_date") or "").strip()
@@ -1761,8 +1763,11 @@ class RutenFetcher:
             )
         if not items:  # listed, but not one name came back: the item format moved
             raise ProviderError("露天商品資料裡沒有任何商品名（介面可能改了）")
-        cursor = max(ids, key=int)
-        return FetchResult(tuple(items), cursor, dict(source.state))
+        # The cursor decides how far back the next pass reads: never past a skipped listing, or a
+        # busy store could push it beyond the pages read before it is retried.
+        newest = max(map(int, ids))
+        cursor = min(newest, min(skipped) - 1) if skipped else newest
+        return FetchResult(tuple(items), str(max(cursor, seen)), dict(source.state))
 
 
 def parse_web_locator(locator: str) -> str:
