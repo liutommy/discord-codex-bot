@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
@@ -88,6 +89,7 @@ from .links import (
     link_blocks,
     strip_tracking,
     understand_video,
+    unreadable,
 )
 from .memory import (
     RECALL_TAG,
@@ -147,6 +149,8 @@ from .ui import (
 from .usage import probe_rate_limits, read_rate_limits
 
 LOGGER = logging.getLogger(__name__)
+# Closes every recall round; a spare taking over mid-recall gets the round's results without it.
+ANSWER_NOW = "\n\nNow answer the member's question."
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
 FAILURE_MESSAGE = (
     "Codex 執行失敗。請用 /{prefix}-status 檢查登入狀態，並通知 Bot 管理者查看 container log。"
@@ -1021,11 +1025,11 @@ class DiscordCodexClient(discord.Client):
             self.config.tracking_keep_days,
         )
 
-    async def _read_page(self, url: str) -> str:
-        """One page as text, with its links kept inline. No out_dir: a background poll has
-        nobody to show a screenshot to, and nothing to clean up afterwards."""
+    async def _read_page(self, url: str) -> tuple[str, bool]:
+        """(one page as text with its links kept inline, whether it was read at all). No out_dir:
+        a background poll has nobody to show a screenshot to, and nothing to clean up afterwards."""
         text, _shots = await fetch_or_render(url, self.config, None, False)
-        return text
+        return text, not unreadable(text)
 
     async def _fetch_tracking_source(self, source: Source):
         fetcher = {
@@ -1310,6 +1314,9 @@ class DiscordCodexClient(discord.Client):
             # the same `_grok_usable` gate the Grok default turn goes through (`next_spare`).
             spares = [spare for spare in spares if spare.backend != GROK]
         drop_resume = fell_back  # only the caller's id is foreign; later recall rounds chain
+        first: tuple[str, dict] | None = None  # the question as first asked, for a spare
+        results: list[str] = []  # every recall round's results so far, oldest first
+        result_images: list[Path] = []  # and the screenshots / sandbox images they came with
 
         async def next_spare():
             nonlocal spares
@@ -1343,8 +1350,13 @@ class DiscordCodexClient(discord.Client):
             return await run_codex(text, self.config, effort=via.effort, **kw)
 
         async def turn(text: str, **kw) -> CodexResult:
-            nonlocal target, fell_back, spares, drop_resume
+            nonlocal target, fell_back, spares, drop_resume, first
             kw.setdefault("on_delta", on_delta)
+            if kw.get("raw"):
+                results.append(text.removesuffix(ANSWER_NOW))
+                result_images.extend(kw.get("images", ()))
+            else:
+                first = (text, dict(kw))
             if drop_resume:
                 kw.pop("resume", None)  # a thread id means nothing to another backend
                 drop_resume = False
@@ -1376,7 +1388,21 @@ class DiscordCodexClient(discord.Client):
                         await self.alerts.login_lost("Grok", str(unavailable))
                     elif isinstance(unavailable, grok.GrokRefused):
                         await self._grok_refused(unavailable)
-                    if kw.pop("resume", None) and spare_history and not kw.get("raw"):
+                    if kw.get("raw") and first is not None:
+                        # A recall round is only results and "now answer" for the thread that
+                        # asked; the spare holds none of it. Ask it the whole question again,
+                        # with every result read so far.
+                        text, asked = first
+                        kw = {
+                            **asked,
+                            "on_delta": kw["on_delta"],
+                            "images": [*asked.get("images", ()), *result_images],
+                            "links": "\n\n".join(b for b in (asked.get("links"), *results) if b),
+                        }
+                        kw.pop("resume", None)
+                        if spare_history:
+                            kw.setdefault("history", spare_history)
+                    elif kw.pop("resume", None) and spare_history and not kw.get("raw"):
                         kw.setdefault("history", spare_history)  # the thread stays behind
 
         images: list[Path] = []
@@ -1493,7 +1519,7 @@ class DiscordCodexClient(discord.Client):
                 recalled = defang(recalled)  # results are not the member: no USER_MESSAGE in them
                 result = await self.queue.run(
                     lambda text=recalled, thread=result.thread_id, imgs=tuple(extra): turn(
-                        text + "\n\nNow answer the member's question.",
+                        text + ANSWER_NOW,
                         images=imgs,
                         resume=thread,
                         raw=True,
@@ -2278,14 +2304,18 @@ class DiscordCodexClient(discord.Client):
             await interaction.response.send_message(reason, ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
+        cut = False
         try:
             if hours is not None:
+                # Newest first, so a window with more than the cap keeps its latest messages.
                 fetched = [
                     m
                     async for m in interaction.channel.history(
-                        limit=MAX_MESSAGES, after=since(hours), oldest_first=True
+                        limit=MAX_MESSAGES + 1, after=since(hours), oldest_first=False
                     )
                 ]
+                cut = len(fetched) > MAX_MESSAGES  # one more than the cap: the window had more
+                fetched = fetched[:MAX_MESSAGES][::-1]
             else:
                 fetched = [m async for m in interaction.channel.history(limit=count)]
                 fetched.reverse()
@@ -2323,16 +2353,28 @@ class DiscordCodexClient(discord.Client):
         )
         if result is None:
             return
-        chunks = split_discord_message(result.text)
+        if hours is None:
+            label = f"（最近 {len(fetched)} 則）"
+        elif cut:
+            label = f"（最近 {hours} 小時，訊息太多，只摘要最新 {MAX_MESSAGES} 則）"
+        else:
+            label = f"（最近 {hours} 小時）"
+        # The header is part of the first message: split after adding it, or that part is over
+        # Discord's limit and refused.
+        chunks = split_discord_message(f"**頻道摘要{label}**\n{result.text}")
+        shown = False
         try:
-            label = f"（最近 {hours} 小時）" if hours is not None else f"（最近 {len(fetched)} 則）"
-            await interaction.edit_original_response(
-                content=f"**頻道摘要{label}**\n{chunks[0]}", view=None
-            )
+            await interaction.edit_original_response(content=chunks[0], view=None)
+            shown = True
             for chunk in chunks[1:]:
                 await interaction.followup.send(chunk)
         except discord.HTTPException:
             LOGGER.exception("Summary delivery failed guild=%s", interaction.guild_id)
+            if not shown:  # the placeholder is still up: say so instead of leaving it
+                with contextlib.suppress(discord.HTTPException):
+                    await interaction.edit_original_response(
+                        content="摘要送不出去，請再試一次。", view=None
+                    )
         finally:
             remove_dir(result.generated_dir)
 

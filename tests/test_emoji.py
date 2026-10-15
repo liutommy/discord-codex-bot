@@ -26,6 +26,7 @@ from discord_codex_bot.emoji import (
     describe_pending,
     describe_prompt,
     import_descriptions,
+    static_ids,
 )
 
 GUILD, OTHER = 111111111111111111, 999999999999999999
@@ -936,3 +937,15 @@ async def test_the_emoji_is_in_place_before_the_answer_is_cut(bot, monkeypatch) 
     chunks = split_discord_message(text)
     assert chunks[0] == "字" * (DISCORD_MESSAGE_LIMIT - 10)
     assert chunks[1] == f"<:pepe:{PEPE}>" + "尾" * 20
+
+
+async def test_an_id_too_big_for_the_database_is_an_unknown_emoji(bot, store) -> None:
+    """Anyone can type `<:xx:99999999999999999999>`; SQLite holds 64-bit integers only, and the
+    overflow used to fail the member's question, the sampling and the backfill alike."""
+    huge = "<:xx:99999999999999999999> <:yy:9300000000000000000> <:zz:184467440737095516150>"
+    assert store.rewrite(f"{huge} <:pepe:{PEPE}>", GUILD).startswith(huge)
+    assert static_ids(huge) == []
+    await bot._collect_emoji(_incoming(1, _Text(3, "閒聊"), f"{huge} <:pepe:{PEPE}>"))
+    assert [s.text for s in bot.emoji.samples(PEPE)] == [f"{huge} <:pepe:{PEPE}>"]
+    channel = _History([_message(100, "開場"), _message(101, huge)])
+    assert await backfill_channel(store, GUILD, channel, NOW, 150, 0, _no_sleep) == (2, 0)

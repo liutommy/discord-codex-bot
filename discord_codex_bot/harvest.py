@@ -96,11 +96,23 @@ def _agy_turns(config: Config, thread_id: str) -> list[Turn]:
 
 
 def _openrouter_turns(config: Config, thread_id: str) -> list[Turn]:
+    """Routers keep the Bot's own follow-ups (recall results, links) as user messages too. Once
+    any prompt in the thread carries USER_MESSAGE, one without it is such a follow-up, as for
+    Grok; only a transcript without it throughout is read as the member's words."""
+    messages = load_transcript(config, thread_id)
+    texts = [message_text(m.get("content")) for m in messages]
+    old_format = not any(
+        _member_turn(text)
+        for m, text in zip(messages, texts, strict=True)
+        if m.get("role") == "user"
+    )
     turns: list[Turn] = []
-    for message in load_transcript(config, thread_id):
-        text = message_text(message.get("content"))
+    for message, text in zip(messages, texts, strict=True):
         if message.get("role") == "user":
-            turns.append(_member_turn(text) or Turn("user", text.strip(), legacy=True))
+            if turn := _member_turn(text):
+                turns.append(turn)
+            elif old_format:
+                turns.append(Turn("user", text.strip(), legacy=True))
         elif message.get("role") == "assistant" and text.strip():
             turns.append(Turn("assistant", text.strip()))
     return turns

@@ -513,3 +513,40 @@ def test_the_model_and_help_know_fixed_tracking_times() -> None:
     assert 'at="12:01,20:01"' in prompt and '<track_at id="N" times=' in prompt
     text, examples = COMMAND_GUIDE["-track"]
     assert "固定時間" in text and any("times:" in example for example in examples)
+
+
+def _turns(codex_home: Path, thread: str, *infos: str | None) -> None:
+    """A rollout of several turns, oldest first: each a task_started and a task_complete that
+    carries an error with `info` (None: the turn succeeded)."""
+    day = codex_home / "sessions" / "2026" / "10" / "02"
+    day.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for info in infos:
+        lines.append({"type": "event_msg", "payload": {"type": "task_started"}})
+        payload: dict = {"type": "task_complete"}
+        if info:
+            payload["error"] = {"message": info, "codex_error_info": info}
+        lines.append({"type": "event_msg", "payload": payload})
+    path = day / f"rollout-2026-10-02T09-59-20-{thread}.jsonl"
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+
+
+async def test_an_old_failure_in_the_thread_does_not_fail_a_good_turn(
+    config: Config, tmp_path: Path, monkeypatch
+) -> None:
+    """A rollout keeps every turn of the thread. A quota error from days ago made every later
+    resumed answer of it count as a spent quota, so the answer was thrown away for the spare."""
+    config = replace(config, codex_home=tmp_path)
+    _turns(tmp_path, "t-old", "usage_limit_exceeded", None)
+    monkeypatch.setattr(codex, "_exec", FakeExec((0, _events("答案"), "")))
+    result = await run_codex("q", config, resume="t-old")
+    assert result.text == "答案" and result.thread_id == "t-old"
+    # a failed turn is judged by its own error, not by the thread's first one
+    failed = _exec_stream("refused", thread="")
+    _turns(tmp_path, "t-two", "usage_limit_exceeded", "bad_request")
+    assert parse_fallback_error(failed, tmp_path, "t-two") is None
+    _turns(tmp_path, "t-three", "unauthorized", "rate_limit_exceeded")
+    error = parse_fallback_error(failed, tmp_path, "t-three")
+    assert isinstance(error, CodexServiceError) and error.info == "rate_limit_exceeded"
+    # a resume that died before its turn started is not the last turn's failure again
+    assert parse_fallback_error("", tmp_path, "t-three", 1) is None

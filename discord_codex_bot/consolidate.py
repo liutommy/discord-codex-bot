@@ -33,6 +33,10 @@ Return only JSON matching the schema."""
 # and come out unmarked, and every result carries exactly its group's marker.
 
 
+class ScopeChanged(Exception):
+    """The scope was written to while the model worked; it is left as it is until next time."""
+
+
 def _batches(notes: list[Note], max_bytes: int) -> list[list[Note]]:
     batches: list[list[Note]] = [[]]
     size = 0
@@ -77,11 +81,19 @@ async def consolidate_scope(
             payload = json.dumps(
                 {"notes": [asdict(note) for note in batch]}, ensure_ascii=False, indent=1
             )
-            merged.extend(_parse(await runner(f"{INSTRUCTIONS}\n\n{payload}")))
-        if not merged:
-            raise RuntimeError("consolidation returned no notes; keeping the current store")
+            notes_out = _parse(await runner(f"{INSTRUCTIONS}\n\n{payload}"))
+            if not notes_out:  # that batch's notes would be gone, whatever the others returned
+                raise RuntimeError("a batch returned no notes; keeping the current store")
+            merged.extend(notes_out)
         result.extend(Note(marker + unmarked(n.name), n.date, n.text) for n in merged)
     result.sort(key=lambda note: note.date)  # stable: each group's own order within a date
+    # The rewrite replaces the scope wholesale: a note added or forgotten while the model worked
+    # would be lost or brought back. Notes only added are kept after the result; anything else
+    # leaves the scope for next time. No await between this check and the rewrite.
+    current = store.notes(scope, guild_id, user_id)
+    if current[: len(notes)] != notes:
+        raise ScopeChanged
+    result.extend(current[len(notes) :])
     store.rewrite(scope, guild_id, user_id, result)
     return len(notes), len(result)
 
@@ -96,6 +108,10 @@ async def consolidate_all(store: MemoryStore, runner: Runner, max_input_bytes: i
                 before, after = await consolidate_scope(
                     store, scope, guild_id, user_id, runner, max_input_bytes
                 )
+            except ScopeChanged:
+                LOGGER.info("Consolidation skipped %s: it changed meanwhile", label)
+                lines.append(f"{label}: skipped (changed while consolidating)")
+                continue
             except Exception as error:  # one bad scope must not stop the rest
                 LOGGER.exception("Consolidation failed for %s", label)
                 lines.append(f"{label}: failed ({error})")
