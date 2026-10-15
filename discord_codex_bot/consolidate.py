@@ -88,9 +88,12 @@ async def consolidate_scope(
         result.extend(Note(marker + unmarked(n.name), n.date, n.text) for n in merged)
     result.sort(key=lambda note: note.date)  # stable: each group's own order within a date
     # The rewrite replaces the scope wholesale: a note added or forgotten while the model worked
-    # would be lost or brought back. No await between this check and the rewrite.
-    if store.notes(scope, guild_id, user_id) != notes:
+    # would be lost or brought back. Notes only added are kept after the result; anything else
+    # leaves the scope for next time. No await between this check and the rewrite.
+    current = store.notes(scope, guild_id, user_id)
+    if current[: len(notes)] != notes:
         raise ScopeChanged
+    result.extend(current[len(notes) :])
     store.rewrite(scope, guild_id, user_id, result)
     return len(notes), len(result)
 

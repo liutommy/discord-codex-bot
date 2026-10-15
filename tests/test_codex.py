@@ -548,3 +548,5 @@ async def test_an_old_failure_in_the_thread_does_not_fail_a_good_turn(
     _turns(tmp_path, "t-three", "unauthorized", "rate_limit_exceeded")
     error = parse_fallback_error(failed, tmp_path, "t-three")
     assert isinstance(error, CodexServiceError) and error.info == "rate_limit_exceeded"
+    # a resume that died before its turn started is not the last turn's failure again
+    assert parse_fallback_error("", tmp_path, "t-three", 1) is None

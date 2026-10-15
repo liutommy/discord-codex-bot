@@ -1029,7 +1029,7 @@ class DiscordCodexClient(discord.Client):
         """(one page as text with its links kept inline, whether it was read at all). No out_dir:
         a background poll has nobody to show a screenshot to, and nothing to clean up afterwards."""
         text, _shots = await fetch_or_render(url, self.config, None, False)
-        return text, not unreadable(text, url)
+        return text, not unreadable(text)
 
     async def _fetch_tracking_source(self, source: Source):
         fetcher = {
@@ -1316,6 +1316,7 @@ class DiscordCodexClient(discord.Client):
         drop_resume = fell_back  # only the caller's id is foreign; later recall rounds chain
         first: tuple[str, dict] | None = None  # the question as first asked, for a spare
         results: list[str] = []  # every recall round's results so far, oldest first
+        result_images: list[Path] = []  # and the screenshots / sandbox images they came with
 
         async def next_spare():
             nonlocal spares
@@ -1353,6 +1354,7 @@ class DiscordCodexClient(discord.Client):
             kw.setdefault("on_delta", on_delta)
             if kw.get("raw"):
                 results.append(text.removesuffix(ANSWER_NOW))
+                result_images.extend(kw.get("images", ()))
             else:
                 first = (text, dict(kw))
             if drop_resume:
@@ -1394,7 +1396,7 @@ class DiscordCodexClient(discord.Client):
                         kw = {
                             **asked,
                             "on_delta": kw["on_delta"],
-                            "images": [*asked.get("images", ()), *kw.get("images", ())],
+                            "images": [*asked.get("images", ()), *result_images],
                             "links": "\n\n".join(b for b in (asked.get("links"), *results) if b),
                         }
                         kw.pop("resume", None)
@@ -2302,16 +2304,18 @@ class DiscordCodexClient(discord.Client):
             await interaction.response.send_message(reason, ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
+        cut = False
         try:
             if hours is not None:
                 # Newest first, so a window with more than the cap keeps its latest messages.
                 fetched = [
                     m
                     async for m in interaction.channel.history(
-                        limit=MAX_MESSAGES, after=since(hours), oldest_first=False
+                        limit=MAX_MESSAGES + 1, after=since(hours), oldest_first=False
                     )
                 ]
-                fetched.reverse()
+                cut = len(fetched) > MAX_MESSAGES  # one more than the cap: the window had more
+                fetched = fetched[:MAX_MESSAGES][::-1]
             else:
                 fetched = [m async for m in interaction.channel.history(limit=count)]
                 fetched.reverse()
@@ -2351,23 +2355,26 @@ class DiscordCodexClient(discord.Client):
             return
         if hours is None:
             label = f"（最近 {len(fetched)} 則）"
-        elif len(fetched) >= MAX_MESSAGES:
+        elif cut:
             label = f"（最近 {hours} 小時，訊息太多，只摘要最新 {MAX_MESSAGES} 則）"
         else:
             label = f"（最近 {hours} 小時）"
         # The header is part of the first message: split after adding it, or that part is over
         # Discord's limit and refused.
         chunks = split_discord_message(f"**頻道摘要{label}**\n{result.text}")
+        shown = False
         try:
             await interaction.edit_original_response(content=chunks[0], view=None)
+            shown = True
             for chunk in chunks[1:]:
                 await interaction.followup.send(chunk)
         except discord.HTTPException:
             LOGGER.exception("Summary delivery failed guild=%s", interaction.guild_id)
-            with contextlib.suppress(discord.HTTPException):
-                await interaction.edit_original_response(
-                    content="摘要送不出去，請再試一次。", view=None
-                )
+            if not shown:  # the placeholder is still up: say so instead of leaving it
+                with contextlib.suppress(discord.HTTPException):
+                    await interaction.edit_original_response(
+                        content="摘要送不出去，請再試一次。", view=None
+                    )
         finally:
             remove_dir(result.generated_dir)
 

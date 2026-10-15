@@ -436,10 +436,12 @@ def test_unreadable_tells_a_failed_read_from_a_page() -> None:
     from discord_codex_bot.links import unreadable
 
     url = "https://site.example/"
-    assert unreadable(f"（{url}：HTTP 404，打不開）", url)
-    assert unreadable("標題：站\n（頁面沒有可讀文字，請看截圖）", url)
-    assert not unreadable("標題：站\n內文（括號）", url)
-    assert not unreadable(f"（{url}：只是引言）\n然後是內文", url)
+    assert unreadable(f"（{url}：HTTP 404，打不開）")
+    assert unreadable("標題：站\n（頁面沒有可讀文字，請看截圖）")
+    assert not unreadable("標題：站\n內文（括號）")
+    assert not unreadable(f"（{url}：只是引言）\n然後是內文")
+    # fetch_or_render reads an X post at x.com, whatever form the tracked URL had
+    assert unreadable("（https://x.com/u/status/1790000000000000000：渲染逾時，打不開）")
 
 
 def test_web_locator_requires_a_public_http_url() -> None:

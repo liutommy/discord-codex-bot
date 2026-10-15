@@ -187,8 +187,8 @@ def parse_fallback_error(
     resumed turn that announces nothing, the `thread_id` the caller already knows. Three sources
     of one fact, in decreasing trust: a code in the stream, the code in the rollout, then the one
     message actually observed. stderr is never consulted: on the real failure it held nothing but
-    the stdin prompt. The rollout is read only for a turn that failed (a non-zero exit, or an
-    `error` / `turn.failed` event), and only that turn's part of it.
+    the stdin prompt. The rollout is read only for a turn that started and failed (a non-zero
+    exit, or an `error` / `turn.failed` event), and only that turn's part of it.
     """
     events = list(_events(stdout))
     for error in _error_payloads(events):
@@ -196,7 +196,9 @@ def parse_fallback_error(
             return found
     thread_id = parse_thread_id(stdout) or thread_id
     failed = exit_code != 0 or any(e.get("type") in ("error", "turn.failed") for e in events)
-    if failed and codex_home and thread_id:
+    # Without turn.started this run never wrote a turn: the rollout's last one is an older turn's.
+    started = any(e.get("type") == "turn.started" for e in events)
+    if failed and started and codex_home and thread_id:
         for error in _error_payloads(_current_turn(list(_rollout_events(codex_home, thread_id)))):
             if found := _classify(error):
                 return found

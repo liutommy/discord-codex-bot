@@ -179,6 +179,24 @@ async def test_a_scope_changed_while_the_model_works_is_left_alone(tmp_path: Pat
     assert not (tmp_path / "1" / "guild" / ".backup").exists()
 
 
+async def test_a_note_added_while_the_model_works_is_kept_after_the_result(
+    tmp_path: Path,
+) -> None:
+    """A 👍 or /remember during the run only adds notes; the run is not wasted for it."""
+    store = MemoryStore(tmp_path, LIMITS)
+    store.add("guild", 1, None, "a", "one")
+    store.add("guild", 1, None, "b", "two")
+
+    async def runner(prompt: str) -> str:
+        store.add("guild", 1, None, "new", "added meanwhile")
+        note = {"name": "合併", "date": "2026-10-15", "text": "one and two"}
+        return json.dumps({"notes": [note]})
+
+    summary = await consolidate_all(store, runner, max_input_bytes=100_000)
+    assert "1/伺服器: 2 → 2" in summary
+    assert [n.text for n in store.notes("guild", 1, None)] == ["one and two", "added meanwhile"]
+
+
 async def test_one_empty_batch_keeps_the_whole_scope(tmp_path: Path) -> None:
     """A batch the model answered with no notes would silently drop every note in it, even when
     the other batches came back fine."""

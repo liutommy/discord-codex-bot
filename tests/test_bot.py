@@ -2758,3 +2758,12 @@ async def test_a_summary_fits_discord_and_reads_the_newest_messages(client, monk
     refuse["next"] = True
     await client.summary_command(interaction, hours=24)
     assert edits[-1] == "摘要送不出去，請再試一次。"
+
+
+async def test_the_bot_reads_a_failed_page_as_unread(client, monkeypatch) -> None:
+    # An X post is read at x.com whatever form the tracked URL had; the failure names that URL.
+    async def failed(url, *args, **kw):
+        return "（https://x.com/u/status/1：無法連線——timeout）", []
+
+    monkeypatch.setattr(bot_module, "fetch_or_render", failed)
+    assert (await client._read_page("https://twitter.com/u/status/1?s=20"))[1] is False
