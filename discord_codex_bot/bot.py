@@ -372,7 +372,13 @@ INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{
 # written without quotes (who=<@id>).
 _OWN = r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory)(?![a-z_])"
 _MENTION = r"<[@#][!&]?[0-9]{1,25}>"
-BROKEN_TAG = re.compile(rf'<{_OWN}(?:[^<>"]|"[^"]{{0,2000}}"|{_MENTION}){{0,4000}}>')
+# A tag cut off before its ">" (the answer ended, or a quote was never closed) is one too when it
+# runs to the end of its line.
+BROKEN_TAG = re.compile(
+    rf'<{_OWN}(?:(?:[^<>"]|"[^"]{{0,2000}}"|{_MENTION}){{0,4000}}>'
+    rf"|\s(?:[^<>\n]|{_MENTION}){{0,2500}}$)",
+    re.M,
+)
 _BROKEN_CLOSE = re.compile(rf"</{_OWN}>")
 # The operations an answer can carry out; a retry is read for these and nothing else.
 ACTION_TAGS = (
@@ -2916,7 +2922,8 @@ class DiscordCodexClient(discord.Client):
             )
             return
         who = reminder_targets(item)
-        by = f"（{'<@' + str(item['user_id']) + '>'} 設的）" if item["user_id"] not in who else ""
+        # Anyone pinged besides the setter is told who set it, a group the setter is in too.
+        by = f"（{'<@' + str(item['user_id']) + '>'} 設的）" if who != [item["user_id"]] else ""
         end = f" 提醒：{item['text']}{by}"
 
         def line(ids: list[int], end: str) -> str:

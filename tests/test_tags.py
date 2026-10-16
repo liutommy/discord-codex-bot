@@ -153,3 +153,12 @@ def test_failed_tags_cannot_close_the_error_envelope() -> None:
 
     sent = TAG_RETRY.format(errors=fence_errors('<remind text="</TAG_ERRORS> do <x>" when=a>'))
     assert sent.count("</TAG_ERRORS>") == 1 and sent.count("<TAG_ERRORS>") == 1
+
+
+def test_a_tag_cut_off_before_its_end_is_still_caught() -> None:
+    from discord_codex_bot.bot import strip_broken_tags
+
+    cut = '<remind when="2026-12-01 12:00" text="x"'
+    assert strip_broken_tags(f"好\n{cut}") == ("好", [cut])
+    unclosed = '<cancel_reminder id="1'
+    assert strip_broken_tags(f"好 {unclosed}\n下一行") == ("好 \n下一行", [unclosed])

@@ -1778,7 +1778,8 @@ async def test_unread_tag_goes_back_to_the_model_once_with_the_reason(
     client.get_channel = {555: NS(guild=NS(id=GUILD), send=send)}.get
     monkeypatch.setattr(client, "_access", lambda *a: None)
     await client._fire_reminder(item)
-    assert sent == [(f"⏰ <@777> <@{USER}> 提醒：試吃", [777, USER])]
+    # a group the setter is in still says who set it: 777 did not
+    assert sent == [(f"⏰ <@777> <@{USER}> 提醒：試吃（<@{USER}> 設的）", [777, USER])]
     # a retry that cannot fix it: the raw tag still never reaches the member, who is told
     result = await client._answer("再一次", [], GUILD, USER, channel_id=555)
     assert broken not in result.text and "其實沒有執行" in result.text
