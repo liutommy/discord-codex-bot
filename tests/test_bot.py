@@ -1955,7 +1955,6 @@ async def test_a_refused_action_goes_back_to_the_model_with_the_reason(
             CodexResult('好\n\n<remind when="等一下" text="喝水"/>', (), None, "t", False),
             CodexResult('<remind when="2026-12-01 15:00" text="喝水"/>', (), None, "t", True),
             CodexResult('好\n\n<cancel_reminder id="42"/>', (), None, "t", False),
-            CodexResult("", (), None, "t", True),
         ]
     )
     prompts = []
@@ -1969,9 +1968,31 @@ async def test_a_refused_action_goes_back_to_the_model_with_the_reason(
     assert '<remind when="等一下">: the time cannot be read' in prompts[1]
     assert "（時間「等一下」看不懂，提醒沒有設）" in result.text and "⏰ 已設定 #1" in result.text
     assert "其實沒有執行" not in result.text  # the refusal was already said in its own words
+    # an id the member does not have is told, never sent back: a retry could only guess at
+    # another of their reminders and cancel one they never named
     result = await client._answer("取消 42", [], GUILD, USER, channel_id=555)
-    assert '<cancel_reminder id="42"/>: this member has no such reminder' in prompts[3]
-    assert "（找不到你的提醒 #42）" in result.text and "其實沒有執行" not in result.text
+    assert len(prompts) == 3 and "（找不到你的提醒 #42）" in result.text
+    assert "其實沒有執行" not in result.text
+
+
+async def test_an_unknown_cancel_id_is_told_not_retried(client, tmp_path) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    for tag, note in (
+        ('<cancel_reminder id="9"/>', "（找不到你的提醒 #9）"),
+        ('<cancel_track id="9"/>', "（找不到你的追蹤 #9）"),
+    ):
+        text, unread, refused = await client._apply_action_tags(f"好\n{tag}", GUILD, 555, USER)
+        assert note in text and unread == [] and refused == []
+
+
+async def test_a_cut_off_read_request_is_answered_not_posted(client, backends) -> None:
+    codex, _ = backends
+    client.config = replace(client.config, sandbox_url="http://sandbox")
+    codex.replies = ['<run lang="python">print(1)', '<search query="x"', "答案"]
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案"
+    assert '<run lang="python">print(1): not in the documented form' in codex.calls[1][0]
+    assert '<search query="x": not in the documented form' in codex.calls[2][0]
 
 
 async def test_a_dropped_tracking_tag_is_said_and_sent_back(client, tmp_path) -> None:
@@ -1986,7 +2007,7 @@ async def test_a_dropped_tracking_tag_is_said_and_sent_back(client, tmp_path) ->
     )
     assert "<track_every" not in text and "（有 1 個追蹤指令格式不對，沒有執行）" in text
     assert refused[0].startswith("1 <track_every> tag(s) were not carried out")
-    assert refused[1].startswith('<cancel_track id="99">: this member has no such watch')
+    assert len(refused) == 1 and "（找不到你的追蹤 #99）" in text  # an unknown id is only told
 
 
 async def test_the_warning_counts_only_the_unreadable_tags(client, backends, monkeypatch) -> None:
@@ -2012,7 +2033,7 @@ async def test_the_warning_counts_only_the_unreadable_tags(client, backends, mon
     )
     retries.append(CodexResult('<cancel_reminder id="1"/>', (), None, "t", True))
     result = await client._answer("q", [], GUILD, USER, channel_id=555)
-    assert "其實沒有執行" in result.text
+    assert "其實沒有執行" in result.text  # another tag sent back is not the unreadable one fixed
 
 
 async def test_tracking_tags_past_the_limit_or_in_prose(client, tmp_path) -> None:
@@ -2057,11 +2078,9 @@ async def test_only_a_source_the_model_can_correct_is_sent_back(client, tmp_path
         ('<remind when="2020-01-01 09:00" text="x"/>', "那個時間已經過了"),
         ('<remind when="2099-01-01 09:00" text="x"/>', "天內的提醒"),
         ('<remind when="2026-12-01 09:00" text=" "/>', "text= is missing"),
-        ('<cancel_reminder id="9"/>', "otherwise reply with nothing"),
         ('<track_every id="9" minutes="5"/>', "no such watch"),
         ('<track_at id="9" times="21:00"/>', "no such watch"),
         ('<track_at id="9" times="abc"/>', "times= cannot be read"),
-        ('<cancel_track id="9"/>', "otherwise reply with nothing"),
         ('<track source="https://www.youtube.com/@x" at="abc"/>', "at= cannot be read"),
     ],
 )

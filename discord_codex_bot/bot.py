@@ -362,6 +362,10 @@ BROKEN_READ = re.compile(
     rf"<run(?![a-z_]){_READ_ATTRS}>(?:(?!<run(?![a-z_]))[\s\S]){{0,20000}}?</run>"
     # The others may carry their value as a body (<web>q</web>) instead of an attribute.
     rf"|<{_READ_NAME}{_READ_ATTRS}>(?:[^<]{{0,2000}}</{_READ_NAME}>)?"
+    # Cut off: a <run> whose </run> never came, another read tag stopping before its ">".
+    rf"|<run(?![a-z_])[^<>]{{0,2000}}>(?:(?!<run(?![a-z_]))[\s\S]){{0,20000}}\Z"
+    rf"|<{_READ_NAME}\s[^<>\n]{{0,2500}}$",
+    re.M,
 )
 WEB_PER_ROUND = 2
 # Every read round spent and the model still asking: what it asked for last is not read.
@@ -478,20 +482,31 @@ _REFUSED = re.compile(r"(?:(\d+) )?<([a-z_]+)")
 
 def unread_left(unread: list[str], refused: list[str], resent: list[str]) -> int:
     """How many unreadable tags the retry did not send back. A resent tag goes first to a refusal
-    of its name (each says which tag it was, and how many), and only the rest count as fixes for
-    the unreadable ones — a fixed refusal must not hide an operation that never happened."""
+    of its name (each says which tag it was, and how many), then to an unreadable tag of its
+    name; a made-up name can be fixed by any tag. A fixed refusal, or some other tag, must not
+    hide an operation that never happened."""
     owed: dict[str, int] = {}
     for line in refused:
         if found := _REFUSED.match(line):
             owed[found[2]] = owed.get(found[2], 0) + int(found[1] or 1)
-    fixes = 0
+    need: dict[str, int] = {}
+    wild = 0
+    for line in unread:
+        name = _REFUSED.match(line)
+        if name and OWN_NAME.fullmatch(name[2]):
+            need[name[2]] = need.get(name[2], 0) + 1
+        else:
+            wild += 1
     for tag in resent:
         name = re.match(r"<([a-z_]+)", tag)
-        if name and owed.get(name[1], 0) > 0:
-            owed[name[1]] -= 1
-        else:
-            fixes += 1
-    return max(0, len(unread) - fixes)
+        key = name[1] if name else ""
+        if owed.get(key, 0) > 0:
+            owed[key] -= 1
+        elif need.get(key, 0) > 0:
+            need[key] -= 1
+        elif wild > 0:
+            wild -= 1
+    return sum(need.values()) + wild
 
 
 def action_tags(text: str) -> list[str]:
@@ -2845,17 +2860,13 @@ class DiscordCodexClient(discord.Client):
                 names = ["你" if t == user_id else f"<@{t}>" for t in reminder_targets(item)]
                 whom = ("提醒" if names[0] == "你" else "提醒 ") + "、".join(names)
                 notes.append(f"⏰ 已設定 #{item['id']}：{describe(due)} {whom}：{item['text']}")
+        # An id the member does not have is told, not sent back: a retry could only guess at
+        # another of their reminders, and cancel one they never named.
         for reminder_id in cancels:
             done = self.reminders.cancel(user_id, reminder_id)
             notes.append(
                 f"⛔ 已取消提醒 #{reminder_id}" if done else f"（找不到你的提醒 #{reminder_id}）"
             )
-            if not done:
-                fixable.append(
-                    f'<cancel_reminder id="{reminder_id}"/>: this member has no such reminder;'
-                    " send another id only if the member named that one, otherwise reply with"
-                    " nothing"
-                )
         return _with_notes(clean, notes, notes_out)
 
     async def _add_watch(
@@ -3043,7 +3054,8 @@ class DiscordCodexClient(discord.Client):
                 fixable.append(f'<track_at id="{watch_id}">: {NO_WATCH}')
         for watch_id in cancels:
             # Scoped to the asking member, exactly like the slash command: one member can never
-            # talk the Bot into dropping someone else's watch.
+            # talk the Bot into dropping someone else's watch. An unknown id is told, not sent
+            # back, for the same reason as a reminder's.
             done = store.delete_watch(watch_id, user_id)
             LOGGER.info(
                 "Tracking cancel guild=%s channel=%s user=%s watch=%s -> %s",
@@ -3056,8 +3068,6 @@ class DiscordCodexClient(discord.Client):
             notes.append(
                 f"⛔ 已取消追蹤 #{watch_id}。" if done else f"（找不到你的追蹤 #{watch_id}）"
             )
-            if not done:
-                fixable.append(f'<cancel_track id="{watch_id}">: {NO_WATCH}')
         LOGGER.info(
             "Tracking tags guild=%s channel=%s user=%s adds=%d every=%d at=%d cancels=%d",
             guild_id,
