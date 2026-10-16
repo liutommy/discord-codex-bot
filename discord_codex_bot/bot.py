@@ -406,12 +406,22 @@ def action_tags(text: str) -> list[str]:
     return [m.group(0) for m in kept]
 
 
+# The attributes the Bot's own tags take. An own name with none of them is HTML or C++ in the
+# answer's prose (<track kind="captions">, #include <memory>), not an order that failed.
+_KEYS = re.compile(r"\b(?:when|text|who|source|interest|every|at|id|minutes|times|scope|name)\s*=")
+
+
 def strip_broken_tags(text: str) -> tuple[str, list[str]]:
     """(text without the leftover tags of the Bot's own names, those tags as written)."""
-    broken = tags.findall(BROKEN_TAG, text)
+    broken = [m for m in tags.live(BROKEN_TAG, text) if _KEYS.search(m.group(0))]
     if not broken:
         return text, []
-    return tags.strip(_BROKEN_CLOSE, tags.strip(BROKEN_TAG, text)).strip(), broken
+    parts, at = [], 0
+    for match in broken:
+        parts.append(text[at : match.start()])
+        at = match.end()
+    parts.append(text[at:])
+    return tags.strip(_BROKEN_CLOSE, "".join(parts)).strip(), [m.group(0) for m in broken]
 
 
 def strip_invented_tags(text: str) -> tuple[str, list[str]]:
@@ -426,6 +436,21 @@ def strip_invented_tags(text: str) -> tuple[str, list[str]]:
     """
     names = list(dict.fromkeys(tags.findall(INVENTED_TAG, text)))
     return (tags.strip(INVENTED_TAG, text).strip(), names) if names else (text, [])
+
+
+def _few(ids: list[int], shown: int = 3) -> str:
+    """A reminder's people for a listing: a group of ninety would not fit a message."""
+    head = " ".join(f"<@{t}>" for t in ids[:shown])
+    return head if len(ids) <= shown else f"{head} 等 {len(ids)} 人"
+
+
+def _with_notes(clean: str, notes: list[str], notes_out: list[str] | None) -> str:
+    """`clean` with the confirmations appended, or handed to `notes_out` when the caller wants
+    them kept apart from the model's words."""
+    if notes_out is not None:
+        notes_out.extend(notes)
+        return clean
+    return f"{clean}\n\n" + "\n".join(notes)
 
 
 def _for_other(item: dict) -> bool:
@@ -2600,23 +2625,38 @@ class DiscordCodexClient(discord.Client):
         text, facts = extract_memory_tags(text)
         for scope, name, fact in facts:
             self.memory.add(scope, guild_id, user_id, name, fact)
-        text = self._apply_reminder_tags(text, guild_id, channel_id, user_id)
-        text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id)
+        # Leftover tags are looked for in the model's words only. A confirmation quotes text from
+        # outside (a reminder's words, a watched channel's title), and a tag in there is not the
+        # model's: sent back as "your tag", the retry would turn it into an order.
+        notes: list[str] = []
+        text = self._apply_reminder_tags(text, guild_id, channel_id, user_id, notes)
+        text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id, notes)
         text, invented = strip_invented_tags(text)
         text, broken = strip_broken_tags(text)
         problems = [f"<{name} …/>: the Bot has no such tag" for name in invented]
         problems += [f"{tag}: not in the documented form" for tag in broken]
+        if notes:
+            text = f"{text.strip()}\n\n" + "\n".join(notes)
         return text.strip(), problems
 
     def _apply_reminder_tags(
-        self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
+        self,
+        text: str,
+        guild_id: int | None,
+        channel_id: int | None,
+        user_id: int,
+        notes_out: list[str] | None = None,
     ) -> str:
-        """Create / cancel the reminders the model asked for and append a confirmation."""
+        """Create / cancel the reminders the model asked for and append a confirmation — or,
+        given `notes_out`, put the confirmations there and return the text without them."""
         clean, creates, cancels = extract_reminder_tags(text)
         if not creates and not cancels:
             return text
         notes: list[str] = []
         for when_text, what, who in creates:
+            if who is None:
+                notes.append(f"（要提醒的人寫的不是 @提及，「{what[:40]}」的提醒沒有設）")
+                continue
             due = parse_when(when_text)
             if due is None:
                 notes.append(f"（時間「{when_text}」看不懂，提醒沒有設）")
@@ -2639,7 +2679,7 @@ class DiscordCodexClient(discord.Client):
             notes.append(
                 f"⛔ 已取消提醒 #{reminder_id}" if done else f"（找不到你的提醒 #{reminder_id}）"
             )
-        return f"{clean}\n\n" + "\n".join(notes)
+        return _with_notes(clean, notes, notes_out)
 
     async def _add_watch(
         self,
@@ -2722,15 +2762,21 @@ class DiscordCodexClient(discord.Client):
         )
 
     async def _apply_tracking_tags(
-        self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
+        self,
+        text: str,
+        guild_id: int | None,
+        channel_id: int | None,
+        user_id: int,
+        notes_out: list[str] | None = None,
     ) -> str:
-        """Create / retime / cancel the watches the model asked for and append a confirmation."""
+        """Create / retime / cancel the watches the model asked for and append a confirmation —
+        or, given `notes_out`, put the confirmations there and return the text without them."""
         clean, adds, intervals, schedules, cancels = extract_track_tags(text)
         if not adds and not intervals and not schedules and not cancels:
             return text
         store = self.tracker
         if store is None:
-            return f"{clean}\n\n（社群追蹤尚未啟用。）"
+            return _with_notes(clean, ["（社群追蹤尚未啟用。）"], notes_out)
         notes: list[str] = []
         for locator, interest, who, every, times in adds:
             if times is None:
@@ -2796,7 +2842,7 @@ class DiscordCodexClient(discord.Client):
             len(schedules),
             len(cancels),
         )
-        return f"{clean}\n\n" + "\n".join(notes)
+        return _with_notes(clean, notes, notes_out)
 
     def _tracked_lines(self, user_id: int) -> str:
         """The member's watches for the prompt, so the model can act on one without guessing."""
@@ -2899,16 +2945,14 @@ class DiscordCodexClient(discord.Client):
                 else "你的提醒：\n"
                 + "\n".join(
                     f"#{i['id']} {describe(_dt.fromisoformat(i['due']))}"
-                    + (
-                        " → " + " ".join(f"<@{t}>" for t in reminder_targets(i))
-                        if _for_other(i)
-                        else ""
-                    )
+                    + (" → " + _few(reminder_targets(i)) if _for_other(i) else "")
                     + f" — {i['text']}"
                     for i in mine
                 )
             )
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.response.send_message(
+            truncate(message, DISCORD_MESSAGE_LIMIT), ephemeral=True
+        )
 
     @app_commands.describe(
         source="YouTube／Twitch 頻道、X 帳號、露天賣場（可帶 ?q=關鍵字）或網頁網址；留空列出",

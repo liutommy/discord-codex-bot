@@ -1854,6 +1854,22 @@ async def test_tag_retry_skips_echoed_and_nested_tags(client, backends, monkeypa
     assert [i["text"] for i in client.reminders.for_user(USER)] == ["x"]
 
 
+async def test_a_tag_quoted_in_a_confirmation_is_not_sent_back(client) -> None:
+    # the reminder's words carry a tag; the confirmation repeats them, and it is not the model's
+    answer = '好<remind when="2026-12-01 09:00" text="讀 <cancel_reminder id=1/> 的說明"/>'
+    text, problems = await client._apply_action_tags(answer, GUILD, 555, USER)
+    assert problems == [] and "<cancel_reminder id=1/>" in text and "⏰ 已設定 #1" in text
+    text, problems = await client._apply_action_tags(
+        '好<remind when="2026-12-01 09:00" text="開團" who="@小明"/>', GUILD, 555, USER
+    )
+    assert "不是 @提及" in text and len(client.reminders.for_user(USER)) == 1
+
+
+def test_a_reminder_listing_names_only_a_few_of_a_group() -> None:
+    assert bot_module._few([1, 2]) == "<@1> <@2>"
+    assert bot_module._few(list(range(1, 91))) == "<@1> <@2> <@3> 等 90 人"
+
+
 async def test_fire_reminder_splits_a_long_list_of_people(client, monkeypatch) -> None:
     from types import SimpleNamespace as NS
 

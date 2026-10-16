@@ -117,6 +117,14 @@ def test_a_broken_own_tag_is_caught_even_with_a_mention_in_it() -> None:
     assert strip_broken_tags("<tracking> 與 <reminder>") == ("<tracking> 與 <reminder>", [])
 
 
+def test_an_own_name_in_prose_is_not_a_broken_tag() -> None:
+    from discord_codex_bot.bot import strip_broken_tags
+
+    # HTML and C++ use these names too; without one of the Bot's attributes it is not an order
+    prose = 'C++ 要 #include <memory> 才能用；HTML5 用 <track kind="captions" src="a.vtt" default>'
+    assert strip_broken_tags(prose) == (prose, [])
+
+
 def test_many_tags_in_a_long_answer_stay_cheap() -> None:
     import time
 
