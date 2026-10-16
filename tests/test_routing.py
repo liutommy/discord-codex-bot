@@ -284,7 +284,7 @@ async def test_recent_context_is_the_members_last_three_own_messages(client, mon
         ("quick", 5, "agy", "gemini-3.8-flash-medium", "medium"),
         ("live-x", 5, "grok", "grok-4.7", "medium"),
         ("live-web", 8, "codex", "gpt-5.6-luna", "high"),
-        ("text", 10, "agy", "claude-sonnet-4-6", ""),
+        ("text", 10, "agy", "gemini-4-argon-medium", "medium"),
         ("code", 9, "codex", "gpt-5.6-luna", "xhigh"),
         ("reason", 2, "agy", "gemini-3.8-flash-medium", "medium"),
         ("create", 7, "agy", "claude-sonnet-4-6", ""),
@@ -681,7 +681,6 @@ async def test_grok_refusing_an_x_question_falls_to_flash_medium_with_the_note(
 @pytest.mark.parametrize(
     ("kind", "degree", "stand_in"),
     [
-        ("text", 10, Resolved("agy", "gemini-3.8-flash-high", "high")),
         ("create", 8, Resolved("grok", "grok-4.7", "high")),
     ],
 )
@@ -1096,3 +1095,59 @@ async def test_a_message_with_custom_emoji_is_still_a_judged_text_turn(
     await client.on_message(message)
     assert asked and logged[-1]["status"] == "ok" and logged[-1]["files"] == 0
     assert answered == [(f"<:pepe:{pepe}> 這樣對嗎", [])]  # no picture went along
+
+
+ARGON_SPENT = agy_module.AgyUnavailable(
+    "agy exited with code 1: Your AI credits balance is too low to continue."
+)
+
+
+@pytest.mark.parametrize(
+    ("kind", "before"),
+    [
+        ("chat", Resolved("agy", "gemini-3.8-flash-medium", "medium")),
+        ("quick", Resolved("grok", "grok-4.7", "high")),
+        ("text", Resolved("agy", "claude-sonnet-4-6", "")),
+        ("reason", Resolved("codex", "gpt-5.6-luna", "xhigh")),
+        ("create", Resolved("agy", "claude-opus-4-6-thinking", "")),
+        ("advice", Resolved("codex", "gpt-5.6-luna", "high")),
+    ],
+)
+async def test_the_hardest_questions_go_to_argon_and_back_to_their_old_cell_when_it_is_spent(
+    client, backends, monkeypatch, kind, before
+) -> None:
+    """Argon has one small weekly pool. When it is spent, a hardest question is answered where it
+    was answered before Argon, not by whatever MODEL_CHAIN tries next."""
+    calls: list[str] = []
+
+    async def run_agy(prompt, config, model, **kw):
+        calls.append(model)
+        if model.startswith("gemini-4-argon"):
+            raise ARGON_SPENT
+        return await backends["agy"](prompt, config, model, **kw)
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    verdicts(monkeypatch, ok(kind, 10))
+    plan, result = await ask(client)
+    assert calls[0] == "gemini-4-argon-medium"
+    assert result.via == before
+
+
+async def test_a_spent_argon_then_a_failed_claude_still_finds_the_claude_stand_in(
+    client, backends, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    async def run_agy(prompt, config, model, **kw):
+        calls.append(model)
+        if model.startswith("gemini-4-argon"):
+            raise ARGON_SPENT
+        if model.startswith("claude"):
+            raise agy_module.AgyUnavailable("agy exited with code 1: overloaded")
+        return await backends["agy"](prompt, config, model, **kw)
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    verdicts(monkeypatch, ok("text", 10))
+    plan, result = await ask(client)
+    assert calls[:2] == ["gemini-4-argon-medium", "claude-sonnet-4-6"]
+    assert result.via == Resolved("agy", "gemini-3.8-flash-high", "high")

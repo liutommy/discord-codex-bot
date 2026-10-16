@@ -26,6 +26,12 @@ BACKEND_LABELS = {CODEX: "Codex", GROK: "Grok", AGY: "Antigravity", **ROUTER_LAB
 # family value -> (label, {effort: slug})  — an effort missing from the map falls back to the
 # family's strongest listed level (xhigh/max on Gemini become high; Claude ignores effort).
 AGY_FAMILIES: dict[str, tuple[str, dict[str, str]]] = {
+    # Its own small weekly pool (no 5h window), apart from the Gemini one; routing.json's
+    # argon_failed says where a question goes when it is spent.
+    "gemini-4-argon": (
+        "Gemini 4 Argon",
+        {lvl: f"gemini-4-argon-{lvl}" for lvl in ("low", "medium", "high")},
+    ),
     "gemini-3.8-flash": (
         "Gemini 3.8 Flash",
         {lvl: f"gemini-3.8-flash-{lvl}" for lvl in ("low", "medium", "high")},

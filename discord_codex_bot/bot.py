@@ -1953,7 +1953,13 @@ class DiscordCodexClient(discord.Client):
         spares: list[Resolved] = []
         if target.backend == GROK and kind == "live-x":
             spares.append(routing.resolved(table.live_x_without_grok, model))
-        if not image_turn and routing.is_claude(entry) and route.kind in table.claude_failed:
+        stand_in = entry
+        if not image_turn and routing.is_argon(entry) and route.kind in table.argon_failed:
+            # Argon's weekly pool is small: spent, the question goes back to the cell Argon
+            # replaced, and from a Claude cell on to Claude's own stand-in.
+            stand_in = table.argon_failed[route.kind]
+            spares.append(routing.resolved(stand_in, model))
+        if not image_turn and routing.is_claude(stand_in) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))
         # An image turn takes only the image list's order (no type stand-ins), then MODEL_CHAIN;
         # _answer drops repeats.

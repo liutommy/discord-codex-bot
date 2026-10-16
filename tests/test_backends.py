@@ -113,6 +113,11 @@ def test_effort_maps_onto_legal_agy_slugs() -> None:
     pro = parse_choice("agy:gemini-3.1-pro", "gpt-5.6-luna")
     assert resolve(pro, "medium").model == "gemini-3.1-pro-low"  # closest level at or below
     assert resolve(pro, "xhigh").model == "gemini-3.1-pro-high"
+    argon = parse_choice("agy:gemini-4-argon", "gpt-5.6-luna")
+    assert argon.backend == AGY and argon.label == "Gemini 4 Argon"
+    assert resolve(argon, "low").model == "gemini-4-argon-low"
+    assert resolve(argon, "medium").model == "gemini-4-argon-medium"
+    assert resolve(argon, "max").model == "gemini-4-argon-high"  # xhigh / max: the family's top
     claude = parse_choice("agy:claude-opus-4-6", "gpt-5.6-luna")
     assert resolve(claude, "high") == resolve(claude, "low")
     fixed = resolve(claude, "high")

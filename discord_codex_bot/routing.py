@@ -149,6 +149,7 @@ class Table:
     grok_spent: str
     live_x_without_grok: str
     claude_failed: dict[str, str]
+    argon_failed: dict[str, str]  # type -> the cell Argon replaced, for when its pool is spent
     codex_five_hour: float
     codex_seven_day: float
 
@@ -188,6 +189,7 @@ def load_table(path: Path) -> Table:
             grok_spent=str(degrade["grok_spent"]),
             live_x_without_grok=str(degrade["live_x_without_grok"]),
             claude_failed={str(k): str(v) for k, v in degrade["claude_failed"].items()},
+            argon_failed={str(k): str(v) for k, v in degrade["argon_failed"].items()},
             codex_five_hour=float(degrade["codex_quota"]["five_hour_percent"]),
             codex_seven_day=float(degrade["codex_quota"]["seven_day_percent"]),
         )
@@ -207,15 +209,20 @@ def load_table(path: Path) -> Table:
         # An image goes Codex first (then Grok, agy). Codex cells have no
         # type stand-ins, so keeping a conversation's Codex cell for its image stays simple.
         raise ValueError("routing: image must start with codex (the order is codex → grok → agy)")
-    for kind in table.claude_failed:
-        if kind not in TYPES:
-            raise ValueError(f"routing: claude_failed names an unknown type {kind!r}")
+    for name, stand_ins in (
+        ("claude_failed", table.claude_failed),
+        ("argon_failed", table.argon_failed),
+    ):
+        for kind in stand_ins:
+            if kind not in TYPES:
+                raise ValueError(f"routing: {name} names an unknown type {kind!r}")
     cells = [cell for row in table.types.values() for cell in row]
     for entry in [
         *cells,
         table.grok_spent,
         table.live_x_without_grok,
         *table.claude_failed.values(),
+        *table.argon_failed.values(),
         *table.image,
     ]:
         check_entry(entry)
@@ -238,6 +245,10 @@ def resolved(entry: str, codex_model: str) -> Resolved:
 def is_claude(entry: str) -> bool:
     value = split_stored(entry)[0]
     return value.startswith(f"{AGY}:claude-")
+
+
+def is_argon(entry: str) -> bool:
+    return split_stored(entry)[0] == f"{AGY}:gemini-4-argon"
 
 
 def lower_effort(entry: str) -> str:

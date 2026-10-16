@@ -288,9 +288,12 @@ the second; OpenRouter and OrcaRouter (free models only, one shared OpenAI-compa
 free tier is its `-free` ids (plus `orcarouter/free`); the account must have a GitHub login linked
 or the API answers `429 free_rate_limited`. Each member picks `provider` → `model`
 (autocomplete, typing filters; the OpenRouter list is the live free-model catalog, image-capable
-first) → default `effort` with `/<prefix>-model` (Codex Luna; Gemini 3.8/3.7/3.6 Flash; Gemini
-3.1 Pro; Claude Sonnet 4.6; Claude Opus 4.6; GPT-OSS 120B; whatever OpenRouter lists as free that
-hour). OpenRouter is stateless, so the Bot keeps those conversations itself (`OPENROUTER_DIR`,
+first) → default `effort` with `/<prefix>-model` (Codex Luna; Gemini 4 Argon; Gemini
+3.8/3.7/3.6 Flash; Gemini 3.1 Pro; Claude Sonnet 4.6; Claude Opus 4.6; GPT-OSS 120B; whatever
+OpenRouter lists as free that hour). Gemini 4 Argon has its own small weekly pool (no 5-hour
+window) and answers the hardest band of most routed types (`config/routing.json`); when it is
+spent (`credits balance is too low`), `argon_failed` sends the question back to the cell it
+replaced. OpenRouter is stateless, so the Bot keeps those conversations itself (`OPENROUTER_DIR`,
 replayed within `OPENROUTER_HISTORY_CHARS`), sends the persona as the system message, inlines
 images for models the catalog marks image-capable and `reasoning.effort` for models that take it;
 picking one reminds the member that free models are unstable and may vanish. The shared `effort`
