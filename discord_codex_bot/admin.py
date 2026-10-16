@@ -25,9 +25,10 @@ A request is `inbox/<id>.json`, written as `<id>.json.tmp`, fsynced, then rename
 it into processing/ (so the CLI can still withdraw an unclaimed one), validates it, runs it, and
 writes done/<id>.json — or rejected/<id>.json with the reason when it did not run. An id with a
 result already is never run again, a request left in processing/ by a restart is moved to
-rejected/ and not run, and a request more than a day old is refused, so one pruned from done/
-(after 7 days) cannot come back. Exit codes: 0 done, 1 failed or rejected, 2 not finished in
-time.
+rejected/ and not run (said "may be partly done" when its handler had begun), and a request more
+than two hours old is refused: nobody is waiting for it any more, and one pruned from done/
+(after 7 days) cannot come back. Ctrl-C or SIGTERM withdraws a request not yet claimed. Exit
+codes: 0 done, 1 failed or rejected, 2 not finished in time.
 """
 
 from __future__ import annotations
