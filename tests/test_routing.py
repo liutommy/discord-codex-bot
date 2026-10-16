@@ -1337,3 +1337,61 @@ async def test_argon_s_claude_stand_in_is_checked_against_its_own_reserve(
     verdicts(monkeypatch, ok("create", 10))
     plan, result = await ask(client)
     assert calls == ["gemini-4-argon-medium"] and result.via == Resolved("grok", "grok-4.7", "high")
+
+
+async def test_a_member_s_own_argon_respects_the_reserve_too(client, backends, monkeypatch) -> None:
+    """A /model choice, DEFAULT_MODEL or a MODEL_CHAIN entry spent the pool to zero while
+    automatic choice kept off it; every agy call now checks the pool first."""
+    calls: list[str] = []
+
+    async def run_agy(prompt, config, model, **kw):
+        calls.append(model)
+        return await backends["agy"](prompt, config, model, **kw)
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-argon|medium")
+    client.agy_quota.update(_quota(10.0, 120))  # the reserve five days out is about 13%
+    result = await client._answer("問題", [], GUILD, USER)
+    assert "gemini-4-argon-medium" not in calls and result.text  # answered by the chain instead
+
+
+async def test_the_usage_loop_survives_a_failed_read(client, monkeypatch) -> None:
+    import asyncio as _asyncio
+
+    reads = []
+
+    async def read_usage(config):
+        reads.append(1)
+        if len(reads) == 1:
+            raise RuntimeError("agy crashed")
+        return _quota(50.0, 144)
+
+    async def no_wait(seconds):
+        if len(reads) >= 2:
+            raise _asyncio.CancelledError
+
+    monkeypatch.setattr(bot_module, "read_usage", read_usage)
+    monkeypatch.setattr(bot_module.asyncio, "sleep", no_wait)
+    with pytest.raises(_asyncio.CancelledError):
+        await client._read_agy_usage_forever()
+    assert len(reads) == 2 and client.agy_quota.summary()["gemini-argon-wtu-weekly"] == 50.0
+
+
+@pytest.mark.parametrize("reset_at", [None, "2026-01-01T00:00:00+00:00", "not a time"])
+async def test_grok_chat_without_a_usable_reset_time(
+    config, tmp_path, monkeypatch, reset_at
+) -> None:
+    """No reset_at, one in the past or an unreadable one: the gate holds as before (85% used
+    stops chat at the fixed 80% share), never crashes, and a past reset means spend freely."""
+    cfg = replace(config, xsearch_url="http://xsearch.test", codex_home=tmp_path / "codex")
+    bot = DiscordCodexClient(cfg)
+    reading = {"weekly_percent": 85.0}
+    if reset_at is not None:
+        reading["reset_at"] = reset_at
+
+    async def usage(config):
+        return reading
+
+    monkeypatch.setattr(bot_module.grok, "usage", usage)
+    expected = reset_at == "2026-01-01T00:00:00+00:00"  # past: nothing left to keep back
+    assert await bot._grok_usable() is expected

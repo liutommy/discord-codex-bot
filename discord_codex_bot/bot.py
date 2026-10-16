@@ -21,6 +21,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
+from . import agy as agy_module
 from . import (
     apis,
     embedfix,
@@ -35,7 +36,7 @@ from . import (
     xsearch,
 )
 from .access import check_access
-from .agy import CREDITS_SPENT, AgyUnavailable, read_usage, run_agy
+from .agy import AgyUnavailable, read_usage, run_agy
 from .alerts import Alerter, login_watch
 from .announce import announce_loop
 from .attachments import (
@@ -522,6 +523,7 @@ class DiscordCodexClient(discord.Client):
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
         self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
         self.agy_quota = quota.AgyQuota(float(config.agy_reserve_percent))
+        quota.shared = self.agy_quota  # for background jobs' agy fallback (backends.run_batch)
         # Persona uploads and resets run one at a time: backup, save and the rebuild interleaved
         # could leave the older text built last.
         self._instructions_lock = asyncio.Lock()
@@ -1357,11 +1359,13 @@ class DiscordCodexClient(discord.Client):
                 kw.pop("effort", None)
                 # A timeout, an empty reply or a model out of quota is AgyUnavailable and falls
                 # back; broken settings stay a plain error and reach the failure alert.
+                # A pool under its reserve is skipped here for every turn, a member's own model
+                # and MODEL_CHAIN's agy entries included, not only automatic choice.
+                agy_module.check_pool(via.model, self.agy_quota)
                 try:
                     return await run_agy(text, self.config, via.model, **kw)
                 except AgyUnavailable as error:
-                    if CREDITS_SPENT in str(error).lower():  # skip the pool until it resets
-                        self.agy_quota.mark_spent(quota.group_of(via.model))
+                    agy_module.note_spent(via.model, error, self.agy_quota)
                     raise
             if via.backend in ROUTER_BACKENDS:
                 catalog = self.catalogs[via.backend]
@@ -1862,12 +1866,17 @@ class DiscordCodexClient(discord.Client):
         (Images it cannot take — GIF, WebP, too many — fall back from run_grok itself.)"""
         if not grok.enabled(self.config) or time.time() < self._grok_off_until:
             return False
-        reading = await grok.usage(self.config) or {}
-        percent = reading.get("weekly_percent")
+        return self._grok_chat_open(await grok.usage(self.config))
+
+    def _grok_chat_open(self, reading: dict | None) -> bool:
+        """Chat may use Grok's weekly quota down to the share kept for X lookups, a share that
+        shrinks as the reset nears (quota.reserve_percent). No reading: no gate."""
+        percent = (reading or {}).get("weekly_percent")
         if not isinstance(percent, (int, float)):
             return True
         base = 100.0 - self.config.grok_chat_max_weekly_percent  # the share kept for X lookups
-        reset = quota.parse_time(reading.get("reset_at")) if reading.get("reset_at") else None
+        reset_at = (reading or {}).get("reset_at")
+        reset = quota.parse_time(reset_at) if reset_at else None
         return quota.may_spend(100.0 - percent, base, reset, _dt.now(UTC))
 
     async def _grok_refused(self, error: Exception) -> None:
@@ -2039,8 +2048,9 @@ class DiscordCodexClient(discord.Client):
                 and route.kind in table.claude_failed
                 and not self.agy_quota.usable(quota.group_of("claude-"))
             ):
-                stand_in = table.claude_failed[route.kind]  # Claude under its reserve too
-                degraded.append("claude-reserve")
+                # Claude under its reserve too. Not logged as degraded: this is a spare, and
+                # Argon may well answer itself.
+                stand_in = table.claude_failed[route.kind]
             spares.append(routing.resolved(await codex_effort(stand_in), model))
         if not image_turn and routing.is_claude(stand_in) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))
@@ -3204,11 +3214,8 @@ class DiscordCodexClient(discord.Client):
             if reading and isinstance(reading.get("weekly_percent"), (int, float)):
                 percent = reading["weekly_percent"]
                 line += f" · 額度 7d {percent:.0f}%"
-                if percent >= self.config.grok_chat_max_weekly_percent:
-                    line += (
-                        f"\n　└ 已超過 {self.config.grok_chat_max_weekly_percent}%，"
-                        "聊天改用備援，剩下的留給 X 查詢"
-                    )
+                if not self._grok_chat_open(reading):
+                    line += "\n　└ 剩下的額度留給 X 查詢，聊天改用備援"
             else:
                 line += " · 額度讀不到"
             if time.time() < self._grok_off_until:

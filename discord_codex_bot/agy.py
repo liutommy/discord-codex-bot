@@ -8,6 +8,7 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
+from . import quota
 from .backends import BackendUnavailable
 from .codex import (
     MAX_PROCESS_OUTPUT_BYTES,
@@ -147,6 +148,22 @@ async def _run(
         stdout.decode("utf-8", errors="replace"),
         stderr.decode("utf-8", errors="replace"),
     )
+
+
+def check_pool(model: str, pools: quota.AgyQuota | None = None) -> None:
+    """Every agy call goes through here first: a pool under its reserve, or spent, is
+    AgyUnavailable without calling agy, so the usual fallback answers instead."""
+    pools = pools or quota.shared
+    group = quota.group_of(model)
+    if pools is not None and not pools.usable(group):
+        raise AgyUnavailable(f"agy pool {group} is under its reserve or spent")
+
+
+def note_spent(model: str, error: Exception, pools: quota.AgyQuota | None = None) -> None:
+    """agy said the model's pool is spent: skip the pool until it resets."""
+    pools = pools or quota.shared
+    if pools is not None and CREDITS_SPENT in str(error).lower():
+        pools.mark_spent(quota.group_of(model))
 
 
 async def read_usage(config: Config) -> dict | None:

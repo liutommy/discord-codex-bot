@@ -41,6 +41,10 @@ def parse_time(value: object) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+# The pools the owner keeps a reserve on; any other pool is held back only once agy says spent.
+RESERVED = frozenset({"gemini-argon-wtu", "3p"})
+
+
 def group_of(model: str) -> str:
     """The agy pool a model slug spends (bucket ids are "<group>-<window>")."""
     if model.startswith("gemini-4-argon"):
@@ -58,6 +62,9 @@ class AgyQuota:
         self.base = base
         self._buckets: dict[str, tuple[float, datetime | None]] = {}  # id -> (left %, reset)
         self._spent_until: dict[str, float] = {}  # group -> epoch seconds
+        # group -> its buckets when marked: only a reading with more left, or a later reset,
+        # lifts the mark (one saying the same, or taken before the mark, is no news)
+        self._spent_seen: dict[str, dict[str, tuple[float, datetime | None]]] = {}
 
     def update(self, reading: object) -> None:
         """Take a /usage reading; one of an unexpected shape is ignored (the last one stands).
@@ -79,9 +86,18 @@ class AgyQuota:
             LOGGER.warning("agy usage reading has no buckets; keeping the last one")
             return
         self._buckets = buckets
-        for group in list(self._spent_until):
-            if self._of(group) and all(left > 0 for left, _reset in self._of(group)):
-                del self._spent_until[group]
+        for group, seen in list(self._spent_seen.items()):
+            if any(self._newer(bucket, then) for bucket, then in seen.items()):
+                del self._spent_seen[group]
+                self._spent_until.pop(group, None)
+
+    def _newer(self, bucket: str, then: tuple[float, datetime | None]) -> bool:
+        current = self._buckets.get(bucket)
+        if current is None:
+            return False
+        (left, reset), (was_left, was_reset) = current, then
+        later = reset is not None and was_reset is not None and reset > was_reset
+        return left > was_left or later
 
     def _of(self, group: str) -> list[tuple[float, datetime | None]]:
         return [v for k, v in self._buckets.items() if k.rsplit("-", 1)[0] == group]
@@ -90,6 +106,8 @@ class AgyQuota:
         now = now or datetime.now(UTC)
         if now.timestamp() < self._spent_until.get(group, 0.0):
             return False
+        if group not in RESERVED:
+            return True
         # A bucket past its reset is full again, whatever an old reading said.
         return all(
             may_spend(left, self.base, reset, now)
@@ -107,9 +125,16 @@ class AgyQuota:
             reset.timestamp() if reset and reset > now else now.timestamp() + UNKNOWN_SPENT_SECONDS
         )
         self._spent_until[group] = until
+        self._spent_seen[group] = {
+            k: v for k, v in self._buckets.items() if k.rsplit("-", 1)[0] == group
+        }
         LOGGER.warning(
             "agy pool %s spent; skipped until %s", group, datetime.fromtimestamp(until, UTC)
         )
 
     def summary(self) -> dict[str, float]:
         return {bucket: round(left, 1) for bucket, (left, _reset) in self._buckets.items()}
+
+
+# The Bot's AgyQuota, set when it starts: background jobs that fall back to agy check it too.
+shared: AgyQuota | None = None

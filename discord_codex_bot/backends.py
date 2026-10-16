@@ -146,6 +146,7 @@ async def run_batch(
     (commands, writes, URL reads and MCP are all refused) and is given a fresh conversation each
     time, which is what `isolated` buys on the Codex side.
     """
+    from . import agy as agy_module
     from .agy import run_agy
     from .codex import CodexFallbackError, run_codex
 
@@ -166,9 +167,14 @@ async def run_batch(
             unavailable,
             spare.model,
         )
-        result = await run_agy(
-            prompt, config, spare.model, raw=True, schema=schema, plain=True, images=images
-        )
+        agy_module.check_pool(spare.model)  # under its reserve: the Codex failure stands
+        try:
+            result = await run_agy(
+                prompt, config, spare.model, raw=True, schema=schema, plain=True, images=images
+            )
+        except agy_module.AgyUnavailable as error:
+            agy_module.note_spent(spare.model, error)
+            raise
         return result.text
 
 

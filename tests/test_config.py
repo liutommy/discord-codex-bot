@@ -171,3 +171,18 @@ def test_the_sidecar_reservation_fits_in_the_lookup_deadline() -> None:
         load_config({**on, "XSEARCH_SIDECAR_SECONDS": "241"})
     # Without the sidecar the two settings mean nothing: a short timeout must not stop the Bot.
     assert load_config({**base, "XSEARCH_TIMEOUT_SECONDS": "60"}).xsearch_timeout_seconds == 60
+
+
+def test_agy_reserve_settings_default_and_stay_in_bounds() -> None:
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    config = load_config(base)
+    assert config.agy_reserve_percent == 20 and config.agy_usage_minutes == 10
+    config = load_config({**base, "AGY_RESERVE_PERCENT": "0", "AGY_USAGE_MINUTES": "0"})
+    assert config.agy_reserve_percent == 0 and config.agy_usage_minutes == 0
+    for name, bad in (("AGY_RESERVE_PERCENT", "101"), ("AGY_USAGE_MINUTES", "-1")):
+        with pytest.raises(ValueError, match=name):
+            load_config({**base, name: bad})

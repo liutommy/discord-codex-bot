@@ -104,22 +104,6 @@ async def _failed():
     return 1, json.dumps({"status": "ERROR", "error": "authentication failed or timed out"}), ""
 
 
-def test_a_fresh_reading_with_quota_left_lifts_a_spent_mark() -> None:
-    """The mark lasts until the emptiest bucket's reset, which can be days; a later reading that
-    shows every bucket of the pool with quota left is the better word."""
-    quota = AgyQuota(20.0)
-    quota.update(USAGE)
-    quota.mark_spent("gemini", NOW)
-    assert not quota.usable("gemini", NOW)
-    quota.update(USAGE)  # the next poll: Gemini still at 99%
-    assert quota.usable("gemini", NOW)
-    drained = json.loads(json.dumps(USAGE))
-    drained["command"]["data"]["groups"][0]["buckets"][1]["remaining_fraction"] = 0.0
-    quota.mark_spent("gemini", NOW)
-    quota.update(drained)  # still empty: the mark stays
-    assert not quota.usable("gemini", NOW)
-
-
 def test_a_bucket_past_its_reset_is_full_again() -> None:
     """A reading that went stale (agy unreadable for a while) must not block a pool for good."""
     empty = json.loads(json.dumps(USAGE))
@@ -139,3 +123,35 @@ def test_an_odd_reading_is_ignored_not_fatal(reading) -> None:
     quota.update(USAGE)
     quota.update(reading)
     assert not quota.usable("3p", NOW)  # the last good reading still stands
+
+
+def test_a_reading_that_shows_nothing_new_keeps_a_spent_mark() -> None:
+    """agy said spent at 0.05% left (a day from the reset, so no reserve held it back). The next
+    reading still saying 0.05% is no news: lifting the mark would cost every turn a failed call.
+    A reading taken before the mark and returned after it says the same."""
+    quota = AgyQuota(20.0)
+    quota.update(USAGE)
+    day_before = datetime(2026, 10, 20, 12, tzinfo=UTC)  # 3p-weekly resets 10-21 07:32
+    assert quota.usable("3p", day_before)
+    quota.mark_spent("3p", day_before)
+    quota.update(USAGE)
+    assert not quota.usable("3p", day_before)
+    refilled = json.loads(json.dumps(USAGE))
+    refilled["command"]["data"]["groups"][1]["buckets"][0]["remaining_fraction"] = 0.5
+    quota.update(refilled)  # more left than when it was marked: news
+    assert quota.usable("3p", day_before)
+    quota.mark_spent("3p", day_before)
+    reset = json.loads(json.dumps(refilled))
+    reset["command"]["data"]["groups"][1]["buckets"][0]["reset_time"] = "2026-10-28T07:32:34Z"
+    quota.update(reset)  # a later reset: the pool has reset since the mark
+    assert quota.usable("3p", day_before)
+
+
+def test_only_argon_and_claude_keep_a_reserve() -> None:
+    """The owner set reserves on Argon and the 3p pool; Flash (gemini) is held back only once
+    agy reports it spent."""
+    low = json.loads(json.dumps(USAGE))
+    low["command"]["data"]["groups"][0]["buckets"][0]["remaining_fraction"] = 0.05
+    quota = AgyQuota(20.0)
+    quota.update(low)
+    assert quota.usable("gemini", NOW)
