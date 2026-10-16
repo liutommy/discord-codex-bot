@@ -396,6 +396,15 @@ TAG_RETRY = (
 )
 
 
+_ERRORS_NAME = re.compile(r"(tag)(_errors)", re.I)
+
+
+def fence_errors(text: str) -> str:
+    """The failed tags as data inside TAG_ERRORS: a tag that quotes a member or a page may hold
+    "</TAG_ERRORS>", which would end the envelope early and speak as the Bot to the retry."""
+    return _ERRORS_NAME.sub(lambda m: m[1] + "\u2060" + m[2], text)
+
+
 def action_tags(text: str) -> list[str]:
     """The live action tags of `text` in order, everything around them dropped. A tag inside
     another one (a member's words quoted in a <memory> body) is that tag's data, not an order."""
@@ -1683,7 +1692,7 @@ class DiscordCodexClient(discord.Client):
                     user_id,
                     " | ".join(p[:80] for p in problems),
                 )
-                errors = defang("\n".join(problems))
+                errors = fence_errors(defang("\n".join(problems)))
                 try:
                     # Straight to the backend that answered, never through `turn`: a spare holds
                     # none of the thread and would be asked the whole question again, and every
