@@ -1183,3 +1183,40 @@ async def test_a_stored_route_on_a_model_agy_no_longer_offers_starts_over(
     verdicts(monkeypatch, Verdict("timeout"))
     plan, result = await ask(client, "然後呢")
     assert plan.log["why"] == "default" and plan.route.entry != stale.entry
+
+
+async def test_a_codex_stand_in_for_argon_drops_a_level_near_codex_quota(
+    client, backends, monkeypatch
+) -> None:
+    """Argon's pool stays spent for days; its Codex stand-in must not run at full effort past
+    the Codex threshold that lowers every other Codex cell."""
+    monkeypatch.setattr(bot_module, "read_rate_limits", lambda config: RateLimits(85.0, 10.0, "t"))
+
+    async def run_agy(prompt, config, model, **kw):
+        raise ARGON_SPENT
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    verdicts(monkeypatch, ok("code", 10))
+    plan, result = await ask(client)
+    assert result.via == Resolved("codex", "gpt-5.6-luna", "high")  # xhigh, one level down
+    assert "codex-quota" in plan.log["degraded"]
+
+
+async def test_a_default_route_outside_the_table_syntax_keeps_its_conversation(
+    client, backends, monkeypatch
+) -> None:
+    """DEFAULT_MODEL is written like a member's stored model (codex:<model>, a router id,
+    gpt-oss), not like a table cell. Its stored route must survive to the next message."""
+    client.config = replace(client.config, default_model="codex:gpt-5.6-luna|high")
+    verdicts(monkeypatch, Verdict("timeout"))
+    await ask(client, "第一句")
+    plan, _ = await ask(client, "第二句")
+    assert plan.log["why"] == "kept" and plan.resume == "codex-t1"
+
+
+async def test_a_member_on_a_retired_model_is_routed_again(client, backends, monkeypatch) -> None:
+    """A /model choice agy no longer offers quietly meant DEFAULT_MODEL and kept the member out
+    of routing for good, while /status still said they had chosen it."""
+    client.memory.set_model(GUILD, USER, "agy:claude-opus-4-6")
+    verdicts(monkeypatch, ok("code", 8))
+    assert await client._route(KEY, None, GUILD, USER, "寫程式", [], False) is not None

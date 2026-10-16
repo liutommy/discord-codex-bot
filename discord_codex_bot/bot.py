@@ -1792,10 +1792,16 @@ class DiscordCodexClient(discord.Client):
             text += f"（免費，{sees}圖片）\n{FREE_MODEL_NOTE}"
         return text
 
+    def _own_model(self, guild_id: int | None, user_id: int) -> str:
+        """The member's own /model choice; "" for none, and for one agy no longer offers (it
+        would otherwise mean DEFAULT_MODEL in silence and keep them out of routing)."""
+        own = self.memory.get_model(guild_id, user_id)
+        return "" if own and routing.retired(own) else own
+
     def _stored(self, guild_id: int | None, user_id: int) -> str:
         """The member's stored "<backend>:<model>|<effort>", or DEFAULT_MODEL when they have
         none: what a member who never ran /model gets is a setting, not a code path."""
-        return self.memory.get_model(guild_id, user_id) or self.config.default_model
+        return self._own_model(guild_id, user_id) or self.config.default_model
 
     def _choice(self, stored: str):
         return parse_choice(stored, self.config.codex_model, self.config.default_model)
@@ -1883,14 +1889,14 @@ class DiscordCodexClient(discord.Client):
         timeout, error, odd answer or low confidence — keeps a routed conversation where it is
         and sends a new one to DEFAULT_MODEL, without retrying Jev."""
         table = self.routing
-        if table is None or self.memory.get_model(guild_id, user_id):
+        if table is None or self._own_model(guild_id, user_id):
             return None
         current = None if fresh else self.threads.routed(key, replied_to, plain)
         route = Route.from_dict(current["route"]) if current else None
-        if route is not None and not routing.valid_entry(route.entry):
+        if route is not None and routing.retired(route.entry):
             # Its model is gone (agy dropped it): kept, it would quietly resolve to Codex for as
             # long as nothing moved the conversation. Start over instead.
-            LOGGER.info("Stored route %s is no longer a valid target; starting over", route.entry)
+            LOGGER.info("Stored route %s is on a retired model; starting over", route.entry)
             current = route = None
         sources = [*route.earlier, current["thread_id"]] if current and route else []
         turns = await asyncio.to_thread(
@@ -1933,16 +1939,30 @@ class DiscordCodexClient(discord.Client):
             # Codex (checked at load); a conversation already on a Codex cell keeps its cell.
             entry = table.image[0]
         backend = routing.backend_of(entry)
-        if backend == CODEX and not effort:  # an effort the member set is theirs
-            limits = await asyncio.to_thread(read_rate_limits, self.config)
-            if limits is not None and (
-                limits.primary_used_percent >= table.codex_five_hour
-                or limits.secondary_used_percent >= table.codex_seven_day
-            ):
-                lowered = routing.lower_effort(entry)
-                if lowered != entry:
-                    entry = lowered
-                    degraded.append("codex-quota")
+        codex_tight: bool | None = None  # read once, for the entry or a Codex stand-in
+
+        async def near_codex_quota() -> bool:
+            nonlocal codex_tight
+            if codex_tight is None:
+                limits = await asyncio.to_thread(read_rate_limits, self.config)
+                codex_tight = limits is not None and (
+                    limits.primary_used_percent >= table.codex_five_hour
+                    or limits.secondary_used_percent >= table.codex_seven_day
+                )
+            return codex_tight
+
+        async def codex_effort(cell: str) -> str:
+            """A Codex cell one effort level down near its quota (an effort the member set is
+            theirs). The same rule for the entry and for a Codex stand-in."""
+            if routing.backend_of(cell) != CODEX or effort or not await near_codex_quota():
+                return cell
+            lowered = routing.lower_effort(cell)
+            if lowered != cell and "codex-quota" not in degraded:
+                degraded.append("codex-quota")
+            return lowered
+
+        if backend == CODEX:
+            entry = await codex_effort(entry)
         elif backend == GROK and kind == "live-x":
             if not self._grok_alive():
                 entry = table.live_x_without_grok
@@ -1963,7 +1983,7 @@ class DiscordCodexClient(discord.Client):
             # Argon's weekly pool is small: spent, the question goes back to the cell Argon
             # replaced, and from a Claude cell on to Claude's own stand-in.
             stand_in = table.argon_failed[route.kind]
-            spares.append(routing.resolved(stand_in, model))
+            spares.append(routing.resolved(await codex_effort(stand_in), model))
         if not image_turn and routing.is_claude(stand_in) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))
         # An image turn takes only the image list's order (no type stand-ins), then MODEL_CHAIN;
@@ -3020,7 +3040,7 @@ class DiscordCodexClient(discord.Client):
         continues a thread, memory sizes) and what the system offers. The system section carries
         the live Codex quota and the last spare-backend fallback, so a member who gets no notice
         in the answer itself can still see here that Codex is at its limit right now."""
-        own = self.memory.get_model(guild_id, user_id)
+        own = self._own_model(guild_id, user_id)
         stored = own or self.config.default_model
         chosen = self._choice(stored)
         level = split_stored(stored)[1]

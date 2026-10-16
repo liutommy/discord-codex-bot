@@ -1,5 +1,5 @@
 {
-  "_comment": "Jev routing table v3, chosen by evaluating Jev's verdicts against answers from every target. Each type has one target per difficulty band L/M/H/X (Jev's 10-level score: 1-3 L, 4-6 M, 7-8 H, 9-10 X), written like a stored model with its effort; 'codex' is CODEX_MODEL. Every cell is checked at start-up and a bad one stops the Bot.",
+  "_comment": "Jev routing table v3, chosen by evaluating Jev's verdicts against answers from every target; the X column (Gemini 4 Argon, Codex for quick) and create's H cell (Claude Sonnet 5.5) were set on 2026-10-16 without a new evaluation. Each type has one target per difficulty band L/M/H/X (Jev's 10-level score: 1-3 L, 4-6 M, 7-8 H, 9-10 X), written like a stored model with its effort; 'codex' is CODEX_MODEL. Every cell is checked at start-up and a bad one stops the Bot.",
   "types": {
     "chat":     ["agy:gemini-3.8-flash|low",    "agy:gemini-3.8-flash|low",    "agy:gemini-3.8-flash|medium", "agy:gemini-4-argon|medium"],
     "quick":    ["agy:gemini-3.8-flash|low",    "agy:gemini-3.8-flash|medium", "agy:gemini-3.8-flash|high",   "codex|high"],

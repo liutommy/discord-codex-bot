@@ -234,12 +234,16 @@ def load_table(path: Path) -> Table:
     return table
 
 
-def valid_entry(entry: str) -> bool:
-    try:
-        check_entry(entry)
-    except ValueError:
-        return False
-    return True
+def retired(entry: str) -> bool:
+    """An agy target whose family agy no longer offers. Only that: a stored route may also be
+    DEFAULT_MODEL, written like a member's stored model rather than a table cell."""
+    value = split_stored(entry)[0]
+    backend, _, family = value.partition(":")
+    return backend == AGY and family not in AGY_FAMILIES and not _known_slug(family)
+
+
+def _known_slug(slug: str) -> bool:
+    return any(slug in slugs.values() for _, slugs in AGY_FAMILIES.values())
 
 
 def backend_of(entry: str) -> str:

@@ -200,7 +200,8 @@ FEATURES: list[str] = [
 # Shown only while routing is on (JEV_ENABLED).
 ROUTING_FEATURE = (
     "**自動挑模型**：沒用 `/{p}-model` 指定模型的話，預設模型會依每則問題的類型與難度自動挑選"
-    "（閒聊與簡單問題用輕量模型，程式與要上網查的用 Codex，X 貼文用 Grok，難題換更強的），"
+    "（閒聊與簡單問題用輕量模型，程式與要上網查的用 Codex，X 貼文用 Grok，"
+    "最難的問題大多交給 Gemini 4 Argon），"
     "回覆最下面會寫這次是哪個模型回答；同一段對話的難度只升不降，換了問題類型會改用最適合"
     "那類問題的模型，閒聊不會讓對話換模型。"
     "用 `/{p}-model` 指定模型就不會自動挑，`clear` 回到自動挑選；"
