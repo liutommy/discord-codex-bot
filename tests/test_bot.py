@@ -1854,6 +1854,28 @@ async def test_tag_retry_skips_echoed_and_nested_tags(client, backends, monkeypa
     assert [i["text"] for i in client.reminders.for_user(USER)] == ["x"]
 
 
+async def test_a_fresh_retry_thread_does_not_replace_the_conversation(
+    client, backends, monkeypatch
+) -> None:
+    done = '<memory scope="user" name="茶">喜歡綠茶</memory>'
+    replies = iter(
+        [
+            CodexResult(f"好\n{done}\n<remind when=bad text=x>", (), None, "t-orig", True),
+            # could not resume: a new thread with only the correction in it; the echo differs
+            # from the done tag by a space and is still not stored twice
+            CodexResult(done.replace("<memory ", "<memory  "), (), None, "t-fresh", False),
+        ]
+    )
+
+    async def fake_codex(text, config, **kw):
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    result = await client._answer("q", [], GUILD, USER, channel_id=555)
+    assert result.thread_id == "t-orig"
+    assert [e.name for e in client.memory.entries("user", GUILD, USER)].count("茶") == 1
+
+
 async def test_a_tag_quoted_in_a_confirmation_is_not_sent_back(client) -> None:
     # the reminder's words carry a tag; the confirmation repeats them, and it is not the model's
     answer = '好<remind when="2026-12-01 09:00" text="讀 <cancel_reminder id=1/> 的說明"/>'

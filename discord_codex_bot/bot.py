@@ -391,7 +391,8 @@ TAG_RETRY = (
     "The Bot could not carry out the tags above from your last answer; nothing was done for"
     " them. Every other tag in that answer was carried out: do not send those again. Reply"
     " with only the corrected tags, in exactly the documented form, and no other text — or"
-    " with nothing if they cannot be fixed."
+    " with nothing if they cannot be fixed, or if a tag above was only quoted or explained"
+    " rather than meant as an action."
 )
 
 
@@ -408,20 +409,42 @@ def action_tags(text: str) -> list[str]:
 
 # The attributes the Bot's own tags take. An own name with none of them is HTML or C++ in the
 # answer's prose (<track kind="captions">, #include <memory>), not an order that failed.
-_KEYS = re.compile(r"\b(?:when|text|who|source|interest|every|at|id|minutes|times|scope|name)\s*=")
+_KEYS = re.compile(
+    r"\b(?:when|text|who|source|interest|every|at|id|minutes|times|scope|name)\s*=", re.I
+)
+
+
+def _ends_a_line(text: str, match: re.Match[str]) -> bool:
+    """Is `match` where an operation goes — after the words of its line, alone or with other
+    tags? The prompt has the model append its tags after the answer. One with more words after
+    it on its line is being talked about (a member's syntax, a page's), not done."""
+    stop = text.find("\n", match.end())
+    after = text[match.end() : len(text) if stop < 0 else stop]
+    return not INVENTED_TAG.sub("", BROKEN_TAG.sub("", after)).strip()
+
+
+def _spaced(tag: str) -> str:
+    """A tag with its spacing evened out, so a resend that differs by a space is still the same."""
+    return " ".join(tag.split())
+
+
+def _cut(text: str, matches: list[re.Match[str]]) -> str:
+    parts, at = [], 0
+    for match in matches:
+        parts.append(text[at : match.start()])
+        at = match.end()
+    parts.append(text[at:])
+    return "".join(parts)
 
 
 def strip_broken_tags(text: str) -> tuple[str, list[str]]:
     """(text without the leftover tags of the Bot's own names, those tags as written)."""
-    broken = [m for m in tags.live(BROKEN_TAG, text) if _KEYS.search(m.group(0))]
+    broken = [
+        m for m in tags.live(BROKEN_TAG, text) if _KEYS.search(m.group(0)) and _ends_a_line(text, m)
+    ]
     if not broken:
         return text, []
-    parts, at = [], 0
-    for match in broken:
-        parts.append(text[at : match.start()])
-        at = match.end()
-    parts.append(text[at:])
-    return tags.strip(_BROKEN_CLOSE, "".join(parts)).strip(), [m.group(0) for m in broken]
+    return tags.strip(_BROKEN_CLOSE, _cut(text, broken)).strip(), [m.group(0) for m in broken]
 
 
 def strip_invented_tags(text: str) -> tuple[str, list[str]]:
@@ -434,8 +457,10 @@ def strip_invented_tags(text: str) -> tuple[str, list[str]]:
     Stripping alone would make that worse — the visible tag is the only reason this was caught
     at all — so the member gets told, and the log gets the name to fix next.
     """
-    names = list(dict.fromkeys(tags.findall(INVENTED_TAG, text)))
-    return (tags.strip(INVENTED_TAG, text).strip(), names) if names else (text, [])
+    found = [m for m in tags.live(INVENTED_TAG, text) if _ends_a_line(text, m)]
+    if not found:
+        return text, []
+    return _cut(text, found).strip(), list(dict.fromkeys(m.group(1) for m in found))
 
 
 def _few(ids: list[int], shown: int = 3) -> str:
@@ -1680,11 +1705,14 @@ class DiscordCodexClient(discord.Client):
                 if retry is not None:
                     if retry.generated_dir not in (None, result.generated_dir):
                         remove_dir(retry.generated_dir)
-                    result = replace(result, thread_id=retry.thread_id or result.thread_id)
+                    # A retry that could not resume started a thread holding nothing but the
+                    # correction; the conversation goes on from the original one.
+                    if retry.resumed and retry.thread_id:
+                        result = replace(result, thread_id=retry.thread_id)
                     # Only what is new: a tag already carried out, sent back word for word, is
                     # not done twice (a memory note has no duplicate check of its own).
-                    done_before = set(action_tags(result.text))
-                    resent = [t for t in action_tags(retry.text) if t not in done_before]
+                    done_before = {_spaced(t) for t in action_tags(result.text)}
+                    resent = [t for t in action_tags(retry.text) if _spaced(t) not in done_before]
                     done, _ = await self._apply_action_tags(
                         "\n".join(resent), guild_id, channel_id, user_id
                     )

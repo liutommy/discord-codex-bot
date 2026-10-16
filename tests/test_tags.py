@@ -125,6 +125,20 @@ def test_an_own_name_in_prose_is_not_a_broken_tag() -> None:
     assert strip_broken_tags(prose) == (prose, [])
 
 
+def test_a_tag_talked_about_mid_sentence_is_text_not_an_order() -> None:
+    from discord_codex_bot.bot import strip_broken_tags, strip_invented_tags
+
+    # more words after it on its line: the answer is explaining the syntax, not using it
+    talked = ("用 <cancel_reminder id=1/> 就能取消提醒", '想要 <make_coffee size="L"/> 這種指令嗎')
+    for text in talked:
+        assert strip_broken_tags(text) == (text, [])
+        assert strip_invented_tags(text) == (text, [])
+    # where an operation goes — after the answer's words, alone or with other tags — it is one
+    upper = '<cancel_reminder ID="1"/>'
+    assert strip_broken_tags(f"好\n{upper}") == ("好", [upper])
+    assert strip_broken_tags("好 <cancel_reminder id=1/> <x_y/>")[1] == ["<cancel_reminder id=1/>"]
+
+
 def test_many_tags_in_a_long_answer_stay_cheap() -> None:
     import time
 

@@ -31,7 +31,7 @@ _CLOCK = re.compile(
 # who= holds as many mentions as the member named; one message pings them all.
 REMIND_TAG = re.compile(r'<remind((?:\s+[a-z_]{1,10}="[^"]{0,4000}")+)\s*/?>(?:\s*</remind>)?')
 _ATTR = re.compile(r'([a-z_]{1,10})="([^"]{0,4000})"')
-_WHO = re.compile(r"<@!?([0-9]{1,25})>|@?([0-9]{1,25})")
+_WHO = re.compile(r"<@!?([0-9]{1,25})>|(?<![0-9])@?([0-9]{1,25})(?![0-9])")
 CANCEL_TAG = re.compile(r'<cancel_reminder\s+id="([0-9]{1,9})"\s*/?>(?:\s*</cancel_reminder>)?')
 _ISO = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})\s*$")
 _DATE = re.compile(
@@ -115,15 +115,10 @@ def _parse_when(text: str, now: datetime | None) -> datetime | None:
 def _who(value: str) -> tuple[int, ...] | None:
     """The ids in a who= value (mentions or bare ids), () for none — or None when it names
     someone some other way (who="@小明"): reminding the setter instead would be a silent guess."""
-    ids = []
-    for token in re.split(r"[\s,，、]+", value.strip()):
-        if not token:
-            continue
-        found = _WHO.fullmatch(token)
-        if found is None:
-            return None
-        ids.append(int(found.group(1) or found.group(2)))
-    return tuple(dict.fromkeys(ids))
+    found = list(_WHO.finditer(value))
+    if _WHO.sub("", value).strip(" \t\n,，、"):  # words left over: not a mention list
+        return None
+    return tuple(dict.fromkeys(int(m.group(1) or m.group(2)) for m in found))
 
 
 def extract_reminder_tags(
@@ -206,11 +201,12 @@ class ReminderStore:
         who = [target_id] if isinstance(target_id, int) else list(target_id or ())
         who = list(dict.fromkeys(who)) or [user_id]
         due, kept = when.astimezone(UTC).isoformat(), text.strip()[:500]
-        # The same tag sent again sets nothing new; to the minute, since "30分鐘後" read twice
-        # is a few seconds apart.
+        # The same tag sent again sets nothing new: within a minute, since "30分鐘後" read twice
+        # is a few seconds apart, and whoever comes first in who=.
         for old in self.for_user(user_id):
-            same = (old["channel_id"], old["due"][:16], old["text"], targets(old))
-            if same == (channel_id, due[:16], kept, who):
+            close = abs(datetime.fromisoformat(old["due"]) - when) < timedelta(minutes=1)
+            same = (old["channel_id"], old["text"], sorted(targets(old)))
+            if close and same == (channel_id, kept, sorted(who)):
                 return f"已經有一樣的提醒 #{old['id']}。"
         item = {
             "id": self._next_id,

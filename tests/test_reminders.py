@@ -113,10 +113,17 @@ def test_remind_tag_takes_several_people_in_any_order(tmp_path: Path) -> None:
     assert extract_reminder_tags('<remind when="1小時後" text="a" who="11, <@!22>"/>')[1] == [
         ("1小時後", "a", (11, 22))
     ]
-    # "30分鐘後" read twice is seconds apart: still the same reminder
-    soon = datetime.now(UTC).replace(second=0) + timedelta(hours=2)
-    assert isinstance(store.add(1, 2, 11, soon, "y"), dict)
-    assert store.add(1, 2, 11, soon + timedelta(seconds=5), "y").startswith("已經有一樣的提醒")
+    assert extract_reminder_tags('<remind when="1小時後" text="a" who="<@11><@22>"/>')[1] == [
+        ("1小時後", "a", (11, 22))
+    ]
+    assert extract_reminder_tags('<remind when="1小時後" text="a" who="小明2號"/>')[1] == [
+        ("1小時後", "a", None)
+    ]
+    # "30分鐘後" read twice is seconds apart, across a minute too: still the same reminder
+    soon = datetime.now(UTC).replace(second=59) + timedelta(hours=2)
+    assert isinstance(store.add(1, 2, 11, soon, "y", (11, 22)), dict)
+    again = store.add(1, 2, 11, soon + timedelta(seconds=2), "y", (22, 11))
+    assert again.startswith("已經有一樣的提醒")
 
 
 def test_extract_reminder_tags_and_render_pending() -> None:
