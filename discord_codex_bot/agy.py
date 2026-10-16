@@ -24,7 +24,7 @@ PROJECTS_DIR = Path(".gemini/config/projects")
 # a 5xx, a deadline), as opposed to a broken install or settings, which must surface.
 _UNAVAILABLE = re.compile(
     r"quota|rate.?limit|resource.?exhausted|\b429\b|\b50[234]\b|overload|capacity|"
-    r"unavailable|temporar|deadline|try again",
+    r"unavailable|temporar|deadline|try again|credits balance is too low",
     re.IGNORECASE,
 )
 

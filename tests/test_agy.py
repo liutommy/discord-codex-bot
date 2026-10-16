@@ -276,6 +276,8 @@ async def test_run_streams_agent_text_deltas_while_agy_runs(monkeypatch, config)
         ((1, "", "Error: RESOURCE_EXHAUSTED: quota exceeded for model"), True),
         ((1, "", "HTTP 503 Service Unavailable"), True),
         ((1, "", "model is overloaded, try again later"), True),
+        # agy 1.3.x, a spent quota (Argon's weekly pool): a fallback, not a broken install
+        ((1, "", "Your AI credits balance is too low to continue."), True),
         ((0, _stream("c", ""), ""), True),  # no reply at all
         ((2, "", "settings.json: unexpected token"), False),  # broken install: surfaces
         ((1, "", "unknown flag --print-timeout"), False),
