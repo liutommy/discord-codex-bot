@@ -209,6 +209,8 @@ class Config:
     grok_dir: Path
     grok_history_chars: int
     grok_chat_max_weekly_percent: int
+    agy_reserve_percent: int
+    agy_usage_minutes: int
     jev_enabled: bool
     jev_url: str
     jev_model: str
@@ -400,10 +402,16 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Grok spends plan quota per session, and replayed history is part of every session.
         grok_history_chars=_positive_int(values, "GROK_HISTORY_CHARS", 60_000),
         # Chat and X lookups share Grok's weekly quota: past this share, chat skips Grok and the
-        # rest is left to X lookups. 100 = no reserve.
+        # rest is left to X lookups. 100 = no reserve. The reserve shrinks as the weekly reset
+        # nears (quota.reserve_percent): within a day of it, chat may use it all.
         grok_chat_max_weekly_percent=_bounded_int(
             values, "GROK_CHAT_MAX_WEEKLY_PERCENT", 80, 1, 100
         ),
+        # agy pools (Argon; Claude and GPT-OSS) are shared with the account's other users: this
+        # share is left to them, shrinking the same way. agy's /usage is read this often (0 =
+        # never; a spent pool is still skipped once agy reports it).
+        agy_reserve_percent=_bounded_int(values, "AGY_RESERVE_PERCENT", 20, 0, 100),
+        agy_usage_minutes=_bounded_int(values, "AGY_USAGE_MINUTES", 10, 0, 1440),
         # Routing (Jev, TypeSafe's hosted decision model): a member who never chose a model with
         # /<prefix>-model gets one picked per message from config/routing.json (baked in).
         jev_enabled=_boolean(values, "JEV_ENABLED"),

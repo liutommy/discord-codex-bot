@@ -287,7 +287,10 @@ def grok_client(client, monkeypatch):  # noqa: F811
         return CodexResult(outcome, thread_id="gk-1")
 
     async def fake_usage(config):
-        return {"weekly_percent": calls["usage"], "live": True}
+        reading = {"weekly_percent": calls["usage"], "live": True}
+        if calls.get("reset_at"):
+            reading["reset_at"] = calls["reset_at"]
+        return reading
 
     monkeypatch.setattr(grok, "run_grok", fake_grok)
     monkeypatch.setattr(grok, "usage", fake_usage)
@@ -394,6 +397,17 @@ async def test_status_shows_grok_weekly_usage_and_the_reserve(grok_client) -> No
         bot_module.probe_rate_limits, bot_module.codex_login_status = saved, saved_login
     assert "Grok：可選 · 額度 7d 85%" in text and "留給 X 查詢" in text
     assert "模型：Grok · Grok 4.7（伺服器預設）· 強度 Medium" in text
+    # a day from the weekly reset there is nothing left to keep back: /status says what chat does
+    from datetime import UTC, datetime, timedelta
+
+    calls["reset_at"] = (datetime.now(UTC) + timedelta(hours=12)).isoformat()
+    bot_module.probe_rate_limits, saved = no_probe, bot_module.probe_rate_limits
+    bot_module.codex_login_status, saved_login = login, bot_module.codex_login_status
+    try:
+        text = await bot._status_text(GUILD, 1, USER)
+    finally:
+        bot_module.probe_rate_limits, bot_module.codex_login_status = saved, saved_login
+    assert "Grok：可選 · 額度 7d 85%" in text and "留給 X 查詢" not in text
 
 
 async def test_requests_go_out_as_utf8_not_escaped_ascii(sidecar, config, tmp_path) -> None:

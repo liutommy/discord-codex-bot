@@ -1220,3 +1220,178 @@ async def test_a_member_on_a_retired_model_is_routed_again(client, backends, mon
     client.memory.set_model(GUILD, USER, "agy:claude-opus-4-6")
     verdicts(monkeypatch, ok("code", 8))
     assert await client._route(KEY, None, GUILD, USER, "寫程式", [], False) is not None
+
+
+def _quota(argon_left: float, argon_reset_hours: float, third_party_left: float = 90.0):
+    from datetime import UTC, datetime, timedelta
+
+    def iso(hours: float) -> str:
+        return (datetime.now(UTC) + timedelta(hours=hours)).isoformat()
+
+    return {
+        "status": "SUCCESS",
+        "command": {"name": "usage", "data": {"groups": [
+            {"name": "Gemini 4 Argon", "buckets": [
+                {"id": "gemini-argon-wtu-weekly", "window": "weekly",
+                 "remaining_fraction": argon_left / 100, "reset_time": iso(argon_reset_hours)}]},
+            {"name": "Third party", "buckets": [
+                {"id": "3p-weekly", "window": "weekly",
+                 "remaining_fraction": third_party_left / 100, "reset_time": iso(120)}]},
+        ]}},
+    }  # fmt: skip
+
+
+async def test_argon_under_its_reserve_is_skipped_until_the_reset_is_near(
+    client, backends, monkeypatch
+) -> None:
+    """15% left six days before the reset is under the 20% kept for the other users of the
+    account: the question goes straight to the cell Argon replaced, with no Argon call."""
+    calls: list[str] = []
+
+    async def run_agy(prompt, config, model, **kw):
+        calls.append(model)
+        return await backends["agy"](prompt, config, model, **kw)
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    client.agy_quota.update(_quota(15.0, 144))
+    verdicts(monkeypatch, ok("chat", 10))
+    plan, result = await ask(client)
+    assert calls == ["gemini-3.8-flash-medium"] and "argon-reserve" in plan.log["degraded"]
+    client.agy_quota.update(_quota(15.0, 12))  # a day from the reset: spend it
+    calls.clear()
+    await ask(client, "再問一次")
+    assert calls[0] == "gemini-4-argon-medium"
+
+
+async def test_claude_under_its_reserve_goes_to_its_stand_in(client, backends, monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def run_agy(prompt, config, model, **kw):
+        calls.append(model)
+        return await backends["agy"](prompt, config, model, **kw)
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    client.agy_quota.update(_quota(90.0, 144, third_party_left=0.05))
+    verdicts(monkeypatch, ok("create", 8))
+    plan, result = await ask(client)
+    assert calls == [] and result.via == Resolved("grok", "grok-4.7", "high")
+    assert "claude-reserve" in plan.log["degraded"]
+
+
+async def test_a_spent_argon_is_not_tried_again_until_its_reset(
+    client, backends, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    async def run_agy(prompt, config, model, **kw):
+        calls.append(model)
+        if model.startswith("gemini-4-argon"):
+            raise ARGON_SPENT
+        return await backends["agy"](prompt, config, model, **kw)
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    client.agy_quota.update(_quota(30.0, 144))
+    verdicts(monkeypatch, ok("chat", 10))
+    await ask(client)
+    assert calls[0] == "gemini-4-argon-medium"
+    calls.clear()
+    await ask(client, "下一個難題")
+    assert "gemini-4-argon-medium" not in calls
+
+
+async def test_grok_chat_may_use_the_x_reserve_when_the_reset_is_near(
+    config, tmp_path, monkeypatch
+) -> None:
+    """The weekly share kept for X lookups shrinks as the reset nears, like every reserve."""
+    from datetime import UTC, datetime, timedelta
+
+    cfg = replace(config, xsearch_url="http://xsearch.test", codex_home=tmp_path / "codex")
+    bot = DiscordCodexClient(cfg)  # the real _grok_usable, not the fixture's stand-in
+    for hours, used, usable in ((144, 85.0, False), (12, 85.0, True), (144, 75.0, True)):
+        reading = {
+            "weekly_percent": used,
+            "reset_at": (datetime.now(UTC) + timedelta(hours=hours)).isoformat(),
+        }
+
+        async def usage(config, r=reading):
+            return r
+
+        monkeypatch.setattr(bot_module.grok, "usage", usage)
+        assert await bot._grok_usable() is usable, (hours, used)
+
+
+async def test_argon_s_claude_stand_in_is_checked_against_its_own_reserve(
+    client, backends, monkeypatch
+) -> None:
+    """Argon usable, Claude under its reserve: when Argon fails, Claude is not tried either."""
+    calls: list[str] = []
+
+    async def run_agy(prompt, config, model, **kw):
+        calls.append(model)
+        if model.startswith("gemini-4-argon"):
+            raise agy_module.AgyUnavailable("agy exited with code 1: overloaded")
+        return await backends["agy"](prompt, config, model, **kw)
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    client.agy_quota.update(_quota(90.0, 144, third_party_left=0.05))
+    verdicts(monkeypatch, ok("create", 10))
+    plan, result = await ask(client)
+    assert calls == ["gemini-4-argon-medium"] and result.via == Resolved("grok", "grok-4.7", "high")
+
+
+async def test_a_member_s_own_argon_respects_the_reserve_too(client, backends, monkeypatch) -> None:
+    """A /model choice, DEFAULT_MODEL or a MODEL_CHAIN entry spent the pool to zero while
+    automatic choice kept off it; every agy call now checks the pool first."""
+    calls: list[str] = []
+
+    async def run_agy(prompt, config, model, **kw):
+        calls.append(model)
+        return await backends["agy"](prompt, config, model, **kw)
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-argon|medium")
+    client.agy_quota.update(_quota(10.0, 120))  # the reserve five days out is about 13%
+    result = await client._answer("問題", [], GUILD, USER)
+    assert "gemini-4-argon-medium" not in calls and result.text  # answered by the chain instead
+
+
+async def test_the_usage_loop_survives_a_failed_read(client, monkeypatch) -> None:
+    import asyncio as _asyncio
+
+    reads = []
+
+    async def read_usage(config):
+        reads.append(1)
+        if len(reads) == 1:
+            raise RuntimeError("agy crashed")
+        return _quota(50.0, 144)
+
+    async def no_wait(seconds):
+        if len(reads) >= 2:
+            raise _asyncio.CancelledError
+
+    monkeypatch.setattr(bot_module, "read_usage", read_usage)
+    monkeypatch.setattr(bot_module.asyncio, "sleep", no_wait)
+    with pytest.raises(_asyncio.CancelledError):
+        await client._read_agy_usage_forever()
+    assert len(reads) == 2 and client.agy_quota.summary()["gemini-argon-wtu-weekly"] == 50.0
+
+
+@pytest.mark.parametrize("reset_at", [None, "2026-01-01T00:00:00+00:00", "not a time"])
+async def test_grok_chat_without_a_usable_reset_time(
+    config, tmp_path, monkeypatch, reset_at
+) -> None:
+    """No reset_at, one in the past or an unreadable one: the gate holds as before (85% used
+    stops chat at the fixed 80% share), never crashes, and a past reset means spend freely."""
+    cfg = replace(config, xsearch_url="http://xsearch.test", codex_home=tmp_path / "codex")
+    bot = DiscordCodexClient(cfg)
+    reading = {"weekly_percent": 85.0}
+    if reset_at is not None:
+        reading["reset_at"] = reset_at
+
+    async def usage(config):
+        return reading
+
+    monkeypatch.setattr(bot_module.grok, "usage", usage)
+    expected = reset_at == "2026-01-01T00:00:00+00:00"  # past: nothing left to keep back
+    assert await bot._grok_usable() is expected

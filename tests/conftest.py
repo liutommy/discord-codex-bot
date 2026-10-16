@@ -72,6 +72,8 @@ def config() -> Config:
         grok_dir=Path("/tmp/grok-transcripts"),
         grok_history_chars=60_000,
         grok_chat_max_weekly_percent=80,
+        agy_reserve_percent=20,
+        agy_usage_minutes=0,
         jev_enabled=False,
         jev_url="https://jev.test/v1/systemone",
         jev_model="jev-1.13.0",
@@ -131,3 +133,13 @@ def config() -> Config:
         twitch_client_secret="test-twitch-secret",
         linkclean_admin_ids=frozenset(),
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_agy_quota():
+    """A client sets quota.shared when built; a pool one test marked spent must not reach the
+    next test's background-job fallback."""
+    from discord_codex_bot import quota
+
+    yield
+    quota.shared = None

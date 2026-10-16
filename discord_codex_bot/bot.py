@@ -21,9 +21,22 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from . import apis, embedfix, gemini, grok, instructions, routing, sandbox, search, tags, xsearch
+from . import agy as agy_module
+from . import (
+    apis,
+    embedfix,
+    gemini,
+    grok,
+    instructions,
+    quota,
+    routing,
+    sandbox,
+    search,
+    tags,
+    xsearch,
+)
 from .access import check_access
-from .agy import run_agy
+from .agy import AgyUnavailable, read_usage, run_agy
 from .alerts import Alerter, login_watch
 from .announce import announce_loop
 from .attachments import (
@@ -509,6 +522,8 @@ class DiscordCodexClient(discord.Client):
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
         self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
+        self.agy_quota = quota.AgyQuota(float(config.agy_reserve_percent))
+        quota.shared = self.agy_quota  # for background jobs' agy fallback (backends.run_batch)
         # Persona uploads and resets run one at a time: backup, save and the rebuild interleaved
         # could leave the older text built last.
         self._instructions_lock = asyncio.Lock()
@@ -653,6 +668,8 @@ class DiscordCodexClient(discord.Client):
         self._backup_loop = self.loop.create_task(backup_forever(self.config))
         if self.emoji is not None and self.config.emoji_describe_hour >= 0:
             self._emoji_describer = self.loop.create_task(self._describe_emoji_forever())
+        if self.config.agy_usage_minutes > 0:
+            self._agy_usage_loop = self.loop.create_task(self._read_agy_usage_forever())
         self._reminder_loop = self.loop.create_task(
             reminder_loop(self.reminders, self._fire_reminder, 30)
         )
@@ -1342,7 +1359,14 @@ class DiscordCodexClient(discord.Client):
                 kw.pop("effort", None)
                 # A timeout, an empty reply or a model out of quota is AgyUnavailable and falls
                 # back; broken settings stay a plain error and reach the failure alert.
-                return await run_agy(text, self.config, via.model, **kw)
+                # A pool under its reserve is skipped here for every turn, a member's own model
+                # and MODEL_CHAIN's agy entries included, not only automatic choice.
+                agy_module.check_pool(via.model, self.agy_quota)
+                try:
+                    return await run_agy(text, self.config, via.model, **kw)
+                except AgyUnavailable as error:
+                    agy_module.note_spent(via.model, error, self.agy_quota)
+                    raise
             if via.backend in ROUTER_BACKENDS:
                 catalog = self.catalogs[via.backend]
                 await catalog.free_models()  # image / effort capability lookup
@@ -1823,18 +1847,37 @@ class DiscordCodexClient(discord.Client):
             await asyncio.sleep(wait)
         LOGGER.info("Grok models: %s", ", ".join(m.id for m in catalog) or "(unavailable)")
 
+    async def _read_agy_usage_forever(self) -> None:
+        """agy's own /usage every AGY_USAGE_MINUTES, for the reserves (quota.AgyQuota). It spends
+        nothing; a failed read keeps the last reading."""
+        while True:
+            try:
+                reading = await read_usage(self.config)
+                if reading is not None:
+                    self.agy_quota.update(reading)
+                    LOGGER.info("agy usage: %s", self.agy_quota.summary())
+            except Exception:  # one bad read must not end the loop and freeze the last one
+                LOGGER.exception("agy usage read failed")
+            await asyncio.sleep(self.config.agy_usage_minutes * 60)
+
     async def _grok_usable(self) -> bool:
         """Whether a turn may go to Grok right now. Not past the weekly share reserved for X
         lookups, and not while the circuit breaker is open after repeated refused sessions.
         (Images it cannot take — GIF, WebP, too many — fall back from run_grok itself.)"""
         if not grok.enabled(self.config) or time.time() < self._grok_off_until:
             return False
-        reading = await grok.usage(self.config)
+        return self._grok_chat_open(await grok.usage(self.config))
+
+    def _grok_chat_open(self, reading: dict | None) -> bool:
+        """Chat may use Grok's weekly quota down to the share kept for X lookups, a share that
+        shrinks as the reset nears (quota.reserve_percent). No reading: no gate."""
         percent = (reading or {}).get("weekly_percent")
-        return not (
-            isinstance(percent, (int, float))
-            and percent >= self.config.grok_chat_max_weekly_percent
-        )
+        if not isinstance(percent, (int, float)):
+            return True
+        base = 100.0 - self.config.grok_chat_max_weekly_percent  # the share kept for X lookups
+        reset_at = (reading or {}).get("reset_at")
+        reset = quota.parse_time(reset_at) if reset_at else None
+        return quota.may_spend(100.0 - percent, base, reset, _dt.now(UTC))
 
     async def _grok_refused(self, error: Exception) -> None:
         """A refused session is either an injection that got a tool call through, or Grok's
@@ -1938,6 +1981,23 @@ class DiscordCodexClient(discord.Client):
             # This message only (the route stays for the next one). The image list starts with
             # Codex (checked at load); a conversation already on a Codex cell keeps its cell.
             entry = table.image[0]
+        if not image_turn:
+            # An agy pool under its reserve (or spent) is skipped before it is tried: Argon goes
+            # straight to the cell it replaced, Claude to its own stand-in.
+            if (
+                routing.is_argon(entry)
+                and route.kind in table.argon_failed
+                and not self.agy_quota.usable(quota.group_of("gemini-4-argon"))
+            ):
+                entry = table.argon_failed[route.kind]
+                degraded.append("argon-reserve")
+            if (
+                routing.is_claude(entry)
+                and route.kind in table.claude_failed
+                and not self.agy_quota.usable(quota.group_of("claude-"))
+            ):
+                entry = table.claude_failed[route.kind]
+                degraded.append("claude-reserve")
         backend = routing.backend_of(entry)
         codex_tight: bool | None = None  # read once, for the entry or a Codex stand-in
 
@@ -1983,6 +2043,14 @@ class DiscordCodexClient(discord.Client):
             # Argon's weekly pool is small: spent, the question goes back to the cell Argon
             # replaced, and from a Claude cell on to Claude's own stand-in.
             stand_in = table.argon_failed[route.kind]
+            if (
+                routing.is_claude(stand_in)
+                and route.kind in table.claude_failed
+                and not self.agy_quota.usable(quota.group_of("claude-"))
+            ):
+                # Claude under its reserve too. Not logged as degraded: this is a spare, and
+                # Argon may well answer itself.
+                stand_in = table.claude_failed[route.kind]
             spares.append(routing.resolved(await codex_effort(stand_in), model))
         if not image_turn and routing.is_claude(stand_in) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))
@@ -3146,11 +3214,8 @@ class DiscordCodexClient(discord.Client):
             if reading and isinstance(reading.get("weekly_percent"), (int, float)):
                 percent = reading["weekly_percent"]
                 line += f" · 額度 7d {percent:.0f}%"
-                if percent >= self.config.grok_chat_max_weekly_percent:
-                    line += (
-                        f"\n　└ 已超過 {self.config.grok_chat_max_weekly_percent}%，"
-                        "聊天改用備援，剩下的留給 X 查詢"
-                    )
+                if not self._grok_chat_open(reading):
+                    line += "\n　└ 剩下的額度留給 X 查詢，聊天改用備援"
             else:
                 line += " · 額度讀不到"
             if time.time() < self._grok_off_until:
