@@ -59,16 +59,29 @@ class AgyQuota:
         self._buckets: dict[str, tuple[float, datetime | None]] = {}  # id -> (left %, reset)
         self._spent_until: dict[str, float] = {}  # group -> epoch seconds
 
-    def update(self, reading: dict) -> None:
-        buckets = {}
-        for group in (reading.get("command") or {}).get("data", {}).get("groups") or []:
-            for bucket in group.get("buckets") or []:
+    def update(self, reading: object) -> None:
+        """Take a /usage reading; one of an unexpected shape is ignored (the last one stands).
+        A pool marked spent whose buckets all have quota left in this newer reading is free
+        again: the mark lasts until the emptiest bucket's reset, which can be days away."""
+        buckets: dict[str, tuple[float, datetime | None]] = {}
+        command = reading.get("command") if isinstance(reading, dict) else None
+        data = command.get("data") if isinstance(command, dict) else None
+        groups = data.get("groups") if isinstance(data, dict) else None
+        for group in groups if isinstance(groups, list) else []:
+            for bucket in group.get("buckets") or [] if isinstance(group, dict) else []:
+                if not isinstance(bucket, dict):
+                    continue
                 fraction = bucket.get("remaining_fraction")
                 if isinstance(fraction, (int, float)) and bucket.get("id"):
                     reset = parse_time(bucket.get("reset_time"))
                     buckets[str(bucket["id"])] = (float(fraction) * 100, reset)
-        if buckets:
-            self._buckets = buckets
+        if not buckets:
+            LOGGER.warning("agy usage reading has no buckets; keeping the last one")
+            return
+        self._buckets = buckets
+        for group in list(self._spent_until):
+            if self._of(group) and all(left > 0 for left, _reset in self._of(group)):
+                del self._spent_until[group]
 
     def _of(self, group: str) -> list[tuple[float, datetime | None]]:
         return [v for k, v in self._buckets.items() if k.rsplit("-", 1)[0] == group]
@@ -77,10 +90,16 @@ class AgyQuota:
         now = now or datetime.now(UTC)
         if now.timestamp() < self._spent_until.get(group, 0.0):
             return False
-        return all(may_spend(left, self.base, reset, now) for left, reset in self._of(group))
+        # A bucket past its reset is full again, whatever an old reading said.
+        return all(
+            may_spend(left, self.base, reset, now)
+            for left, reset in self._of(group)
+            if reset is None or reset > now
+        )
 
     def mark_spent(self, group: str, now: datetime | None = None) -> None:
-        """agy said the pool is spent: skip it until the reset of its emptiest bucket."""
+        """agy said the pool is spent: skip it until the reset of its emptiest bucket, or until a
+        newer reading shows quota left."""
         now = now or datetime.now(UTC)
         buckets = self._of(group)
         reset = min(buckets, key=lambda b: b[0])[1] if buckets else None

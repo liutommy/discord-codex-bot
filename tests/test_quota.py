@@ -102,3 +102,40 @@ async def test_the_usage_command_is_read_without_a_conversation(config, monkeypa
 
 async def _failed():
     return 1, json.dumps({"status": "ERROR", "error": "authentication failed or timed out"}), ""
+
+
+def test_a_fresh_reading_with_quota_left_lifts_a_spent_mark() -> None:
+    """The mark lasts until the emptiest bucket's reset, which can be days; a later reading that
+    shows every bucket of the pool with quota left is the better word."""
+    quota = AgyQuota(20.0)
+    quota.update(USAGE)
+    quota.mark_spent("gemini", NOW)
+    assert not quota.usable("gemini", NOW)
+    quota.update(USAGE)  # the next poll: Gemini still at 99%
+    assert quota.usable("gemini", NOW)
+    drained = json.loads(json.dumps(USAGE))
+    drained["command"]["data"]["groups"][0]["buckets"][1]["remaining_fraction"] = 0.0
+    quota.mark_spent("gemini", NOW)
+    quota.update(drained)  # still empty: the mark stays
+    assert not quota.usable("gemini", NOW)
+
+
+def test_a_bucket_past_its_reset_is_full_again() -> None:
+    """A reading that went stale (agy unreadable for a while) must not block a pool for good."""
+    empty = json.loads(json.dumps(USAGE))
+    empty["command"]["data"]["groups"][1]["buckets"][0]["remaining_fraction"] = 0.0
+    quota = AgyQuota(20.0)
+    quota.update(empty)
+    assert not quota.usable("3p", NOW)
+    assert quota.usable("3p", datetime(2026, 10, 21, 8, tzinfo=UTC))  # past 3p-weekly's reset
+
+
+@pytest.mark.parametrize(
+    "reading",
+    [{"command": {"data": None}}, {"command": "usage"}, {"command": {"data": {"groups": ["x"]}}}],
+)
+def test_an_odd_reading_is_ignored_not_fatal(reading) -> None:
+    quota = AgyQuota(20.0)
+    quota.update(USAGE)
+    quota.update(reading)
+    assert not quota.usable("3p", NOW)  # the last good reading still stands

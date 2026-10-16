@@ -1360,7 +1360,7 @@ class DiscordCodexClient(discord.Client):
                 try:
                     return await run_agy(text, self.config, via.model, **kw)
                 except AgyUnavailable as error:
-                    if CREDITS_SPENT in str(error):  # skip the pool until it resets
+                    if CREDITS_SPENT in str(error).lower():  # skip the pool until it resets
                         self.agy_quota.mark_spent(quota.group_of(via.model))
                     raise
             if via.backend in ROUTER_BACKENDS:
@@ -1847,10 +1847,13 @@ class DiscordCodexClient(discord.Client):
         """agy's own /usage every AGY_USAGE_MINUTES, for the reserves (quota.AgyQuota). It spends
         nothing; a failed read keeps the last reading."""
         while True:
-            reading = await read_usage(self.config)
-            if reading is not None:
-                self.agy_quota.update(reading)
-                LOGGER.info("agy usage: %s", self.agy_quota.summary())
+            try:
+                reading = await read_usage(self.config)
+                if reading is not None:
+                    self.agy_quota.update(reading)
+                    LOGGER.info("agy usage: %s", self.agy_quota.summary())
+            except Exception:  # one bad read must not end the loop and freeze the last one
+                LOGGER.exception("agy usage read failed")
             await asyncio.sleep(self.config.agy_usage_minutes * 60)
 
     async def _grok_usable(self) -> bool:
@@ -2031,6 +2034,13 @@ class DiscordCodexClient(discord.Client):
             # Argon's weekly pool is small: spent, the question goes back to the cell Argon
             # replaced, and from a Claude cell on to Claude's own stand-in.
             stand_in = table.argon_failed[route.kind]
+            if (
+                routing.is_claude(stand_in)
+                and route.kind in table.claude_failed
+                and not self.agy_quota.usable(quota.group_of("claude-"))
+            ):
+                stand_in = table.claude_failed[route.kind]  # Claude under its reserve too
+                degraded.append("claude-reserve")
             spares.append(routing.resolved(await codex_effort(stand_in), model))
         if not image_turn and routing.is_claude(stand_in) and route.kind in table.claude_failed:
             spares.append(routing.resolved(table.claude_failed[route.kind], model))

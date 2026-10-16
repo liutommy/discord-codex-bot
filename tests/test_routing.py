@@ -1318,3 +1318,22 @@ async def test_grok_chat_may_use_the_x_reserve_when_the_reset_is_near(
 
         monkeypatch.setattr(bot_module.grok, "usage", usage)
         assert await bot._grok_usable() is usable, (hours, used)
+
+
+async def test_argon_s_claude_stand_in_is_checked_against_its_own_reserve(
+    client, backends, monkeypatch
+) -> None:
+    """Argon usable, Claude under its reserve: when Argon fails, Claude is not tried either."""
+    calls: list[str] = []
+
+    async def run_agy(prompt, config, model, **kw):
+        calls.append(model)
+        if model.startswith("gemini-4-argon"):
+            raise agy_module.AgyUnavailable("agy exited with code 1: overloaded")
+        return await backends["agy"](prompt, config, model, **kw)
+
+    monkeypatch.setattr(bot_module, "run_agy", run_agy)
+    client.agy_quota.update(_quota(90.0, 144, third_party_left=0.05))
+    verdicts(monkeypatch, ok("create", 10))
+    plan, result = await ask(client)
+    assert calls == ["gemini-4-argon-medium"] and result.via == Resolved("grok", "grok-4.7", "high")
