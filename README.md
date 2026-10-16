@@ -312,6 +312,17 @@ discord_codex_bot.announce send` posts one now, `queue` holds one for a time or 
 (`CODEX_HOME/announce-queue`, each item posted at most once). Starting the Bot never creates an
 announcement: a start only lets due items already in the queue (an `--after-deploy` one) go out.
 
+The operator can do anything a member or an admin can, without restarting the Bot:
+`python -m discord_codex_bot.admin <group> <action> [--guild … --channel … --user …]`
+(`--help` lists all of them: reminders, memory, model, style, reset, stop, export, status,
+tracking, link cleaning, persona, summary, ask, help, bot status, alerts). The CLI only drops a
+request file into `CODEX_HOME/admin/inbox` (owner-only, 0700); the running Bot claims it, checks
+it with the same rules members get (allowlisted guild and channel, real guild members), runs it
+through the same code the slash commands use and writes the result to `done/` or the reason to
+`rejected/`. A request runs at most once — never again after a restart — and nothing the CLI asks
+for is posted in a channel: `ask`, `summary` and `help` answer the operator only (a reminder or a
+watch it sets fires later like any other).
+
 When the ChatGPT subscription quota runs out or the selected model is temporarily at capacity,
 Codex reports it *inside* its JSONL stream (`codex_error_info: usage_limit_exceeded` or
 `server_overloaded`, often with an empty stderr), so the exit code alone cannot tell these remote

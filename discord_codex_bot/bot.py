@@ -36,6 +36,8 @@ from . import (
     xsearch,
 )
 from .access import check_access
+from .admin import admin_root
+from .admin_server import AdminServer
 from .agy import AgyUnavailable, read_usage, run_agy
 from .alerts import Alerter, login_watch
 from .announce import announce_loop
@@ -135,7 +137,14 @@ from .reminders import (
     targets as reminder_targets,
 )
 from .routing import CONTEXT_TURNS, MAX_EARLIER, Route, Table, Verdict
-from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
+from .summary import (
+    DEFAULT_MESSAGES,
+    MAX_MESSAGES,
+    recent_messages,
+    render_transcript,
+    summary_prompt,
+    window_label,
+)
 from .threads import ThreadStore
 from .tracking import (
     CANCEL_TRACK_TAG,
@@ -757,6 +766,9 @@ class DiscordCodexClient(discord.Client):
             lambda handle, since_id, **page: xsearch.recent_posts(config, handle, since_id, **page),
             config.x_tracking_interval_minutes,
         )
+        # Operator commands (python -m discord_codex_bot.admin) run here, in this process, so
+        # they go through the same in-memory stores and checks as members' own commands.
+        self.admin = AdminServer(self, admin_root(config))
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-remember",
@@ -910,6 +922,7 @@ class DiscordCodexClient(discord.Client):
         )
         if self.tracker is not None:
             self._tracking_loop = self.loop.create_task(self._tracking_forever())
+        self.admin.start()
         # A guild that has not invited the bot yet (e.g. production before rollout) must not take
         # the whole client down; the runtime access check still rejects it until it is synced.
         for guild_id in self.config.allowed_guild_ids:
@@ -921,6 +934,10 @@ class DiscordCodexClient(discord.Client):
                 LOGGER.exception("Command sync failed for guild %d; is the bot invited?", guild_id)
                 continue
             LOGGER.info("Registered %d commands for guild %d", len(commands), guild_id)
+
+    async def close(self) -> None:
+        self.admin.stop()
+        await super().close()
 
     async def warm_emojis(self) -> None:
         """Cache each guild's custom emojis by name (REST, so it works even without the intent
@@ -2701,21 +2718,8 @@ class DiscordCodexClient(discord.Client):
             await interaction.response.send_message(reason, ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        cut = False
         try:
-            if hours is not None:
-                # Newest first, so a window with more than the cap keeps its latest messages.
-                fetched = [
-                    m
-                    async for m in interaction.channel.history(
-                        limit=MAX_MESSAGES + 1, after=since(hours), oldest_first=False
-                    )
-                ]
-                cut = len(fetched) > MAX_MESSAGES  # one more than the cap: the window had more
-                fetched = fetched[:MAX_MESSAGES][::-1]
-            else:
-                fetched = [m async for m in interaction.channel.history(limit=count)]
-                fetched.reverse()
+            fetched, cut = await recent_messages(interaction.channel, count, hours)
         except discord.HTTPException:
             await interaction.edit_original_response(content="讀不到這個頻道的訊息紀錄。")
             return
@@ -2750,12 +2754,7 @@ class DiscordCodexClient(discord.Client):
         )
         if result is None:
             return
-        if hours is None:
-            label = f"（最近 {len(fetched)} 則）"
-        elif cut:
-            label = f"（最近 {hours} 小時，訊息太多，只摘要最新 {MAX_MESSAGES} 則）"
-        else:
-            label = f"（最近 {hours} 小時）"
+        label = window_label(len(fetched), hours, cut)
         # The header is part of the first message: split after adding it, or that part is over
         # Discord's limit and refused.
         chunks = split_discord_message(f"**頻道摘要{label}**\n{result.text}")
@@ -3418,25 +3417,8 @@ class DiscordCodexClient(discord.Client):
             return
         if action in ("reset_persona", "reset_style"):
             kind = instructions.PERSONA if action == "reset_persona" else instructions.OUTPUT_STYLE
-            async with self._instructions_lock:
-                removed, kept = await asyncio.to_thread(instructions.reset, self.config, kind)
-                if removed:
-                    await self._apply_instructions()
-            label = instructions.LABELS[kind]
-            head = (
-                f"{label}已還原成 image 預設，所有對話串重新開始。"
-                if removed
-                else f"{label}本來就是 image 預設，沒有東西要還原。"
-            )
-            LOGGER.info(
-                "instructions reset kind=%s removed=%s by=%s",
-                kind,
-                removed,
-                interaction.user.id,
-            )
-            await interaction.response.send_message(
-                self._with_backup(f"{head}\n{self._instructions_status()}", kept), ephemeral=True
-            )
+            _, text = await self._reset_instructions(kind, interaction.user.id)
+            await interaction.response.send_message(text, ephemeral=True)
             return
         await interaction.response.send_message(self._instructions_status(), ephemeral=True)
 
@@ -3444,7 +3426,24 @@ class DiscordCodexClient(discord.Client):
     def _with_backup(text: str, kept: Path | None) -> str:
         return f"{text}\n備份：{kept.name}" if kept else text
 
-    async def _save_instructions(self, uploads: dict[str, str], who: int) -> str:
+    async def _reset_instructions(self, kind: str, who: int | str) -> tuple[bool, str]:
+        """Put the persona or the default output style back to the image's: (whether anything
+        was reset, the reply). Threads are retired only when something was. `who` is the
+        member's id, or "admin" from the operator CLI."""
+        async with self._instructions_lock:
+            removed, kept = await asyncio.to_thread(instructions.reset, self.config, kind)
+            if removed:
+                await self._apply_instructions()
+        label = instructions.LABELS[kind]
+        head = (
+            f"{label}已還原成 image 預設，所有對話串重新開始。"
+            if removed
+            else f"{label}本來就是 image 預設，沒有東西要還原。"
+        )
+        LOGGER.info("instructions reset kind=%s removed=%s by=%s", kind, removed, who)
+        return removed, self._with_backup(f"{head}\n{self._instructions_status()}", kept)
+
+    async def _save_instructions(self, uploads: dict[str, str], who: int | str) -> str:
         """Store one or both uploaded files, keep what they replaced, then rebuild and retire."""
         kept: list[Path] = []
         async with self._instructions_lock:
@@ -3852,6 +3851,55 @@ class DiscordCodexClient(discord.Client):
                 return None
         return chosen
 
+    async def _change_model(
+        self,
+        guild_id: int | None,
+        user_id: int,
+        provider: str | None,
+        model: str | None,
+        effort: str | None,
+    ) -> tuple[str, str]:
+        """Save /model's provider, model and effort for the member: (the stored value, "").
+        ("", why) when nothing was saved: a model the menu does not offer, or a provider alone
+        with no default model to take; the caller says how to pick one. The operator CLI
+        (admin_members) calls this too, so both apply the same checks."""
+        stored = self.memory.get_model(guild_id, user_id)
+        current = split_stored(stored)[0].split(":")[0]
+        source = provider or current
+        if model is not None:
+            # A typed "<backend>:<model>" is checked against that backend's live list, which
+            # need not be the list of the provider the member is on now.
+            named = model.strip().split(":", 1)[0]
+            listed = named if named == GROK or named in ROUTER_BACKENDS else source
+            if listed in ROUTER_BACKENDS:
+                await self.catalogs[listed].free_models()
+            elif listed == GROK:
+                await grok.models(self.config)
+            chosen = self._chosen_model(source, model)
+            if chosen is None:
+                return "", f"沒有這個模型：`{model}`"
+        elif provider is not None and current != source:
+            # A provider alone used to only show the current setting and save nothing; a
+            # member who picked Codex (it has one model) kept getting the default. Picking a
+            # provider now means its default model.
+            chosen = await self._provider_default(source)
+            if chosen is None:
+                return "", (
+                    "這個來源的免費模型會變動" if source in ROUTER_BACKENDS
+                    else "Grok 的模型清單暫時讀不到" if source == GROK
+                    else "這個來源沒有預設模型"
+                )  # fmt: skip
+        else:
+            chosen = self._choice(stored or self.config.default_model)
+        # A new provider without an effort starts at its default effort: the old provider's
+        # level saved as-is would read differently from what /status shows.
+        switched = chosen.backend != current
+        level = effort or ("" if switched else split_stored(stored)[1])
+        value = f"{chosen.value}|{level}" if level else chosen.value
+        self.memory.set_model(guild_id, user_id, value)
+        LOGGER.info("Model set guild=%s user=%s value=%s", guild_id, user_id, value)
+        return value, ""
+
     @app_commands.describe(
         provider="模型來源；只選來源＝用它的預設模型；全部留空＝查看目前設定",
         model="模型（打字篩選；OpenRouter 只列免費模型）",
@@ -3879,43 +3927,22 @@ class DiscordCodexClient(discord.Client):
             message = "已清除，回到預設模型。" if cleared else "你沒有設定模型。"
             LOGGER.info("Model cleared guild=%s user=%s had=%s", guild_id, user_id, bool(stored))
         elif model is not None or effort is not None or provider is not None:
-            source = provider.value if provider else split_stored(stored)[0].split(":")[0]
-            if model is not None:
-                if source in ROUTER_BACKENDS:
-                    await self.catalogs[source].free_models()
-                elif source == GROK:
-                    await grok.models(self.config)
-                chosen = self._chosen_model(source, model)
-                if chosen is None:
-                    await interaction.response.send_message(
-                        f"沒有這個模型：`{model}`。請從清單裡選（打字可篩選）。", ephemeral=True
-                    )
-                    return
-            elif provider is not None and split_stored(stored)[0].split(":")[0] != source:
-                # A provider alone used to only show the current setting and save nothing; a
-                # member who picked Codex (it has one model) kept getting the default. Picking a
-                # provider now means its default model.
-                chosen = await self._provider_default(source)
-                if chosen is None:
-                    why = (
-                        "這個來源的免費模型會變動" if source in ROUTER_BACKENDS
-                        else "Grok 的模型清單暫時讀不到" if source == GROK
-                        else "這個來源沒有預設模型"
-                    )  # fmt: skip
-                    await interaction.response.send_message(
-                        f"{why}，請在 model 欄從清單選一個（打字可篩選）。", ephemeral=True
-                    )
-                    return
-            else:
-                chosen = self._choice(stored or self.config.default_model)
-            # A new provider without an effort starts at its default effort: the old provider's
-            # level saved as-is would read differently from what /status shows.
-            switched = chosen.backend != split_stored(stored)[0].split(":")[0]
-            level = effort.value if effort else "" if switched else split_stored(stored)[1]
-            value = f"{chosen.value}|{level}" if level else chosen.value
-            self.memory.set_model(guild_id, user_id, value)
-            LOGGER.info("Model set guild=%s user=%s value=%s", guild_id, user_id, value)
-            message = f"已設定：{self._describe(chosen.value, level)}"
+            value, why = await self._change_model(
+                guild_id,
+                user_id,
+                provider.value if provider else None,
+                model,
+                effort.value if effort else None,
+            )
+            if not value:
+                how = (
+                    "。請從清單裡選（打字可篩選）。"
+                    if model is not None
+                    else "，請在 model 欄從清單選一個（打字可篩選）。"
+                )
+                await interaction.response.send_message(why + how, ephemeral=True)
+                return
+            message = f"已設定：{self._describe(*split_stored(value))}"
         else:
             current = stored or self.config.default_model
             origin = "" if stored else "（預設）"

@@ -65,3 +65,31 @@ def summary_prompt(channel_name: str, transcript: str, count: int, focus: str = 
 
 def since(hours: int) -> datetime:
     return datetime.now(UTC) - timedelta(hours=hours)
+
+
+async def recent_messages(channel: Any, count: int, hours: int | None) -> tuple[list[Any], bool]:
+    """Oldest first: the channel's last `count` messages, or with `hours` those of that many
+    hours (at most MAX_MESSAGES); and whether the window held more than the cap. A failed read
+    raises discord.HTTPException."""
+    if hours is None:
+        fetched = [m async for m in channel.history(limit=count)]
+        fetched.reverse()
+        return fetched, False
+    # Newest first, so a window with more than the cap keeps its latest messages.
+    fetched = [
+        m
+        async for m in channel.history(
+            limit=MAX_MESSAGES + 1, after=since(hours), oldest_first=False
+        )
+    ]
+    # One more than the cap came back: the window had more.
+    return fetched[:MAX_MESSAGES][::-1], len(fetched) > MAX_MESSAGES
+
+
+def window_label(count: int, hours: int | None, cut: bool) -> str:
+    """What a summary's heading says it covers."""
+    if hours is None:
+        return f"（最近 {count} 則）"
+    if cut:
+        return f"（最近 {hours} 小時，訊息太多，只摘要最新 {MAX_MESSAGES} 則）"
+    return f"（最近 {hours} 小時）"
