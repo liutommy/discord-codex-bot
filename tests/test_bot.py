@@ -1738,6 +1738,53 @@ async def test_answer_creates_and_cancels_reminders_from_model_tags(
     assert "看不懂，提醒沒有設" in result.text
 
 
+async def test_unread_tag_goes_back_to_the_model_once_with_the_reason(
+    client, backends, monkeypatch
+) -> None:
+    from types import SimpleNamespace as NS
+
+    # 2026-10-16: the tag went out raw, nothing was set, and nobody (model, member, log) was told.
+    broken = '<remind when=2026-12-01 text="試吃">'
+    replies = iter(
+        [
+            CodexResult(f"好喔\n\n{broken}", (), None, "t", False),
+            CodexResult(
+                f'<remind when="2026-12-01 12:00" text="試吃" who="<@777> <@{USER}>"/>',
+                (),
+                None,
+                "t",
+                True,
+            ),
+            CodexResult(f"好喔 {broken}", (), None, "t", False),
+            CodexResult("沒辦法", (), None, "t", True),
+        ]
+    )
+    prompts = []
+
+    async def fake_codex(text, config, **kw):
+        prompts.append((text, kw.get("resume")))
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    result = await client._answer("中午提醒我們去試吃", [], GUILD, USER, channel_id=555)
+    assert "<TAG_ERRORS>" in prompts[1][0] and broken in prompts[1][0] and prompts[1][1] == "t"
+    assert result.text == "好喔\n\n⏰ 已設定 #1：12/01 12:00 提醒 <@777>、你：試吃"
+    item = client.reminders.for_user(USER)[0]
+    sent = []
+
+    async def send(text, allowed_mentions=None):
+        sent.append((text, [u.id for u in allowed_mentions.users]))
+
+    client.get_channel = {555: NS(guild=NS(id=GUILD), send=send)}.get
+    monkeypatch.setattr(client, "_access", lambda *a: None)
+    await client._fire_reminder(item)
+    assert sent == [(f"⏰ <@777> <@{USER}> 提醒：試吃", [777, USER])]
+    # a retry that cannot fix it: the raw tag still never reaches the member, who is told
+    result = await client._answer("再一次", [], GUILD, USER, channel_id=555)
+    assert broken not in result.text and "其實沒有執行" in result.text
+    assert len(client.reminders.for_user(USER)) == 1
+
+
 async def test_recall_loop_runs_sandbox_snippets_and_delivers_files(
     client, backends, monkeypatch, tmp_path
 ) -> None:

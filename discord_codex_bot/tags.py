@@ -65,6 +65,11 @@ def findall(pattern: re.Pattern[str], text: str) -> list:
     return found
 
 
+def only(text: str) -> str:
+    """The live tags of `text`, one per line, with every word around them dropped."""
+    return "\n".join(match.group(0) for match in live(_TAG, text))
+
+
 def strip(pattern: re.Pattern[str], text: str) -> str:
     """`pattern.sub("", text)` for live matches only; a shown tag stays as written."""
     parts, at = [], 0

@@ -126,6 +126,9 @@ from .reminders import (
     reminder_loop,
     render_pending,
 )
+from .reminders import (
+    targets as reminder_targets,
+)
 from .routing import CONTEXT_TURNS, MAX_EARLIER, Route, Table, Verdict
 from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
 from .threads import ThreadStore
@@ -356,6 +359,28 @@ def request_only(answer: str) -> bool:
 INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{0,200}")*\s*/?>')
 
 
+# A tag of the Bot's own name left over after its parser ran: written in a shape the parser does
+# not take (an unquoted value, a body instead of text=), so nothing was done for it.
+BROKEN_TAG = re.compile(r"<(?:remind|track|memory)\b[^<>]{0,2500}>")
+_BROKEN_CLOSE = re.compile(r"</(?:remind|track|memory)>")
+# One more turn for the operations the Bot could not read, with the reason, so the model can send
+# them again instead of the member being told it was done when it was not.
+TAG_RETRY = (
+    "<TAG_ERRORS>\n{errors}\n</TAG_ERRORS>\n"
+    "The Bot could not carry out the tags above from your last answer; nothing was done for"
+    " them. Reply with only the corrected tags, in exactly the documented form, and no other"
+    " text — or with nothing if they cannot be fixed."
+)
+
+
+def strip_broken_tags(text: str) -> tuple[str, list[str]]:
+    """(text without the leftover tags of the Bot's own names, those tags as written)."""
+    broken = tags.findall(BROKEN_TAG, text)
+    if not broken:
+        return text, []
+    return tags.strip(_BROKEN_CLOSE, tags.strip(BROKEN_TAG, text)).strip(), broken
+
+
 def strip_invented_tags(text: str) -> tuple[str, list[str]]:
     """(text with the leftover tags removed, the names that were in it).
 
@@ -372,7 +397,7 @@ def strip_invented_tags(text: str) -> tuple[str, list[str]]:
 
 def _for_other(item: dict) -> bool:
     """A reminder set for someone other than the member who set it."""
-    return item.get("target_id", item["user_id"]) != item["user_id"]
+    return reminder_targets(item) != [item["user_id"]]
 
 
 def _bot_sees(guild: discord.Guild | None, channel) -> bool:
@@ -1564,24 +1589,48 @@ class DiscordCodexClient(discord.Client):
                         plain=persona_off,
                     )
                 )
-            text, facts = extract_memory_tags(result.text)
-            for scope, name, fact in facts:
-                self.memory.add(scope, guild_id, user_id, name, fact)
-            text = self._apply_reminder_tags(text, guild_id, channel_id, user_id)
-            text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id)
-            text, invented = strip_invented_tags(text)
-            if invented:
+            text, problems = await self._apply_action_tags(
+                result.text, guild_id, channel_id, user_id
+            )
+            if problems:
                 LOGGER.warning(
-                    "Invented tags guild=%s channel=%s user=%s tags=%s",
+                    "Unread tags guild=%s channel=%s user=%s tags=%s",
                     guild_id,
                     channel_id,
                     user_id,
-                    ",".join(invented),
+                    " | ".join(p[:80] for p in problems),
                 )
-                text += (
-                    "\n\n（⚠️ 上面說的操作其實沒有執行——我用了不存在的指令。"
-                    "請直接用斜線指令，或再說一次。）"
-                )
+                errors = defang("\n".join(problems))
+                try:
+                    retry = await self.queue.run(
+                        lambda thread=result.thread_id: turn(
+                            TAG_RETRY.format(errors=errors),
+                            resume=thread,
+                            raw=True,
+                            personal_style=style,
+                            plain=persona_off,
+                        )
+                    )
+                except Exception:  # the answer itself is fine; the member is told below
+                    LOGGER.exception("Tag retry failed guild=%s", guild_id)
+                    retry = None
+                fixed = 0
+                if retry is not None:
+                    if retry.generated_dir not in (None, result.generated_dir):
+                        remove_dir(retry.generated_dir)
+                    result = replace(result, thread_id=retry.thread_id or result.thread_id)
+                    resent = tags.only(retry.text)
+                    done, still = await self._apply_action_tags(
+                        resent, guild_id, channel_id, user_id
+                    )
+                    fixed = len(resent.splitlines()) - len(still)
+                    if done:
+                        text = f"{text}\n\n{done}"
+                if fixed < len(problems):
+                    text += (
+                        "\n\n（⚠️ 上面說的操作有的其實沒有執行——我用了 Bot 看不懂的指令。"
+                        "請直接用斜線指令，或再說一次。）"
+                    )
             if emoji_out is not None:
                 text = emoji_out(text, False)  # before any cut: `<:name:id>` is the longer one
             await self.alerts.record_success(target.backend)
@@ -2504,6 +2553,22 @@ class DiscordCodexClient(discord.Client):
         target.write_bytes(path.read_bytes())
         return target
 
+    async def _apply_action_tags(
+        self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
+    ) -> tuple[str, list[str]]:
+        """Carry out the memory, reminder and tracking tags in `text`: (the text without them,
+        confirmations appended; each tag nothing could be done for, with the reason)."""
+        text, facts = extract_memory_tags(text)
+        for scope, name, fact in facts:
+            self.memory.add(scope, guild_id, user_id, name, fact)
+        text = self._apply_reminder_tags(text, guild_id, channel_id, user_id)
+        text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id)
+        text, invented = strip_invented_tags(text)
+        text, broken = strip_broken_tags(text)
+        problems = [f"<{name} …/>: the Bot has no such tag" for name in invented]
+        problems += [f"{tag}: not in the documented form" for tag in broken]
+        return text.strip(), problems
+
     def _apply_reminder_tags(
         self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
     ) -> str:
@@ -2512,19 +2577,23 @@ class DiscordCodexClient(discord.Client):
         if not creates and not cancels:
             return text
         notes: list[str] = []
-        for when_text, what, target in creates:
+        for when_text, what, who in creates:
             due = parse_when(when_text)
             if due is None:
                 notes.append(f"（時間「{when_text}」看不懂，提醒沒有設）")
                 continue
+            if not what.strip():
+                notes.append("（沒寫要提醒什麼，提醒沒有設）")
+                continue
             if channel_id is None:
                 notes.append("（這裡沒辦法設提醒）")
                 continue
-            item = self.reminders.add(guild_id, channel_id, user_id, due, what, target)
+            item = self.reminders.add(guild_id, channel_id, user_id, due, what, who)
             if isinstance(item, str):
                 notes.append(f"（提醒沒有設：{item}）")
             else:
-                whom = f"提醒 <@{target}>" if target and target != user_id else "提醒你"
+                names = ["你" if t == user_id else f"<@{t}>" for t in reminder_targets(item)]
+                whom = ("提醒" if names[0] == "你" else "提醒 ") + "、".join(names)
                 notes.append(f"⏰ 已設定 #{item['id']}：{describe(due)} {whom}：{item['text']}")
         for reminder_id in cancels:
             done = self.reminders.cancel(user_id, reminder_id)
@@ -2720,13 +2789,13 @@ class DiscordCodexClient(discord.Client):
                 item["channel_id"],
             )
             return
-        target = item.get("target_id") or item["user_id"]
-        by = f"（{'<@' + str(item['user_id']) + '>'} 設的）" if target != item["user_id"] else ""
-        # Only the target is pinged; a mention inside the reminder text is shown, not sent.
+        who = reminder_targets(item)
+        by = f"（{'<@' + str(item['user_id']) + '>'} 設的）" if item["user_id"] not in who else ""
+        # Only the targets are pinged; a mention inside the reminder text is shown, not sent.
         await channel.send(
-            f"⏰ <@{target}> 提醒：{item['text']}{by}",
+            f"⏰ {' '.join(f'<@{t}>' for t in who)} 提醒：{item['text']}{by}",
             allowed_mentions=discord.AllowedMentions(
-                users=[discord.Object(id=target)], everyone=False, roles=False
+                users=[discord.Object(id=t) for t in who], everyone=False, roles=False
             ),
         )
 
@@ -2779,7 +2848,11 @@ class DiscordCodexClient(discord.Client):
                 else "你的提醒：\n"
                 + "\n".join(
                     f"#{i['id']} {describe(_dt.fromisoformat(i['due']))}"
-                    + (f" → <@{i['target_id']}>" if _for_other(i) else "")
+                    + (
+                        " → " + " ".join(f"<@{t}>" for t in reminder_targets(i))
+                        if _for_other(i)
+                        else ""
+                    )
                     + f" — {i['text']}"
                     for i in mine
                 )

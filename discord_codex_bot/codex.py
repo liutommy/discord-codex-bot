@@ -349,7 +349,9 @@ def _prompt(
             "MEMORY may end with a [待辦提醒] section: this member's pending reminders (#id,"
             " Taipei time, text). When the member asks to be reminded of something, append"
             ' <remind when="YYYY-MM-DD HH:MM" text="what" who="<@user id>"/> after your'
-            " answer (Taipei time; omit who to remind the member themself; relative forms like"
+            " answer (Taipei time; omit who to remind the member themself; who may list up to"
+            ' five people, e.g. who="<@id1> <@id2>" for 提醒我們, the member included;'
+            " relative forms like"
             " 30分鐘後 or 明天 9:30 are also accepted); the Bot creates it and confirms. When"
             ' they ask to cancel one, append <cancel_reminder id="N"/> using an id from that'
             " section; never invent ids.",

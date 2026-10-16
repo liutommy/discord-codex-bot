@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,10 +26,11 @@ _CLOCK = re.compile(
     r"(?P<h>\d{1,2})\s*(?:[:：]\s*(?P<m>\d{2})|點\s*(?P<m2>\d{1,2})?\s*分?|點半)?\s*$"
 )
 # Tags the model appends to an answer: create / cancel reminders on the member's behalf.
-REMIND_TAG = re.compile(
-    r'<remind\s+when="([^"]{1,60})"\s+text="([^"]{1,300})"(?:\s+who="<?@?!?([0-9]{1,25})>?")?\s*/?>'
-    r"(?:\s*</remind>)?"
-)
+# Read by attribute name, like <track>: 2026-10-16 "提醒我們" got who="<@a> <@b>", the fixed
+# one-id pattern did not match, and the raw tag went out while nothing was set.
+REMIND_TAG = re.compile(r'<remind((?:\s+[a-z_]{1,10}="[^"]{0,300}")+)\s*/?>(?:\s*</remind>)?')
+_ATTR = re.compile(r'([a-z_]{1,10})="([^"]{0,300})"')
+MAX_TARGETS = 5
 CANCEL_TAG = re.compile(r'<cancel_reminder\s+id="([0-9]{1,9})"\s*/?>(?:\s*</cancel_reminder>)?')
 _ISO = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})\s*$")
 _DATE = re.compile(
@@ -112,13 +113,15 @@ def _parse_when(text: str, now: datetime | None) -> datetime | None:
 
 def extract_reminder_tags(
     answer: str,
-) -> tuple[str, list[tuple[str, str, int | None]], list[int]]:
-    """(answer without the tags, [(when, text, target_id)], [ids to cancel]). Tags inside code or
-    quoted lines are left in the text and not acted on (tags.py)."""
-    creates = [
-        (when, text, int(who) if who else None)
-        for when, text, who in tags.findall(REMIND_TAG, answer)
-    ]
+) -> tuple[str, list[tuple[str, str, tuple[int, ...]]], list[int]]:
+    """(answer without the tags, [(when, text, target ids — () for the member)], [ids to
+    cancel]). A missing when/text comes back "" for the caller to refuse out loud. Tags inside
+    code or quoted lines are left in the text and not acted on (tags.py)."""
+    creates = []
+    for body in tags.findall(REMIND_TAG, answer):
+        attrs = dict(_ATTR.findall(body))
+        who = tuple(dict.fromkeys(int(i) for i in re.findall(r"[0-9]{1,25}", attrs.get("who", ""))))
+        creates.append((attrs.get("when", ""), attrs.get("text", ""), who[:MAX_TARGETS]))
     cancels = [int(i) for i in tags.findall(CANCEL_TAG, answer)]
     clean = tags.strip(CANCEL_TAG, tags.strip(REMIND_TAG, answer)).strip()
     return clean, creates, cancels
@@ -128,13 +131,18 @@ def render_pending(items: list[dict]) -> str:
     """The member's pending reminders as prompt lines (id, Taipei time, text)."""
 
     def note(item: dict) -> str:
-        target = item.get("target_id")
-        return f"（提醒 <@{target}>）" if target not in (None, item["user_id"]) else ""
+        who = targets(item)
+        return f"（提醒 {' '.join(f'<@{t}>' for t in who)}）" if who != [item["user_id"]] else ""
 
     return "\n".join(
         f"#{i['id']} {describe(datetime.fromisoformat(i['due']))} {i['text']}{note(i)}"
         for i in items
     )
+
+
+def targets(item: dict) -> list[int]:
+    """Who a reminder pings: several when set for a group, else its one target or the setter."""
+    return item.get("target_ids") or [item.get("target_id") or item["user_id"]]
 
 
 def describe(when: datetime) -> str:
@@ -169,9 +177,10 @@ class ReminderStore:
         user_id: int,
         when: datetime,
         text: str,
-        target_id: int | None = None,
+        target_id: int | Sequence[int] | None = None,
     ) -> dict | str:
-        """The stored reminder, or a user-facing reason it was refused."""
+        """The stored reminder, or a user-facing reason it was refused. Several targets are
+        pinged together in one message (`target_ids`); `target_id` is the first of them."""
         now = datetime.now(UTC)
         if when <= now:
             return "那個時間已經過了。"
@@ -179,6 +188,8 @@ class ReminderStore:
             return f"最多只能設 {MAX_DAYS_AHEAD} 天內的提醒。"
         if len(self.for_user(user_id)) >= MAX_PER_USER:
             return f"你已經有 {MAX_PER_USER} 個提醒了，先取消幾個。"
+        who = [target_id] if isinstance(target_id, int) else list(target_id or ())
+        who = list(dict.fromkeys(who))[:MAX_TARGETS] or [user_id]
         item = {
             "id": self._next_id,
             "guild_id": guild_id,
@@ -186,8 +197,10 @@ class ReminderStore:
             "user_id": user_id,
             "due": when.astimezone(UTC).isoformat(),
             "text": text.strip()[:500],
-            "target_id": target_id or user_id,
+            "target_id": who[0],
         }
+        if len(who) > 1:
+            item["target_ids"] = who
         self._next_id += 1
         self._items.append(item)
         self._save()
