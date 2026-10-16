@@ -354,11 +354,14 @@ def with_quoted_message(prompt: str, author: str, content: str, image_count: int
 READ_TAGS = (SEARCH_TAG, RECALL_TAG, FETCH_TAG, search.WEB_TAG, sandbox.RUN_TAG, apis.API_TAG)
 # A read tag in a shape its parser does not take. Still a request — answered with the reason, so
 # the model can send it again — never an answer to post with the raw tag in it.
-_READ_ATTRS = r'(?:[^<>"]|"[^"]{0,2000}"){0,4000}'
+_READ_ATTRS = r'(?:(?:[^<>"]|"[^"]{0,2000}"){0,4000}|[^<>]{0,2500})'  # stray quote: the plain one
+_READ_NAME = r"(?:search|recall|fetch|web|api)(?![a-z_])"
 BROKEN_READ = re.compile(
-    rf"<run(?![a-z_]){_READ_ATTRS}>[\s\S]*?</run>"
-    rf"|<(?:search|recall|fetch|web|api)(?![a-z_]){_READ_ATTRS}>"
-    r"(?:\s*</(?:search|recall|fetch|web|api)>)?"
+    # A <run> body goes to its </run> but never past the next <run>: an answer full of unclosed
+    # ones would otherwise be read to the end again from each of them.
+    rf"<run(?![a-z_]){_READ_ATTRS}>(?:(?!<run(?![a-z_]))[\s\S]){{0,20000}}?</run>"
+    # The others may carry their value as a body (<web>q</web>) instead of an attribute.
+    rf"|<{_READ_NAME}{_READ_ATTRS}>(?:[^<]{{0,2000}}</{_READ_NAME}>)?"
 )
 WEB_PER_ROUND = 2
 # Every read round spent and the model still asking: what it asked for last is not read.
@@ -395,6 +398,11 @@ def unserved_reads(answer: str, config: Config, has_apis: bool) -> list[str]:
         ("fetch", len(extract_fetch_tags(answer)), config.link_max_urls),
         ("web", len(search.extract_web_queries(answer)), WEB_PER_ROUND),
         ("api", len(calls) if has_apis else 0, apis.MAX_CALLS_PER_ROUND),
+        (
+            "run",
+            len(tags.findall(sandbox.RUN_TAG, answer)) if sandbox.available(config) else 0,
+            sandbox.MAX_RUNS_PER_ROUND,
+        ),
     )
     for name, asked, limit in limits:
         if asked > limit:
@@ -420,7 +428,10 @@ INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{
 _OWN = r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory)(?![a-z_])"
 _MENTION = r"<[@#][!&]?[0-9]{1,25}>"
 OWN_NAME = re.compile(_OWN)
-NO_WATCH = "this member has no such watch; use an id from [社群追蹤]"
+NO_WATCH = (
+    "this member has no such watch; send another id only if the member named that one,"
+    " otherwise reply with nothing"
+)
 # A stray quote inside a value (text="他說"好") breaks the quoted reading; the plain one is the
 # fallback. A tag cut off before its ">" (the answer ended, or a quote was never closed) is one
 # too when it runs to the end of its line.
@@ -460,6 +471,27 @@ def fence_errors(text: str) -> str:
     """The failed tags as data inside TAG_ERRORS: a tag that quotes a member or a page may hold
     "</TAG_ERRORS>", which would end the envelope early and speak as the Bot to the retry."""
     return _ERRORS_NAME.sub(lambda m: m[1] + "\u2060" + m[2], text)
+
+
+_REFUSED = re.compile(r"(?:(\d+) )?<([a-z_]+)")
+
+
+def unread_left(unread: list[str], refused: list[str], resent: list[str]) -> int:
+    """How many unreadable tags the retry did not send back. A resent tag goes first to a refusal
+    of its name (each says which tag it was, and how many), and only the rest count as fixes for
+    the unreadable ones — a fixed refusal must not hide an operation that never happened."""
+    owed: dict[str, int] = {}
+    for line in refused:
+        if found := _REFUSED.match(line):
+            owed[found[2]] = owed.get(found[2], 0) + int(found[1] or 1)
+    fixes = 0
+    for tag in resent:
+        name = re.match(r"<([a-z_]+)", tag)
+        if name and owed.get(name[1], 0) > 0:
+            owed[name[1]] -= 1
+        else:
+            fixes += 1
+    return max(0, len(unread) - fixes)
 
 
 def action_tags(text: str) -> list[str]:
@@ -1813,7 +1845,7 @@ class DiscordCodexClient(discord.Client):
                         text = f"{text}\n\n{done}"
                 # A refusal was already told to the member in its own words; this is for the
                 # tags the Bot could not even read.
-                if unread and len(resent) < len(unread) + len(refused):
+                if unread and unread_left(unread, refused, resent):
                     text += (
                         "\n\n（⚠️ 上面說的操作有的其實沒有執行——我用了 Bot 看不懂的指令。"
                         "請直接用斜線指令，或再說一次。）"
@@ -2821,7 +2853,8 @@ class DiscordCodexClient(discord.Client):
             if not done:
                 fixable.append(
                     f'<cancel_reminder id="{reminder_id}"/>: this member has no such reminder;'
-                    " use an id from [待辦提醒]"
+                    " send another id only if the member named that one, otherwise reply with"
+                    " nothing"
                 )
         return _with_notes(clean, notes, notes_out)
 
@@ -2835,9 +2868,12 @@ class DiscordCodexClient(discord.Client):
         user_id: int,
         interval_minutes: int = 0,
         times: Sequence[str] = (),
+        why: list[str] | None = None,
     ) -> tuple[str, object | None]:
         """Resolve one source and start watching it. Returns (message, watch or None);
-        shared by the slash command and the <track> tag so both enforce the same limits."""
+        shared by the slash command and the <track> tag so both enforce the same limits. A
+        refusal about the source itself (another one could work) is also noted in `why`."""
+        fixable = why if why is not None else []
         store = self.tracker
         if store is None:
             return "社群追蹤尚未啟用；管理者需設定 TRACKING_ENABLED=true 與 provider 憑證。", None
@@ -2845,6 +2881,7 @@ class DiscordCodexClient(discord.Client):
             return "這裡沒辦法建立追蹤。", None
         policy = interest.strip() or INTEREST_POLICY
         if len(locator) > 500 or len(policy) > 4000:
+            fixable.append("too long")
             return "網址或追蹤條件太長。", None
         if len(store.watches(user_id=user_id, active_only=True)) >= (
             self.config.tracking_max_per_user
@@ -2853,6 +2890,7 @@ class DiscordCodexClient(discord.Client):
         try:
             provider = tracking_provider(locator)
         except ValueError as error:
+            fixable.append("source")
             return str(error), None
         if provider == "youtube" and not self.config.youtube_api_key:
             return "管理者尚未設定 YOUTUBE_API_KEY。", None
@@ -2890,6 +2928,7 @@ class DiscordCodexClient(discord.Client):
             ValueError,
         ) as error:
             LOGGER.warning("Tracking source resolution failed (%s)", type(error).__name__)
+            fixable.append("unreadable")
             return "無法讀取這個來源；請確認網址與 provider 憑證後再試。", None
         label = str(state.get("title") or state.get("login") or external_id)
         also = (
@@ -2919,30 +2958,41 @@ class DiscordCodexClient(discord.Client):
         refusal the model can fix also goes to `refused`, for it to send the tag again."""
         clean, adds, intervals, schedules, cancels = extract_track_tags(text)
         fixable = refused if refused is not None else []
-        # A tag the parser read but dropped (no source, an id or minutes that is not a number,
-        # past the per-answer limit) used to vanish from the answer with nothing said at all.
-        dropped = [
-            (name, found - len(kept), rule)
-            for name, pattern, kept, rule in (
-                ("track", TRACK_TAG, adds, 'needs source="…"'),
-                ("track_every", TRACK_EVERY_TAG, intervals, 'needs id="N" minutes="M", digits'),
-                ("track_at", TRACK_AT_TAG, schedules, 'needs id="N" times="HH:MM"'),
-                ("cancel_track", CANCEL_TRACK_TAG, cancels, 'needs id="N"'),
+        # A tag the parser read but dropped used to vanish from the answer with nothing said:
+        # one written wrong (no source, an id or minutes that is not a number) and one past the
+        # per-answer limit. Only the Bot's own count — an operation's attribute, where an
+        # operation goes — so HTML's <track kind src> in prose is not taken for a broken one.
+        wrong, over = [], []
+        for name, pattern, index, rule in (
+            ("track", TRACK_TAG, 1, 'needs source="…"'),
+            ("track_every", TRACK_EVERY_TAG, 2, 'needs id="N" minutes="M", digits'),
+            ("track_at", TRACK_AT_TAG, 3, 'needs id="N" times="HH:MM"'),
+            ("cancel_track", CANCEL_TRACK_TAG, 4, 'needs id="N"'),
+        ):
+            found = tags.live(pattern, text)
+            read = [m for m in found if extract_track_tags(m.group(0))[index]]
+            bad = sum(
+                1
+                for m in found
+                if m not in read and _KEYS.search(m.group(0)) and _ends_a_line(text, m)
             )
-            if (found := len(tags.findall(pattern, text))) > len(kept)
-        ]
-        if not adds and not intervals and not schedules and not cancels and not dropped:
+            if bad:
+                wrong.append((name, bad, rule))
+            if len(read) > MAX_TRACK_TAGS:
+                over.append((name, len(read) - MAX_TRACK_TAGS))
+        if not (adds or intervals or schedules or cancels or wrong or over):
             return text
-        notes: list[str] = []
-        for name, count, rule in dropped:
-            notes.append(f"（有 {count} 個追蹤指令格式不對，沒有執行）")
-            fixable.append(
-                f"{count} <{name}> tag(s) were not carried out: {rule}; at most"
-                f" {MAX_TRACK_TAGS} of each per answer"
-            )
         store = self.tracker
-        if store is None:
-            return _with_notes(clean, [*notes, "（社群追蹤尚未啟用。）"], notes_out)
+        if store is None:  # nothing the model sends again could be carried out either
+            return _with_notes(clean, ["（社群追蹤尚未啟用。）"], notes_out)
+        notes: list[str] = []
+        for name, count, rule in wrong:
+            notes.append(f"（有 {count} 個追蹤指令格式不對，沒有執行）")
+            fixable.append(f"{count} <{name}> tag(s) were not carried out: {rule}")
+        for name, count in over:
+            what = {"track": "新增", "track_every": "改頻率", "track_at": "改時間"}
+            what = what.get(name, "取消")
+            notes.append(f"（{what}追蹤一次最多 {MAX_TRACK_TAGS} 個，多的 {count} 個沒有執行）")
         for locator, interest, who, every, times in adds:
             if times is None:
                 notes.append(
@@ -2950,10 +3000,11 @@ class DiscordCodexClient(discord.Client):
                 )
                 fixable.append(f'<track source="{locator[:80]}">: at= cannot be read; "HH:MM"')
                 continue
+            why: list[str] = []
             note, watch = await self._add_watch(
-                locator, interest, who, guild_id, channel_id, user_id, every, times
+                locator, interest, who, guild_id, channel_id, user_id, every, times, why
             )
-            if watch is None:
+            if watch is None and why:  # a source it can correct, not a limit or a setting
                 fixable.append(f'<track source="{locator[:80]}">: {note[:200]}')
             # A refusal only ever reached the member as text: the log recorded that a tag had
             # been parsed and nothing more, so a watch that was never created looked exactly

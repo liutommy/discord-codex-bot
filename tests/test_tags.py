@@ -176,3 +176,13 @@ def test_a_broken_own_tag_with_a_stray_quote_is_caught() -> None:
     started = time.perf_counter()
     strip_broken_tags("<remind " + 'a="<@1>" ' * 3000 + "x" * 5000)
     assert time.perf_counter() - started < 1
+
+
+def test_a_flood_of_unclosed_run_tags_stays_cheap() -> None:
+    import time
+
+    from discord_codex_bot.bot import request_only
+
+    started = time.perf_counter()
+    request_only('<run lang="x">' * 4000 + "y" * 20000)
+    assert time.perf_counter() - started < 1
