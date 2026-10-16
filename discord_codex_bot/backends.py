@@ -36,20 +36,14 @@ AGY_FAMILIES: dict[str, tuple[str, dict[str, str]]] = {
         "Gemini 3.8 Flash",
         {lvl: f"gemini-3.8-flash-{lvl}" for lvl in ("low", "medium", "high")},
     ),
-    "gemini-3.7-flash": (
-        "Gemini 3.7 Flash",
-        {lvl: f"gemini-3.7-flash-{lvl}" for lvl in ("low", "medium", "high")},
+    "claude-sonnet-5-5": (
+        "Claude Sonnet 5.5",
+        {lvl: f"claude-sonnet-5-5-{lvl}" for lvl in ("low", "medium", "high")},
     ),
-    "gemini-3.6-flash": (
-        "Gemini 3.6 Flash",
-        {lvl: f"gemini-3.6-flash-{lvl}" for lvl in ("low", "medium", "high")},
+    "claude-opus-5-5": (
+        "Claude Opus 5.5",
+        {lvl: f"claude-opus-5-5-{lvl}" for lvl in ("low", "medium", "high")},
     ),
-    "gemini-3.1-pro": (
-        "Gemini 3.1 Pro",
-        {"low": "gemini-3.1-pro-low", "high": "gemini-3.1-pro-high"},
-    ),
-    "claude-sonnet-4-6": ("Claude Sonnet 4.6（固定 thinking）", {"": "claude-sonnet-4-6"}),
-    "claude-opus-4-6": ("Claude Opus 4.6（固定 thinking）", {"": "claude-opus-4-6-thinking"}),
     "gpt-oss-120b": ("GPT-OSS 120B（固定 medium）", {"": "gpt-oss-120b-medium"}),
 }
 _ORDER = ["low", "medium", "high", "xhigh", "max"]

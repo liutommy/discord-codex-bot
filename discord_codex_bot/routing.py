@@ -216,6 +216,11 @@ def load_table(path: Path) -> Table:
         for kind in stand_ins:
             if kind not in TYPES:
                 raise ValueError(f"routing: {name} names an unknown type {kind!r}")
+    for kind, row in table.types.items():
+        if any(is_argon(cell) for cell in row) and kind not in table.argon_failed:
+            raise ValueError(
+                f"routing: argon_failed has no stand-in for {kind!r}, which uses Argon"
+            )
     cells = [cell for row in table.types.values() for cell in row]
     for entry in [
         *cells,

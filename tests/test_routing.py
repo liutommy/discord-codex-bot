@@ -117,16 +117,22 @@ async def ask(client, text: str = "問題", attachments=(), replied_to=None):
 def test_the_shipped_table_loads_and_every_cell_is_checked() -> None:
     table = routing.load_table(TABLE_PATH)
     assert set(table.types) == set(routing.TYPES)
-    assert table.types["code"] == ("codex|low", "codex|medium", "codex|high", "codex|xhigh")
-    assert table.needs == {"live-x": "grok", "live-web": "codex", "code": "codex"}
+    assert table.types["code"] == (
+        "codex|low",
+        "codex|medium",
+        "codex|high",
+        "agy:gemini-4-argon|medium",
+    )
+    assert table.needs == {"live-x": "grok"}  # every model gets the Bot's <web> and <run>
 
 
 @pytest.mark.parametrize(
     "cell",
     [
-        "agy:claude-sonnet-4-6|high",  # Claude takes no effort
+        "agy:gpt-oss-120b|high",  # a fixed-level model takes no effort
         "agy:gemini-3.8-flash",  # Gemini needs one
-        "agy:gemini-3.1-pro|medium",  # not offered by that family
+        "agy:claude-sonnet-5-5",  # so does Claude now
+        "agy:claude-sonnet-4-6",  # gone from agy
         "grok:grok-4.7",  # no effort
         "codex",  # no effort
         "codex|huge",
@@ -147,6 +153,16 @@ def test_a_bad_cell_stops_the_bot_at_start_up(tmp_path, config: Config, cell: st
     DiscordCodexClient(replace(config, jev_enabled=False, routing_path=bad))  # off: not read
 
 
+def test_every_type_with_an_argon_cell_names_where_it_goes_when_argon_is_spent(tmp_path) -> None:
+    """Without an argon_failed entry a spent Argon would quietly mean MODEL_CHAIN for that type."""
+    data = json.loads(TABLE_PATH.read_text("utf-8"))
+    del data["degrade"]["argon_failed"]["advice"]
+    path = tmp_path / "routing.json"
+    path.write_text(json.dumps(data), "utf-8")
+    with pytest.raises(ValueError, match="argon_failed.*advice"):
+        routing.load_table(path)
+
+
 def test_the_image_list_is_checked_too(tmp_path) -> None:
     data = json.loads(TABLE_PATH.read_text("utf-8"))
     for bad in ([], ["codex"]):
@@ -160,7 +176,7 @@ def test_the_image_list_is_checked_too(tmp_path) -> None:
     for bad in (
         ["grok:grok-4.7|medium", "codex|medium"],
         ["agy:gemini-3.8-flash|medium", "codex|medium"],
-        ["agy:claude-sonnet-4-6"],
+        ["agy:claude-sonnet-5-5|high"],
     ):
         data["image"] = bad
         path.write_text(json.dumps(data), "utf-8")
@@ -173,10 +189,10 @@ def test_the_image_list_is_checked_too(tmp_path) -> None:
 
 def test_a_needs_type_must_stay_on_its_backend(tmp_path) -> None:
     data = json.loads(TABLE_PATH.read_text("utf-8"))
-    data["types"]["code"][0] = "agy:gemini-3.8-flash|low"
+    data["types"]["live-x"][0] = "agy:gemini-3.8-flash|low"
     bad = tmp_path / "routing.json"
     bad.write_text(json.dumps(data), "utf-8")
-    with pytest.raises(ValueError, match="every code cell"):
+    with pytest.raises(ValueError, match="every live-x cell"):
         routing.load_table(bad)
 
 
@@ -229,7 +245,7 @@ def test_a_greeting_then_a_hard_question_still_moves_up() -> None:
     table = routing.load_table(TABLE_PATH)
     hello, _ = routing.decide(table, "chat", "L", None)
     route, why = routing.decide(table, "code", "X", hello)
-    assert (route.entry, route.band, why) == ("codex|xhigh", "X", "harder")
+    assert (route.entry, route.band, why) == ("agy:gemini-4-argon|medium", "X", "harder")
 
 
 def test_lower_effort_steps_once_and_stops_at_the_bottom() -> None:
@@ -284,10 +300,13 @@ async def test_recent_context_is_the_members_last_three_own_messages(client, mon
         ("quick", 5, "agy", "gemini-3.8-flash-medium", "medium"),
         ("live-x", 5, "grok", "grok-4.7", "medium"),
         ("live-web", 8, "codex", "gpt-5.6-luna", "high"),
+        ("live-web", 10, "agy", "gemini-4-argon-medium", "medium"),
+        ("quick", 10, "codex", "gpt-5.6-luna", "high"),
         ("text", 10, "agy", "gemini-4-argon-medium", "medium"),
-        ("code", 9, "codex", "gpt-5.6-luna", "xhigh"),
+        ("code", 9, "agy", "gemini-4-argon-medium", "medium"),
+        ("code", 8, "codex", "gpt-5.6-luna", "high"),
         ("reason", 2, "agy", "gemini-3.8-flash-medium", "medium"),
-        ("create", 7, "agy", "claude-sonnet-4-6", ""),
+        ("create", 7, "agy", "claude-sonnet-5-5-high", "high"),
         ("advice", 4, "grok", "grok-4.7", "medium"),
     ],
 )
@@ -332,7 +351,7 @@ async def test_moving_up_to_another_backend_replays_instead_of_resuming(
     assert built.count("<USER_MESSAGE") == 1 and built.count("</USER_MESSAGE>") == 1
     assert "<EARLIER_CONVERSATION>" in built
     # The next move replays both earlier threads.
-    verdicts(monkeypatch, ok("code", 9))
+    verdicts(monkeypatch, ok("code", 8))
     transcripts["grok-t1"] = [Turn("user", "要買哪台筆電", USER), Turn("assistant", "看預算")]
     await ask(client, "寫個爬蟲")
     codex_call = backends["codex"].calls[0]
@@ -542,10 +561,10 @@ async def test_an_image_with_a_slash_effort_takes_codex_at_that_effort(client, m
 async def test_an_image_on_a_codex_conversation_keeps_its_cell(
     client, backends, monkeypatch
 ) -> None:
-    verdicts(monkeypatch, ok("code", 10))
+    verdicts(monkeypatch, ok("code", 8))
     await ask(client, "重構這個專案")
     plan, result = await ask_with_image(client, "這個錯誤截圖")
-    assert plan.target == Resolved("codex", "gpt-5.6-luna", "xhigh")
+    assert plan.target == Resolved("codex", "gpt-5.6-luna", "high")
     assert plan.resume == "codex-t1"
 
 
@@ -701,7 +720,7 @@ async def test_a_failed_claude_turn_takes_its_types_stand_in(
     monkeypatch.setattr(bot_module, "run_agy", run_agy)
     verdicts(monkeypatch, ok(kind, degree))
     plan, result = await ask(client)
-    assert calls[0] == "claude-sonnet-4-6" and result.via == stand_in
+    assert calls[0] == "claude-sonnet-5-5-high" and result.via == stand_in
 
 
 async def test_a_broken_agy_on_a_routed_turn_is_reported_not_hidden(
@@ -1031,8 +1050,8 @@ def test_help_tells_members_and_the_model_about_routing(client) -> None:
     assert "進行中的對話維持原本的模型" in client.help_sheet()
     assert "附圖片時依序用 Codex、Grok、Gemini 3.8 Flash 看圖" in client.help_sheet()
     # From the table, never hard-coded (Codex on #35).
-    client.routing = replace(client.routing, image=("codex|medium", "agy:claude-sonnet-4-6"))
-    assert "附圖片時依序用 Codex、Claude Sonnet 4.6 看圖" in client.help_guide()
+    client.routing = replace(client.routing, image=("codex|medium", "agy:claude-sonnet-5-5|high"))
+    assert "附圖片時依序用 Codex、Claude Sonnet 5.5 看圖" in client.help_guide()
     assert "effort 只改這一則的強度" in client.help_sheet()
     assert "難度只升不降" in client.help_sheet() and "不會換弱" not in client.help_sheet()
     client.routing = None
@@ -1106,10 +1125,11 @@ ARGON_SPENT = agy_module.AgyUnavailable(
     ("kind", "before"),
     [
         ("chat", Resolved("agy", "gemini-3.8-flash-medium", "medium")),
-        ("quick", Resolved("grok", "grok-4.7", "high")),
-        ("text", Resolved("agy", "claude-sonnet-4-6", "")),
+        ("live-web", Resolved("codex", "gpt-5.6-luna", "high")),
+        ("text", Resolved("agy", "claude-sonnet-5-5-high", "high")),
+        ("code", Resolved("codex", "gpt-5.6-luna", "xhigh")),
         ("reason", Resolved("codex", "gpt-5.6-luna", "xhigh")),
-        ("create", Resolved("agy", "claude-opus-4-6-thinking", "")),
+        ("create", Resolved("agy", "claude-opus-5-5-high", "high")),
         ("advice", Resolved("codex", "gpt-5.6-luna", "high")),
     ],
 )
@@ -1149,5 +1169,5 @@ async def test_a_spent_argon_then_a_failed_claude_still_finds_the_claude_stand_i
     monkeypatch.setattr(bot_module, "run_agy", run_agy)
     verdicts(monkeypatch, ok("text", 10))
     plan, result = await ask(client)
-    assert calls[:2] == ["gemini-4-argon-medium", "claude-sonnet-4-6"]
+    assert calls[:2] == ["gemini-4-argon-medium", "claude-sonnet-5-5-high"]
     assert result.via == Resolved("agy", "gemini-3.8-flash-high", "high")

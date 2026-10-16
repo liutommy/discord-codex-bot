@@ -635,9 +635,9 @@ async def test_answer_dispatches_to_agy_from_the_stored_model(client, backends) 
     assert args == ("gemini-3.8-flash-low",) and "effort" not in kw
     await client._answer("q", [], GUILD, USER, effort="max")
     assert agy.calls[-1][1] == ("gemini-3.8-flash-high",)  # capped at the family's top level
-    client.memory.set_model(GUILD, USER, "agy:claude-opus-4-6")
+    client.memory.set_model(GUILD, USER, "agy:claude-opus-5-5")
     await client._answer("q", [], GUILD, USER, effort="low")
-    assert agy.calls[-1][1] == ("claude-opus-4-6-thinking",)
+    assert agy.calls[-1][1] == ("claude-opus-5-5-low",)
 
 
 async def test_answer_injects_memory_indexes_and_personal_style(client, tmp_path, backends) -> None:
@@ -855,7 +855,7 @@ async def test_model_command_autocomplete_and_openrouter_reminder(client, monkey
     assert [c.value for c in await client.model_options("openrouter", "TEXT")] == [
         "openrouter:t/text:free"
     ]
-    assert [c.value for c in await client.model_options("agy", "opus")] == ["agy:claude-opus-4-6"]
+    assert [c.value for c in await client.model_options("agy", "opus")] == ["agy:claude-opus-5-5"]
     assert [c.value for c in await client.model_options("codex", "")] == ["codex:gpt-5.6-luna"]
     assert client._chosen_model("openrouter", "g/vision:free").value == "openrouter:g/vision:free"
     assert client._chosen_model("openrouter", "openrouter:t/text:free").family == "t/text:free"
@@ -2601,7 +2601,7 @@ async def test_a_routed_agy_turn_falls_back_to_grok_then_codex(client, monkeypat
     monkeypatch.setattr(bot_module, "run_codex", codex)
     monkeypatch.setattr(client, "_grok_usable", usable)
     client.config = replace(client.config, model_chain=ROUTED_CHAIN)
-    routed = Resolved("agy", "claude-sonnet-4-6", "")
+    routed = Resolved("agy", "claude-sonnet-5-5-high", "high")
     result = await client._answer("q", [], GUILD, USER, routed=routed)
     assert result.text == "Grok 備援" and grok_spare.calls[0][1] == ("grok-4.7",)
     # A routed turn keeps its spare's thread; the caller records it under Grok (_routed_memo).

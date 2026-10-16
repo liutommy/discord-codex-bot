@@ -100,7 +100,10 @@ def test_choices_cover_codex_and_every_agy_slug() -> None:
     assert all_choices[0].value == "codex:gpt-5.6-luna" and all_choices[0].backend == CODEX
     assert {c.family for c in all_choices if c.backend == AGY} == set(AGY_FAMILIES)
     assert len(all_choices) <= 25  # Discord's per-option choice cap
-    assert parse_choice("agy:claude-opus-4-6", "gpt-5.6-luna").backend == AGY
+    assert parse_choice("agy:claude-opus-5-5", "gpt-5.6-luna").backend == AGY
+    # gone from agy: a stored choice of one means the default, never an invalid model
+    for gone in ("claude-opus-4-6", "claude-sonnet-4-6", "gemini-3.7-flash", "gemini-3.1-pro"):
+        assert parse_choice(f"agy:{gone}", "gpt-5.6-luna").value == "codex:gpt-5.6-luna"
     assert parse_choice("agy:gemini-3.8-flash-high", "gpt-5.6-luna").family == "gemini-3.8-flash"
     assert parse_choice("agy:no-such-model", "gpt-5.6-luna").value == "codex:gpt-5.6-luna"
     assert parse_choice("", "gpt-5.6-luna").backend == CODEX
@@ -110,18 +113,17 @@ def test_effort_maps_onto_legal_agy_slugs() -> None:
     flash = parse_choice("agy:gemini-3.8-flash", "gpt-5.6-luna")
     assert resolve(flash, "medium").model == "gemini-3.8-flash-medium"
     assert resolve(flash, "max").model == "gemini-3.8-flash-high"  # capped at the family's top
-    pro = parse_choice("agy:gemini-3.1-pro", "gpt-5.6-luna")
-    assert resolve(pro, "medium").model == "gemini-3.1-pro-low"  # closest level at or below
-    assert resolve(pro, "xhigh").model == "gemini-3.1-pro-high"
     argon = parse_choice("agy:gemini-4-argon", "gpt-5.6-luna")
     assert argon.backend == AGY and argon.label == "Gemini 4 Argon"
     assert resolve(argon, "low").model == "gemini-4-argon-low"
     assert resolve(argon, "medium").model == "gemini-4-argon-medium"
     assert resolve(argon, "max").model == "gemini-4-argon-high"  # xhigh / max: the family's top
-    claude = parse_choice("agy:claude-opus-4-6", "gpt-5.6-luna")
-    assert resolve(claude, "high") == resolve(claude, "low")
-    fixed = resolve(claude, "high")
-    assert fixed.effort == "" and fixed.model.endswith("thinking")
+    for family in ("claude-sonnet-5-5", "claude-opus-5-5"):
+        claude = parse_choice(f"agy:{family}", "gpt-5.6-luna")
+        assert resolve(claude, "medium").model == f"{family}-medium"
+        assert resolve(claude, "max").model == f"{family}-high"
+    fixed = resolve(parse_choice("agy:gpt-oss-120b", "gpt-5.6-luna"), "high")
+    assert fixed.effort == "" and fixed.model == "gpt-oss-120b-medium"  # one fixed level
     codex = parse_choice("codex:gpt-5.6-luna", "gpt-5.6-luna")
     assert resolve(codex, "xhigh").effort == "xhigh" and resolve(codex, "xhigh").backend == CODEX
 
