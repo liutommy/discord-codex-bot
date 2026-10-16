@@ -56,7 +56,9 @@ ROOT_NAME = "admin"
 INBOX, PROCESSING, DONE, REJECTED = "inbox", "processing", "done", "rejected"
 SUBDIRS = (INBOX, PROCESSING, DONE, REJECTED)
 VERSION = 1
-MAX_REQUEST_BYTES = 64 * 1024
+# Room for the largest persona an upload may hold (instructions.MAX_UPLOAD_BYTES, ~80 KB of
+# four-byte characters), with JSON's escaping and the envelope on top.
+MAX_REQUEST_BYTES = 256 * 1024
 REQUEST_ID = re.compile(r"[0-9a-f]{32}")
 # A request older than the longest any CLI waits for it is one nobody is waiting for any more:
 # left by an interrupted CLI while the Bot was down, it must not run hours later. Also well inside
@@ -374,7 +376,7 @@ def validate_request(
         raise Rejected("created 必須是時間戳")
     now = time.time() if now is None else now
     if not math.isfinite(created) or abs(now - created) > MAX_AGE_SECONDS:
-        raise Rejected("請求的建立時間離現在超過一天，不執行")
+        raise Rejected("請求的建立時間離現在超過兩小時，已經沒人在等，不執行")
     by = body.get("by")
     if not isinstance(by, str) or len(by) > MAX_BY_CHARS:
         raise Rejected(f"by 必須是最多 {MAX_BY_CHARS} 字的文字")

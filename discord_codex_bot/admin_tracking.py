@@ -82,11 +82,20 @@ async def track_add(client: Any, args: dict) -> dict:
     return {"text": text, "id": watch.id}
 
 
+def _owned(store: Any, args: dict) -> None:
+    """The watch is --user's and in --guild, as a member would have to be there to see it: a
+    mistyped id must not reach a watch the same person keeps somewhere else."""
+    if not any(
+        watch.id == args["id"] and watch.guild_id == args["guild"]
+        for watch in store.watches(user_id=args["user"])
+    ):
+        raise _missing(args)
+
+
 async def track_list(client: Any, args: dict) -> dict:
     store = _store(client)
     watches = store.watches(user_id=args.get("user"), active_only=True)
-    if "guild" in args:
-        watches = [watch for watch in watches if watch.guild_id == args["guild"]]
+    watches = [watch for watch in watches if watch.guild_id == args["guild"]]
     rows = [_watch_row(store, watch) for watch in watches]
     if not rows:
         return {"text": "沒有符合的社群追蹤。", "watches": []}
@@ -95,6 +104,7 @@ async def track_list(client: Any, args: dict) -> dict:
 
 
 async def track_cancel(client: Any, args: dict) -> dict:
+    _owned(_store(client), args)
     deleted = _store(client).delete_watch(args["id"], args["user"])
     # Logged like a <cancel_track>: dropping a member's watch leaves a trace by id.
     LOGGER.info(
@@ -109,6 +119,7 @@ async def track_cancel(client: Any, args: dict) -> dict:
 
 
 async def track_every(client: Any, args: dict) -> dict:
+    _owned(_store(client), args)
     if not _store(client).set_watch_interval(args["id"], args["minutes"], args["user"]):
         raise _missing(args)
     return {
@@ -120,6 +131,7 @@ async def track_every(client: Any, args: dict) -> dict:
 
 async def track_at(client: Any, args: dict) -> dict:
     times = _times(args["times"], "--times")
+    _owned(_store(client), args)
     if not _store(client).set_watch_times(args["id"], times, args["user"]):
         raise _missing(args)
     when = "、".join(times)
@@ -132,13 +144,9 @@ async def track_at(client: Any, args: dict) -> dict:
 
 async def track_log(client: Any, args: dict) -> dict:
     store = _store(client)
-    watch_id = args.get("id")
     # For an id that is not theirs the member just sees an empty log; the operator is told.
-    if watch_id is not None and all(
-        watch.id != watch_id for watch in store.watches(user_id=args["user"])
-    ):
-        raise _missing(args)
-    rows = store.recent_decisions(args["user"], args.get("limit", 10), watch_id)
+    _owned(store, args)
+    rows = store.recent_decisions(args["user"], args.get("limit", 10), args["id"])
     # Imported here: the CLI loads this module for its schemas and never needs bot.py.
     from .bot import render_decision_log
 
@@ -235,13 +243,14 @@ SCHEMAS: dict[str, dict] = {
     "track.list": {
         "help": "列出社群追蹤（可依成員、伺服器篩選）",
         "args": {
-            "guild": {"type": "id", "help": "只列這個伺服器的"},
+            "guild": {"type": "id", "required": True, "help": "只列這個伺服器的"},
             "user": {"type": "id", "help": "只列這位成員的"},
         },
     },
     "track.cancel": {
         "help": "取消成員的一個追蹤（只取消屬於 --user 的）",
         "args": {
+            "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
             "user": {"type": "id", "required": True, "help": "追蹤的主人"},
             "id": {**WATCH_ID, "required": True},
         },
@@ -249,6 +258,7 @@ SCHEMAS: dict[str, dict] = {
     "track.every": {
         "help": "把成員的追蹤改成每 N 分鐘判斷一次（取消固定時間）",
         "args": {
+            "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
             "user": {"type": "id", "required": True, "help": "追蹤的主人"},
             "id": {**WATCH_ID, "required": True},
             "minutes": {**MINUTES, "required": True, "help": "每幾分鐘判斷一次"},
@@ -257,6 +267,7 @@ SCHEMAS: dict[str, dict] = {
     "track.at": {
         "help": "把成員的追蹤改成每天固定時間判斷",
         "args": {
+            "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
             "user": {"type": "id", "required": True, "help": "追蹤的主人"},
             "id": {**WATCH_ID, "required": True},
             "times": {
@@ -271,8 +282,9 @@ SCHEMAS: dict[str, dict] = {
     "track.log": {
         "help": "看成員追蹤的判斷紀錄（為什麼提醒或沒提醒）",
         "args": {
+            "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
             "user": {"type": "id", "required": True, "help": "追蹤的主人"},
-            "id": {**WATCH_ID, "help": "只看這個追蹤；不給則看全部"},
+            "id": {**WATCH_ID, "required": True, "help": "要看的追蹤（同 /track log:編號）"},
             "limit": {"type": "int", "min": 1, "max": 25, "help": "最多幾筆（預設 10）"},
         },
     },

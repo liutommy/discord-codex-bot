@@ -210,11 +210,11 @@ async def test_the_cli_waits_for_the_running_loop(root, server, calls, monkeypat
         (f"{'a' * 32}.json", _body(args={"n": 1, "note": "x" * 11}), "--note 最多 10"),
         (f"{'a' * 32}.json", _body(args={"n": 1, "note": "  "}), "--note 不可空白"),
         (f"{'a' * 32}.json", _body(v=2), "版本"),
-        (f"{'a' * 32}.json", _body(created=time.time() - 2 * 86400), "超過一天"),
+        (f"{'a' * 32}.json", _body(created=time.time() - 2 * 86400), "超過兩小時"),
         (f"{'a' * 32}.json", _body(extra=1), "不認識的欄位"),
         (f"{'a' * 32}.json", b"{not json", "不是有效的 JSON"),
         (f"{'a' * 32}.json", b"[]", "必須是 JSON 物件"),
-        (f"{'a' * 32}.json", b" " * (64 * 1024 + 1), "未讀取"),
+        (f"{'a' * 32}.json", b" " * (admin.MAX_REQUEST_BYTES + 1), "未讀取"),
     ],
 )
 async def test_a_bad_request_is_rejected_and_kept_never_run(

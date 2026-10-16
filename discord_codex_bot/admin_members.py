@@ -70,14 +70,19 @@ async def remind_add(client: Any, args: dict) -> dict:
 
 
 async def remind_list(client: Any, args: dict) -> dict:
-    items = client.reminders.for_user(args["user"])
-    if "guild" in args:
-        items = [item for item in items if item.get("guild_id") == args["guild"]]
+    items = [
+        i for i in client.reminders.for_user(args["user"]) if i.get("guild_id") == args["guild"]
+    ]
     text = "\n".join(map(_reminder_line, items)) if items else "這位成員沒有提醒。"
     return {"text": text, "reminders": items}
 
 
 async def remind_cancel(client: Any, args: dict) -> dict:
+    # In the guild the operator named, checked like a member: a mistyped id must not reach a
+    # reminder the same person set somewhere else.
+    mine = [i for i in client.reminders.for_user(args["user"]) if i["id"] == args["id"]]
+    if not mine or mine[0].get("guild_id") != args["guild"]:
+        raise AdminError(f"找不到這位成員在這個伺服器的提醒 #{args['id']}。")
     if not client.reminders.cancel(args["user"], args["id"]):
         raise AdminError(f"找不到這位成員的提醒 #{args['id']}。")
     return {"text": f"已取消提醒 #{args['id']}。", "id": args["id"]}
@@ -337,14 +342,12 @@ SCHEMAS: dict[str, dict] = {
     },
     "remind.list": {
         "help": "列出成員設的提醒",
-        "args": {
-            "user": USER,
-            "guild": _with(GUILD, required=False, help="只列這個伺服器的"),
-        },
+        "args": {"guild": GUILD, "user": USER},
     },
     "remind.cancel": {
         "help": "取消成員自己的一個提醒",
         "args": {
+            "guild": GUILD,
             "user": _with(USER, help="設提醒的成員；只能取消他自己的"),
             "id": {"type": "id", "required": True, "help": "提醒編號"},
         },

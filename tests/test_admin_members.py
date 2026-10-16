@@ -12,7 +12,7 @@ import pytest
 from discord_codex_bot import admin, admin_members
 from discord_codex_bot import bot as bot_module
 from discord_codex_bot.admin_members import HANDLERS, NO_CHANNEL_THREAD, SCHEMAS
-from discord_codex_bot.admin_server import AdminServer
+from discord_codex_bot.admin_server import AdminError, AdminServer
 from discord_codex_bot.bot import DiscordCodexClient
 from discord_codex_bot.openrouter import Model
 from discord_codex_bot.reminders import PAST
@@ -139,16 +139,22 @@ async def test_a_reminder_is_set_listed_and_cancelled_as_the_member(bot, server)
     assert (item["guild_id"], item["channel_id"], item["text"]) == (GUILD, CHANNEL, "倒垃圾")
     assert item["target_ids"] == [FRIEND, MEMBER]
 
-    listed = await _ok(server, "remind.list", user=MEMBER)
+    listed = await _ok(server, "remind.list", user=MEMBER, guild=GUILD)
     assert listed["reminders"] == [item]
     assert "#1" in listed["text"] and "倒垃圾" in listed["text"] and str(FRIEND) in listed["text"]
-    assert (await _ok(server, "remind.list", user=FRIEND))["text"] == "這位成員沒有提醒。"
-    assert (await _ok(server, "remind.list", user=MEMBER, guild=GUILD))["reminders"] == [item]
+    assert (await _ok(server, "remind.list", user=FRIEND, guild=GUILD))[
+        "text"
+    ] == "這位成員沒有提醒。"
 
     # The store's own scoping: a reminder is cancelled only as the member who set it.
-    assert "找不到這位成員的提醒 #1" in await _failed(server, "remind.cancel", user=FRIEND, id=1)
+    assert "找不到這位成員在這個伺服器的提醒 #1" in await _failed(
+        server, "remind.cancel", user=FRIEND, guild=GUILD, id=1
+    )
     assert bot.reminders.for_user(MEMBER) == [item]
-    assert (await _ok(server, "remind.cancel", user=MEMBER, id=1))["id"] == 1
+    # a reminder the same person set in another guild is not reachable from this one
+    with pytest.raises(AdminError, match="在這個伺服器"):
+        await admin_members.remind_cancel(bot, {"guild": GUILD + 1, "user": MEMBER, "id": 1})
+    assert (await _ok(server, "remind.cancel", user=MEMBER, guild=GUILD, id=1))["id"] == 1
     assert bot.reminders.for_user(MEMBER) == []
 
 

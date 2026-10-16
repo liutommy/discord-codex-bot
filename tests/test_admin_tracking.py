@@ -192,18 +192,22 @@ async def test_track_list_filters_by_member_and_guild(bot, server) -> None:
     elsewhere = bot.tracker.add_source("youtube", "UC9", "@elsewhere")
     bot.tracker.add_watch(elsewhere.id, OTHER_GUILD, 999, MEMBER)
 
-    _status, mine = await _run(server, "track.list", {"user": MEMBER})
-    assert [row["guild"] for row in mine["result"]["watches"]] == [GUILD, OTHER_GUILD]
+    _status, mine = await _run(server, "track.list", {"guild": GUILD, "user": MEMBER})
+    assert [row["guild"] for row in mine["result"]["watches"]] == [GUILD]  # never another guild's
     assert f"#1 youtube · {SOURCE}" in mine["result"]["text"]
     _status, here = await _run(server, "track.list", {"guild": GUILD})
     assert [row["user"] for row in here["result"]["watches"]] == [MEMBER, FRIEND]
     assert "每天 09:30 判斷" in here["result"]["text"]
     _status, both = await _run(server, "track.list", {"guild": GUILD, "user": FRIEND})
     assert [row["id"] for row in both["result"]["watches"]] == [2]
-    _status, everything = await _run(server, "track.list", {})
-    assert len(everything["result"]["watches"]) == 3
-    _status, none = await _run(server, "track.list", {"user": STRANGER})
-    assert none["result"] == {"text": "沒有符合的社群追蹤。", "watches": []}
+    status, everything = await _run(server, "track.list", {})
+    assert status == "rejected"  # a guild is always named
+    # the same member's watch in another guild cannot be reached from this one
+    [there] = [w for w in bot.tracker.watches(user_id=MEMBER) if w.guild_id == OTHER_GUILD]
+    _status, far = await _run(
+        server, "track.cancel", {"guild": GUILD, "user": MEMBER, "id": there.id}
+    )
+    assert far["ok"] is False and len(bot.tracker.watches(user_id=MEMBER)) == 2
     status, refused = await _run(server, "track.list", {"guild": GUILD, "user": STRANGER})
     assert status == "rejected" and "不是伺服器" in refused["reason"]
 
@@ -218,27 +222,31 @@ async def test_changes_only_reach_the_members_own_watch(bot, server, caplog) -> 
         ("track.at", {"times": "10:00"}),
         ("track.cancel", {}),
     ):
-        status, document = await _run(server, command, {"user": FRIEND, "id": watch.id, **extra})
+        status, document = await _run(
+            server, command, {"guild": GUILD, "user": FRIEND, "id": watch.id, **extra}
+        )
         assert status == "done" and document["ok"] is False
         assert document["error"] == f"使用者 {FRIEND} 沒有追蹤 #{watch.id}。"
     assert bot.tracker.watches() == [watch]
 
     _status, timed = await _run(
-        server, "track.at", {"user": MEMBER, "id": watch.id, "times": "0930"}
+        server, "track.at", {"guild": GUILD, "user": MEMBER, "id": watch.id, "times": "0930"}
     )
     assert timed["result"]["times"] == ["09:30"]
     assert bot.tracker.watches()[0].times == ("09:30",)
     status, unreadable = await _run(
-        server, "track.at", {"user": MEMBER, "id": watch.id, "times": "中午"}
+        server, "track.at", {"guild": GUILD, "user": MEMBER, "id": watch.id, "times": "中午"}
     )
     assert status == "rejected" and "--times 看不懂" in unreadable["reason"]
     _status, every = await _run(
-        server, "track.every", {"user": MEMBER, "id": watch.id, "minutes": 120}
+        server, "track.every", {"guild": GUILD, "user": MEMBER, "id": watch.id, "minutes": 120}
     )
     assert every["ok"] is True and "每 120 分鐘" in every["result"]["text"]
     assert (bot.tracker.watches()[0].interval_minutes, bot.tracker.watches()[0].times) == (120, ())
 
-    _status, cancelled = await _run(server, "track.cancel", {"user": MEMBER, "id": watch.id})
+    _status, cancelled = await _run(
+        server, "track.cancel", {"guild": GUILD, "user": MEMBER, "id": watch.id}
+    )
     assert cancelled["result"]["text"] == f"已取消追蹤 #{watch.id}。"
     assert bot.tracker.watches() == []
     assert f"Tracking cancel (admin) user={MEMBER} watch={watch.id} -> deleted" in caplog.text
@@ -251,16 +259,16 @@ async def test_track_log_shows_the_members_judgements(bot, server) -> None:
     _judge(bot.tracker, 1, "a", notify=True, reason="宣布新曲")
     _judge(bot.tracker, 2, "b", notify=False, reason="一般直播")
 
-    _status, one = await _run(server, "track.log", {"user": MEMBER, "id": 1})
+    _status, one = await _run(server, "track.log", {"guild": GUILD, "user": MEMBER, "id": 1})
     text = one["result"]["text"]
     assert (
         "🔔 提醒了" in text and "宣布新曲" in text and "標題 a" in text and "一般直播" not in text
     )
-    _status, every = await _run(server, "track.log", {"user": MEMBER, "limit": 1})
-    assert [row["reason"] for row in every["result"]["decisions"]] == ["一般直播"]
-    _status, empty = await _run(server, "track.log", {"user": FRIEND})
+    _status, two = await _run(server, "track.log", {"guild": GUILD, "user": MEMBER, "id": 2})
+    assert [row["reason"] for row in two["result"]["decisions"]] == ["一般直播"]
+    _status, empty = await _run(server, "track.log", {"guild": GUILD, "user": FRIEND, "id": 3})
     assert "還沒有判斷紀錄" in empty["result"]["text"]
-    _status, theirs = await _run(server, "track.log", {"user": FRIEND, "id": 1})
+    _status, theirs = await _run(server, "track.log", {"guild": GUILD, "user": FRIEND, "id": 1})
     assert theirs["ok"] is False and theirs["error"] == f"使用者 {FRIEND} 沒有追蹤 #1。"
 
 
@@ -301,11 +309,11 @@ async def test_tracking_commands_say_so_when_tracking_is_off(bot, server) -> Non
     bot.tracker = None
     for command, args in (
         ("track.add", _add_args()),
-        ("track.list", {}),
-        ("track.cancel", {"user": MEMBER, "id": 1}),
-        ("track.every", {"user": MEMBER, "id": 1, "minutes": 60}),
-        ("track.at", {"user": MEMBER, "id": 1, "times": "12:00"}),
-        ("track.log", {"user": MEMBER}),
+        ("track.list", {"guild": GUILD}),
+        ("track.cancel", {"guild": GUILD, "user": MEMBER, "id": 1}),
+        ("track.every", {"guild": GUILD, "user": MEMBER, "id": 1, "minutes": 60}),
+        ("track.at", {"guild": GUILD, "user": MEMBER, "id": 1, "times": "12:00"}),
+        ("track.log", {"guild": GUILD, "user": MEMBER, "id": 1}),
         ("tracking.outbox", {}),
     ):
         status, document = await _run(server, command, args)
