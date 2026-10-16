@@ -40,6 +40,7 @@ import math
 import os
 import re
 import secrets
+import signal
 import stat
 import sys
 import time
@@ -56,7 +57,10 @@ SUBDIRS = (INBOX, PROCESSING, DONE, REJECTED)
 VERSION = 1
 MAX_REQUEST_BYTES = 64 * 1024
 REQUEST_ID = re.compile(r"[0-9a-f]{32}")
-MAX_AGE_SECONDS = 24 * 3600  # well inside the 7 days done/ keeps: a pruned id cannot run again
+# A request older than the longest any CLI waits for it is one nobody is waiting for any more:
+# left by an interrupted CLI while the Bot was down, it must not run hours later. Also well inside
+# the 7 days done/ keeps, so a pruned id cannot run again.
+MAX_AGE_SECONDS = 2 * 3600
 DEFAULT_TIMEOUT = 60.0
 # The CLI waits this much longer than the Bot gives the command: the Bot polls every 2 s and
 # the request may wait for a free slot.
@@ -215,12 +219,15 @@ def wait_result(
     """Wait for the result. On timeout the request is withdrawn if the Bot has not claimed it
     ("withdrawn": nothing ran), else ("running", None)."""
     deadline = time.monotonic() + timeout
-    while True:
-        if found := read_result(root, request_id):
-            return found
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(poll)
+    try:
+        while True:
+            if found := read_result(root, request_id):
+                return found
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(poll)
+    except KeyboardInterrupt:  # Ctrl-C or SIGTERM: an operator who stopped waiting
+        pass  # withdrawn below, so it cannot run later behind their back
     if withdraw(root, request_id):
         return "withdrawn", None
     return read_result(root, request_id) or ("running", None)
@@ -573,7 +580,7 @@ def pending(root: Path) -> list[str]:
                     f"{path.stem}  {label}  {str(body.get('command'))[:40]}  "
                     f"{_show_time(body.get('created'))}  {str(body.get('by'))[:MAX_BY_CHARS]}"
                 )
-            except (OSError, ValueError, AttributeError):
+            except (OSError, ValueError, AttributeError, RecursionError):
                 lines.append(f"{path.stem}  {label}  （無法讀取）")
     return lines
 
@@ -605,6 +612,10 @@ def _arguments(namespace: argparse.Namespace, schema: Mapping[str, Any]) -> dict
     return args
 
 
+def _interrupt(_signum: int, _frame: Any) -> None:
+    raise KeyboardInterrupt
+
+
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     schemas = load_schemas()
     namespace = build_parser(schemas).parse_args(argv)
@@ -629,6 +640,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         print(f"沒有送出：{error}", file=sys.stderr)
         return 1
     timeout = namespace.timeout or float(schema.get("timeout", DEFAULT_TIMEOUT)) + WAIT_MARGIN
+    print(f"已送出 {request_id}，等 Bot 處理…", file=sys.stderr)
+    with contextlib.suppress(ValueError):  # not the main thread (tests): no signals there
+        signal.signal(signal.SIGTERM, _interrupt)  # a killed `docker exec` withdraws like Ctrl-C
     status, document = wait_result(root, request_id, timeout)
     return report(request_id, status, document, namespace.json)
 

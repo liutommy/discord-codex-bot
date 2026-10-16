@@ -109,7 +109,12 @@ POLL_SECONDS = 2.0
 KEEP_DAYS = 7
 PRUNE_EVERY = 3600.0
 MAX_RUNNING = 4  # a 10-minute ask must not hold up a quick lookup behind it
-INTERRUPTED = "Bot 在執行途中重啟；不會再執行（interrupted by a restart; not run again）"
+INTERRUPTED = "Bot 在開始執行前重啟；沒有執行，也不會再執行（interrupted before it ran）"
+# Restarted after the handler began: not run again, but it may have changed something already.
+PARTLY = (
+    "Bot 在執行途中重啟；不會再執行，但可能已經做了一部分，請確認結果（interrupted while running）"
+)
+STARTED = ".started"  # next to processing/<id>.json once its handler has been called
 DUPLICATE = "這個 id 已經有結果；同一個請求不會執行兩次"
 
 
@@ -186,7 +191,9 @@ async def check_context(client: Any, args: Mapping[str, Any]) -> None:
 
 
 def _encode(document: dict) -> bytes:
-    return json.dumps(document, ensure_ascii=False, default=str).encode("utf-8")
+    # ASCII escapes: a request's own text (a lone surrogate from a hand-written file) must never
+    # stop its rejection from being written.
+    return json.dumps(document, ensure_ascii=True, default=str).encode("ascii")
 
 
 def _discard(path: Path) -> None:
@@ -245,17 +252,24 @@ class AdminServer:
         """Requests left in processing/ by a crash or restart go to rejected/, never run again;
         one whose result was already written only lost its clean-up."""
         interrupted = 0
-        for path in sorted(self._dir(PROCESSING).iterdir()):
+        for path in sorted(self._dir(PROCESSING).glob("*.json")):
             stem = path.name.removesuffix(".json")
-            if (self._dir(DONE) / path.name).exists():
+            marker = path.with_suffix(STARTED)
+            try:
+                if (self._dir(DONE) / path.name).exists():
+                    continue
+                request = None
+                with contextlib.suppress(Exception):  # whatever the file holds, it is set aside
+                    request = json.loads(self._read(path))
+                self._reject(stem, request, PARTLY if marker.exists() else INTERRUPTED)
+                interrupted += 1
+            except Exception:
+                LOGGER.exception("Admin: interrupted request %s not recorded", _label(stem))
+            finally:
                 _discard(path)
-                continue
-            request = None
-            with contextlib.suppress(Rejected, ValueError):
-                request = json.loads(self._read(path))
-            self._reject(stem, request, INTERRUPTED)
-            _discard(path)
-            interrupted += 1
+                _discard(marker)
+        for marker in self._dir(PROCESSING).glob(f"*{STARTED}"):  # its request already gone
+            _discard(marker)
         return interrupted
 
     def start(self) -> asyncio.Task:
@@ -277,6 +291,8 @@ class AdminServer:
         except (OSError, UnsafeDirectory):
             LOGGER.exception("Admin inbox %s unusable; operator commands are off", self.root)
             return
+        except Exception:  # one bad leftover must not switch the operator channel off
+            LOGGER.exception("Admin: recovery after the restart failed; serving anyway")
         await self.client.wait_until_ready()
         while True:
             try:
@@ -384,8 +400,19 @@ class AdminServer:
     async def _handle(self, claimed: Path, now: float) -> None:
         try:
             await self._settle(claimed, now)
-        except Exception:  # left in processing/: the next start moves it to rejected/
+        except Exception as error:  # still settled: the CLI must not be left saying "running"
             LOGGER.exception("Admin request %s could not be settled", _label(claimed.stem))
+            self._give_up(claimed, error)
+
+    def _give_up(self, claimed: Path, error: Exception) -> None:
+        if not claimed.exists() or (self._dir(DONE) / claimed.name).exists():
+            return
+        started = claimed.with_suffix(STARTED).exists()
+        reason = PARTLY if started else f"Bot 內部錯誤（{type(error).__name__}），沒有執行"
+        with contextlib.suppress(Exception):
+            self._reject(claimed.stem, None, reason)
+        _discard(claimed)
+        _discard(claimed.with_suffix(STARTED))
 
     async def _settle(self, claimed: Path, now: float) -> None:
         stem = claimed.name.removesuffix(".json")
@@ -393,24 +420,42 @@ class AdminServer:
         try:
             try:
                 request = json.loads(self._read(claimed))
-            except ValueError:  # UnicodeDecodeError included
-                raise Rejected("不是有效的 JSON") from None
-            request_id, command, args = validate_request(request, self.schemas, stem, now)
+            except Rejected:
+                raise
+            except Exception as error:  # bad bytes, nesting too deep for the parser, …
+                raise Rejected(f"不是有效的 JSON（{type(error).__name__}）") from None
+            try:
+                request_id, command, args = validate_request(request, self.schemas, stem, now)
+            except Rejected:
+                raise
+            except Exception as error:  # a value no check expected (a 400-digit number)
+                raise Rejected(f"請求無法檢查（{type(error).__name__}）") from None
             if any((self._dir(name) / claimed.name).exists() for name in (DONE, REJECTED)):
                 raise Rejected(DUPLICATE)
-            await check_context(self.client, args)
+            try:
+                await check_context(self.client, args)
+            except Rejected:
+                raise
+            except Exception as error:  # Discord could not be asked: nothing was run
+                LOGGER.warning("Admin %s id=%s context check failed", command, request_id)
+                raise Rejected(
+                    f"無法向 Discord 確認伺服器、頻道或成員（{type(error).__name__}），沒有執行"
+                ) from None
         except Rejected as rejection:
             self._reject(stem, request, rejection.reason)
             _discard(claimed)
             return
         timeout = float(self.schemas[command].get("timeout", DEFAULT_TIMEOUT))
         ok, result, error = False, None, None
+        # From here on a restart cannot say "nothing ran": the handler may have changed things.
+        write_private(claimed.with_suffix(STARTED), b"")
         try:
             result = await asyncio.wait_for(self.handlers[command](self.client, args), timeout)
             ok = True
         except Rejected as rejection:  # the handler refused before doing anything
             self._reject(stem, request, rejection.reason)
             _discard(claimed)
+            _discard(claimed.with_suffix(STARTED))
             return
         except AdminError as failure:
             error = str(failure)
@@ -435,6 +480,7 @@ class AdminServer:
             data = _encode({**document, "ok": False, "result": None, "error": "結果無法寫成 JSON"})
         write_private(self._dir(DONE) / f"{request_id}.json", data)
         _discard(claimed)
+        _discard(claimed.with_suffix(STARTED))
         LOGGER.info("Admin %s id=%s ok=%s", command, request_id, ok)
 
     def prune(self, now: float | None = None) -> int:

@@ -16,6 +16,7 @@ from discord_codex_bot.admin import AdminError, Rejected
 from discord_codex_bot.admin_server import (
     DUPLICATE,
     INTERRUPTED,
+    PARTLY,
     AdminServer,
     check_context,
     require_member,
@@ -264,7 +265,7 @@ async def test_a_copy_of_a_running_request_waits_and_is_then_refused(root, serve
 
     await server.pass_once()  # the copy must not replace the running one's claimed file
     assert _files(root / "inbox") == [f"{request_id}.json"]
-    assert _files(root / "processing") == [f"{request_id}.json"]
+    assert [n for n in _files(root / "processing") if n.endswith(".json")] == [f"{request_id}.json"]
 
     calls.release.set()
     await server.drain()
@@ -293,7 +294,20 @@ async def test_a_restart_moves_interrupted_requests_to_rejected(root, calls, cap
     assert status == "rejected" and document["reason"] == INTERRUPTED
     assert document["request"]["id"] == request_id
     assert admin.read_result(root, finished) == ("done", {"ok": True})
-    assert "interrupted by a restart" in caplog.text
+    assert "interrupted before it ran" in caplog.text
+
+
+async def test_a_restart_after_the_handler_began_says_it_may_be_partly_done(root, calls) -> None:
+    first = AdminServer(FakeClient(), root, _handlers(calls), _schemas())
+    first.prepare()
+    request_id = admin.write_request(root, "test.wait", {})
+    os.replace(root / "inbox" / f"{request_id}.json", root / "processing" / f"{request_id}.json")
+    (root / "processing" / f"{request_id}.started").write_bytes(b"")
+    second = AdminServer(FakeClient(), root, _handlers(calls), _schemas())
+    assert second.prepare() == 1
+    assert _files(root / "processing") == []
+    status, document = admin.read_result(root, request_id)
+    assert status == "rejected" and document["reason"] == PARTLY
 
 
 async def test_directories_are_private_and_a_writable_one_is_refused(
@@ -342,7 +356,7 @@ def test_a_timeout_after_the_claim_reports_it_still_running(root, server) -> Non
     request_id = admin.write_request(root, "test.echo", {"n": 1})
     os.replace(root / "inbox" / f"{request_id}.json", root / "processing" / f"{request_id}.json")
     assert admin.wait_result(root, request_id, 0.05, poll=0.01) == ("running", None)
-    assert _files(root / "processing") == [f"{request_id}.json"]
+    assert [n for n in _files(root / "processing") if n.endswith(".json")] == [f"{request_id}.json"]
 
 
 async def test_failures_timeouts_and_refusals_are_reported(root, server, calls, caplog) -> None:
@@ -573,3 +587,79 @@ async def test_the_server_checks_context_before_the_handler_runs(root, bot, call
     status, document = admin.read_result(root, refused)
     assert status == "rejected" and "不是伺服器" in document["reason"]
     assert admin.read_result(root, allowed)[1]["ok"] is True
+
+
+async def test_a_poison_request_is_rejected_and_never_stops_the_inbox(
+    root, server, calls, monkeypatch
+) -> None:
+    # nesting too deep for the parser, a lone surrogate in a refused request, a 400-digit time
+    _drop(root, "b" * 32 + ".json", b"[" * 60000)
+    _drop(root, "c" * 32 + ".json", _body(id="c" * 32, args={"n": 1, "x": 1}, by="\ud800"))
+    _drop(root, "d" * 32 + ".json", _body(id="d" * 32, created=10**400))
+    await _process(server)
+    assert _files(root / "processing") == [] and calls.seen == []
+    reasons = sorted(r["reason"] for r in _rejections(root))
+    assert any("RecursionError" in r for r in reasons) and any(
+        "OverflowError" in r for r in reasons
+    )
+    assert len(reasons) == 3
+    # the same files left behind by a restart: set aside, and the inbox goes on working
+    for name in ("e" * 32, "f" * 32):
+        (root / "processing" / f"{name}.json").write_bytes(b"[" * 60000)
+    later = AdminServer(FakeClient(), root, _handlers(calls), _schemas(), poll_seconds=0.02)
+    assert later.prepare() == 2
+    request_id = admin.write_request(root, "test.echo", {"n": 3})
+    await _process(later)
+    assert admin.read_result(root, request_id)[0] == "done"
+
+
+async def test_a_context_check_that_cannot_reach_discord_rejects_it(
+    root, server, calls, monkeypatch
+) -> None:
+    from discord_codex_bot import admin_server
+
+    async def down(client, args):
+        raise discord.HTTPException(types.SimpleNamespace(status=503, reason="down"), "down")
+
+    monkeypatch.setattr(admin_server, "check_context", down)
+    request_id = admin.write_request(root, "test.ctx", {"guild": GUILD, "user": MEMBER})
+    await _process(server)
+    status, document = admin.read_result(root, request_id)
+    assert status == "rejected" and "無法向 Discord 確認" in document["reason"]
+    assert calls.seen == [] and _files(root / "processing") == []
+
+
+async def test_a_request_file_of_another_user_is_not_read(root, server, calls, monkeypatch) -> None:
+    real = os.fstat
+
+    def foreign(fd):
+        info = real(fd)
+        return types.SimpleNamespace(
+            st_mode=info.st_mode, st_uid=info.st_uid + 1, st_size=info.st_size
+        )
+
+    request_id = admin.write_request(root, "test.echo", {"n": 1})
+    monkeypatch.setattr(os, "fstat", foreign)
+    await _process(server)
+    monkeypatch.undo()
+    status, document = admin.read_result(root, request_id)
+    assert status == "rejected" and "不是 Bot 的使用者" in document["reason"]
+    assert calls.seen == []
+
+
+def test_an_interrupted_cli_withdraws_its_request(root, server, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "load_schemas", _schemas)
+
+    def interrupted(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(admin.time, "sleep", interrupted)
+    assert admin.main(["test", "echo", "--n", "1"], root) != 0
+    assert _files(root / "inbox") == []  # withdrawn: it cannot run later behind their back
+    assert "已送出" in capsys.readouterr().err
+
+
+async def test_a_request_nobody_waits_for_any_more_does_not_run(root, server, calls) -> None:
+    _drop(root, "a" * 32 + ".json", _body(created=time.time() - 3 * 3600))
+    await _process(server)
+    assert calls.seen == [] and len(_rejections(root)) == 1
