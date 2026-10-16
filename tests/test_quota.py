@@ -155,3 +155,17 @@ def test_only_argon_and_claude_keep_a_reserve() -> None:
     quota = AgyQuota(20.0)
     quota.update(low)
     assert quota.usable("gemini", NOW)
+
+
+def test_only_the_bucket_that_ran_out_lifts_a_spent_mark() -> None:
+    """3p-weekly ran out; 3p-5h refilling (as it does every five hours) says nothing about it."""
+    quota = AgyQuota(20.0)
+    quota.update(USAGE)
+    day_before = datetime(2026, 10, 20, 12, tzinfo=UTC)
+    quota.mark_spent("3p", day_before)
+    five_hour_back = json.loads(json.dumps(USAGE))
+    five_hour = five_hour_back["command"]["data"]["groups"][1]["buckets"][1]
+    five_hour["remaining_fraction"] = 0.995
+    five_hour["reset_time"] = "2026-10-20T17:00:00Z"
+    quota.update(five_hour_back)
+    assert not quota.usable("3p", day_before)

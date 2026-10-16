@@ -133,3 +133,13 @@ def config() -> Config:
         twitch_client_secret="test-twitch-secret",
         linkclean_admin_ids=frozenset(),
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_agy_quota():
+    """A client sets quota.shared when built; a pool one test marked spent must not reach the
+    next test's background-job fallback."""
+    from discord_codex_bot import quota
+
+    yield
+    quota.shared = None
