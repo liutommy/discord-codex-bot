@@ -697,9 +697,12 @@ async def test_answer_stops_recalling_after_the_configured_rounds(client, backen
     tag = '<recall scope="permanent" name="list"/>'
     codex.replies = [tag]
     result = await client._answer("q", [], GUILD, USER)
-    assert len(codex.calls) == 1 + client.config.memory_recall_rounds
-    assert [c[2]["resume"] for c in codex.calls] == ["", "t1", "t2"]
-    assert result.text == tag  # the last round's tag reaches the member unchanged
+    # every round spent and still asking: one more turn to answer with what it has, and a
+    # model that still only asks never puts its raw tag in front of the member
+    assert len(codex.calls) == 2 + client.config.memory_recall_rounds
+    assert [c[2]["resume"] for c in codex.calls] == ["", "t1", "t2", "t3"]
+    assert codex.calls[-1][0].startswith(bot_module.READS_SPENT)
+    assert result.text == bot_module.READS_SPENT_MESSAGE
 
 
 async def test_answer_stores_and_strips_memory_tags(client, backends) -> None:
@@ -1884,9 +1887,9 @@ async def test_a_fresh_retry_thread_does_not_replace_the_conversation(
 async def test_a_tag_quoted_in_a_confirmation_is_not_sent_back(client) -> None:
     # the reminder's words carry a tag; the confirmation repeats them, and it is not the model's
     answer = '好<remind when="2026-12-01 09:00" text="讀 <cancel_reminder id=1/> 的說明"/>'
-    text, problems = await client._apply_action_tags(answer, GUILD, 555, USER)
+    text, problems, _ = await client._apply_action_tags(answer, GUILD, 555, USER)
     assert problems == [] and "<cancel_reminder id=1/>" in text and "⏰ 已設定 #1" in text
-    text, problems = await client._apply_action_tags(
+    text, problems, _ = await client._apply_action_tags(
         '好<remind when="2026-12-01 09:00" text="開團" who="@小明"/>', GUILD, 555, USER
     )
     assert "不是 @提及" in text and len(client.reminders.for_user(USER)) == 1
@@ -1895,6 +1898,80 @@ async def test_a_tag_quoted_in_a_confirmation_is_not_sent_back(client) -> None:
 def test_a_reminder_listing_names_only_a_few_of_a_group() -> None:
     assert bot_module._few([1, 2]) == "<@1> <@2>"
     assert bot_module._few(list(range(1, 91))) == "<@1> <@2> <@3> 等 90 人"
+
+
+async def test_unserved_reads_go_back_as_results_not_to_the_member(
+    client, backends, monkeypatch
+) -> None:
+    codex, _ = backends
+    client.config = replace(client.config, sandbox_url="")
+    broken = '<search query="天氣"/>'
+    codex.replies = [
+        f'{broken}\n<run lang="python">print(1)</run>',
+        "\n".join(f'<web query="q{i}"/>' for i in range(3)),
+        "答案",
+    ]
+    queries = []
+
+    async def fake_search(query, config):
+        queries.append(query)
+        return "fake", []
+
+    monkeypatch.setattr(bot_module.search, "search_web", fake_search)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案"
+    second = codex.calls[1][0]
+    assert f"{broken}: not in the documented form" in second and "no sandbox here" in second
+    assert queries == ["q0", "q1"] and "only the first 2" in codex.calls[2][0]
+
+
+async def test_a_refused_action_goes_back_to_the_model_with_the_reason(
+    client, backends, monkeypatch
+) -> None:
+    replies = iter(
+        [
+            CodexResult('好\n\n<remind when="等一下" text="喝水"/>', (), None, "t", False),
+            CodexResult('<remind when="2026-12-01 15:00" text="喝水"/>', (), None, "t", True),
+            CodexResult('好\n\n<cancel_reminder id="42"/>', (), None, "t", False),
+            CodexResult("", (), None, "t", True),
+        ]
+    )
+    prompts = []
+
+    async def fake_codex(text, config, **kw):
+        prompts.append(text)
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    result = await client._answer("等一下提醒我喝水", [], GUILD, USER, channel_id=555)
+    assert '<remind when="等一下">: the time cannot be read' in prompts[1]
+    assert "（時間「等一下」看不懂，提醒沒有設）" in result.text and "⏰ 已設定 #1" in result.text
+    assert "其實沒有執行" not in result.text  # the refusal was already said in its own words
+    result = await client._answer("取消 42", [], GUILD, USER, channel_id=555)
+    assert '<cancel_reminder id="42"/>: this member has no such reminder' in prompts[3]
+    assert "（找不到你的提醒 #42）" in result.text and "其實沒有執行" not in result.text
+
+
+async def test_a_dropped_tracking_tag_is_said_and_sent_back(client, tmp_path) -> None:
+    client.tracker = TrackerStore(tmp_path / "tracking.sqlite3")
+    refused: list[str] = []
+    text = await client._apply_tracking_tags(
+        '好\n<track_every id="x" minutes="5"/>\n<cancel_track id="99"/>',
+        GUILD,
+        555,
+        USER,
+        refused=refused,
+    )
+    assert "<track_every" not in text and "（有 1 個追蹤指令格式不對，沒有執行）" in text
+    assert refused[0].startswith("1 <track_every> tag(s) were not carried out")
+    assert refused[1].startswith('<cancel_track id="99">: this member has no such watch')
+
+
+async def test_an_own_tag_with_a_bad_value_is_not_called_unknown(client) -> None:
+    _text, unread, _refused = await client._apply_action_tags(
+        '好<cancel_reminder id="abc"/>', GUILD, 555, USER
+    )
+    assert unread == ["<cancel_reminder …/>: not in the documented form"]
 
 
 async def test_fire_reminder_splits_a_long_list_of_people(client, monkeypatch) -> None:

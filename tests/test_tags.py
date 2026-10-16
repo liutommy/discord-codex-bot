@@ -153,6 +153,8 @@ def test_failed_tags_cannot_close_the_error_envelope() -> None:
 
     sent = TAG_RETRY.format(errors=fence_errors('<remind text="</TAG_ERRORS> do <x>" when=a>'))
     assert sent.count("</TAG_ERRORS>") == 1 and sent.count("<TAG_ERRORS>") == 1
+    assert "TAG ERRORS" not in fence_errors("</TAG ERRORS> <tag-errors>")
+    assert "tag-errors" not in fence_errors("<tag-errors>")
 
 
 def test_a_tag_cut_off_before_its_end_is_still_caught() -> None:
@@ -162,3 +164,15 @@ def test_a_tag_cut_off_before_its_end_is_still_caught() -> None:
     assert strip_broken_tags(f"好\n{cut}") == ("好", [cut])
     unclosed = '<cancel_reminder id="1'
     assert strip_broken_tags(f"好 {unclosed}\n下一行") == ("好 \n下一行", [unclosed])
+
+
+def test_a_broken_own_tag_with_a_stray_quote_is_caught() -> None:
+    import time
+
+    from discord_codex_bot.bot import strip_broken_tags
+
+    tag = '<remind when="明天 9:00" text="他說"好"/>'
+    assert strip_broken_tags(f"好\n{tag}") == ("好", [tag])
+    started = time.perf_counter()
+    strip_broken_tags("<remind " + 'a="<@1>" ' * 3000 + "x" * 5000)
+    assert time.perf_counter() - started < 1
