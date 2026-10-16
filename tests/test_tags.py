@@ -108,6 +108,7 @@ def test_a_broken_own_tag_is_caught_even_with_a_mention_in_it() -> None:
         '<remind when=明天9點 text="開會" who="<@111> <@222>"/>',
         '<track channel="x" who="<@111>" mode=live/>',
         "<cancel_reminder id=6/>",
+        '<remind when="2026-12-01 12:00" text="x" who=<@12345678901234567>/>',
         '<memory scope="server" name="x">',
     ):
         assert strip_broken_tags(f"好\n{tag}") == ("好", [tag])

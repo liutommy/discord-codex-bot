@@ -1791,7 +1791,8 @@ async def test_tag_retry_never_repeats_what_was_already_done(client, backends, m
     first = CodexResult(f"好\n\n{good}\n{broken}", (), None, "t", False)
     retries = iter(
         [
-            # the model sends the done one again with the fix: only the fix is new
+            # the model sends the done one again with the fix: only the fix is new, and the
+            # echo is not even tried (reminders would refuse it; a memory note would not)
             CodexResult(f'{good}\n<remind when="2026-12-01 10:00" text="B"/>', (), None, "t"),
             # a tag that is not an action is not a fix, and never reaches the member
             CodexResult('<fetch url="https://example.com"/>', (), None, "t"),
@@ -1819,7 +1820,7 @@ async def test_tag_retry_never_repeats_what_was_already_done(client, backends, m
     result = await client._answer("提醒", [], GUILD, USER, channel_id=555)
     assert "do not send those again" in prompts[1] and "<@111> <@222>" in prompts[1]
     assert [i["text"] for i in client.reminders.for_user(USER)] == ["A", "B"]
-    assert "已經有一樣的提醒 #1" in result.text and "其實沒有執行" not in result.text
+    assert "已經有一樣的提醒" not in result.text and "其實沒有執行" not in result.text
     client.reminders = bot_module.ReminderStore(client.reminders._path.with_name("r2.json"))
     result = await client._answer("提醒", [], GUILD, USER, channel_id=555)
     assert "<fetch" not in result.text and "其實沒有執行" in result.text
@@ -1827,6 +1828,30 @@ async def test_tag_retry_never_repeats_what_was_already_done(client, backends, m
     result = await client._answer("提醒", [], GUILD, USER, channel_id=555)
     assert spare == [] and "其實沒有執行" in result.text
     assert [i["text"] for i in client.reminders.for_user(USER)] == ["A"]
+
+
+async def test_tag_retry_skips_echoed_and_nested_tags(client, backends, monkeypatch) -> None:
+    done = '<memory scope="user" name="茶">喜歡綠茶</memory>'
+    inner = '<remind when="2026-12-01 09:00" text="偷設"/>'
+    nested = f'<memory scope="user" name="原話">他說 {inner}</memory>'
+    replies = iter(
+        [
+            CodexResult(f'好\n{done}\n<remind when=bad text="x">', (), None, "t", False),
+            CodexResult(
+                f'{done}\n{nested}\n<remind when="2026-12-01 10:00" text="x"/>', (), None, "t"
+            ),
+        ]
+    )
+
+    async def fake_codex(text, config, **kw):
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    await client._answer("記住並提醒", [], GUILD, USER, channel_id=555)
+    names = [e.name for e in client.memory.entries("user", GUILD, USER)]
+    assert names.count("茶") == 1 and "原話" in names  # the echoed note is not stored twice
+    # a tag inside the remembered words is data: only the corrected reminder is set
+    assert [i["text"] for i in client.reminders.for_user(USER)] == ["x"]
 
 
 async def test_fire_reminder_splits_a_long_list_of_people(client, monkeypatch) -> None:

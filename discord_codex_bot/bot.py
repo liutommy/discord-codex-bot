@@ -368,9 +368,11 @@ INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{
 
 # A tag of the Bot's own name left over after its parser ran: written in a shape the parser does
 # not take (an unquoted value, a body instead of text=), so nothing was done for it. A quoted value
-# is skipped whole: who="<@id>" is the documented form and holds both < and >.
+# is skipped whole: who="<@id>" is the documented form and holds both < and >; so is a mention
+# written without quotes (who=<@id>).
 _OWN = r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory)(?![a-z_])"
-BROKEN_TAG = re.compile(rf'<{_OWN}(?:[^<>"]|"[^"]{{0,2000}}"){{0,4000}}>')
+_MENTION = r"<[@#][!&]?[0-9]{1,25}>"
+BROKEN_TAG = re.compile(rf'<{_OWN}(?:[^<>"]|"[^"]{{0,2000}}"|{_MENTION}){{0,4000}}>')
 _BROKEN_CLOSE = re.compile(rf"</{_OWN}>")
 # The operations an answer can carry out; a retry is read for these and nothing else.
 ACTION_TAGS = (
@@ -394,9 +396,14 @@ TAG_RETRY = (
 
 
 def action_tags(text: str) -> list[str]:
-    """The live action tags of `text` in order, everything around them dropped."""
+    """The live action tags of `text` in order, everything around them dropped. A tag inside
+    another one (a member's words quoted in a <memory> body) is that tag's data, not an order."""
     found = sorted((m for p in ACTION_TAGS for m in tags.live(p, text)), key=lambda m: m.start())
-    return [m.group(0) for m in found]
+    kept: list[re.Match[str]] = []
+    for match in found:
+        if not kept or match.start() >= kept[-1].end():
+            kept.append(match)
+    return [m.group(0) for m in kept]
 
 
 def strip_broken_tags(text: str) -> tuple[str, list[str]]:
@@ -1649,7 +1656,10 @@ class DiscordCodexClient(discord.Client):
                     if retry.generated_dir not in (None, result.generated_dir):
                         remove_dir(retry.generated_dir)
                     result = replace(result, thread_id=retry.thread_id or result.thread_id)
-                    resent = action_tags(retry.text)
+                    # Only what is new: a tag already carried out, sent back word for word, is
+                    # not done twice (a memory note has no duplicate check of its own).
+                    done_before = set(action_tags(result.text))
+                    resent = [t for t in action_tags(retry.text) if t not in done_before]
                     done, _ = await self._apply_action_tags(
                         "\n".join(resent), guild_id, channel_id, user_id
                     )
