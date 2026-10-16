@@ -72,6 +72,8 @@ def config() -> Config:
         grok_dir=Path("/tmp/grok-transcripts"),
         grok_history_chars=60_000,
         grok_chat_max_weekly_percent=80,
+        agy_reserve_percent=20,
+        agy_usage_minutes=0,
         jev_enabled=False,
         jev_url="https://jev.test/v1/systemone",
         jev_model="jev-1.13.0",

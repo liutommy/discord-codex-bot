@@ -576,8 +576,10 @@ is logged.
 
 When Grok cannot answer, the turn moves down `MODEL_CHAIN` (grok → codex → agy), the same way
 Codex already fell back to agy, and `/codex-status` shows the last fallback. A turn skips Grok
-outright when the plan's weekly usage is past `GROK_CHAT_MAX_WEEKLY_PERCENT` (chat and X lookups share one weekly quota;
-the rest is left for X), or for an hour after three refused sessions in ten minutes (one alert,
+outright when the plan's weekly usage is past `GROK_CHAT_MAX_WEEKLY_PERCENT` (chat and X lookups
+share one weekly quota; the rest is left for X, a reserve that shrinks from whole a week before
+the reset to none within a day of it; `AGY_RESERVE_PERCENT` keeps the same kind of reserve on the
+agy pools for Argon and Claude, read from agy's `/usage` every `AGY_USAGE_MINUTES`), or for an hour after three refused sessions in ten minutes (one alert,
 not one per message). A request the sidecar rejects as malformed is reported, not hidden by a
 fallback. Background jobs (memory consolidation, tracking classification) stay on Codex → agy:
 they need structured output, and their quota is not the members'.

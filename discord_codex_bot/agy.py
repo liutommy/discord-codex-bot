@@ -20,6 +20,7 @@ from .config import Config
 
 LOGGER = logging.getLogger(__name__)
 PROJECTS_DIR = Path(".gemini/config/projects")
+CREDITS_SPENT = "credits balance is too low"  # agy 1.3.x: the model's pool is spent
 # What agy says when the model or service cannot answer right now (quota, rate limit, capacity,
 # a 5xx, a deadline), as opposed to a broken install or settings, which must surface.
 _UNAVAILABLE = re.compile(
@@ -146,6 +147,27 @@ async def _run(
         stdout.decode("utf-8", errors="replace"),
         stderr.decode("utf-8", errors="replace"),
     )
+
+
+async def read_usage(config: Config) -> dict | None:
+    """agy's own quota reading (`/usage`: groups of buckets with remaining_fraction and
+    reset_time), or None when it cannot be read. It starts no conversation and spends nothing.
+    --print-timeout: logged out, agy would otherwise wait for a sign-in."""
+    args = ["-p", "/usage", "--output-format", "json", "--print-timeout", "30s"]
+    try:
+        code, out, _err = await _run(args, "", config.codex_workspace, config)
+    except (OSError, RuntimeError, AgyUnavailable) as error:
+        LOGGER.warning("agy usage unreadable: %s", type(error).__name__)
+        return None
+    try:
+        reading = json.loads(out[out.index("{") :])
+    except ValueError:
+        reading = None
+    if code != 0 or not isinstance(reading, dict) or reading.get("status") != "SUCCESS":
+        detail = reading.get("error") if isinstance(reading, dict) else "no JSON"
+        LOGGER.warning("agy usage unreadable: %s", str(detail)[:120])
+        return None
+    return reading
 
 
 async def ensure_project(config: Config, workspace: Path) -> str:
