@@ -121,7 +121,9 @@ from .output import DISCORD_MESSAGE_LIMIT, format_reply, split_discord_message, 
 from .queue import QueueFullError, SerialQueue
 from .reminders import (
     CANCEL_TAG,
+    PAST,
     REMIND_TAG,
+    TOO_FAR,
     ReminderStore,
     describe,
     extract_reminder_tags,
@@ -138,6 +140,7 @@ from .threads import ThreadStore
 from .tracking import (
     CANCEL_TRACK_TAG,
     INTEREST_POLICY,
+    MAX_TRACK_TAGS,
     TRACK_AT_TAG,
     TRACK_EVERY_TAG,
     TRACK_TAG,
@@ -348,13 +351,69 @@ def with_quoted_message(prompt: str, author: str, content: str, image_count: int
     return "\n".join([QUOTE_FENCE, *parts, QUOTE_FENCE, prompt or "請看這則訊息。"])
 
 
+READ_TAGS = (SEARCH_TAG, RECALL_TAG, FETCH_TAG, search.WEB_TAG, sandbox.RUN_TAG, apis.API_TAG)
+# A read tag in a shape its parser does not take. Still a request — answered with the reason, so
+# the model can send it again — never an answer to post with the raw tag in it.
+_READ_ATTRS = r'(?:(?:[^<>"]|"[^"]{0,2000}"){0,4000}|[^<>]{0,2500})'  # stray quote: the plain one
+_READ_NAME = r"(?:search|recall|fetch|web|api)(?![a-z_])"
+BROKEN_READ = re.compile(
+    # A <run> body goes to its </run> but never past the next <run>: an answer full of unclosed
+    # ones would otherwise be read to the end again from each of them.
+    rf"<run(?![a-z_]){_READ_ATTRS}>(?:(?!<run(?![a-z_]))[\s\S]){{0,20000}}?</run>"
+    # The others may carry their value as a body (<web>q</web>) instead of an attribute.
+    rf"|<{_READ_NAME}{_READ_ATTRS}>(?:[^<]{{0,2000}}</{_READ_NAME}>)?"
+    # Cut off: a <run> whose </run> never came, another read tag stopping before its ">".
+    rf"|<run(?![a-z_])[^<>]{{0,2000}}>(?:(?!<run(?![a-z_]))[\s\S]){{0,20000}}\Z"
+    rf"|<{_READ_NAME}\s[^<>\n]{{0,2500}}$",
+    re.M,
+)
+WEB_PER_ROUND = 2
+# Every read round spent and the model still asking: what it asked for last is not read.
+READS_SPENT = (
+    '<RESULT kind="error">\nThe read limit for this question is used up; nothing more will be'
+    " read. Answer with what you have.\n</RESULT>"
+)
+READS_SPENT_MESSAGE = "（⚠️ 查詢次數用完了，還沒整理出答案；請換個問法再問一次。）"
+
+
 def request_only(answer: str) -> bool:
     """True when the reply is nothing but read/fetch tags — the protocol for asking the Bot to
     read something. A tag embedded in prose (quoted from a fetched page, say) is just text."""
     rest = answer
-    for tag in (SEARCH_TAG, RECALL_TAG, FETCH_TAG, search.WEB_TAG, sandbox.RUN_TAG, apis.API_TAG):
+    for tag in READ_TAGS:
         rest = tag.sub("", rest)
-    return bool(answer.strip()) and not rest.strip()
+    return bool(answer.strip()) and not BROKEN_READ.sub("", rest).strip()
+
+
+def unserved_reads(answer: str, config: Config, has_apis: bool) -> list[str]:
+    """The requests in a request-only reply the Bot will not carry out this round, each with the
+    reason: written in a shape no parser takes, for a tool this Bot does not have, or past a
+    round's limit. They used to end the read loop, and the reply — raw tags — was posted."""
+    rest = answer
+    for tag in READ_TAGS:
+        rest = tags.strip(tag, rest)
+    problems = [f"{tag}: not in the documented form" for tag in tags.findall(BROKEN_READ, rest)]
+    if sandbox.extract_runs(answer) and not sandbox.available(config):
+        problems.append("<run>: there is no sandbox here; answer without running code")
+    calls = list(dict.fromkeys(tags.findall(apis.API_TAG, answer)))
+    if calls and not has_apis:
+        problems.append("<api>: no APIs are registered here")
+    limits = (
+        ("fetch", len(extract_fetch_tags(answer)), config.link_max_urls),
+        ("web", len(search.extract_web_queries(answer)), WEB_PER_ROUND),
+        ("api", len(calls) if has_apis else 0, apis.MAX_CALLS_PER_ROUND),
+        (
+            "run",
+            len(tags.findall(sandbox.RUN_TAG, answer)) if sandbox.available(config) else 0,
+            sandbox.MAX_RUNS_PER_ROUND,
+        ),
+    )
+    for name, asked, limit in limits:
+        if asked > limit:
+            problems.append(
+                f"<{name}>: only the first {limit} are carried out per round; send the rest again"
+            )
+    return problems
 
 
 # A control tag the model made up. Every real one it wrote is handled and stripped before this
@@ -372,10 +431,17 @@ INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{
 # written without quotes (who=<@id>).
 _OWN = r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory)(?![a-z_])"
 _MENTION = r"<[@#][!&]?[0-9]{1,25}>"
-# A tag cut off before its ">" (the answer ended, or a quote was never closed) is one too when it
-# runs to the end of its line.
+OWN_NAME = re.compile(_OWN)
+NO_WATCH = (
+    "this member has no such watch; send another id only if the member named that one,"
+    " otherwise reply with nothing"
+)
+# A stray quote inside a value (text="他說"好") breaks the quoted reading; the plain one is the
+# fallback. A tag cut off before its ">" (the answer ended, or a quote was never closed) is one
+# too when it runs to the end of its line.
 BROKEN_TAG = re.compile(
     rf'<{_OWN}(?:(?:[^<>"]|"[^"]{{0,2000}}"|{_MENTION}){{0,4000}}>'
+    rf"|(?:[^<>]|{_MENTION}){{0,2500}}>"
     rf"|\s(?:[^<>\n]|{_MENTION}){{0,2500}}$)",
     re.M,
 )
@@ -394,21 +460,53 @@ ACTION_TAGS = (
 # them again instead of the member being told it was done when it was not.
 TAG_RETRY = (
     "<TAG_ERRORS>\n{errors}\n</TAG_ERRORS>\n"
-    "The Bot could not carry out the tags above from your last answer; nothing was done for"
-    " them. Every other tag in that answer was carried out: do not send those again. Reply"
-    " with only the corrected tags, in exactly the documented form, and no other text — or"
-    " with nothing if they cannot be fixed, or if a tag above was only quoted or explained"
-    " rather than meant as an action."
+    "The Bot could not carry out the tags above from your last answer (each says why); nothing"
+    " was done for them. Every other tag in that answer was carried out: do not send those"
+    " again. Reply with only the corrected tags, in exactly the documented form, and no other"
+    " text — or with nothing if they cannot be fixed, or if a tag above was only quoted or"
+    " explained rather than meant as an action."
 )
 
 
-_ERRORS_NAME = re.compile(r"(tag)(_errors)", re.I)
+_ERRORS_NAME = re.compile(r"(tag)([\s_-]*errors)", re.I)
 
 
 def fence_errors(text: str) -> str:
     """The failed tags as data inside TAG_ERRORS: a tag that quotes a member or a page may hold
     "</TAG_ERRORS>", which would end the envelope early and speak as the Bot to the retry."""
     return _ERRORS_NAME.sub(lambda m: m[1] + "\u2060" + m[2], text)
+
+
+_REFUSED = re.compile(r"(?:(\d+) )?<([a-z_]+)")
+
+
+def unread_left(unread: list[str], refused: list[str], resent: list[str]) -> int:
+    """How many unreadable tags the retry did not send back. A resent tag goes first to a refusal
+    of its name (each says which tag it was, and how many), then to an unreadable tag of its
+    name; a made-up name can be fixed by any tag. A fixed refusal, or some other tag, must not
+    hide an operation that never happened."""
+    owed: dict[str, int] = {}
+    for line in refused:
+        if found := _REFUSED.match(line):
+            owed[found[2]] = owed.get(found[2], 0) + int(found[1] or 1)
+    need: dict[str, int] = {}
+    wild = 0
+    for line in unread:
+        name = _REFUSED.match(line)
+        if name and OWN_NAME.fullmatch(name[2]):
+            need[name[2]] = need.get(name[2], 0) + 1
+        else:
+            wild += 1
+    for tag in resent:
+        name = re.match(r"<([a-z_]+)", tag)
+        key = name[1] if name else ""
+        if owed.get(key, 0) > 0:
+            owed[key] -= 1
+        elif need.get(key, 0) > 0:
+            need[key] -= 1
+        elif wild > 0:
+            wild -= 1
+    return sum(need.values()) + wild
 
 
 def action_tags(text: str) -> list[str]:
@@ -1634,10 +1732,11 @@ class DiscordCodexClient(discord.Client):
                     break  # an answer that merely quotes a tag (e.g. from a page) is an answer
                 wanted = extract_read_requests(result.text)
                 urls = extract_fetch_tags(result.text)[: self.config.link_max_urls]
-                queries = search.extract_web_queries(result.text)[:2]
+                queries = search.extract_web_queries(result.text)[:WEB_PER_ROUND]
                 runs = sandbox.extract_runs(result.text) if sandbox.available(self.config) else []
                 api_calls = apis.extract_api_calls(result.text) if self.apis else []
-                if not wanted and not urls and not queries and not runs and not api_calls:
+                unserved = unserved_reads(result.text, self.config, bool(self.apis))
+                if not (wanted or urls or queries or runs or api_calls or unserved):
                     break
                 blocks = [
                     f'<RESULT kind="{kind}" scope="{scope}" target="{target}">\n'
@@ -1645,6 +1744,14 @@ class DiscordCodexClient(discord.Client):
                     + "\n</RESULT>"
                     for kind, scope, target, offset, lines in wanted
                 ]
+                if unserved:
+                    LOGGER.warning(
+                        "Unserved reads guild=%s user=%s: %s",
+                        guild_id,
+                        user_id,
+                        " | ".join(p[:80] for p in unserved),
+                    )
+                    blocks.append('<RESULT kind="error">\n' + "\n".join(unserved) + "\n</RESULT>")
                 for query in queries:
                     provider, hits = await search.search_web(query, self.config)
                     blocks.append(search.render_results(query, provider, hits))
@@ -1687,18 +1794,32 @@ class DiscordCodexClient(discord.Client):
                         plain=persona_off,
                     )
                 )
-            text, problems = await self._apply_action_tags(
+            else:
+                if request_only(result.text):
+                    LOGGER.warning("Read rounds spent guild=%s user=%s", guild_id, user_id)
+                    result = await self.queue.run(
+                        lambda thread=result.thread_id: turn(
+                            READS_SPENT + ANSWER_NOW,
+                            resume=thread,
+                            raw=True,
+                            personal_style=style,
+                            plain=persona_off,
+                        )
+                    )
+                    if request_only(result.text):
+                        result = replace(result, text=READS_SPENT_MESSAGE)
+            text, unread, refused = await self._apply_action_tags(
                 result.text, guild_id, channel_id, user_id
             )
-            if problems:
+            if unread or refused:
                 LOGGER.warning(
-                    "Unread tags guild=%s channel=%s user=%s tags=%s",
+                    "Unread or refused tags guild=%s channel=%s user=%s tags=%s",
                     guild_id,
                     channel_id,
                     user_id,
-                    " | ".join(p[:80] for p in problems),
+                    " | ".join(p[:80] for p in unread + refused),
                 )
-                errors = fence_errors(defang("\n".join(problems)))
+                errors = fence_errors(defang("\n".join(unread + refused)))
                 try:
                     # Straight to the backend that answered, never through `turn`: a spare holds
                     # none of the thread and would be asked the whole question again, and every
@@ -1732,12 +1853,14 @@ class DiscordCodexClient(discord.Client):
                         if _spaced(tag) not in seen:
                             seen.add(_spaced(tag))
                             resent.append(tag)
-                    done, _ = await self._apply_action_tags(
+                    done, _, _ = await self._apply_action_tags(
                         "\n".join(resent), guild_id, channel_id, user_id
                     )
                     if done:
                         text = f"{text}\n\n{done}"
-                if len(resent) < len(problems):
+                # A refusal was already told to the member in its own words; this is for the
+                # tags the Bot could not even read.
+                if unread and unread_left(unread, refused, resent):
                     text += (
                         "\n\n（⚠️ 上面說的操作有的其實沒有執行——我用了 Bot 看不懂的指令。"
                         "請直接用斜線指令，或再說一次。）"
@@ -2666,9 +2789,10 @@ class DiscordCodexClient(discord.Client):
 
     async def _apply_action_tags(
         self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[str], list[str]]:
         """Carry out the memory, reminder and tracking tags in `text`: (the text without them,
-        confirmations appended; each tag nothing could be done for, with the reason)."""
+        confirmations appended; each tag that could not be read, with the reason; each one read
+        but refused for a reason the model can fix — a time, an id, a missing value)."""
         text, facts = extract_memory_tags(text)
         for scope, name, fact in facts:
             self.memory.add(scope, guild_id, user_id, name, fact)
@@ -2676,15 +2800,20 @@ class DiscordCodexClient(discord.Client):
         # outside (a reminder's words, a watched channel's title), and a tag in there is not the
         # model's: sent back as "your tag", the retry would turn it into an order.
         notes: list[str] = []
-        text = self._apply_reminder_tags(text, guild_id, channel_id, user_id, notes)
-        text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id, notes)
+        refused: list[str] = []
+        text = self._apply_reminder_tags(text, guild_id, channel_id, user_id, notes, refused)
+        text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id, notes, refused)
         text, invented = strip_invented_tags(text)
         text, broken = strip_broken_tags(text)
-        problems = [f"<{name} …/>: the Bot has no such tag" for name in invented]
+        problems = [
+            f"<{name} …/>: "
+            + ("not in the documented form" if OWN_NAME.match(name) else "the Bot has no such tag")
+            for name in invented
+        ]
         problems += [f"{tag}: not in the documented form" for tag in broken]
         if notes:
             text = f"{text.strip()}\n\n" + "\n".join(notes)
-        return text.strip(), problems
+        return text.strip(), problems, refused
 
     def _apply_reminder_tags(
         self,
@@ -2693,13 +2822,16 @@ class DiscordCodexClient(discord.Client):
         channel_id: int | None,
         user_id: int,
         notes_out: list[str] | None = None,
+        refused: list[str] | None = None,
     ) -> str:
         """Create / cancel the reminders the model asked for and append a confirmation — or,
-        given `notes_out`, put the confirmations there and return the text without them."""
+        given `notes_out`, put the confirmations there and return the text without them. A
+        refusal the model can fix also goes to `refused`, for it to send the tag again."""
         clean, creates, cancels = extract_reminder_tags(text)
         if not creates and not cancels:
             return text
         notes: list[str] = []
+        fixable = refused if refused is not None else []
         for when_text, what, who in creates:
             if who is None:
                 notes.append(f"（要提醒的人寫的不是 @提及，「{what[:40]}」的提醒沒有設）")
@@ -2707,9 +2839,14 @@ class DiscordCodexClient(discord.Client):
             due = parse_when(when_text)
             if due is None:
                 notes.append(f"（時間「{when_text}」看不懂，提醒沒有設）")
+                fixable.append(
+                    f'<remind when="{when_text}">: the time cannot be read; write'
+                    ' "YYYY-MM-DD HH:MM" in Taipei time'
+                )
                 continue
             if not what.strip():
                 notes.append("（沒寫要提醒什麼，提醒沒有設）")
+                fixable.append(f'<remind when="{when_text}">: text= is missing')
                 continue
             if channel_id is None:
                 notes.append("（這裡沒辦法設提醒）")
@@ -2717,10 +2854,14 @@ class DiscordCodexClient(discord.Client):
             item = self.reminders.add(guild_id, channel_id, user_id, due, what, who)
             if isinstance(item, str):
                 notes.append(f"（提醒沒有設：{item}）")
+                if item in (PAST, TOO_FAR):
+                    fixable.append(f'<remind when="{when_text}">: {item}')
             else:
                 names = ["你" if t == user_id else f"<@{t}>" for t in reminder_targets(item)]
                 whom = ("提醒" if names[0] == "你" else "提醒 ") + "、".join(names)
                 notes.append(f"⏰ 已設定 #{item['id']}：{describe(due)} {whom}：{item['text']}")
+        # An id the member does not have is told, not sent back: a retry could only guess at
+        # another of their reminders, and cancel one they never named.
         for reminder_id in cancels:
             done = self.reminders.cancel(user_id, reminder_id)
             notes.append(
@@ -2738,9 +2879,12 @@ class DiscordCodexClient(discord.Client):
         user_id: int,
         interval_minutes: int = 0,
         times: Sequence[str] = (),
+        why: list[str] | None = None,
     ) -> tuple[str, object | None]:
         """Resolve one source and start watching it. Returns (message, watch or None);
-        shared by the slash command and the <track> tag so both enforce the same limits."""
+        shared by the slash command and the <track> tag so both enforce the same limits. A
+        refusal about the source itself (another one could work) is also noted in `why`."""
+        fixable = why if why is not None else []
         store = self.tracker
         if store is None:
             return "社群追蹤尚未啟用；管理者需設定 TRACKING_ENABLED=true 與 provider 憑證。", None
@@ -2748,6 +2892,7 @@ class DiscordCodexClient(discord.Client):
             return "這裡沒辦法建立追蹤。", None
         policy = interest.strip() or INTEREST_POLICY
         if len(locator) > 500 or len(policy) > 4000:
+            fixable.append("too long")
             return "網址或追蹤條件太長。", None
         if len(store.watches(user_id=user_id, active_only=True)) >= (
             self.config.tracking_max_per_user
@@ -2756,6 +2901,7 @@ class DiscordCodexClient(discord.Client):
         try:
             provider = tracking_provider(locator)
         except ValueError as error:
+            fixable.append("source")
             return str(error), None
         if provider == "youtube" and not self.config.youtube_api_key:
             return "管理者尚未設定 YOUTUBE_API_KEY。", None
@@ -2793,6 +2939,7 @@ class DiscordCodexClient(discord.Client):
             ValueError,
         ) as error:
             LOGGER.warning("Tracking source resolution failed (%s)", type(error).__name__)
+            fixable.append("unreadable")
             return "無法讀取這個來源；請確認網址與 provider 憑證後再試。", None
         label = str(state.get("title") or state.get("login") or external_id)
         also = (
@@ -2815,25 +2962,61 @@ class DiscordCodexClient(discord.Client):
         channel_id: int | None,
         user_id: int,
         notes_out: list[str] | None = None,
+        refused: list[str] | None = None,
     ) -> str:
         """Create / retime / cancel the watches the model asked for and append a confirmation —
-        or, given `notes_out`, put the confirmations there and return the text without them."""
+        or, given `notes_out`, put the confirmations there and return the text without them. A
+        refusal the model can fix also goes to `refused`, for it to send the tag again."""
         clean, adds, intervals, schedules, cancels = extract_track_tags(text)
-        if not adds and not intervals and not schedules and not cancels:
+        fixable = refused if refused is not None else []
+        # A tag the parser read but dropped used to vanish from the answer with nothing said:
+        # one written wrong (no source, an id or minutes that is not a number) and one past the
+        # per-answer limit. Only the Bot's own count — an operation's attribute, where an
+        # operation goes — so HTML's <track kind src> in prose is not taken for a broken one.
+        wrong, over = [], []
+        for name, pattern, index, rule in (
+            ("track", TRACK_TAG, 1, 'needs source="…"'),
+            ("track_every", TRACK_EVERY_TAG, 2, 'needs id="N" minutes="M", digits'),
+            ("track_at", TRACK_AT_TAG, 3, 'needs id="N" times="HH:MM"'),
+            ("cancel_track", CANCEL_TRACK_TAG, 4, 'needs id="N"'),
+        ):
+            found = tags.live(pattern, text)
+            read = [m for m in found if extract_track_tags(m.group(0))[index]]
+            bad = sum(
+                1
+                for m in found
+                if m not in read and _KEYS.search(m.group(0)) and _ends_a_line(text, m)
+            )
+            if bad:
+                wrong.append((name, bad, rule))
+            if len(read) > MAX_TRACK_TAGS:
+                over.append((name, len(read) - MAX_TRACK_TAGS))
+        if not (adds or intervals or schedules or cancels or wrong or over):
             return text
         store = self.tracker
-        if store is None:
+        if store is None:  # nothing the model sends again could be carried out either
             return _with_notes(clean, ["（社群追蹤尚未啟用。）"], notes_out)
         notes: list[str] = []
+        for name, count, rule in wrong:
+            notes.append(f"（有 {count} 個追蹤指令格式不對，沒有執行）")
+            fixable.append(f"{count} <{name}> tag(s) were not carried out: {rule}")
+        for name, count in over:
+            what = {"track": "新增", "track_every": "改頻率", "track_at": "改時間"}
+            what = what.get(name, "取消")
+            notes.append(f"（{what}追蹤一次最多 {MAX_TRACK_TAGS} 個，多的 {count} 個沒有執行）")
         for locator, interest, who, every, times in adds:
             if times is None:
                 notes.append(
                     f"（{locator[:80]} 的時間看不懂，沒有建立追蹤；請用像 12:01、20:01 這樣的寫法）"
                 )
+                fixable.append(f'<track source="{locator[:80]}">: at= cannot be read; "HH:MM"')
                 continue
+            why: list[str] = []
             note, watch = await self._add_watch(
-                locator, interest, who, guild_id, channel_id, user_id, every, times
+                locator, interest, who, guild_id, channel_id, user_id, every, times, why
             )
+            if watch is None and why:  # a source it can correct, not a limit or a setting
+                fixable.append(f'<track source="{locator[:80]}">: {note[:200]}')
             # A refusal only ever reached the member as text: the log recorded that a tag had
             # been parsed and nothing more, so a watch that was never created looked exactly
             # like one that was. Record the outcome, not just the intent.
@@ -2853,9 +3036,12 @@ class DiscordCodexClient(discord.Client):
                 if done
                 else f"（找不到你的追蹤 #{watch_id}）"
             )
+            if not done:
+                fixable.append(f'<track_every id="{watch_id}">: {NO_WATCH}')
         for watch_id, times in schedules:
             if not times:
                 notes.append(f"（追蹤 #{watch_id} 的時間看不懂，請用像 12:01、20:01 這樣的寫法）")
+                fixable.append(f'<track_at id="{watch_id}">: times= cannot be read; "HH:MM"')
                 continue
             done = store.set_watch_times(watch_id, times, user_id)
             notes.append(
@@ -2864,9 +3050,12 @@ class DiscordCodexClient(discord.Client):
                 if done
                 else f"（找不到你的追蹤 #{watch_id}）"
             )
+            if not done:
+                fixable.append(f'<track_at id="{watch_id}">: {NO_WATCH}')
         for watch_id in cancels:
             # Scoped to the asking member, exactly like the slash command: one member can never
-            # talk the Bot into dropping someone else's watch.
+            # talk the Bot into dropping someone else's watch. An unknown id is told, not sent
+            # back, for the same reason as a reminder's.
             done = store.delete_watch(watch_id, user_id)
             LOGGER.info(
                 "Tracking cancel guild=%s channel=%s user=%s watch=%s -> %s",

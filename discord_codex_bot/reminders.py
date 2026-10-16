@@ -17,6 +17,9 @@ LOGGER = logging.getLogger(__name__)
 TAIPEI = timezone(timedelta(hours=8))
 MAX_PER_USER = 20
 MAX_DAYS_AHEAD = 365
+# Refusals the model can fix by sending another time; the others (a full list) it cannot.
+PAST = "那個時間已經過了。"
+TOO_FAR = f"最多只能設 {MAX_DAYS_AHEAD} 天內的提醒。"
 
 _RELATIVE = re.compile(r"^\s*(\d+)\s*(分鐘|分|小時|小时|時|天|日|min|m|h|d)\s*(後|后)?\s*$", re.I)
 _DAY_WORDS = {"今天": 0, "明天": 1, "後天": 2, "后天": 2, "大後天": 3}
@@ -193,9 +196,9 @@ class ReminderStore:
         pinged together in one message (`target_ids`); `target_id` is the first of them."""
         now = datetime.now(UTC)
         if when <= now:
-            return "那個時間已經過了。"
+            return PAST
         if when - now > timedelta(days=MAX_DAYS_AHEAD):
-            return f"最多只能設 {MAX_DAYS_AHEAD} 天內的提醒。"
+            return TOO_FAR
         if len(self.for_user(user_id)) >= MAX_PER_USER:
             return f"你已經有 {MAX_PER_USER} 個提醒了，先取消幾個。"
         who = [target_id] if isinstance(target_id, int) else list(target_id or ())
