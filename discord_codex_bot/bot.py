@@ -1887,6 +1887,11 @@ class DiscordCodexClient(discord.Client):
             return None
         current = None if fresh else self.threads.routed(key, replied_to, plain)
         route = Route.from_dict(current["route"]) if current else None
+        if route is not None and not routing.valid_entry(route.entry):
+            # Its model is gone (agy dropped it): kept, it would quietly resolve to Codex for as
+            # long as nothing moved the conversation. Start over instead.
+            LOGGER.info("Stored route %s is no longer a valid target; starting over", route.entry)
+            current = route = None
         sources = [*route.earlier, current["thread_id"]] if current and route else []
         turns = await asyncio.to_thread(
             lambda: [turn for thread in sources for turn in transcript_turns(self.config, thread)]

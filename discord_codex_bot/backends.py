@@ -19,12 +19,12 @@ ROUTER_LABELS = {OPENROUTER: "OpenRouter", ORCAROUTER: "OrcaRouter"}
 # What a member reads for each backend (/status, the fallback line).
 BACKEND_LABELS = {CODEX: "Codex", GROK: "Grok", AGY: "Antigravity", **ROUTER_LABELS}
 
-# Verified 2026-09-12 against `agy models` and a full model × --effort matrix: agy bakes the
-# reasoning effort into the model slug (`-high/-medium/-low`), `--effort` is only accepted when
-# it repeats that suffix, and the Claude / gpt-oss models take no effort at all. Members therefore
+# agy bakes the reasoning effort into the model slug (`-high/-medium/-low`); `--effort` is only
+# accepted when it repeats that suffix, and gpt-oss takes no effort at all. Members therefore
 # pick a *family* here and the shared `effort` option is mapped onto a legal slug per family.
 # family value -> (label, {effort: slug})  — an effort missing from the map falls back to the
-# family's strongest listed level (xhigh/max on Gemini become high; Claude ignores effort).
+# family's strongest listed level (xhigh/max become high). The list follows `agy models`
+# (2026-10-16: Argon, 3.8 Flash, Claude Sonnet / Opus 5.5, gpt-oss).
 AGY_FAMILIES: dict[str, tuple[str, dict[str, str]]] = {
     # Its own small weekly pool (no 5h window), apart from the Gemini one; routing.json's
     # argon_failed says where a question goes when it is spent.

@@ -1171,3 +1171,15 @@ async def test_a_spent_argon_then_a_failed_claude_still_finds_the_claude_stand_i
     plan, result = await ask(client)
     assert calls[:2] == ["gemini-4-argon-medium", "claude-sonnet-5-5-high"]
     assert result.via == Resolved("agy", "gemini-3.8-flash-high", "high")
+
+
+async def test_a_stored_route_on_a_model_agy_no_longer_offers_starts_over(
+    client, backends, monkeypatch
+) -> None:
+    """A conversation routed before a model left agy kept its cell on a chat message or a Jev
+    miss, and that cell quietly resolved to Codex for as long as nothing moved it."""
+    stale = Route("agy:claude-sonnet-4-6", "H", "create")
+    client._remember(KEY, "agy-t1", None, False, "agy:claude-sonnet-4-6", stale)
+    verdicts(monkeypatch, Verdict("timeout"))
+    plan, result = await ask(client, "然後呢")
+    assert plan.log["why"] == "default" and plan.route.entry != stale.entry

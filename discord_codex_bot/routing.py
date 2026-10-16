@@ -234,6 +234,14 @@ def load_table(path: Path) -> Table:
     return table
 
 
+def valid_entry(entry: str) -> bool:
+    try:
+        check_entry(entry)
+    except ValueError:
+        return False
+    return True
+
+
 def backend_of(entry: str) -> str:
     return split_stored(entry)[0].split(":", 1)[0]
 
