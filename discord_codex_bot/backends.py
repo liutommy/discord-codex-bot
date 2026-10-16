@@ -19,31 +19,31 @@ ROUTER_LABELS = {OPENROUTER: "OpenRouter", ORCAROUTER: "OrcaRouter"}
 # What a member reads for each backend (/status, the fallback line).
 BACKEND_LABELS = {CODEX: "Codex", GROK: "Grok", AGY: "Antigravity", **ROUTER_LABELS}
 
-# Verified 2026-09-12 against `agy models` and a full model × --effort matrix: agy bakes the
-# reasoning effort into the model slug (`-high/-medium/-low`), `--effort` is only accepted when
-# it repeats that suffix, and the Claude / gpt-oss models take no effort at all. Members therefore
+# agy bakes the reasoning effort into the model slug (`-high/-medium/-low`); `--effort` is only
+# accepted when it repeats that suffix, and gpt-oss takes no effort at all. Members therefore
 # pick a *family* here and the shared `effort` option is mapped onto a legal slug per family.
 # family value -> (label, {effort: slug})  — an effort missing from the map falls back to the
-# family's strongest listed level (xhigh/max on Gemini become high; Claude ignores effort).
+# family's strongest listed level (xhigh/max become high). The list follows `agy models`
+# (2026-10-16: Argon, 3.8 Flash, Claude Sonnet / Opus 5.5, gpt-oss).
 AGY_FAMILIES: dict[str, tuple[str, dict[str, str]]] = {
+    # Its own small weekly pool (no 5h window), apart from the Gemini one; routing.json's
+    # argon_failed says where a question goes when it is spent.
+    "gemini-4-argon": (
+        "Gemini 4 Argon",
+        {lvl: f"gemini-4-argon-{lvl}" for lvl in ("low", "medium", "high")},
+    ),
     "gemini-3.8-flash": (
         "Gemini 3.8 Flash",
         {lvl: f"gemini-3.8-flash-{lvl}" for lvl in ("low", "medium", "high")},
     ),
-    "gemini-3.7-flash": (
-        "Gemini 3.7 Flash",
-        {lvl: f"gemini-3.7-flash-{lvl}" for lvl in ("low", "medium", "high")},
+    "claude-sonnet-5-5": (
+        "Claude Sonnet 5.5",
+        {lvl: f"claude-sonnet-5-5-{lvl}" for lvl in ("low", "medium", "high")},
     ),
-    "gemini-3.6-flash": (
-        "Gemini 3.6 Flash",
-        {lvl: f"gemini-3.6-flash-{lvl}" for lvl in ("low", "medium", "high")},
+    "claude-opus-5-5": (
+        "Claude Opus 5.5",
+        {lvl: f"claude-opus-5-5-{lvl}" for lvl in ("low", "medium", "high")},
     ),
-    "gemini-3.1-pro": (
-        "Gemini 3.1 Pro",
-        {"low": "gemini-3.1-pro-low", "high": "gemini-3.1-pro-high"},
-    ),
-    "claude-sonnet-4-6": ("Claude Sonnet 4.6（固定 thinking）", {"": "claude-sonnet-4-6"}),
-    "claude-opus-4-6": ("Claude Opus 4.6（固定 thinking）", {"": "claude-opus-4-6-thinking"}),
     "gpt-oss-120b": ("GPT-OSS 120B（固定 medium）", {"": "gpt-oss-120b-medium"}),
 }
 _ORDER = ["low", "medium", "high", "xhigh", "max"]
