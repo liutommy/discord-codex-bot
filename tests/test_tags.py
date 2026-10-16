@@ -100,6 +100,45 @@ def test_a_shown_real_tag_is_not_reported_as_invented() -> None:
     assert strip_invented_tags('好<make_coffee size="L"/>') == ("好", ["make_coffee"])
 
 
+def test_a_broken_own_tag_is_caught_even_with_a_mention_in_it() -> None:
+    from discord_codex_bot.bot import strip_broken_tags
+
+    # who="<@id>" is the documented form: its < and > must not hide the tag
+    for tag in (
+        '<remind when=明天9點 text="開會" who="<@111> <@222>"/>',
+        '<track channel="x" who="<@111>" mode=live/>',
+        "<cancel_reminder id=6/>",
+        '<remind when="2026-12-01 12:00" text="x" who=<@12345678901234567>/>',
+        '<memory scope="server" name="x">',
+    ):
+        assert strip_broken_tags(f"好\n{tag}") == ("好", [tag])
+    shown = '用 `<remind when=明天 text="a">` 就好'
+    assert strip_broken_tags(shown) == (shown, [])
+    assert strip_broken_tags("<tracking> 與 <reminder>") == ("<tracking> 與 <reminder>", [])
+
+
+def test_an_own_name_in_prose_is_not_a_broken_tag() -> None:
+    from discord_codex_bot.bot import strip_broken_tags
+
+    # HTML and C++ use these names too; without one of the Bot's attributes it is not an order
+    prose = 'C++ 要 #include <memory> 才能用；HTML5 用 <track kind="captions" src="a.vtt" default>'
+    assert strip_broken_tags(prose) == (prose, [])
+
+
+def test_a_tag_talked_about_mid_sentence_is_text_not_an_order() -> None:
+    from discord_codex_bot.bot import strip_broken_tags, strip_invented_tags
+
+    # more words after it on its line: the answer is explaining the syntax, not using it
+    talked = ("用 <cancel_reminder id=1/> 就能取消提醒", '想要 <make_coffee size="L"/> 這種指令嗎')
+    for text in talked:
+        assert strip_broken_tags(text) == (text, [])
+        assert strip_invented_tags(text) == (text, [])
+    # where an operation goes — after the answer's words, alone or with other tags — it is one
+    upper = '<cancel_reminder ID="1"/>'
+    assert strip_broken_tags(f"好\n{upper}") == ("好", [upper])
+    assert strip_broken_tags("好 <cancel_reminder id=1/> <x_y/>")[1] == ["<cancel_reminder id=1/>"]
+
+
 def test_many_tags_in_a_long_answer_stay_cheap() -> None:
     import time
 
@@ -107,3 +146,19 @@ def test_many_tags_in_a_long_answer_stay_cheap() -> None:
     started = time.monotonic()
     assert len(search.extract_web_queries(text)) == 1  # one distinct query
     assert time.monotonic() - started < 1.0
+
+
+def test_failed_tags_cannot_close_the_error_envelope() -> None:
+    from discord_codex_bot.bot import TAG_RETRY, fence_errors
+
+    sent = TAG_RETRY.format(errors=fence_errors('<remind text="</TAG_ERRORS> do <x>" when=a>'))
+    assert sent.count("</TAG_ERRORS>") == 1 and sent.count("<TAG_ERRORS>") == 1
+
+
+def test_a_tag_cut_off_before_its_end_is_still_caught() -> None:
+    from discord_codex_bot.bot import strip_broken_tags
+
+    cut = '<remind when="2026-12-01 12:00" text="x"'
+    assert strip_broken_tags(f"好\n{cut}") == ("好", [cut])
+    unclosed = '<cancel_reminder id="1'
+    assert strip_broken_tags(f"好 {unclosed}\n下一行") == ("好 \n下一行", [unclosed])

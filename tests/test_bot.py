@@ -1738,6 +1738,187 @@ async def test_answer_creates_and_cancels_reminders_from_model_tags(
     assert "看不懂，提醒沒有設" in result.text
 
 
+async def test_unread_tag_goes_back_to_the_model_once_with_the_reason(
+    client, backends, monkeypatch
+) -> None:
+    from types import SimpleNamespace as NS
+
+    # 2026-10-16: the tag went out raw, nothing was set, and nobody (model, member, log) was told.
+    broken = '<remind when=2026-12-01 text="試吃">'
+    replies = iter(
+        [
+            CodexResult(f"好喔\n\n{broken}", (), None, "t", False),
+            CodexResult(
+                f'<remind when="2026-12-01 12:00" text="試吃" who="<@777> <@{USER}>"/>',
+                (),
+                None,
+                "t",
+                True,
+            ),
+            CodexResult(f"好喔 {broken}", (), None, "t", False),
+            CodexResult("沒辦法", (), None, "t", True),
+        ]
+    )
+    prompts = []
+
+    async def fake_codex(text, config, **kw):
+        prompts.append((text, kw.get("resume")))
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    result = await client._answer("中午提醒我們去試吃", [], GUILD, USER, channel_id=555)
+    assert "<TAG_ERRORS>" in prompts[1][0] and broken in prompts[1][0] and prompts[1][1] == "t"
+    assert result.text == "好喔\n\n⏰ 已設定 #1：12/01 12:00 提醒 <@777>、你：試吃"
+    item = client.reminders.for_user(USER)[0]
+    sent = []
+
+    async def send(text, allowed_mentions=None):
+        sent.append((text, [u.id for u in allowed_mentions.users]))
+
+    client.get_channel = {555: NS(guild=NS(id=GUILD), send=send)}.get
+    monkeypatch.setattr(client, "_access", lambda *a: None)
+    await client._fire_reminder(item)
+    # a group the setter is in still says who set it: 777 did not
+    assert sent == [(f"⏰ <@777> <@{USER}> 提醒：試吃（<@{USER}> 設的）", [777, USER])]
+    # a retry that cannot fix it: the raw tag still never reaches the member, who is told
+    result = await client._answer("再一次", [], GUILD, USER, channel_id=555)
+    assert broken not in result.text and "其實沒有執行" in result.text
+    assert len(client.reminders.for_user(USER)) == 1
+
+
+async def test_tag_retry_never_repeats_what_was_already_done(client, backends, monkeypatch) -> None:
+    good = '<remind when="2026-12-01 09:00" text="A"/>'
+    broken = '<remind when=明天9點 text="B" who="<@111> <@222>"/>'
+    first = CodexResult(f"好\n\n{good}\n{broken}", (), None, "t", False)
+    retries = iter(
+        [
+            # the model sends the done one again with the fix: only the fix is new, and the
+            # echo is not even tried (reminders would refuse it; a memory note would not)
+            CodexResult(f'{good}\n<remind when="2026-12-01 10:00" text="B"/>', (), None, "t"),
+            # a tag that is not an action is not a fix, and never reaches the member
+            CodexResult('<fetch url="https://example.com"/>', (), None, "t"),
+            # the backend is gone for the retry: no spare is asked the whole question again
+            CodexUsageLimit("quota spent"),
+        ]
+    )
+    prompts, spare = [], []
+
+    async def fake_codex(text, config, **kw):
+        prompts.append(text)
+        if "<TAG_ERRORS>" not in text:
+            return first
+        reply = next(retries)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    async def fake_agy(text, config, model, **kw):
+        spare.append(text)
+        return first
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(bot_module, "run_agy", fake_agy)
+    result = await client._answer("提醒", [], GUILD, USER, channel_id=555)
+    assert "do not send those again" in prompts[1] and "<@111> <@222>" in prompts[1]
+    assert [i["text"] for i in client.reminders.for_user(USER)] == ["A", "B"]
+    assert "已經有一樣的提醒" not in result.text and "其實沒有執行" not in result.text
+    client.reminders = bot_module.ReminderStore(client.reminders._path.with_name("r2.json"))
+    result = await client._answer("提醒", [], GUILD, USER, channel_id=555)
+    assert "<fetch" not in result.text and "其實沒有執行" in result.text
+    client.reminders = bot_module.ReminderStore(client.reminders._path.with_name("r3.json"))
+    result = await client._answer("提醒", [], GUILD, USER, channel_id=555)
+    assert spare == [] and "其實沒有執行" in result.text
+    assert [i["text"] for i in client.reminders.for_user(USER)] == ["A"]
+
+
+async def test_tag_retry_skips_echoed_and_nested_tags(client, backends, monkeypatch) -> None:
+    done = '<memory scope="user" name="茶">喜歡綠茶</memory>'
+    inner = '<remind when="2026-12-01 09:00" text="偷設"/>'
+    nested = f'<memory scope="user" name="原話">他說 {inner}</memory>'
+    replies = iter(
+        [
+            CodexResult(f'好\n{done}\n<remind when=bad text="x">', (), None, "t", False),
+            CodexResult(
+                f'{done}\n{nested}\n{nested}\n<remind when="2026-12-01 10:00" text="x"/>',
+                (),
+                None,
+                "t",
+            ),
+        ]
+    )
+
+    async def fake_codex(text, config, **kw):
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    await client._answer("記住並提醒", [], GUILD, USER, channel_id=555)
+    names = [e.name for e in client.memory.entries("user", GUILD, USER)]
+    # the echoed note is not stored twice, nor one the retry itself repeats
+    assert names.count("茶") == 1 and names.count("原話") == 1
+    # a tag inside the remembered words is data: only the corrected reminder is set
+    assert [i["text"] for i in client.reminders.for_user(USER)] == ["x"]
+
+
+async def test_a_fresh_retry_thread_does_not_replace_the_conversation(
+    client, backends, monkeypatch
+) -> None:
+    done = '<memory scope="user" name="茶">喜歡綠茶</memory>'
+    replies = iter(
+        [
+            CodexResult(f"好\n{done}\n<remind when=bad text=x>", (), None, "t-orig", True),
+            # could not resume: a new thread with only the correction in it; the echo differs
+            # from the done tag by a space and is still not stored twice
+            CodexResult(done.replace("<memory ", "<memory  "), (), None, "t-fresh", False),
+        ]
+    )
+
+    async def fake_codex(text, config, **kw):
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    result = await client._answer("q", [], GUILD, USER, channel_id=555)
+    assert result.thread_id == "t-orig"
+    assert [e.name for e in client.memory.entries("user", GUILD, USER)].count("茶") == 1
+
+
+async def test_a_tag_quoted_in_a_confirmation_is_not_sent_back(client) -> None:
+    # the reminder's words carry a tag; the confirmation repeats them, and it is not the model's
+    answer = '好<remind when="2026-12-01 09:00" text="讀 <cancel_reminder id=1/> 的說明"/>'
+    text, problems = await client._apply_action_tags(answer, GUILD, 555, USER)
+    assert problems == [] and "<cancel_reminder id=1/>" in text and "⏰ 已設定 #1" in text
+    text, problems = await client._apply_action_tags(
+        '好<remind when="2026-12-01 09:00" text="開團" who="@小明"/>', GUILD, 555, USER
+    )
+    assert "不是 @提及" in text and len(client.reminders.for_user(USER)) == 1
+
+
+def test_a_reminder_listing_names_only_a_few_of_a_group() -> None:
+    assert bot_module._few([1, 2]) == "<@1> <@2>"
+    assert bot_module._few(list(range(1, 91))) == "<@1> <@2> <@3> 等 90 人"
+
+
+async def test_fire_reminder_splits_a_long_list_of_people(client, monkeypatch) -> None:
+    from types import SimpleNamespace as NS
+
+    sent = []
+
+    async def send(text, allowed_mentions=None):
+        sent.append((text, [u.id for u in allowed_mentions.users]))
+
+    client.get_channel = {555: NS(guild=NS(id=GUILD), send=send)}.get
+    monkeypatch.setattr(client, "_access", lambda *a: None)
+    people = [10**17 + i for i in range(150)]
+    item = {"guild_id": GUILD, "channel_id": 555, "user_id": USER, "text": "集合"}
+    await client._fire_reminder({**item, "target_id": people[0], "target_ids": people})
+    assert len(sent) > 1 and all(len(text) <= 2000 for text, _ in sent)
+    assert "提醒：集合" in sent[0][0] and all("提醒" not in text for text, _ in sent[1:])
+    assert [i for _, ids in sent for i in ids] == people
+    for text, ids in sent:
+        assert text == "⏰ " + " ".join(f"<@{i}>" for i in ids) + (
+            f" 提醒：集合（<@{USER}> 設的）" if text is sent[0][0] else ""
+        )
+
+
 async def test_recall_loop_runs_sandbox_snippets_and_delivers_files(
     client, backends, monkeypatch, tmp_path
 ) -> None:

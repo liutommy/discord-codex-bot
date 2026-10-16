@@ -92,6 +92,40 @@ def test_parse_when_accepts_iso_taipei() -> None:
     assert parse_when("2026-13-01 09:00", NOW) is None
 
 
+def test_remind_tag_takes_several_people_in_any_order(tmp_path: Path) -> None:
+    from discord_codex_bot.reminders import extract_reminder_tags, render_pending, targets
+
+    # 2026-10-16: asked to remind "us", the model listed two people in who= and the tag went out
+    # raw with nothing set.
+    answer = '好喔\n\n<remind when="2026-10-17 12:00" text="試吃" who="<@11> <@22>"/>'
+    assert extract_reminder_tags(answer) == ("好喔", [("2026-10-17 12:00", "試吃", (11, 22))], [])
+    assert extract_reminder_tags('<remind text="a" when="1小時後"/>')[1] == [("1小時後", "a", ())]
+    assert extract_reminder_tags('<remind when="1小時後"/>')[1] == [("1小時後", "", ())]
+    store = ReminderStore(tmp_path / "r.json")
+    item = store.add(1, 2, 11, datetime.now(UTC) + timedelta(hours=1), "試吃", (11, 22))
+    assert item["target_id"] == 11 and targets(item) == [11, 22]
+    assert render_pending([item]).endswith("試吃（提醒 <@11> <@22>）")
+    assert targets(store.add(1, 2, 11, datetime.now(UTC) + timedelta(hours=1), "x")) == [11]
+    # a who= that names someone without a mention is not quietly turned into the setter
+    assert extract_reminder_tags('<remind when="1小時後" text="a" who="@小明"/>')[1] == [
+        ("1小時後", "a", None)
+    ]
+    assert extract_reminder_tags('<remind when="1小時後" text="a" who="11, <@!22>"/>')[1] == [
+        ("1小時後", "a", (11, 22))
+    ]
+    assert extract_reminder_tags('<remind when="1小時後" text="a" who="<@11><@22>"/>')[1] == [
+        ("1小時後", "a", (11, 22))
+    ]
+    assert extract_reminder_tags('<remind when="1小時後" text="a" who="小明2號"/>')[1] == [
+        ("1小時後", "a", None)
+    ]
+    # "30分鐘後" read twice is seconds apart, across a minute too: still the same reminder
+    soon = datetime.now(UTC).replace(second=59) + timedelta(hours=2)
+    assert isinstance(store.add(1, 2, 11, soon, "y", (11, 22)), dict)
+    again = store.add(1, 2, 11, soon + timedelta(seconds=2), "y", (22, 11))
+    assert again.startswith("已經有一樣的提醒")
+
+
 def test_extract_reminder_tags_and_render_pending() -> None:
     from discord_codex_bot.reminders import extract_reminder_tags, render_pending
 
@@ -101,7 +135,7 @@ def test_extract_reminder_tags_and_render_pending() -> None:
     )
     clean, creates, cancels = extract_reminder_tags(answer)
     assert clean == "好，我記下了。 另外"
-    assert creates == [("2026-09-14 09:30", "倒垃圾", None), ("30分鐘後", "開團", 777)]
+    assert creates == [("2026-09-14 09:30", "倒垃圾", ()), ("30分鐘後", "開團", (777,))]
     assert cancels == [3]
     assert extract_reminder_tags("沒有標籤") == ("沒有標籤", [], [])
     # a tag the answer only shows (a code block, inline code, a quoted line) is not acted on
@@ -112,7 +146,7 @@ def test_extract_reminder_tags_and_render_pending() -> None:
         '<remind when="30分鐘後" text="c"/>'
     )
     clean, creates, cancels = extract_reminder_tags(shown)
-    assert creates == [("30分鐘後", "c", None)] and cancels == []
+    assert creates == [("30分鐘後", "c", ())] and cancels == []
     assert clean == shown.rsplit("\n", 1)[0]
     # a code block the answer never closed runs to the end of it
     assert extract_reminder_tags('看：\n```\n<remind when="1小時後" text="a"/>')[1] == []
