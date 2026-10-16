@@ -100,6 +100,22 @@ def test_a_shown_real_tag_is_not_reported_as_invented() -> None:
     assert strip_invented_tags('好<make_coffee size="L"/>') == ("好", ["make_coffee"])
 
 
+def test_a_broken_own_tag_is_caught_even_with_a_mention_in_it() -> None:
+    from discord_codex_bot.bot import strip_broken_tags
+
+    # who="<@id>" is the documented form: its < and > must not hide the tag
+    for tag in (
+        '<remind when=明天9點 text="開會" who="<@111> <@222>"/>',
+        '<track channel="x" who="<@111>" mode=live/>',
+        "<cancel_reminder id=6/>",
+        '<memory scope="server" name="x">',
+    ):
+        assert strip_broken_tags(f"好\n{tag}") == ("好", [tag])
+    shown = '用 `<remind when=明天 text="a">` 就好'
+    assert strip_broken_tags(shown) == (shown, [])
+    assert strip_broken_tags("<tracking> 與 <reminder>") == ("<tracking> 與 <reminder>", [])
+
+
 def test_many_tags_in_a_long_answer_stay_cheap() -> None:
     import time
 

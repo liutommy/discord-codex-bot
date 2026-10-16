@@ -105,6 +105,7 @@ from .links import (
     unreadable,
 )
 from .memory import (
+    MEMORY_TAG,
     RECALL_TAG,
     SCOPES,
     SEARCH_TAG,
@@ -116,9 +117,11 @@ from .memory import (
     extract_read_requests,
 )
 from .openrouter import ROUTERS, Catalog, run_router, trim_history
-from .output import format_reply, split_discord_message, tail, truncate
+from .output import DISCORD_MESSAGE_LIMIT, format_reply, split_discord_message, tail, truncate
 from .queue import QueueFullError, SerialQueue
 from .reminders import (
+    CANCEL_TAG,
+    REMIND_TAG,
     ReminderStore,
     describe,
     extract_reminder_tags,
@@ -133,7 +136,11 @@ from .routing import CONTEXT_TURNS, MAX_EARLIER, Route, Table, Verdict
 from .summary import DEFAULT_MESSAGES, MAX_MESSAGES, render_transcript, since, summary_prompt
 from .threads import ThreadStore
 from .tracking import (
+    CANCEL_TRACK_TAG,
     INTEREST_POLICY,
+    TRACK_AT_TAG,
+    TRACK_EVERY_TAG,
+    TRACK_TAG,
     OutboxMessage,
     ProviderError,
     RutenFetcher,
@@ -360,17 +367,36 @@ INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{
 
 
 # A tag of the Bot's own name left over after its parser ran: written in a shape the parser does
-# not take (an unquoted value, a body instead of text=), so nothing was done for it.
-BROKEN_TAG = re.compile(r"<(?:remind|track|memory)\b[^<>]{0,2500}>")
-_BROKEN_CLOSE = re.compile(r"</(?:remind|track|memory)>")
+# not take (an unquoted value, a body instead of text=), so nothing was done for it. A quoted value
+# is skipped whole: who="<@id>" is the documented form and holds both < and >.
+_OWN = r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory)(?![a-z_])"
+BROKEN_TAG = re.compile(rf'<{_OWN}(?:[^<>"]|"[^"]{{0,2000}}"){{0,4000}}>')
+_BROKEN_CLOSE = re.compile(rf"</{_OWN}>")
+# The operations an answer can carry out; a retry is read for these and nothing else.
+ACTION_TAGS = (
+    MEMORY_TAG,
+    REMIND_TAG,
+    CANCEL_TAG,
+    TRACK_TAG,
+    TRACK_EVERY_TAG,
+    TRACK_AT_TAG,
+    CANCEL_TRACK_TAG,
+)
 # One more turn for the operations the Bot could not read, with the reason, so the model can send
 # them again instead of the member being told it was done when it was not.
 TAG_RETRY = (
     "<TAG_ERRORS>\n{errors}\n</TAG_ERRORS>\n"
     "The Bot could not carry out the tags above from your last answer; nothing was done for"
-    " them. Reply with only the corrected tags, in exactly the documented form, and no other"
-    " text — or with nothing if they cannot be fixed."
+    " them. Every other tag in that answer was carried out: do not send those again. Reply"
+    " with only the corrected tags, in exactly the documented form, and no other text — or"
+    " with nothing if they cannot be fixed."
 )
+
+
+def action_tags(text: str) -> list[str]:
+    """The live action tags of `text` in order, everything around them dropped."""
+    found = sorted((m for p in ACTION_TAGS for m in tags.live(p, text)), key=lambda m: m.start())
+    return [m.group(0) for m in found]
 
 
 def strip_broken_tags(text: str) -> tuple[str, list[str]]:
@@ -1602,8 +1628,12 @@ class DiscordCodexClient(discord.Client):
                 )
                 errors = defang("\n".join(problems))
                 try:
+                    # Straight to the backend that answered, never through `turn`: a spare holds
+                    # none of the thread and would be asked the whole question again, and every
+                    # action already carried out would come back in its answer.
                     retry = await self.queue.run(
-                        lambda thread=result.thread_id: turn(
+                        lambda via=target, thread=result.thread_id: run_on(
+                            via,
                             TAG_RETRY.format(errors=errors),
                             resume=thread,
                             raw=True,
@@ -1614,19 +1644,18 @@ class DiscordCodexClient(discord.Client):
                 except Exception:  # the answer itself is fine; the member is told below
                     LOGGER.exception("Tag retry failed guild=%s", guild_id)
                     retry = None
-                fixed = 0
+                resent: list[str] = []
                 if retry is not None:
                     if retry.generated_dir not in (None, result.generated_dir):
                         remove_dir(retry.generated_dir)
                     result = replace(result, thread_id=retry.thread_id or result.thread_id)
-                    resent = tags.only(retry.text)
-                    done, still = await self._apply_action_tags(
-                        resent, guild_id, channel_id, user_id
+                    resent = action_tags(retry.text)
+                    done, _ = await self._apply_action_tags(
+                        "\n".join(resent), guild_id, channel_id, user_id
                     )
-                    fixed = len(resent.splitlines()) - len(still)
                     if done:
                         text = f"{text}\n\n{done}"
-                if fixed < len(problems):
+                if len(resent) < len(problems):
                     text += (
                         "\n\n（⚠️ 上面說的操作有的其實沒有執行——我用了 Bot 看不懂的指令。"
                         "請直接用斜線指令，或再說一次。）"
@@ -2791,13 +2820,25 @@ class DiscordCodexClient(discord.Client):
             return
         who = reminder_targets(item)
         by = f"（{'<@' + str(item['user_id']) + '>'} 設的）" if item["user_id"] not in who else ""
+        end = f" 提醒：{item['text']}{by}"
+
+        def line(ids: list[int], end: str) -> str:
+            return f"⏰ {' '.join(f'<@{t}>' for t in ids)}{end}"
+
         # Only the targets are pinged; a mention inside the reminder text is shown, not sent.
-        await channel.send(
-            f"⏰ {' '.join(f'<@{t}>' for t in who)} 提醒：{item['text']}{by}",
-            allowed_mentions=discord.AllowedMentions(
-                users=[discord.Object(id=t) for t in who], everyone=False, roles=False
-            ),
-        )
+        # Too many people for one message: the first carries the text, the rest only mentions.
+        while who:
+            take = 1
+            while take < len(who) and len(line(who[: take + 1], end)) <= DISCORD_MESSAGE_LIMIT:
+                take += 1
+            batch, who = who[:take], who[take:]
+            await channel.send(
+                line(batch, end),
+                allowed_mentions=discord.AllowedMentions(
+                    users=[discord.Object(id=t) for t in batch], everyone=False, roles=False
+                ),
+            )
+            end = ""
 
     @app_commands.describe(
         when="什麼時候：30分鐘後、2小時後、明天 9:30、後天下午3點、21:00、9/15 14:30",

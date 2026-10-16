@@ -28,9 +28,9 @@ _CLOCK = re.compile(
 # Tags the model appends to an answer: create / cancel reminders on the member's behalf.
 # Read by attribute name, like <track>: 2026-10-16 "提醒我們" got who="<@a> <@b>", the fixed
 # one-id pattern did not match, and the raw tag went out while nothing was set.
-REMIND_TAG = re.compile(r'<remind((?:\s+[a-z_]{1,10}="[^"]{0,300}")+)\s*/?>(?:\s*</remind>)?')
-_ATTR = re.compile(r'([a-z_]{1,10})="([^"]{0,300})"')
-MAX_TARGETS = 5
+# who= holds as many mentions as the member named; one message pings them all.
+REMIND_TAG = re.compile(r'<remind((?:\s+[a-z_]{1,10}="[^"]{0,4000}")+)\s*/?>(?:\s*</remind>)?')
+_ATTR = re.compile(r'([a-z_]{1,10})="([^"]{0,4000})"')
 CANCEL_TAG = re.compile(r'<cancel_reminder\s+id="([0-9]{1,9})"\s*/?>(?:\s*</cancel_reminder>)?')
 _ISO = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})\s*$")
 _DATE = re.compile(
@@ -121,7 +121,7 @@ def extract_reminder_tags(
     for body in tags.findall(REMIND_TAG, answer):
         attrs = dict(_ATTR.findall(body))
         who = tuple(dict.fromkeys(int(i) for i in re.findall(r"[0-9]{1,25}", attrs.get("who", ""))))
-        creates.append((attrs.get("when", ""), attrs.get("text", ""), who[:MAX_TARGETS]))
+        creates.append((attrs.get("when", ""), attrs.get("text", ""), who))
     cancels = [int(i) for i in tags.findall(CANCEL_TAG, answer)]
     clean = tags.strip(CANCEL_TAG, tags.strip(REMIND_TAG, answer)).strip()
     return clean, creates, cancels
@@ -189,14 +189,19 @@ class ReminderStore:
         if len(self.for_user(user_id)) >= MAX_PER_USER:
             return f"你已經有 {MAX_PER_USER} 個提醒了，先取消幾個。"
         who = [target_id] if isinstance(target_id, int) else list(target_id or ())
-        who = list(dict.fromkeys(who))[:MAX_TARGETS] or [user_id]
+        who = list(dict.fromkeys(who)) or [user_id]
+        due, kept = when.astimezone(UTC).isoformat(), text.strip()[:500]
+        for old in self.for_user(user_id):  # the same tag sent again (a retry) sets nothing new
+            same = (old["channel_id"], old["due"], old["text"], targets(old))
+            if same == (channel_id, due, kept, who):
+                return f"已經有一樣的提醒 #{old['id']}。"
         item = {
             "id": self._next_id,
             "guild_id": guild_id,
             "channel_id": channel_id,
             "user_id": user_id,
-            "due": when.astimezone(UTC).isoformat(),
-            "text": text.strip()[:500],
+            "due": due,
+            "text": kept,
             "target_id": who[0],
         }
         if len(who) > 1:

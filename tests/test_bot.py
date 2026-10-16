@@ -1785,6 +1785,72 @@ async def test_unread_tag_goes_back_to_the_model_once_with_the_reason(
     assert len(client.reminders.for_user(USER)) == 1
 
 
+async def test_tag_retry_never_repeats_what_was_already_done(client, backends, monkeypatch) -> None:
+    good = '<remind when="2026-12-01 09:00" text="A"/>'
+    broken = '<remind when=明天9點 text="B" who="<@111> <@222>"/>'
+    first = CodexResult(f"好\n\n{good}\n{broken}", (), None, "t", False)
+    retries = iter(
+        [
+            # the model sends the done one again with the fix: only the fix is new
+            CodexResult(f'{good}\n<remind when="2026-12-01 10:00" text="B"/>', (), None, "t"),
+            # a tag that is not an action is not a fix, and never reaches the member
+            CodexResult('<fetch url="https://example.com"/>', (), None, "t"),
+            # the backend is gone for the retry: no spare is asked the whole question again
+            CodexUsageLimit("quota spent"),
+        ]
+    )
+    prompts, spare = [], []
+
+    async def fake_codex(text, config, **kw):
+        prompts.append(text)
+        if "<TAG_ERRORS>" not in text:
+            return first
+        reply = next(retries)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    async def fake_agy(text, config, model, **kw):
+        spare.append(text)
+        return first
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(bot_module, "run_agy", fake_agy)
+    result = await client._answer("提醒", [], GUILD, USER, channel_id=555)
+    assert "do not send those again" in prompts[1] and "<@111> <@222>" in prompts[1]
+    assert [i["text"] for i in client.reminders.for_user(USER)] == ["A", "B"]
+    assert "已經有一樣的提醒 #1" in result.text and "其實沒有執行" not in result.text
+    client.reminders = bot_module.ReminderStore(client.reminders._path.with_name("r2.json"))
+    result = await client._answer("提醒", [], GUILD, USER, channel_id=555)
+    assert "<fetch" not in result.text and "其實沒有執行" in result.text
+    client.reminders = bot_module.ReminderStore(client.reminders._path.with_name("r3.json"))
+    result = await client._answer("提醒", [], GUILD, USER, channel_id=555)
+    assert spare == [] and "其實沒有執行" in result.text
+    assert [i["text"] for i in client.reminders.for_user(USER)] == ["A"]
+
+
+async def test_fire_reminder_splits_a_long_list_of_people(client, monkeypatch) -> None:
+    from types import SimpleNamespace as NS
+
+    sent = []
+
+    async def send(text, allowed_mentions=None):
+        sent.append((text, [u.id for u in allowed_mentions.users]))
+
+    client.get_channel = {555: NS(guild=NS(id=GUILD), send=send)}.get
+    monkeypatch.setattr(client, "_access", lambda *a: None)
+    people = [10**17 + i for i in range(150)]
+    item = {"guild_id": GUILD, "channel_id": 555, "user_id": USER, "text": "集合"}
+    await client._fire_reminder({**item, "target_id": people[0], "target_ids": people})
+    assert len(sent) > 1 and all(len(text) <= 2000 for text, _ in sent)
+    assert "提醒：集合" in sent[0][0] and all("提醒" not in text for text, _ in sent[1:])
+    assert [i for _, ids in sent for i in ids] == people
+    for text, ids in sent:
+        assert text == "⏰ " + " ".join(f"<@{i}>" for i in ids) + (
+            f" 提醒：集合（<@{USER}> 設的）" if text is sent[0][0] else ""
+        )
+
+
 async def test_recall_loop_runs_sandbox_snippets_and_delivers_files(
     client, backends, monkeypatch, tmp_path
 ) -> None:
