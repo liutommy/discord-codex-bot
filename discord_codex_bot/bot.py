@@ -1720,8 +1720,12 @@ class DiscordCodexClient(discord.Client):
                         result = replace(result, thread_id=retry.thread_id)
                     # Only what is new: a tag already carried out, sent back word for word, is
                     # not done twice (a memory note has no duplicate check of its own).
-                    done_before = {_spaced(t) for t in action_tags(result.text)}
-                    resent = [t for t in action_tags(retry.text) if _spaced(t) not in done_before]
+                    seen = {_spaced(t) for t in action_tags(result.text)}
+                    resent = []
+                    for tag in action_tags(retry.text):  # nor twice within the retry itself
+                        if _spaced(tag) not in seen:
+                            seen.add(_spaced(tag))
+                            resent.append(tag)
                     done, _ = await self._apply_action_tags(
                         "\n".join(resent), guild_id, channel_id, user_id
                     )

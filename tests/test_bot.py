@@ -1838,7 +1838,10 @@ async def test_tag_retry_skips_echoed_and_nested_tags(client, backends, monkeypa
         [
             CodexResult(f'好\n{done}\n<remind when=bad text="x">', (), None, "t", False),
             CodexResult(
-                f'{done}\n{nested}\n<remind when="2026-12-01 10:00" text="x"/>', (), None, "t"
+                f'{done}\n{nested}\n{nested}\n<remind when="2026-12-01 10:00" text="x"/>',
+                (),
+                None,
+                "t",
             ),
         ]
     )
@@ -1849,7 +1852,8 @@ async def test_tag_retry_skips_echoed_and_nested_tags(client, backends, monkeypa
     monkeypatch.setattr(bot_module, "run_codex", fake_codex)
     await client._answer("記住並提醒", [], GUILD, USER, channel_id=555)
     names = [e.name for e in client.memory.entries("user", GUILD, USER)]
-    assert names.count("茶") == 1 and "原話" in names  # the echoed note is not stored twice
+    # the echoed note is not stored twice, nor one the retry itself repeats
+    assert names.count("茶") == 1 and names.count("原話") == 1
     # a tag inside the remembered words is data: only the corrected reminder is set
     assert [i["text"] for i in client.reminders.for_user(USER)] == ["x"]
 
