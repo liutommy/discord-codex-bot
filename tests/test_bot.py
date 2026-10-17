@@ -957,6 +957,39 @@ async def test_picking_only_grok_takes_a_model_the_plan_still_offers(client, mon
     assert client.memory.get_model(GUILD, USER) == ""
 
 
+async def test_a_typed_router_model_is_checked_against_that_routers_list(
+    client, monkeypatch
+) -> None:
+    # A member on Antigravity typing "openrouter:<id>" was refused whenever OpenRouter's list
+    # had not been loaded yet: only the current provider's list was.
+    from discord_codex_bot.openrouter import Model
+
+    responses: list[str] = []
+
+    async def send(text, **kwargs):
+        responses.append(text)
+
+    interaction = _interaction(USER, 999)
+    interaction.guild_id = GUILD
+    interaction.channel = _FakeChannel(True)
+    interaction.channel_id = interaction.channel.id
+    interaction.response = types.SimpleNamespace(send_message=send)
+    client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
+    client.openrouter.models = []
+
+    async def free_models():
+        client.openrouter.models = [Model("t/text:free", "Text", False, True, 1)]
+        return client.openrouter.models
+
+    monkeypatch.setattr(client.openrouter, "free_models", free_models)
+    await client.model_command(interaction, model="openrouter:t/text:free")
+    assert client.memory.get_model(GUILD, USER) == "openrouter:t/text:free"
+    assert responses[-1].startswith("已設定：OpenRouter")
+    await client.model_command(interaction, model="openrouter:gone")
+    assert responses[-1] == "沒有這個模型：`openrouter:gone`。請從清單裡選（打字可篩選）。"
+    assert client.memory.get_model(GUILD, USER) == "openrouter:t/text:free"
+
+
 def test_previews_from_reads_discord_embeds_preferring_the_proxied_picture() -> None:
     from types import SimpleNamespace as NS
 
