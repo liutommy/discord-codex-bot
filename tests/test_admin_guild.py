@@ -65,6 +65,12 @@ class FakeChannel:
         self.messages: list = []  # oldest first
         self.reads: list[dict] = []
         self.broken = False
+        self.hidden: set[int] = set()  # members this channel is hidden from
+
+    def permissions_for(self, member):
+        return types.SimpleNamespace(
+            view_channel=member.id not in self.hidden, manage_threads=False
+        )
 
     def history(self, limit: int, after=None, oldest_first=None):
         self.reads.append({"limit": limit, "after": after, "oldest_first": oldest_first})
@@ -327,6 +333,16 @@ async def test_summary_refusals_and_failures(client, run, codex) -> None:
     assert failed(await run("summary", **where)) == FAILURE_MESSAGE.format(prefix="codex")
 
 
+async def test_summary_is_refused_in_a_channel_the_member_cannot_see(client, run, codex) -> None:
+    client.fake_channel.messages = [_message("只有幹部看得到的內容")]
+    client.fake_channel.hidden.add(MEMBER)
+    where = {"guild": GUILD, "channel": CHANNEL, "user": MEMBER}
+    assert f"使用者 {MEMBER} 看不到頻道 {CHANNEL}" in refused(await run("summary", **where))
+    assert client.fake_channel.reads == [] and codex.calls == []  # nothing read, nothing asked
+    client.fake_channel.hidden.clear()
+    assert ok(await run("summary", **where))["summary"] == "答案"
+
+
 # --------------------------------------------------------------------------- ask
 
 
@@ -373,6 +389,15 @@ async def test_ask_refusals_and_failures(client, run, codex) -> None:
 
     codex.replies = [RuntimeError("codex down")]
     assert failed(await run("ask", **where, prompt="q")) == FAILURE_MESSAGE.format(prefix="codex")
+
+
+async def test_ask_is_refused_in_a_channel_the_member_cannot_see(client, run, codex) -> None:
+    client.fake_channel.hidden.add(MEMBER)
+    where = {"guild": GUILD, "channel": CHANNEL, "user": MEMBER}
+    assert f"使用者 {MEMBER} 看不到頻道 {CHANNEL}" in refused(await run("ask", **where, prompt="q"))
+    assert codex.calls == [] and client.active == {}
+    client.fake_channel.hidden.clear()
+    assert ok(await run("ask", **where, prompt="q"))["answer"] == "答案"
 
 
 async def test_the_members_stop_cancels_an_ask(client, codex, tmp_path) -> None:

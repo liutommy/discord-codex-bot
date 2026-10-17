@@ -51,7 +51,8 @@ Names with a fixed meaning, checked by the server before the handler runs, so a 
 sees an unchecked one (check_context):
 - "guild" must be in ALLOWED_GUILD_IDS.
 - "channel" must resolve (cache, else the API), belong to "guild", and pass the client's
-  `_access` like a slash command in that channel.
+  `_access` like a slash command in that channel. With "user" as well, that member must be able
+  to see it (require_view): a member can only use a slash command where they can read.
 - "user", when "guild" is given, must be a member of that guild (unless "owner").
 - "who" (a list) needs "guild", and each id must be a member of it.
 A handler that needs the channel or member object calls resolve_guild_channel / require_member
@@ -105,6 +106,7 @@ __all__ = [
     "check_context",
     "require_guild",
     "require_member",
+    "require_view",
     "resolve_guild_channel",
 ]
 
@@ -136,20 +138,26 @@ def require_guild(client: Any, guild_id: int) -> None:
         raise Rejected(f"伺服器 {guild_id} 不在允許清單內。")
 
 
+async def _channel(client: Any, channel_id: int) -> Any:
+    """The channel from the cache, else the API; Rejected when Discord will not give it."""
+    channel = client.get_channel(channel_id)
+    if channel is not None:
+        return channel
+    try:
+        return await client.fetch_channel(channel_id)
+    except discord.NotFound:
+        raise Rejected(f"找不到頻道 {channel_id}。") from None
+    except discord.Forbidden:
+        raise Rejected(f"Bot 看不到頻道 {channel_id}。") from None
+    except discord.HTTPException as error:
+        raise Rejected(f"查不到頻道 {channel_id}（HTTP {error.status}）。") from None
+
+
 async def resolve_guild_channel(client: Any, guild_id: int, channel_id: int) -> Any:
     """The channel (or thread), when it belongs to the allowed guild and passes the same
     `_access` a slash command used there would; Rejected otherwise."""
     require_guild(client, guild_id)
-    channel = client.get_channel(channel_id)
-    if channel is None:
-        try:
-            channel = await client.fetch_channel(channel_id)
-        except discord.NotFound:
-            raise Rejected(f"找不到頻道 {channel_id}。") from None
-        except discord.Forbidden:
-            raise Rejected(f"Bot 看不到頻道 {channel_id}。") from None
-        except discord.HTTPException as error:
-            raise Rejected(f"查不到頻道 {channel_id}（HTTP {error.status}）。") from None
+    channel = await _channel(client, channel_id)
     if getattr(getattr(channel, "guild", None), "id", None) != guild_id:
         raise Rejected(f"頻道 {channel_id} 不屬於伺服器 {guild_id}。")
     if reason := client._access(guild_id, channel, channel_id):
@@ -177,6 +185,32 @@ async def require_member(client: Any, guild_id: int, user_id: int) -> Any:
         raise Rejected(f"無法確認使用者 {user_id} 的成員身分（HTTP {error.status}）。") from None
 
 
+async def require_view(client: Any, channel: Any, member: Any) -> None:
+    """Rejected unless the member can see the channel, as Discord decides it for them: a
+    command run as them must not read or post where they could not use a slash command."""
+    parent_id = getattr(channel, "parent_id", None)
+    where = channel
+    if parent_id is not None:  # a thread has no permissions of its own: its parent's apply
+        where = getattr(channel, "parent", None) or await _channel(client, parent_id)
+    permissions = where.permissions_for(member)
+    if not permissions.view_channel:
+        raise Rejected(f"使用者 {member.id} 看不到頻道 {channel.id}。")
+    private = getattr(channel, "is_private", None)
+    if parent_id is None or not callable(private) or not private():
+        return
+    # A private thread shows only to the members added to it and to thread moderators.
+    if permissions.manage_threads or any(m.id == member.id for m in channel.members):
+        return
+    try:
+        await channel.fetch_member(member.id)
+    except discord.NotFound:
+        raise Rejected(f"使用者 {member.id} 不在私人討論串 {channel.id} 裡。") from None
+    except discord.HTTPException as error:
+        raise Rejected(
+            f"無法確認使用者 {member.id} 是否在討論串 {channel.id} 裡（HTTP {error.status}）。"
+        ) from None
+
+
 async def check_context(
     client: Any, args: Mapping[str, Any], specs: Mapping[str, Any] | None = None
 ) -> None:
@@ -187,11 +221,14 @@ async def check_context(
         require_guild(client, guild_id)
     elif "channel" in args or "who" in args:
         raise Rejected("--channel／--who 需要同時給 --guild。")
+    channel = None
     if "channel" in args:
-        await resolve_guild_channel(client, guild_id, args["channel"])
+        channel = await resolve_guild_channel(client, guild_id, args["channel"])
     owner = bool((specs or {}).get("user", {}).get("owner"))
     if guild_id is not None and "user" in args and not owner:
-        await require_member(client, guild_id, args["user"])
+        member = await require_member(client, guild_id, args["user"])
+        if channel is not None:
+            await require_view(client, channel, member)
     for target in args.get("who", ()):
         await require_member(client, guild_id, target)
 

@@ -538,14 +538,55 @@ class FakeGuild:
         return types.SimpleNamespace(id=user_id, guild=self)
 
 
+class FakeChannel:
+    """A channel every member can see until a test hides it from one; with a parent it is a
+    thread, and permissions_for raises like a thread's would: only its parent has them."""
+
+    def __init__(self, channel_id: int, guild, parent_id: int | None = None) -> None:
+        self.id = channel_id
+        self.guild = guild
+        self.parent_id = parent_id
+        self.hidden: set[int] = set()
+        self.moderators: set[int] = set()
+
+    def permissions_for(self, member):
+        if self.parent_id is not None:
+            raise AssertionError("a thread's permissions are its parent's")
+        return types.SimpleNamespace(
+            view_channel=member.id not in self.hidden,
+            manage_threads=member.id in self.moderators,
+        )
+
+
+class FakeThread(FakeChannel):
+    def __init__(self, channel_id: int, guild, private: bool) -> None:
+        super().__init__(channel_id, guild, parent_id=CHANNEL)
+        self.private = private
+        self.members: list = []  # the cached thread members, often incomplete
+        self.joined: set[int] = set()  # who the API says is in it
+
+    def is_private(self) -> bool:
+        return self.private
+
+    async def fetch_member(self, user_id: int):
+        if user_id not in self.joined:
+            raise _http(discord.NotFound, 404)
+        return types.SimpleNamespace(id=user_id)
+
+
+PUBLIC_THREAD, PRIVATE_THREAD = 901, 902
+
+
 @pytest.fixture
 def bot(config, tmp_path, monkeypatch) -> DiscordCodexClient:
     client = DiscordCodexClient(replace(config, codex_home=tmp_path / "codex"))
-    guild = FakeGuild(GUILD, {MEMBER})
+    guild = FakeGuild(GUILD, {MEMBER, STRANGER + 1})
     channels = {
-        CHANNEL: types.SimpleNamespace(id=CHANNEL, guild=guild, parent_id=None),
-        777: types.SimpleNamespace(id=777, guild=guild, parent_id=None),  # not allowlisted
-        888: types.SimpleNamespace(id=888, guild=FakeGuild(OTHER_GUILD, set()), parent_id=None),
+        CHANNEL: FakeChannel(CHANNEL, guild),
+        777: FakeChannel(777, guild),  # not allowlisted
+        888: FakeChannel(888, FakeGuild(OTHER_GUILD, set())),
+        PUBLIC_THREAD: FakeThread(PUBLIC_THREAD, guild, private=False),
+        PRIVATE_THREAD: FakeThread(PRIVATE_THREAD, guild, private=True),
     }
 
     async def fetch_channel(channel_id):
@@ -557,6 +598,7 @@ def bot(config, tmp_path, monkeypatch) -> DiscordCodexClient:
     monkeypatch.setattr(client, "fetch_channel", fetch_channel)
     monkeypatch.setattr(client, "get_guild", lambda guild_id: guild if guild_id == GUILD else None)
     client.fake_guild = guild
+    client.fake_channels = channels
     return client
 
 
@@ -578,6 +620,45 @@ async def test_context_checks_follow_the_member_rules(bot) -> None:
     for args, reason in refusals:
         with pytest.raises(Rejected, match=reason):
             await check_context(bot, args)
+
+
+async def test_a_member_who_sees_the_channel_passes(bot) -> None:
+    channel = bot.fake_channels[CHANNEL]
+    channel.hidden.add(STRANGER + 1)  # hidden from someone else only
+    await check_context(bot, {"guild": GUILD, "channel": CHANNEL, "user": MEMBER})
+    await check_context(bot, {"guild": GUILD, "channel": PUBLIC_THREAD, "user": MEMBER})
+    bot.fake_channels[PRIVATE_THREAD].joined.add(MEMBER)
+    await check_context(bot, {"guild": GUILD, "channel": PRIVATE_THREAD, "user": MEMBER})
+
+
+async def test_a_channel_hidden_from_the_member_is_refused(bot) -> None:
+    bot.fake_channels[CHANNEL].hidden.add(MEMBER)
+    for channel in (CHANNEL, PUBLIC_THREAD):  # a thread takes its parent's permissions
+        with pytest.raises(Rejected, match=f"使用者 {MEMBER} 看不到頻道 {channel}"):
+            await check_context(bot, {"guild": GUILD, "channel": channel, "user": MEMBER})
+    # without --user nobody is acted for: the Bot's own access is all that is checked
+    await check_context(bot, {"guild": GUILD, "channel": CHANNEL})
+
+
+async def test_a_private_thread_the_member_is_not_in_is_refused(bot) -> None:
+    thread = bot.fake_channels[PRIVATE_THREAD]
+    args = {"guild": GUILD, "channel": PRIVATE_THREAD, "user": MEMBER}
+    with pytest.raises(Rejected, match=f"不在私人討論串 {PRIVATE_THREAD}"):
+        await check_context(bot, args)
+    # in it by the cache or by the API, or a thread moderator on the parent, they see it
+    thread.members = [types.SimpleNamespace(id=MEMBER)]
+    await check_context(bot, args)
+    thread.members = []
+    bot.fake_channels[CHANNEL].moderators.add(MEMBER)
+    await check_context(bot, args)
+    bot.fake_channels[CHANNEL].moderators.clear()
+
+    async def broken(user_id):
+        raise _http(discord.HTTPException, 503)
+
+    thread.fetch_member = broken
+    with pytest.raises(Rejected, match="HTTP 503"):
+        await check_context(bot, args)
 
 
 async def test_an_owner_user_is_checked_for_the_guild_but_not_for_membership(bot) -> None:

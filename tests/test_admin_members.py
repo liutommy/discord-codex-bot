@@ -29,6 +29,15 @@ def _not_found():
     return discord.NotFound(types.SimpleNamespace(status=404, reason="x"), "x")
 
 
+def _channel(channel_id: int, guild, parent_id: int | None = None):
+    """A channel every member can see until a test hides it from one (`hidden`)."""
+    channel = types.SimpleNamespace(id=channel_id, guild=guild, parent_id=parent_id, hidden=set())
+    channel.permissions_for = lambda member: types.SimpleNamespace(
+        view_channel=member.id not in channel.hidden, manage_threads=False
+    )
+    return channel
+
+
 class FakeGuild:
     def __init__(self, guild_id: int, members: set[int]) -> None:
         self.id = guild_id
@@ -51,8 +60,8 @@ def bot(config, tmp_path, monkeypatch) -> DiscordCodexClient:
     guild = FakeGuild(GUILD, {MEMBER, FRIEND})
     # No send(): a command that tried to post would fail the test.
     channels = {
-        CHANNEL: types.SimpleNamespace(id=CHANNEL, guild=guild, parent_id=None),
-        CLOSED: types.SimpleNamespace(id=CLOSED, guild=guild, parent_id=None),
+        CHANNEL: _channel(CHANNEL, guild),
+        CLOSED: _channel(CLOSED, guild),
     }
 
     async def fetch_channel(channel_id):
@@ -64,6 +73,7 @@ def bot(config, tmp_path, monkeypatch) -> DiscordCodexClient:
     monkeypatch.setattr(client, "fetch_channel", fetch_channel)
     monkeypatch.setattr(client, "get_guild", lambda guild_id: guild if guild_id == GUILD else None)
     client.fake_guild = guild
+    client.fake_channel = channels[CHANNEL]
     return client
 
 
@@ -195,6 +205,30 @@ async def test_a_reminder_that_cannot_be_set_stores_nothing(bot, server) -> None
     )
     assert await _failed(server, "remind.add", **base, when="2020-01-01 08:00") == PAST
     assert bot.reminders.for_user(MEMBER) == []
+
+
+async def test_remind_add_is_refused_in_a_channel_the_member_cannot_see(bot, server) -> None:
+    base = {"guild": GUILD, "channel": CHANNEL, "user": MEMBER, "text": "開會", "when": "1小時後"}
+    bot.fake_channel.hidden.add(MEMBER)
+    assert f"使用者 {MEMBER} 看不到頻道 {CHANNEL}" in await _refused(server, "remind.add", **base)
+    assert bot.reminders.for_user(MEMBER) == []
+    # the same reminder from a member who does see it is set
+    await _ok(server, "remind.add", **{**base, "user": FRIEND})
+    assert len(bot.reminders.for_user(FRIEND)) == 1
+
+
+async def test_channel_commands_are_refused_where_the_member_cannot_see(bot, server) -> None:
+    where = {"guild": GUILD, "channel": CHANNEL, "user": MEMBER}
+    key = ThreadStore.key(GUILD, CHANNEL, MEMBER)
+    bot.threads.remember(key, "t1")
+    task = asyncio.get_running_loop().create_future()
+    bot.active[key] = task
+    bot.fake_channel.hidden.add(MEMBER)
+    for command in ("reset", "stop", "status"):
+        assert "看不到頻道" in await _refused(server, command, **where), command
+    assert not task.done() and bot.threads.forget(key)
+    # without --channel, stop and status do not ask about any one channel
+    assert (await _ok(server, "stop", guild=GUILD, user=MEMBER))["stopped"] == 1
 
 
 async def test_memory_commands_act_in_the_members_own_scope(bot, server) -> None:

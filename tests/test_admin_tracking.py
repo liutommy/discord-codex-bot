@@ -21,6 +21,15 @@ def _http(kind, status: int):
     return kind(types.SimpleNamespace(status=status, reason="x"), "x")
 
 
+def _channel(channel_id: int, guild, parent_id: int | None = None):
+    """A channel every member can see until a test hides it from one (`hidden`)."""
+    channel = types.SimpleNamespace(id=channel_id, guild=guild, parent_id=parent_id, hidden=set())
+    channel.permissions_for = lambda member: types.SimpleNamespace(
+        view_channel=member.id not in channel.hidden, manage_threads=False
+    )
+    return channel
+
+
 class FakeGuild:
     def __init__(self, guild_id: int, members: set[int]) -> None:
         self.id = guild_id
@@ -48,8 +57,8 @@ def bot(config, tmp_path, monkeypatch) -> DiscordCodexClient:
     )
     guild = FakeGuild(GUILD, {MEMBER, FRIEND})
     channels = {
-        CHANNEL: types.SimpleNamespace(id=CHANNEL, guild=guild, parent_id=None),
-        777: types.SimpleNamespace(id=777, guild=guild, parent_id=None),  # not allowlisted
+        CHANNEL: _channel(CHANNEL, guild),
+        777: _channel(777, guild),  # not allowlisted
     }
 
     async def fetch_channel(channel_id):
@@ -69,6 +78,7 @@ def bot(config, tmp_path, monkeypatch) -> DiscordCodexClient:
     monkeypatch.setattr(client.youtube_tracker, "resolve", resolve)
     client.resolved = resolved
     client.fake_guild = guild
+    client.fake_channel = channels[CHANNEL]
     return client
 
 
@@ -173,6 +183,13 @@ async def test_track_add_refuses_before_resolving_anything(bot, server, changes,
     status, document = await _run(server, "track.add", _add_args(**changes))
     assert status == "rejected" and reason in document["reason"]
     assert bot.resolved == [] and bot.tracker.watches() == []
+
+
+async def test_track_add_is_refused_in_a_channel_the_member_cannot_see(bot, server) -> None:
+    bot.fake_channel.hidden.add(MEMBER)
+    status, document = await _run(server, "track.add", _add_args())
+    assert status == "rejected" and "看不到頻道" in document["reason"]
+    assert bot.tracker.watches() == [] and bot.resolved == []
 
 
 async def test_track_add_keeps_the_members_limit_and_source_checks(bot, server) -> None:
