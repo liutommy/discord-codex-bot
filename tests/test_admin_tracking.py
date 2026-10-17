@@ -68,6 +68,7 @@ def bot(config, tmp_path, monkeypatch) -> DiscordCodexClient:
     monkeypatch.setattr(client, "get_guild", lambda guild_id: guild if guild_id == GUILD else None)
     monkeypatch.setattr(client.youtube_tracker, "resolve", resolve)
     client.resolved = resolved
+    client.fake_guild = guild
     return client
 
 
@@ -208,8 +209,41 @@ async def test_track_list_filters_by_member_and_guild(bot, server) -> None:
         server, "track.cancel", {"guild": GUILD, "user": MEMBER, "id": there.id}
     )
     assert far["ok"] is False and len(bot.tracker.watches(user_id=MEMBER)) == 2
-    status, refused = await _run(server, "track.list", {"guild": GUILD, "user": STRANGER})
-    assert status == "rejected" and "不是伺服器" in refused["reason"]
+    # --user only names whose watches to show; it need not be a member (they may have left)
+    _status, nobody = await _run(server, "track.list", {"guild": GUILD, "user": STRANGER})
+    assert nobody["result"]["watches"] == []
+    status, refused = await _run(server, "track.list", {"guild": OTHER_GUILD, "user": MEMBER})
+    assert status == "rejected" and "不在允許清單" in refused["reason"]
+
+
+async def test_a_departed_members_watches_can_still_be_managed(bot, server) -> None:
+    await _run(server, "track.add", _add_args())
+    [watch] = bot.tracker.watches()
+    bot.tracker.add_watch(watch.source_id, OTHER_GUILD, 999, MEMBER)
+    bot.fake_guild.members.discard(MEMBER)  # left the guild; the watch still notifies
+    owner = {"guild": GUILD, "user": MEMBER, "id": watch.id}
+
+    _status, listed = await _run(server, "track.list", {"guild": GUILD, "user": MEMBER})
+    assert [row["id"] for row in listed["result"]["watches"]] == [watch.id]
+    for command, extra in (
+        ("track.every", {"minutes": 30}),
+        ("track.at", {"times": "08:00"}),
+        ("track.log", {}),
+    ):
+        status, document = await _run(server, command, {**owner, **extra})
+        assert status == "done" and document["ok"] is True, (command, document)
+    assert bot.tracker.watches(user_id=MEMBER)[0].times == ("08:00",)
+    # still only their own watch in the guild named, and that guild must be allowlisted
+    status, theirs = await _run(server, "track.cancel", {**owner, "user": FRIEND})
+    assert status == "done" and theirs["ok"] is False
+    status, far = await _run(server, "track.cancel", {**owner, "guild": OTHER_GUILD})
+    assert status == "rejected" and "不在允許清單" in far["reason"]
+    status, cancelled = await _run(server, "track.cancel", owner)
+    assert cancelled["ok"] is True
+    assert [w.guild_id for w in bot.tracker.watches(user_id=MEMBER)] == [OTHER_GUILD]
+    # a new watch needs them to be there now
+    status, added = await _run(server, "track.add", _add_args(source=SOURCE + "2"))
+    assert status == "rejected" and "不是伺服器" in added["reason"]
 
 
 async def test_changes_only_reach_the_members_own_watch(bot, server, caplog) -> None:
@@ -303,6 +337,34 @@ async def test_tracking_outbox_lists_what_has_not_gone_out(bot, server) -> None:
         and "只列出前 1 則，共 2 則" in capped["result"]["text"]
     )
     json.dumps(document)  # what done/ holds is plain JSON
+
+
+async def test_tracking_outbox_lists_only_allowlisted_guilds_unless_asked(bot, server) -> None:
+    await _run(server, "track.add", _add_args())
+    [watch] = bot.tracker.watches()
+    elsewhere = bot.tracker.add_source("youtube", "UC9", "@elsewhere")
+    far = bot.tracker.add_watch(elsewhere.id, OTHER_GUILD, 999, STRANGER)
+    _judge(bot.tracker, watch.id, "a", notify=True)
+    _judge(bot.tracker, far.id, "z", notify=True)  # a guild the Bot no longer serves
+    assert {m.watch.guild_id for m in bot.tracker.pending_outbox()} == {GUILD, OTHER_GUILD}
+
+    def guilds(document) -> list[int]:
+        return [row["guild"] for row in document["result"]["messages"]]
+
+    _status, default = await _run(server, "tracking.outbox", {})
+    assert guilds(default) == [GUILD] and default["result"]["pending"] == 1
+    assert str(STRANGER) not in default["result"]["text"]
+    _status, one = await _run(server, "tracking.outbox", {"guild": GUILD})
+    assert guilds(one) == [GUILD]
+    _status, everything = await _run(server, "tracking.outbox", {"all_guilds": True})
+    assert sorted(guilds(everything)) == [GUILD, OTHER_GUILD]
+    assert [
+        row["watch"] for row in everything["result"]["messages"] if row["guild"] == OTHER_GUILD
+    ] == [far.id]
+    status, refused = await _run(server, "tracking.outbox", {"guild": OTHER_GUILD})
+    assert status == "rejected" and "不在允許清單" in refused["reason"]
+    status, both = await _run(server, "tracking.outbox", {"guild": GUILD, "all_guilds": True})
+    assert status == "rejected" and "只能擇一" in both["reason"]
 
 
 async def test_tracking_commands_say_so_when_tracking_is_off(bot, server) -> None:

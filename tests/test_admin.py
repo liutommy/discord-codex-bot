@@ -486,6 +486,20 @@ def test_cli_options_come_from_the_schema(root, server, monkeypatch, capsys) -> 
         {"help": "x", "args": {"channel": {"type": "id"}}},  # no guild to check it against
         {"help": "x", "args": {"json": {"type": "bool"}}},
         {"help": "x", "timeout": 3600},
+        # "owner" only on --user, only as True, and never with a channel or mentions
+        {
+            "help": "x",
+            "args": {"guild": {"type": "id"}, "who": {"type": "list[id]", "owner": True}},
+        },
+        {"help": "x", "args": {"user": {"type": "id", "owner": 1}}},
+        {
+            "help": "x",
+            "args": {
+                "guild": {"type": "id"},
+                "channel": {"type": "id"},
+                "user": {"type": "id", "owner": True},
+            },
+        },
     ],
 )
 def test_a_malformed_schema_is_refused(schema) -> None:
@@ -564,6 +578,18 @@ async def test_context_checks_follow_the_member_rules(bot) -> None:
     for args, reason in refusals:
         with pytest.raises(Rejected, match=reason):
             await check_context(bot, args)
+
+
+async def test_an_owner_user_is_checked_for_the_guild_but_not_for_membership(bot) -> None:
+    owner = {"guild": {"type": "id"}, "user": {"type": "id", "owner": True}}
+    await check_context(bot, {"guild": GUILD, "user": STRANGER}, owner)  # may have left
+    assert bot.fake_guild.fetched == []
+    with pytest.raises(Rejected, match="不在允許清單"):
+        await check_context(bot, {"guild": OTHER_GUILD, "user": MEMBER}, owner)
+    # without the flag (or with no schema at all) the member must still be there
+    for specs in ({"guild": {"type": "id"}, "user": {"type": "id"}}, None):
+        with pytest.raises(Rejected, match="不是伺服器"):
+            await check_context(bot, {"guild": GUILD, "user": STRANGER}, specs)
 
 
 async def test_require_member_reports_an_unclear_answer_as_a_refusal(bot, monkeypatch) -> None:

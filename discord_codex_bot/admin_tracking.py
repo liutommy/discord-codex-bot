@@ -17,6 +17,9 @@ DISABLED = "社群追蹤尚未啟用；管理者需設定 TRACKING_ENABLED=true 
 # nine digits, and so does this.
 WATCH_ID = {"type": "int", "min": 1, "max": 999_999_999, "help": "追蹤編號（track list 看得到）"}
 MINUTES = {"type": "int", "min": 1, "max": 99_999}  # five digits, as <track_every> reads them
+# The watch's owner: a member who has left keeps their watches notifying, so they must still be
+# reachable (see "owner" in admin_server).
+OWNER = {"type": "id", "required": True, "owner": True, "help": "追蹤的主人（可以已經離開伺服器）"}
 TIMES_HELP = "每天固定判斷的時間（台灣時間），例如 12:01,20:01"
 OUTBOX_LIMIT = 50
 
@@ -168,7 +171,16 @@ def _outbox_row(message: OutboxMessage) -> dict:
 
 
 async def tracking_outbox(client: Any, args: dict) -> dict:
+    if "guild" in args and args.get("all_guilds"):
+        raise Rejected("--guild 與 --all-guilds 只能擇一")
     messages = _store(client).pending_outbox()
+    # Each row names a member, a channel and what they follow: by default only the guilds the
+    # Bot serves, since a guild taken off the allowlist may still have notifications queued.
+    if "guild" in args:
+        messages = [message for message in messages if message.watch.guild_id == args["guild"]]
+    elif not args.get("all_guilds"):
+        allowed = client.config.allowed_guild_ids
+        messages = [message for message in messages if message.watch.guild_id in allowed]
     # A failed delivery stays pending with its attempts counted; every tracking pass retries it.
     failed = [message for message in messages if message.attempts]
     listed = failed if args.get("failed") else messages
@@ -182,7 +194,7 @@ async def tracking_outbox(client: Any, args: dict) -> dict:
         title = row["title"].strip()[:120] or "（無標題）"
         lines.append(
             f"#{row['id']} {state} · 追蹤 #{row['watch']} · 成員 {row['user']} · "
-            f"頻道 {row['channel']}\n　{title}\n　{row['url']}"
+            f"伺服器 {row['guild']} · 頻道 {row['channel']}\n　{title}\n　{row['url']}"
         )
     if len(listed) > limit:
         lines.append(f"（只列出前 {limit} 則，共 {len(listed)} 則）")
@@ -244,14 +256,14 @@ SCHEMAS: dict[str, dict] = {
         "help": "列出社群追蹤（可依成員、伺服器篩選）",
         "args": {
             "guild": {"type": "id", "required": True, "help": "只列這個伺服器的"},
-            "user": {"type": "id", "help": "只列這位成員的"},
+            "user": {**OWNER, "required": False, "help": "只列這位成員的（可以已經離開伺服器）"},
         },
     },
     "track.cancel": {
         "help": "取消成員的一個追蹤（只取消屬於 --user 的）",
         "args": {
             "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
-            "user": {"type": "id", "required": True, "help": "追蹤的主人"},
+            "user": OWNER,
             "id": {**WATCH_ID, "required": True},
         },
     },
@@ -259,7 +271,7 @@ SCHEMAS: dict[str, dict] = {
         "help": "把成員的追蹤改成每 N 分鐘判斷一次（取消固定時間）",
         "args": {
             "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
-            "user": {"type": "id", "required": True, "help": "追蹤的主人"},
+            "user": OWNER,
             "id": {**WATCH_ID, "required": True},
             "minutes": {**MINUTES, "required": True, "help": "每幾分鐘判斷一次"},
         },
@@ -268,7 +280,7 @@ SCHEMAS: dict[str, dict] = {
         "help": "把成員的追蹤改成每天固定時間判斷",
         "args": {
             "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
-            "user": {"type": "id", "required": True, "help": "追蹤的主人"},
+            "user": OWNER,
             "id": {**WATCH_ID, "required": True},
             "times": {
                 "type": "str",
@@ -283,14 +295,17 @@ SCHEMAS: dict[str, dict] = {
         "help": "看成員追蹤的判斷紀錄（為什麼提醒或沒提醒）",
         "args": {
             "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
-            "user": {"type": "id", "required": True, "help": "追蹤的主人"},
+            "user": OWNER,
             "id": {**WATCH_ID, "required": True, "help": "要看的追蹤（同 /track log:編號）"},
             "limit": {"type": "int", "min": 1, "max": 25, "help": "最多幾筆（預設 10）"},
         },
     },
     "tracking.outbox": {
         "help": "列出還沒送出的追蹤通知（含送出失敗、等待重試的）",
+        "description": "預設只列允許清單內伺服器的；--guild 只列一個，--all-guilds 列全部。",
         "args": {
+            "guild": {"type": "id", "help": "只列這個伺服器的（要在允許清單內）"},
+            "all_guilds": {"type": "bool", "help": "也列不在允許清單內的伺服器"},
             "failed": {"type": "bool", "help": "只列送出失敗過的"},
             "limit": {
                 "type": "int",

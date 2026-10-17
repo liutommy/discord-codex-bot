@@ -90,6 +90,7 @@ ARG_KEYS = {
     "choices",
     "max_items",
     "stdin",
+    "owner",
 }
 DEFAULT_MAX_ITEMS = 10
 MAX_TIMEOUT = 900
@@ -288,6 +289,12 @@ def check_schema(command: str, schema: Mapping[str, Any]) -> None:
             raise ValueError(f"{where}: choice needs a list of string choices")
         if spec.get("stdin") and kind != "str":
             raise ValueError(f"{where}: only a str can come from stdin")
+        if "owner" in spec and (name != "user" or spec["owner"] is not True):
+            raise ValueError(f"{where}: owner is a flag (True) on --user only")
+    # An owner command only reads, removes or retimes what --user already has, so a channel or
+    # a mention list, which would act on the guild now, must keep the membership check.
+    if arguments.get("user", {}).get("owner") and ("channel" in arguments or "who" in arguments):
+        raise ValueError(f"{command}: an owner --user takes no --channel or --who")
 
 
 def _flag(name: str) -> str:

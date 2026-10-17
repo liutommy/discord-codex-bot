@@ -36,6 +36,9 @@ NO_CHANNEL_THREAD = "續接：（續接是每個頻道各自的；加 --channel 
 GUILD = {"type": "id", "required": True, "help": "伺服器 id"}
 CHANNEL = {"type": "id", "required": True, "help": "頻道（或討論串）id"}
 USER = {"type": "id", "required": True, "help": "以這位成員的身分"}
+# Whose stored items these are: a member who has left keeps them firing, so they must still
+# be reachable (see "owner" in admin_server).
+OWNER = {**USER, "owner": True, "help": "設提醒的成員（可以已經離開伺服器）"}
 SCOPE = {"type": "choice", "choices": list(SCOPES), "help": "user＝個人、guild＝伺服器"}
 
 
@@ -342,13 +345,13 @@ SCHEMAS: dict[str, dict] = {
     },
     "remind.list": {
         "help": "列出成員設的提醒",
-        "args": {"guild": GUILD, "user": USER},
+        "args": {"guild": GUILD, "user": OWNER},
     },
     "remind.cancel": {
         "help": "取消成員自己的一個提醒",
         "args": {
             "guild": GUILD,
-            "user": _with(USER, help="設提醒的成員；只能取消他自己的"),
+            "user": _with(OWNER, help="設提醒的成員；只能取消他自己的（可以已經離開伺服器）"),
             "id": {"type": "id", "required": True, "help": "提醒編號"},
         },
     },

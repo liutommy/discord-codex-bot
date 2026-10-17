@@ -41,13 +41,18 @@ Argument types, each becoming `--name` (underscores as dashes):
 - "list[id]", "list[int]", "list[str]": one or more values (`--who 1 2` or `--who 1 --who 2`),
   at most "max_items" (default 10), each checked as the scalar type.
 Other keys: "required" (default false), "help", "metavar". Unknown keys fail the schema check.
+"owner": True, on "user" only, marks a command that reads, removes or retimes the member's own
+stored items (remind.list, track.cancel, …): --user then names whose items they are and need not
+still be a member, so a departed member's reminders and watches can still be listed and
+stopped. The handler matches each item's guild and user itself. Such a command takes no
+"channel" or "who".
 
 Names with a fixed meaning, checked by the server before the handler runs, so a handler never
 sees an unchecked one (check_context):
 - "guild" must be in ALLOWED_GUILD_IDS.
 - "channel" must resolve (cache, else the API), belong to "guild", and pass the client's
   `_access` like a slash command in that channel.
-- "user", when "guild" is given, must be a member of that guild.
+- "user", when "guild" is given, must be a member of that guild (unless "owner").
 - "who" (a list) needs "guild", and each id must be a member of it.
 A handler that needs the channel or member object calls resolve_guild_channel / require_member
 again: the lookups are cached.
@@ -172,8 +177,11 @@ async def require_member(client: Any, guild_id: int, user_id: int) -> Any:
         raise Rejected(f"無法確認使用者 {user_id} 的成員身分（HTTP {error.status}）。") from None
 
 
-async def check_context(client: Any, args: Mapping[str, Any]) -> None:
-    """The fixed-meaning arguments (see the module docstring); Rejected on the first failure."""
+async def check_context(
+    client: Any, args: Mapping[str, Any], specs: Mapping[str, Any] | None = None
+) -> None:
+    """The fixed-meaning arguments (see the module docstring), `specs` being the command's
+    schema args; Rejected on the first failure."""
     guild_id = args.get("guild")
     if guild_id is not None:
         require_guild(client, guild_id)
@@ -181,7 +189,8 @@ async def check_context(client: Any, args: Mapping[str, Any]) -> None:
         raise Rejected("--channel／--who 需要同時給 --guild。")
     if "channel" in args:
         await resolve_guild_channel(client, guild_id, args["channel"])
-    if guild_id is not None and "user" in args:
+    owner = bool((specs or {}).get("user", {}).get("owner"))
+    if guild_id is not None and "user" in args and not owner:
         await require_member(client, guild_id, args["user"])
     for target in args.get("who", ()):
         await require_member(client, guild_id, target)
@@ -433,7 +442,7 @@ class AdminServer:
             if any((self._dir(name) / claimed.name).exists() for name in (DONE, REJECTED)):
                 raise Rejected(DUPLICATE)
             try:
-                await check_context(self.client, args)
+                await check_context(self.client, args, self.schemas[command].get("args", {}))
             except Rejected:
                 raise
             except Exception as error:  # Discord could not be asked: nothing was run

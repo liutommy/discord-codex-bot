@@ -63,6 +63,7 @@ def bot(config, tmp_path, monkeypatch) -> DiscordCodexClient:
     monkeypatch.setattr(client, "get_channel", lambda channel_id: None)
     monkeypatch.setattr(client, "fetch_channel", fetch_channel)
     monkeypatch.setattr(client, "get_guild", lambda guild_id: guild if guild_id == GUILD else None)
+    client.fake_guild = guild
     return client
 
 
@@ -156,6 +157,28 @@ async def test_a_reminder_is_set_listed_and_cancelled_as_the_member(bot, server)
         await admin_members.remind_cancel(bot, {"guild": GUILD + 1, "user": MEMBER, "id": 1})
     assert (await _ok(server, "remind.cancel", user=MEMBER, guild=GUILD, id=1))["id"] == 1
     assert bot.reminders.for_user(MEMBER) == []
+
+
+async def test_a_departed_members_reminders_can_still_be_listed_and_cancelled(bot, server) -> None:
+    base = {"guild": GUILD, "channel": CHANNEL, "user": MEMBER, "text": "開會"}
+    await _ok(server, "remind.add", **base, when="1小時後")
+    await _ok(server, "remind.add", **base, when="2小時後")
+    bot.fake_guild.members.discard(MEMBER)  # left the guild; the reminders still fire
+
+    listed = await _ok(server, "remind.list", guild=GUILD, user=MEMBER)
+    assert [item["id"] for item in listed["reminders"]] == [1, 2]
+    assert (await _ok(server, "remind.cancel", guild=GUILD, user=MEMBER, id=1))["id"] == 1
+    assert [item["id"] for item in bot.reminders.for_user(MEMBER)] == [2]
+    # still only the allowlisted guild the item is in, and still only their own
+    assert "不在允許清單" in await _refused(
+        server, "remind.cancel", guild=OTHER_GUILD, user=MEMBER, id=2
+    )
+    assert "找不到這位成員在這個伺服器的提醒 #2" in await _failed(
+        server, "remind.cancel", guild=GUILD, user=FRIEND, id=2
+    )
+    # adding one needs them to be there now
+    assert "不是伺服器" in await _refused(server, "remind.add", **base, when="3小時後")
+    assert [item["id"] for item in bot.reminders.for_user(MEMBER)] == [2]
 
 
 async def test_a_reminder_that_cannot_be_set_stores_nothing(bot, server) -> None:
