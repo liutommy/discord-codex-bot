@@ -24,11 +24,11 @@ A request is `inbox/<id>.json`, written as `<id>.json.tmp`, fsynced, then rename
 `id` is 32 lowercase hex digits and must equal the file name. The Bot claims a file by renaming
 it into processing/ (so the CLI can still withdraw an unclaimed one), validates it, runs it, and
 writes done/<id>.json — or rejected/<id>.json with the reason when it did not run. An id with a
-result already is never run again, a request left in processing/ by a restart is moved to
-rejected/ and not run (said "may be partly done" when its handler had begun), and a request more
-than two hours old is refused: nobody is waiting for it any more, and one pruned from done/
-(after 7 days) cannot come back. Ctrl-C or SIGTERM withdraws a request not yet claimed. Exit
-codes: 0 done, 1 failed or rejected, 2 not finished in time.
+result already is never run again, a request left in processing/ by a restart is not run again
+(rejected/ when it had not begun, done/ as failed, "may be partly done", when its handler had),
+and a request more than two hours old is refused: nobody is waiting for it any more, and one
+pruned from done/ (after 7 days) cannot come back. Ctrl-C, SIGTERM or SIGHUP withdraws a request
+not yet claimed. Exit codes: 0 done, 1 failed or rejected, 2 not finished in time.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ import signal
 import stat
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -218,19 +218,23 @@ def withdraw(root: Path, request_id: str) -> bool:
 
 
 def wait_result(
-    root: Path, request_id: str, timeout: float, poll: float = POLL_SECONDS
+    root: Path,
+    request_id: str,
+    timeout: float,
+    poll: float = POLL_SECONDS,
+    stopped: Callable[[], bool] = lambda: False,
 ) -> tuple[str, dict | None]:
-    """Wait for the result. On timeout the request is withdrawn if the Bot has not claimed it
-    ("withdrawn": nothing ran), else ("running", None)."""
+    """Wait for the result, until `timeout` or until `stopped()`. Then the request is withdrawn
+    if the Bot has not claimed it ("withdrawn": nothing ran), else ("running", None)."""
     deadline = time.monotonic() + timeout
     try:
         while True:
             if found := read_result(root, request_id):
                 return found
-            if time.monotonic() >= deadline:
+            if stopped() or time.monotonic() >= deadline:
                 break
             time.sleep(poll)
-    except KeyboardInterrupt:  # Ctrl-C or SIGTERM: an operator who stopped waiting
+    except KeyboardInterrupt:  # an operator who stopped waiting
         pass  # withdrawn below, so it cannot run later behind their back
     if withdraw(root, request_id):
         return "withdrawn", None
@@ -622,8 +626,32 @@ def _arguments(namespace: argparse.Namespace, schema: Mapping[str, Any]) -> dict
     return args
 
 
-def _interrupt(_signum: int, _frame: Any) -> None:
-    raise KeyboardInterrupt
+# Ctrl-C, a killed `docker exec` (SIGTERM) and a closed terminal (SIGHUP) all mean nobody waits
+# for the answer any more.
+STOP_SIGNALS = tuple(
+    getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name)
+)
+
+
+class _Stop:
+    """A signal handler that only notes the signal; the wait loop then withdraws the request.
+    Raising instead could land between writing the request and waiting for it, and leave it
+    queued to run later with nobody waiting."""
+
+    def __init__(self) -> None:
+        self.signalled = False
+
+    def __call__(self, _signum: int, _frame: Any) -> None:
+        self.signalled = True
+
+
+def _catch_signals(stop: _Stop) -> dict:
+    """Install `stop` for STOP_SIGNALS; returns the handlers it replaced."""
+    previous = {}
+    for signum in STOP_SIGNALS:
+        with contextlib.suppress(ValueError):  # not the main thread (tests): no signals there
+            previous[signum] = signal.signal(signum, stop)
+    return previous
 
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
@@ -645,15 +673,28 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     schema = schemas[command]
     try:
         args = validate_args(schema, _arguments(namespace, schema))
-        request_id = write_request(root, command, args)
     except (Rejected, ValueError) as error:
         print(f"沒有送出：{error}", file=sys.stderr)
         return 1
     timeout = namespace.timeout or float(schema.get("timeout", DEFAULT_TIMEOUT)) + WAIT_MARGIN
-    print(f"已送出 {request_id}，等 Bot 處理…", file=sys.stderr)
-    with contextlib.suppress(ValueError):  # not the main thread (tests): no signals there
-        signal.signal(signal.SIGTERM, _interrupt)  # a killed `docker exec` withdraws like Ctrl-C
-    status, document = wait_result(root, request_id, timeout)
+    stop = _Stop()
+    # Before the request exists: a signal from then on reaches the withdrawal below.
+    previous = _catch_signals(stop)
+    try:
+        if stop.signalled:
+            print("已中斷，沒有送出。", file=sys.stderr)
+            return 1
+        try:
+            request_id = write_request(root, command, args)
+        except ValueError as error:
+            print(f"沒有送出：{error}", file=sys.stderr)
+            return 1
+        print(f"已送出 {request_id}，等 Bot 處理…", file=sys.stderr)
+        status, document = wait_result(root, request_id, timeout, stopped=lambda: stop.signalled)
+    finally:
+        for signum, handler in previous.items():
+            if handler is not None:  # None: set outside Python, cannot be put back from here
+                signal.signal(signum, handler)
     return report(request_id, status, document, namespace.json)
 
 

@@ -121,6 +121,11 @@ INTERRUPTED = "Bot 在開始執行前重啟；沒有執行，也不會再執行�
 PARTLY = (
     "Bot 在執行途中重啟；不會再執行，但可能已經做了一部分，請確認結果（interrupted while running）"
 )
+# The handler began but its result could not be written: as above, it may have done something.
+UNRECORDED = (
+    "Bot 無法記錄這個請求的結果；不會再執行，但它可能已經執行，請確認結果"
+    "（the result could not be recorded; it may have run）"
+)
 STARTED = ".started"  # next to processing/<id>.json once its handler has been called
 DUPLICATE = "這個 id 已經有結果；同一個請求不會執行兩次"
 
@@ -295,27 +300,32 @@ class AdminServer:
         return self.recover()
 
     def recover(self) -> int:
-        """Requests left in processing/ by a crash or restart go to rejected/, never run again;
-        one whose result was already written only lost its clean-up."""
+        """Requests left in processing/ by a crash or restart are never run again: one that
+        had not begun goes to rejected/, one whose handler had begun to done/ as failed (it may
+        have done something). One whose result was already written only lost its clean-up.
+        A request whose record cannot be written stays in processing/ for the next start."""
         interrupted = 0
         for path in sorted(self._dir(PROCESSING).glob("*.json")):
             stem = path.name.removesuffix(".json")
             marker = path.with_suffix(STARTED)
             try:
-                if (self._dir(DONE) / path.name).exists():
-                    continue
-                request = None
-                with contextlib.suppress(Exception):  # whatever the file holds, it is set aside
-                    request = json.loads(self._read(path))
-                self._reject(stem, request, PARTLY if marker.exists() else INTERRUPTED)
-                interrupted += 1
+                if not (self._dir(DONE) / path.name).exists():
+                    request = None
+                    with contextlib.suppress(Exception):  # whatever it holds, it is set aside
+                        request = json.loads(self._read(path))
+                    if marker.exists():
+                        self._unfinished(stem, request, PARTLY)
+                    else:
+                        self._reject(stem, request, INTERRUPTED)
+                    interrupted += 1
             except Exception:
                 LOGGER.exception("Admin: interrupted request %s not recorded", _label(stem))
-            finally:
-                _discard(path)
-                _discard(marker)
-        for marker in self._dir(PROCESSING).glob(f"*{STARTED}"):  # its request already gone
+                continue  # without a record, discarding it would leave no trace of it at all
+            _discard(path)
             _discard(marker)
+        for marker in self._dir(PROCESSING).glob(f"*{STARTED}"):
+            if not marker.with_suffix(".json").exists():  # its request already gone
+                _discard(marker)
         return interrupted
 
     def start(self) -> asyncio.Task:
@@ -387,6 +397,9 @@ class AdminServer:
             if stem in self.running:
                 continue  # a copy of one still running: judged a duplicate once that is done
             claimed = self._dir(PROCESSING) / path.name
+            if claimed.exists():
+                # One left unrecorded waits for the next start; a copy must not replace it.
+                continue
             try:
                 os.replace(path, claimed)  # claimed: the CLI can no longer withdraw it
             except OSError:
@@ -443,6 +456,24 @@ class AdminServer:
         LOGGER.warning("Admin request %s (%s) rejected: %s", _label(stem), _label(command), reason)
         return target
 
+    def _unfinished(self, stem: str, request: Any, reason: str) -> None:
+        """done/<id>.json with ok=false, for a request whose handler began but did not finish
+        cleanly: "rejected, not run" would be untrue, since it may have changed something."""
+        if not REQUEST_ID.fullmatch(stem):  # never the case: a marker follows validation
+            self._reject(stem, request, reason)
+            return
+        command = request.get("command") if isinstance(request, dict) else None
+        document = {
+            "id": stem,
+            "command": command,
+            "ok": False,
+            "result": None,
+            "error": reason,
+            "finished": time.time(),
+        }
+        write_private(self._dir(DONE) / f"{stem}.json", _encode(document))
+        LOGGER.warning("Admin request %s (%s) failed: %s", stem, _label(command), reason)
+
     async def _handle(self, claimed: Path, now: float) -> None:
         try:
             await self._settle(claimed, now)
@@ -453,12 +484,23 @@ class AdminServer:
     def _give_up(self, claimed: Path, error: Exception) -> None:
         if not claimed.exists() or (self._dir(DONE) / claimed.name).exists():
             return
-        started = claimed.with_suffix(STARTED).exists()
-        reason = PARTLY if started else f"Bot 內部錯誤（{type(error).__name__}），沒有執行"
-        with contextlib.suppress(Exception):
-            self._reject(claimed.stem, None, reason)
+        marker = claimed.with_suffix(STARTED)
+        try:
+            if marker.exists():
+                request = None
+                with contextlib.suppress(Exception):
+                    request = json.loads(self._read(claimed))
+                self._unfinished(claimed.stem, request, UNRECORDED)
+            else:
+                self._reject(
+                    claimed.stem, None, f"Bot 內部錯誤（{type(error).__name__}），沒有執行"
+                )
+        except Exception:
+            # Left in processing/: the next start records it, rather than it vanishing now.
+            LOGGER.exception("Admin request %s not recorded", _label(claimed.stem))
+            return
         _discard(claimed)
-        _discard(claimed.with_suffix(STARTED))
+        _discard(marker)
 
     async def _settle(self, claimed: Path, now: float) -> None:
         stem = claimed.name.removesuffix(".json")

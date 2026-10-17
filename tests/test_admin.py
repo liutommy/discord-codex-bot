@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import stat
 import time
 import types
@@ -11,12 +12,13 @@ from pathlib import Path
 import discord
 import pytest
 
-from discord_codex_bot import admin
+from discord_codex_bot import admin, admin_server
 from discord_codex_bot.admin import AdminError, Rejected
 from discord_codex_bot.admin_server import (
     DUPLICATE,
     INTERRUPTED,
     PARTLY,
+    UNRECORDED,
     AdminServer,
     check_context,
     require_member,
@@ -297,7 +299,9 @@ async def test_a_restart_moves_interrupted_requests_to_rejected(root, calls, cap
     assert "interrupted before it ran" in caplog.text
 
 
-async def test_a_restart_after_the_handler_began_says_it_may_be_partly_done(root, calls) -> None:
+async def test_a_restart_after_the_handler_began_says_it_may_be_partly_done(
+    root, calls, monkeypatch, capsys
+) -> None:
     first = AdminServer(FakeClient(), root, _handlers(calls), _schemas())
     first.prepare()
     request_id = admin.write_request(root, "test.wait", {})
@@ -306,8 +310,75 @@ async def test_a_restart_after_the_handler_began_says_it_may_be_partly_done(root
     second = AdminServer(FakeClient(), root, _handlers(calls), _schemas())
     assert second.prepare() == 1
     assert _files(root / "processing") == []
+    # a failure, not a refusal: "rejected, nothing ran" would be untrue
     status, document = admin.read_result(root, request_id)
-    assert status == "rejected" and document["reason"] == PARTLY
+    assert (status, document["ok"], document["error"]) == ("done", False, PARTLY)
+    assert document["id"] == request_id and document["command"] == "test.wait"
+    assert not (root / "rejected" / f"{request_id}.json").exists()
+    monkeypatch.setattr(admin, "load_schemas", _schemas)
+    assert admin.main(["result", request_id], root) == 1
+    err = capsys.readouterr().err
+    assert err.startswith(f"失敗：{PARTLY}") and "被拒絕" not in err and "沒有執行" not in err
+
+
+def _failing_writes(monkeypatch, *directories: str, times: int = -1) -> None:
+    """write_private in the server fails for files in these directories (`times` times)."""
+    real = admin_server.write_private
+    left = [times]
+
+    def write(path, data, scratch=None):
+        if path.parent.name in directories and left[0] != 0:
+            left[0] -= 1
+            raise OSError(30, "Read-only file system")
+        real(path, data, scratch)
+
+    monkeypatch.setattr(admin_server, "write_private", write)
+
+
+async def test_a_result_that_cannot_be_written_says_it_may_have_run(
+    root, server, calls, monkeypatch
+) -> None:
+    _failing_writes(monkeypatch, "done", times=1)
+    request_id = admin.write_request(root, "test.echo", {"n": 1})
+    await _process(server)
+    assert [command for command, _ in calls.seen] == ["test.echo"]
+    status, document = admin.read_result(root, request_id)
+    # it did run: never "not run", and never blamed on a restart that did not happen
+    assert (status, document["ok"], document["error"]) == ("done", False, UNRECORDED)
+    assert _files(root / "processing") == [] and _files(root / "rejected") == []
+
+
+async def test_a_request_whose_record_cannot_be_written_stays_for_the_next_start(
+    root, server, calls, monkeypatch, capsys
+) -> None:
+    _failing_writes(monkeypatch, "done", "rejected")
+    ran = admin.write_request(root, "test.echo", {"n": 1})
+    refused = admin.write_request(root, "test.echo", {"n": 1000})  # over max: never runs
+    await _process(server)
+    assert [command for command, _ in calls.seen] == ["test.echo"]
+    assert _files(root / "processing") == sorted(
+        [f"{ran}.json", f"{ran}.started", f"{refused}.json"]
+    )
+    # still known, not "no such id"
+    monkeypatch.setattr(admin, "load_schemas", _schemas)
+    assert admin.main(["result", ran], root) == 2
+    assert "仍在執行中" in capsys.readouterr().err
+    # a copy of it in the inbox does not replace it, and so cannot run it a second time
+    (root / "inbox" / f"{ran}.json").write_bytes((root / "processing" / f"{ran}.json").read_bytes())
+    assert await server.pass_once() == 0
+    (root / "inbox" / f"{ran}.json").unlink()
+    # a start that still cannot write keeps them too
+    assert AdminServer(FakeClient(), root, _handlers(calls), _schemas()).prepare() == 0
+    assert len(_files(root / "processing")) == 3
+
+    monkeypatch.setattr(admin_server, "write_private", admin.write_private)
+    later = AdminServer(FakeClient(), root, _handlers(calls), _schemas())
+    assert later.prepare() == 2
+    assert _files(root / "processing") == []
+    status, document = admin.read_result(root, ran)
+    assert (status, document["ok"], document["error"]) == ("done", False, PARTLY)
+    assert admin.read_result(root, refused)[1]["reason"] == INTERRUPTED
+    assert len(calls.seen) == 1
 
 
 async def test_directories_are_private_and_a_writable_one_is_refused(
@@ -764,6 +835,35 @@ def test_an_interrupted_cli_withdraws_its_request(root, server, monkeypatch, cap
     assert admin.main(["test", "echo", "--n", "1"], root) != 0
     assert _files(root / "inbox") == []  # withdrawn: it cannot run later behind their back
     assert "已送出" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM, signal.SIGINT])
+def test_a_signal_while_sending_withdraws_the_request(
+    root, server, monkeypatch, capsys, signum
+) -> None:
+    monkeypatch.setattr(admin, "load_schemas", _schemas)
+    real = admin.write_request
+
+    def write_then_signal(*args, **kw):
+        request_id = real(*args, **kw)
+        os.kill(os.getpid(), signum)  # right after the request lands, before any wait
+        return request_id
+
+    monkeypatch.setattr(admin, "write_request", write_then_signal)
+    missed = []
+    # Stands in for the default action (killing the CLI, the request left queued) if the CLI
+    # had not caught the signal before writing.
+    before = signal.signal(signum, lambda *_: missed.append(signum))
+    try:
+        code = admin.main(["test", "echo", "--n", "1", "--timeout", "1"], root)
+        assert signal.getsignal(signum) is not None and not isinstance(
+            signal.getsignal(signum), admin._Stop
+        )  # put back
+    finally:
+        signal.signal(signum, before)
+    assert missed == []
+    assert _files(root / "inbox") == []  # withdrawn: it cannot run later behind their back
+    assert code == 2 and "已撤回，什麼都沒執行" in capsys.readouterr().err
 
 
 async def test_a_request_nobody_waits_for_any_more_does_not_run(root, server, calls) -> None:
