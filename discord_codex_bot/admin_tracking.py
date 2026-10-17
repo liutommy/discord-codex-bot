@@ -9,7 +9,15 @@ import logging
 from typing import Any
 
 from .admin_server import AdminError, Handler, Rejected
-from .tracking import MAX_TRACK_MENTIONS, OutboxMessage, TrackerStore, Watch, cadence, parse_times
+from .tracking import (
+    MAX_TRACK_MENTIONS,
+    MAX_TRACK_TIMES,
+    OutboxMessage,
+    TrackerStore,
+    Watch,
+    cadence,
+    parse_times,
+)
 
 LOGGER = logging.getLogger(__name__)
 DISABLED = "社群追蹤尚未啟用；管理者需設定 TRACKING_ENABLED=true 與 provider 憑證。"
@@ -20,7 +28,15 @@ MINUTES = {"type": "int", "min": 1, "max": 99_999}  # five digits, as <track_eve
 # The watch's owner: a member who has left keeps their watches notifying, so they must still be
 # reachable (see "owner" in admin_server).
 OWNER = {"type": "id", "required": True, "owner": True, "help": "追蹤的主人（可以已經離開伺服器）"}
-TIMES_HELP = "每天固定判斷的時間（台灣時間），例如 12:01,20:01"
+GUILD = {"type": "id", "required": True, "help": "伺服器 id（要在 ALLOWED_GUILD_IDS 內）"}
+WHERE = {**GUILD, "help": "追蹤所在的伺服器 id（要在 ALLOWED_GUILD_IDS 內）"}
+TIMES_HELP = (
+    f"每天固定判斷的時間（台灣時間），逗號或空白分隔，最多 {MAX_TRACK_TIMES} 個，例如 12:01,20:01"
+)
+# Placeholder ids for the examples: guild, channel, member, another member.
+EG = "--guild 123456789012345678"
+EGC = f"{EG} --channel 234567890123456789"
+EGU = "--user 345678901234567890"
 OUTBOX_LIMIT = 50
 
 
@@ -216,70 +232,104 @@ HANDLERS: dict[str, Handler] = {
     "tracking.outbox": tracking_outbox,
 }
 
+GROUPS: dict[str, str] = {
+    "track": "成員的社群追蹤（同 /track 與 <track> 標籤）：add、list、cancel、every、at、log",
+    "tracking": "社群追蹤的系統狀態：outbox 列出還沒送出的通知",
+}
+
 SCHEMAS: dict[str, dict] = {
     "track.add": {
-        "help": "以成員身分新增社群追蹤（同 /track）",
+        "help": "以成員的身分新增社群追蹤（同 /track）",
         "description": (
-            "以 --user 的身分新增一個社群追蹤，和 /track、<track> 走同一條路：\n"
-            "每人上限、provider 設定與網址檢查都一樣。\n"
-            "之後有符合的新內容時，Bot 會在 --channel 發通知並 @ --user（和 --who 的人）；\n"
-            "這就是追蹤功能本身。"
+            "以 --user 的身分新增一個社群追蹤，和 /track、<track> 標籤走同一條路：\n"
+            "每人上限（TRACKING_MAX_PER_USER）、provider 設定與網址檢查都一樣。\n"
+            "之後有符合 --interest 的新內容時，Bot 會在 --channel 發通知並 @ --user"
+            "（和 --who 的人）；\n那是追蹤功能本身，這個指令現在不會在頻道發任何訊息。\n"
+            "判斷時間：--at 每天固定時間；否則每 --every 分鐘"
+            "（不給則 TRACKING_CLASSIFY_INTERVAL_MINUTES，預設 60）。\n"
+            "X 帳號要解析，最久可能等上幾分鐘。"
         ),
+        "examples": [
+            f"track add {EGC} {EGU} --source https://www.youtube.com/@example --at 12:01,20:01",
+            f'track add {EGC} {EGU} --source https://x.com/example --interest "新品發表或價格調整" '
+            "--who 456789012345678901 --every 120",
+        ],
         # Resolving an X account is two xsearch calls of up to XSEARCH_TIMEOUT_SECONDS each.
         "timeout": 600,
         "args": {
-            "guild": {"type": "id", "required": True},
-            "channel": {"type": "id", "required": True, "help": "通知發在這個頻道"},
-            "user": {"type": "id", "required": True, "help": "以這位成員的身分（追蹤的主人）"},
+            "guild": GUILD,
+            "channel": {
+                "type": "id",
+                "required": True,
+                "help": "通知發在這個頻道（要屬於 --guild，且是 Bot 開放的頻道）",
+            },
+            "user": {
+                "type": "id",
+                "required": True,
+                "help": "追蹤的主人，以他的身分新增（要是 --guild 的現任成員，並看得到 --channel）",
+            },
             "source": {
                 "type": "str",
                 "required": True,
                 "max_len": 500,
-                "help": "YouTube／Twitch 頻道、X 帳號、露天賣場（可帶 ?q=關鍵字）或網頁網址",
+                "help": (
+                    "YouTube／Twitch 頻道網址、X 帳號網址（https://x.com/<帳號>）、"
+                    "露天賣場網址（可帶 ?q=關鍵字）或任何 http(s) 網頁"
+                ),
             },
             "interest": {
                 "type": "str",
                 "max_len": 4000,
                 "stdin": True,
-                "help": "想知道的內容；不給則用預設的重大事件政策",
+                "help": "想知道什麼樣的新內容；不給則用預設的重大事件政策",
             },
             "who": {
                 "type": "list[id]",
                 "max_items": MAX_TRACK_MENTIONS,
-                "help": "通知時另外 @ 的成員",
+                "help": "通知時另外 @ 的成員（每位都要是 --guild 的成員）",
             },
-            "every": {**MINUTES, "help": "每幾分鐘判斷一次（不給則用預設間隔）"},
+            "every": {**MINUTES, "help": "每幾分鐘判斷一次"},
             "at": {"type": "str", "max_len": 200, "help": TIMES_HELP, "metavar": "HH:MM,…"},
         },
     },
     "track.list": {
-        "help": "列出社群追蹤（可依成員、伺服器篩選）",
+        "help": "列出伺服器上的社群追蹤（同 /track 不帶選項）",
+        "description": (
+            "列出 --guild 上還在運作的追蹤；給 --user 只列他的（成員已離開伺服器也可以）。\n"
+            "每個追蹤列出編號、來源、判斷時間、主人、頻道與另外 @ 的人。"
+        ),
+        "examples": [f"track list {EG}", f"track list {EG} {EGU}"],
         "args": {
-            "guild": {"type": "id", "required": True, "help": "只列這個伺服器的"},
+            "guild": {**GUILD, "help": "只列這個伺服器的（要在 ALLOWED_GUILD_IDS 內）"},
             "user": {**OWNER, "required": False, "help": "只列這位成員的（可以已經離開伺服器）"},
         },
     },
     "track.cancel": {
-        "help": "取消成員的一個追蹤（只取消屬於 --user 的）",
-        "args": {
-            "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
-            "user": OWNER,
-            "id": {**WATCH_ID, "required": True},
-        },
+        "help": "取消成員的一個追蹤（同 /track cancel）",
+        "description": (
+            "取消 --user 在 --guild 的追蹤 --id（編號用 track list 查）。\n"
+            "只取消屬於他、在這個伺服器的追蹤；成員已離開伺服器也可以取消。"
+        ),
+        "examples": [f"track cancel {EG} {EGU} --id 7"],
+        "args": {"guild": WHERE, "user": OWNER, "id": {**WATCH_ID, "required": True}},
     },
     "track.every": {
-        "help": "把成員的追蹤改成每 N 分鐘判斷一次（取消固定時間）",
+        "help": "把成員的追蹤改成每 N 分鐘判斷一次（同 <track_every> 標籤）",
+        "description": "改成每 --minutes 分鐘判斷一次，並取消原本的每日固定時間。",
+        "examples": [f"track every {EG} {EGU} --id 7 --minutes 30"],
         "args": {
-            "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
+            "guild": WHERE,
             "user": OWNER,
             "id": {**WATCH_ID, "required": True},
             "minutes": {**MINUTES, "required": True, "help": "每幾分鐘判斷一次"},
         },
     },
     "track.at": {
-        "help": "把成員的追蹤改成每天固定時間判斷",
+        "help": "把成員的追蹤改成每天固定時間判斷（同 /track times）",
+        "description": "改成每天在 --times 的時間（台灣時間）判斷，從下一個時間開始。",
+        "examples": [f"track at {EG} {EGU} --id 7 --times 09:00,21:00"],
         "args": {
-            "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
+            "guild": WHERE,
             "user": OWNER,
             "id": {**WATCH_ID, "required": True},
             "times": {
@@ -292,19 +342,26 @@ SCHEMAS: dict[str, dict] = {
         },
     },
     "track.log": {
-        "help": "看成員追蹤的判斷紀錄（為什麼提醒或沒提醒）",
+        "help": "看成員一個追蹤的判斷紀錄（同 /track log）",
+        "description": "最近幾次判斷的結果與理由：為什麼通知了，或為什麼沒有。",
+        "examples": [f"track log {EG} {EGU} --id 7 --limit 5"],
         "args": {
-            "guild": {"type": "id", "required": True, "help": "追蹤所在的伺服器"},
+            "guild": WHERE,
             "user": OWNER,
-            "id": {**WATCH_ID, "required": True, "help": "要看的追蹤（同 /track log:編號）"},
+            "id": {**WATCH_ID, "required": True},
             "limit": {"type": "int", "min": 1, "max": 25, "help": "最多幾筆（預設 10）"},
         },
     },
     "tracking.outbox": {
         "help": "列出還沒送出的追蹤通知（含送出失敗、等待重試的）",
-        "description": "預設只列允許清單內伺服器的；--guild 只列一個，--all-guilds 列全部。",
+        "description": (
+            "列出已經判斷要通知、但還沒成功發到頻道的追蹤通知。送出失敗的會留著，"
+            "每輪追蹤都重試。\n預設只列 ALLOWED_GUILD_IDS 內伺服器的；"
+            "--guild 只列一個，--all-guilds 連已移出允許清單的伺服器也列（兩者擇一）。"
+        ),
+        "examples": ["tracking outbox --failed", f"tracking outbox {EG} --limit 10"],
         "args": {
-            "guild": {"type": "id", "help": "只列這個伺服器的（要在允許清單內）"},
+            "guild": {"type": "id", "help": "只列這個伺服器的（要在 ALLOWED_GUILD_IDS 內）"},
             "all_guilds": {"type": "bool", "help": "也列不在允許清單內的伺服器"},
             "failed": {"type": "bool", "help": "只列送出失敗過的"},
             "limit": {

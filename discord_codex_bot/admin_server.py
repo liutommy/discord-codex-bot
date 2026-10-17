@@ -2,7 +2,8 @@
 inbox is read, each request is claimed, checked and run inside this process, and its result is
 written back. The commands come from the handler modules (admin_members, admin_tracking,
 admin_guild), each exporting HANDLERS and SCHEMAS keyed by "<group>.<action>" (or a single word
-such as "reset"); the CLI builds its options from the same SCHEMAS.
+such as "reset"), and GROUPS: one line per group saying what it is for. The CLI builds its
+options and its whole --help from the same SCHEMAS, so the help cannot drift from the code.
 
 Handler: `async def handler(client, args: dict) -> dict`. `client` is the DiscordCodexClient and
 `args` holds the validated arguments, absent options left out. It returns a JSON-able value,
@@ -19,6 +20,7 @@ Schema, one per command:
         "remind.add": {
             "help": "設定提醒",                  # one line in the CLI's list (required)
             "description": "…",                  # optional, longer: the command's --help
+            "examples": ["remind add --guild …"],  # optional, shown after the options
             "timeout": 60,                       # seconds the Bot allows it (default 60, max 900)
             "args": {
                 "guild": {"type": "id", "required": True},
@@ -41,6 +43,9 @@ Argument types, each becoming `--name` (underscores as dashes):
 - "list[id]", "list[int]", "list[str]": one or more values (`--who 1 2` or `--who 1 --who 2`),
   at most "max_items" (default 10), each checked as the scalar type.
 Other keys: "required" (default false), "help", "metavar". Unknown keys fail the schema check.
+The CLI's help appends each option's limits (length, range, count, stdin) from the schema;
+a "help" that already says 最多 keeps its own length limit instead (persona's, which is
+tighter than the request's bound). Examples are tested to parse and validate.
 "owner": True, on "user" only, marks a command that reads, removes or retimes the member's own
 stored items (remind.list, track.cancel, …): --user then names whose items they are and need not
 still be a member, so a departed member's reminders and watches can still be listed and

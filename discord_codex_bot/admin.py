@@ -77,7 +77,7 @@ CONTEXT_ARGS = ("guild", "channel", "user", "who")
 MAX_ID = 10**20 - 1  # Discord ids have at most 20 digits
 SCALAR_TYPES = ("id", "int", "str", "bool", "choice")
 LIST_TYPES = ("list[id]", "list[int]", "list[str]")
-SCHEMA_KEYS = {"help", "description", "timeout", "args"}
+SCHEMA_KEYS = {"help", "description", "timeout", "args", "examples"}
 ARG_KEYS = {
     "type",
     "required",
@@ -99,7 +99,43 @@ ARG_NAME = re.compile(r"[a-z][a-z0-9_]*")
 LOCAL_COMMANDS = ("result", "pending")
 RESERVED_ARGS = {"json", "timeout", "help", "h"}  # options every command already has
 
-SEE_ALSO = """\
+PROG = "python -m discord_codex_bot.admin"
+EXIT_CODES = """\
+結束碼：0 完成；1 執行失敗、被拒絕或參數錯誤；2 時間內沒有結果
+  （Bot 還沒接手的請求已撤回，什麼都沒執行；已在執行的之後用 result <id> 查）。"""
+DESCRIPTION = f"""\
+在執行中的 Bot 裡做成員或管理員在 Discord 上能做的事，不需重啟。
+CLI 只把請求放進 CODEX_HOME/admin/inbox；Bot 在自己的行程裡用和 slash 指令相同的程式與檢查
+執行它，CLI 再把結果讀回來。每個請求最多執行一次。CLI 本身不在任何頻道發訊息。
+
+在 container 裡執行（--text - 之類從標準輸入讀的要加 -i）：
+  docker exec <container> {PROG} <指令> [<動作>] [選項]
+每個指令的 --help 有完整的選項、限制與範例；完整說明見 docs/admin-cli.md。
+文中的 /remind 等指 /<COMMAND_PREFIX>-remind（預設 /codex-remind），/codex 指 /<COMMAND_PREFIX>。
+
+共同的選項：
+  --guild    伺服器 id，必須在 ALLOWED_GUILD_IDS 內。成員的設定、記憶、提醒與追蹤都是
+             依伺服器分開存的，所以作用於成員的指令一律要給。
+  --channel  頻道或討論串 id：必須屬於 --guild，並通過和 slash 指令相同的頻道開放檢查。
+  --user     以這位成員的身分：必須是 --guild 的現任成員，有 --channel 時還要看得到那個頻道。
+             例外：remind list／cancel 與 track list／cancel／every／at／log 只動他已有的
+             東西，成員已離開伺服器也可以，好讓他留下的提醒與追蹤能被列出或停掉。
+  --who      要 @ 的成員 id，空白分隔可給多個；每位都必須是 --guild 的成員。
+  --json     印出完整的 JSON 結果，而不是文字。
+  --timeout  最多等幾秒；預設是這個指令在 Bot 的時限再加 30 秒。
+  id 都是 Discord 的數字 id（使用者設定 → 進階 → 開發者模式，之後右鍵 → 複製 ID）。
+
+{EXIT_CODES}
+逾時、Ctrl-C 或終端機關閉時，Bot 還沒接手的請求會撤回；pending 列出還在排隊或執行中的。"""
+LEAF_FOOTER = f"""\
+完成時結果印到標準輸出（--json 則是完整 JSON）；失敗、被拒絕或還沒完成的說明印到標準錯誤。
+{EXIT_CODES}"""
+SEE_ALSO = f"""\
+例：
+  {PROG} remind list --guild 123456789012345678 --user 345678901234567890
+  {PROG} bot status
+  {PROG} pending
+
 其他維運指令（各自獨立，不經過這個收件匣）：
   python -m discord_codex_bot.announce     公告：立即發送（send）、排程（queue）、查看（list）
   python -m discord_codex_bot.emoji        表情符號描述：import / export / status
@@ -263,6 +299,11 @@ def check_schema(command: str, schema: Mapping[str, Any]) -> None:
         raise ValueError(f"{command}: timeout must be a number")
     if not 0 < timeout <= MAX_TIMEOUT:
         raise ValueError(f"{command}: timeout must be 1-{MAX_TIMEOUT} seconds")
+    examples = schema.get("examples", [])
+    if not isinstance(examples, list | tuple) or not all(
+        isinstance(example, str) and example.strip() for example in examples
+    ):
+        raise ValueError(f"{command}: examples must be a list of command lines")
     arguments = schema.get("args", {})
     if not isinstance(arguments, Mapping):
         raise ValueError(f"{command}: args must be a mapping")
@@ -416,6 +457,12 @@ def handler_modules() -> tuple:
     return admin_members, admin_tracking, admin_guild
 
 
+def load_groups() -> dict[str, str]:
+    """One line per group of commands (remind, track, …), for the CLI's list and the group's
+    --help."""
+    return merge_exports("GROUPS", handler_modules())
+
+
 def load_schemas() -> dict[str, dict]:
     """Every command's schema from the handler modules, each checked."""
     schemas = merge_exports("SCHEMAS", handler_modules())
@@ -443,13 +490,45 @@ def _timeout_text(text: str) -> float:
     return value
 
 
+def _limits(name: str, spec: Mapping[str, Any]) -> list[str]:
+    """The limits the request is checked against, as the option's help states them: written
+    from the schema, so the help cannot promise more than validate_args accepts."""
+    kind, help_text = spec["type"], spec.get("help", "")
+    scalar = _scalar(kind)
+    notes = []
+    if kind in LIST_TYPES:
+        notes.append(f"可給多個，空白分隔，最多 {spec.get('max_items', DEFAULT_MAX_ITEMS)} 個")
+    # A help that already names its own limit (one tighter than the request's) keeps it alone.
+    if scalar == "str" and "最多" not in help_text:
+        notes.append(f"最多 {spec['max_len']} 字")
+    if scalar == "int" and name not in CONTEXT_ARGS:
+        low, high = spec.get("min"), spec.get("max")
+        if low is not None and high is not None:
+            notes.append(f"{low}–{high}")
+        elif low is not None:
+            notes.append(f"至少 {low}")
+        elif high is not None:
+            notes.append(f"最多 {high}")
+    if spec.get("stdin"):
+        notes.append("寫 - 則從標準輸入讀")
+    return notes
+
+
 def _add_argument(parser: argparse.ArgumentParser, name: str, spec: Mapping[str, Any]) -> None:
     kind = spec["type"]
     scalar = "id" if name in CONTEXT_ARGS else _scalar(kind)
+    help_text = spec.get("help", "")
+    if notes := _limits(name, spec):
+        if help_text.endswith("）"):  # one parenthesis, not two in a row
+            help_text = f"{help_text[:-1]}；{'；'.join(notes)}）"
+        else:
+            help_text += f"（{'；'.join(notes)}）"
+    if spec.get("required"):
+        help_text = f"必填。{help_text}"
     options: dict[str, Any] = {
         "dest": f"arg_{name}",
         "required": bool(spec.get("required")),
-        "help": spec.get("help", ""),
+        "help": help_text,
     }
     if spec.get("metavar"):
         options["metavar"] = spec["metavar"]
@@ -463,51 +542,101 @@ def _add_argument(parser: argparse.ArgumentParser, name: str, spec: Mapping[str,
             options["choices"] = list(spec["choices"])
         if kind in LIST_TYPES:
             options.update(action="extend", nargs="+")
-    if spec.get("stdin"):
-        options["help"] = (options["help"] + "（寫 - 則從標準輸入讀）").strip()
     parser.add_argument(_flag(name), **options)
 
 
-def _shared_options() -> tuple[argparse.ArgumentParser, argparse.ArgumentParser]:
-    """(--json alone, --json and --timeout): parents for the CLI's own and the Bot's commands."""
+def _json_option() -> argparse.ArgumentParser:
     as_json = argparse.ArgumentParser(add_help=False)
-    as_json.add_argument("--json", action="store_true", help="輸出 JSON 而不是文字")
-    common = argparse.ArgumentParser(add_help=False, parents=[as_json])
-    common.add_argument(
-        "--timeout", type=_timeout_text, help="最多等幾秒（預設依指令而定）；逾時未開始就撤回"
+    as_json.add_argument(
+        "--json",
+        action="store_true",
+        help="印出完整的 JSON（status、id 與 Bot 寫下的所有欄位），而不是只印文字",
     )
-    return as_json, common
+    return as_json
+
+
+def _add_timeout(parser: argparse.ArgumentParser, default: float) -> None:
+    parser.add_argument(
+        "--timeout",
+        type=_timeout_text,
+        metavar="SECONDS",
+        help=f"最多等幾秒（最多 3600，預設 {default:g}）。時間到時 Bot 還沒接手就撤回、"
+        "什麼都沒執行；已在執行的不會中斷，之後用 result <id> 查",
+    )
 
 
 class _Parser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, **kw: Any) -> None:
+        super().__init__(*args, **kw)
+        # argparse's own headings and -h text, in the language of the rest of the help.
+        self._positionals.title = "指令與參數"
+        self._optionals.title = "選項"
+        for action in self._actions:
+            if isinstance(action, argparse._HelpAction):
+                action.help = "顯示這段說明後結束"
+
     def error(self, message: str):  # a usage error exits 1: 2 means "not finished in time"
         self.print_usage(sys.stderr)
         self.exit(1, f"{self.prog}: 錯誤：{message}\n")
 
 
-def build_parser(schemas: Mapping[str, Mapping[str, Any]]) -> argparse.ArgumentParser:
-    parser = _Parser(
-        prog="python -m discord_codex_bot.admin",
-        description="在執行中的 Bot 裡執行維運指令（不需重啟）。指令交給 Bot 執行，結果再讀回來。",
-        epilog=SEE_ALSO,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    as_json, common = _shared_options()
+def _leaf_epilog(schema: Mapping[str, Any]) -> str:
+    examples = [f"  {PROG} {example}" for example in schema.get("examples", ())]
+    return "\n".join(["例：", *examples, "", LEAF_FOOTER] if examples else [LEAF_FOOTER])
+
+
+def build_parser(
+    schemas: Mapping[str, Mapping[str, Any]], groups: Mapping[str, str] | None = None
+) -> argparse.ArgumentParser:
+    """The CLI's parser, every option and help text taken from the schemas, `groups` naming
+    what each group of commands is for."""
+    groups = groups or {}
+    raw = argparse.RawDescriptionHelpFormatter
+    parser = _Parser(prog=PROG, description=DESCRIPTION, epilog=SEE_ALSO, formatter_class=raw)
+    as_json = _json_option()
     top = parser.add_subparsers(dest="group", required=True, metavar="<指令>")
-    result = top.add_parser("result", help="查看一個請求的結果", parents=[as_json])
-    result.add_argument("request_id", metavar="id")
-    top.add_parser("pending", help="列出還在排隊或執行中的請求")
-    groups: dict[str, list[str]] = {}
+    result = top.add_parser(
+        "result",
+        help="查看一個請求的結果（逾時、中斷或想再看一次時）",
+        description=(
+            "查看一個請求的結果。id 是送出時印在標準錯誤的 32 個十六進位字元，"
+            "pending 也列得出來；結果保留 7 天。"
+        ),
+        epilog=(
+            "結束碼：0 完成；1 執行失敗、被拒絕或找不到這個 id；2 還在排隊或執行中。\n"
+            f"例：\n  {PROG} result 0123456789abcdef0123456789abcdef"
+        ),
+        parents=[as_json],
+        formatter_class=raw,
+    )
+    result.add_argument("request_id", metavar="id", help="請求的 id")
+    top.add_parser(
+        "pending",
+        help="列出還在排隊或執行中的請求",
+        description=(
+            "列出 inbox/（排隊中，Bot 還沒接手）與 processing/（執行中）的請求："
+            "id、狀態、指令、送出時間（台北時間）與送出的系統使用者。"
+        ),
+        epilog="結束碼：0。",
+        formatter_class=raw,
+    )
+    by_group: dict[str, list[str]] = {}
     for command in sorted(schemas):
         group, _, action = command.partition(".")
-        groups.setdefault(group, []).append(action)
-    for group, actions in groups.items():
+        by_group.setdefault(group, []).append(action)
+    for group, actions in by_group.items():
         if "" in actions and len(actions) > 1:
             raise ValueError(f"{group} is both a command and a group")
         if actions == [""]:
             leaves = [(top, group, group)]
         else:
-            holder = top.add_parser(group, help=f"{group}：{', '.join(actions)}")
+            summary = groups.get(group, group)
+            holder = top.add_parser(
+                group,
+                help=summary,
+                description=f"{summary}\n每個動作的 --help 有選項、限制與範例。",
+                formatter_class=raw,
+            )
             sub = holder.add_subparsers(dest="action", required=True, metavar="<動作>")
             leaves = [(sub, action, f"{group}.{action}") for action in actions]
         for subparsers, word, command in leaves:
@@ -516,9 +645,11 @@ def build_parser(schemas: Mapping[str, Mapping[str, Any]]) -> argparse.ArgumentP
                 word,
                 help=schema["help"],
                 description=schema.get("description") or schema["help"],
-                parents=[common],
-                formatter_class=argparse.RawDescriptionHelpFormatter,
+                epilog=_leaf_epilog(schema),
+                parents=[as_json],
+                formatter_class=raw,
             )
+            _add_timeout(leaf, float(schema.get("timeout", DEFAULT_TIMEOUT)) + WAIT_MARGIN)
             for name, spec in schema.get("args", {}).items():
                 _add_argument(leaf, name, spec)
             leaf.set_defaults(command=command)
@@ -656,7 +787,7 @@ def _catch_signals(stop: _Stop) -> dict:
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     schemas = load_schemas()
-    namespace = build_parser(schemas).parse_args(argv)
+    namespace = build_parser(schemas, load_groups()).parse_args(argv)
     if root is None:
         root = admin_root(load_config())
     try:

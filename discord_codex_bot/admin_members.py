@@ -22,7 +22,7 @@ from .backends import AGY, CODEX, GROK, OPENROUTER, ORCAROUTER, split_stored
 from .backup import export_memory_zip
 from .config import REASONING_EFFORTS
 from .memory import SCOPES, STYLE_MAX_CHARS
-from .reminders import describe, parse_when, targets
+from .reminders import MAX_DAYS_AHEAD, MAX_PER_USER, describe, parse_when, targets
 from .threads import ThreadStore
 
 LOGGER = logging.getLogger(__name__)
@@ -33,13 +33,25 @@ NAME_MAX = 100
 EXPORTS = "exports"
 NO_CHANNEL_THREAD = "續接：（續接是每個頻道各自的；加 --channel 看那個頻道）"
 
-GUILD = {"type": "id", "required": True, "help": "伺服器 id"}
-CHANNEL = {"type": "id", "required": True, "help": "頻道（或討論串）id"}
-USER = {"type": "id", "required": True, "help": "以這位成員的身分"}
+GUILD = {"type": "id", "required": True, "help": "伺服器 id（要在 ALLOWED_GUILD_IDS 內）"}
+CHANNEL = {
+    "type": "id",
+    "required": True,
+    "help": "頻道或討論串 id（要屬於 --guild，且是 Bot 開放的頻道）",
+}
+USER = {
+    "type": "id",
+    "required": True,
+    "help": "以這位成員的身分（要是 --guild 的現任成員；有 --channel 時要看得到它）",
+}
 # Whose stored items these are: a member who has left keeps them firing, so they must still
 # be reachable (see "owner" in admin_server).
 OWNER = {**USER, "owner": True, "help": "設提醒的成員（可以已經離開伺服器）"}
-SCOPE = {"type": "choice", "choices": list(SCOPES), "help": "user＝個人、guild＝伺服器"}
+SCOPE = {"type": "choice", "choices": list(SCOPES), "help": "user＝個人記憶；guild＝伺服器記憶"}
+# Placeholder ids for the examples: guild, channel, member, another member.
+EG = "--guild 123456789012345678"
+EGC = f"{EG} --channel 234567890123456789"
+EGU = "--user 345678901234567890"
 
 
 def _with(spec: dict, **changes: Any) -> dict:
@@ -315,19 +327,43 @@ HANDLERS: dict[str, Handler] = {
     "status": status,
 }
 
+GROUPS: dict[str, str] = {
+    "remind": "成員的提醒（同 /remind）：add 設定、list 列出、cancel 取消",
+    "memory": "Bot 的記憶（同 /remember、/forget、/memory）：add、forget、list",
+    "model": "成員用的模型（同 /model）：get 查看、set 設定、clear 回到預設",
+    "style": "成員的回覆風格與人設開關（同 /style）：get、set、clear、persona",
+}
+
 SCHEMAS: dict[str, dict] = {
     "remind.add": {
         "help": "以成員的身分設定提醒（同 /remind）",
-        "description": "以 --user 的身分設定提醒；到時 Bot 照常在 --channel @ 提醒對象。",
+        "description": (
+            "以 --user 的身分設定一個提醒，和他自己用 /remind 一樣：時間要在 "
+            f"{MAX_DAYS_AHEAD} 天內，每人最多 {MAX_PER_USER} 個，\n"
+            "一分鐘內內容相同的提醒不會重複設定。\n"
+            "到時 Bot 在 --channel 發提醒並 @ --user；給了 --who 則改 @ 那些成員"
+            "（要含 --user 請一併列出）。\n"
+            "那則提醒是提醒功能本身；這個指令現在不會在頻道發任何訊息。"
+        ),
+        "examples": [
+            f'remind add {EGC} {EGU} --when "明天 9:30" --text "交週報"',
+            f"remind add {EGC} {EGU} --when 30分鐘後 --text 開會 "
+            "--who 345678901234567890 456789012345678901",
+        ],
         "args": {
             "guild": GUILD,
-            "channel": _with(CHANNEL, help="到時在這個頻道提醒"),
-            "user": _with(USER, help="設提醒的成員"),
+            "channel": _with(
+                CHANNEL, help="到時在這個頻道提醒（要屬於 --guild，且是 Bot 開放的頻道）"
+            ),
+            "user": _with(USER, help="設提醒的成員（要是 --guild 的現任成員，並看得到 --channel）"),
             "when": {
                 "type": "str",
                 "required": True,
                 "max_len": 100,
-                "help": "台北時間：30分鐘後、明天 9:30、後天下午3點、9/15 14:30",
+                "help": (
+                    "台北時間：30分鐘後、2小時後、3天後、明天 9:30、後天下午3點、"
+                    "21:00（今天，已過則明天）、9/15 14:30、2026-10-01 08:00"
+                ),
             },
             "text": {
                 "type": "str",
@@ -339,28 +375,47 @@ SCHEMAS: dict[str, dict] = {
             "who": {
                 "type": "list[id]",
                 "max_items": 10,
-                "help": "要 @ 的成員 id（可多個；留空＝提醒 --user 自己）",
+                "help": "改 @ 這些成員（每位都要是 --guild 的成員；不給＝@ --user 自己）",
             },
         },
     },
     "remind.list": {
-        "help": "列出成員設的提醒",
+        "help": "列出成員設的提醒（同 /remind 不帶選項）",
+        "description": (
+            "列出 --user 在 --guild 設的提醒：編號、到期時間、伺服器、頻道、要 @ 的人與內容。\n"
+            "成員已離開伺服器也可以列，他設的提醒仍會照常發出。"
+        ),
+        "examples": [f"remind list {EG} {EGU}"],
         "args": {"guild": GUILD, "user": OWNER},
     },
     "remind.cancel": {
-        "help": "取消成員自己的一個提醒",
+        "help": "取消成員設的一個提醒（同 /remind cancel）",
+        "description": (
+            "取消 --user 在 --guild 設的提醒 --id（編號用 remind list 查）。\n"
+            "只取消他自己設、在這個伺服器的提醒；成員已離開伺服器也可以取消。"
+        ),
+        "examples": [f"remind cancel {EG} {EGU} --id 12"],
         "args": {
             "guild": GUILD,
-            "user": _with(OWNER, help="設提醒的成員；只能取消他自己的（可以已經離開伺服器）"),
-            "id": {"type": "id", "required": True, "help": "提醒編號"},
+            "user": _with(OWNER, help="設提醒的成員；只能取消他自己設的（可以已經離開伺服器）"),
+            "id": {"type": "id", "required": True, "help": "提醒編號（remind list 看得到）"},
         },
     },
     "memory.add": {
         "help": "記住一件事（同 /remember）",
+        "description": (
+            "存一則記憶，和 /remember 存在同一個地方，Bot 之後回答時會參考：\n"
+            "--scope user 是 --user 的個人記憶（只在他問時用到）；"
+            "--scope guild 是整個伺服器共用的記憶，不需要 --user。"
+        ),
+        "examples": [
+            f"memory add --scope user {EG} {EGU} --name 生日 --text 3月14日",
+            f"memory add --scope guild {EG} --name 群規 --text -",
+        ],
         "args": {
             "scope": _with(SCOPE, required=True),
             "guild": GUILD,
-            "user": _with(USER, required=False, help="個人記憶的成員（scope user 時必填）"),
+            "user": _with(USER, required=False, help="個人記憶的成員（--scope user 時必填）"),
             "name": {"type": "str", "required": True, "max_len": NAME_MAX, "help": "短標題"},
             "text": {
                 "type": "str",
@@ -373,11 +428,15 @@ SCHEMAS: dict[str, dict] = {
     },
     "memory.forget": {
         "help": "刪除一則記憶（同 /forget）",
-        "description": "用檔名或完整名稱指定；同名的有好幾條時不刪，改用檔名。",
+        "description": (
+            "用完整名稱或 memory list 括號裡的檔名（.md）指定要刪的記憶。\n"
+            "有好幾條同名時什麼都不刪，請改用檔名。"
+        ),
+        "examples": [f"memory forget --scope user {EG} {EGU} --name 生日"],
         "args": {
             "scope": _with(SCOPE, required=True),
             "guild": GUILD,
-            "user": _with(USER, required=False, help="個人記憶的成員（scope user 時必填）"),
+            "user": _with(USER, required=False, help="個人記憶的成員（--scope user 時必填）"),
             "name": {
                 "type": "str",
                 "required": True,
@@ -388,23 +447,41 @@ SCHEMAS: dict[str, dict] = {
     },
     "memory.list": {
         "help": "列出記憶（同 /memory）",
-        "description": "沒給 --user 時只列伺服器記憶。",
+        "description": (
+            "不給 --user 只列伺服器記憶；給 --user 則列他的個人記憶與伺服器記憶，"
+            "--scope 可只列其中一種。\n--json 另有每則記憶的名稱、檔名與內容。"
+        ),
+        "examples": [f"memory list {EG} {EGU}", f"memory list {EG}"],
         "args": {
-            "scope": _with(SCOPE, help="只列個人或伺服器；留空＝兩者"),
+            "scope": _with(SCOPE, help="只列個人或伺服器記憶（不給＝兩者）"),
             "guild": GUILD,
-            "user": _with(USER, required=False, help="也列這位成員的個人記憶"),
+            "user": _with(
+                USER, required=False, help="也列這位成員的個人記憶（要是 --guild 的現任成員）"
+            ),
         },
     },
     "model.get": {
-        "help": "查看成員的模型設定",
+        "help": "查看成員用的模型（同 /model 查看）",
+        "description": (
+            "顯示 --user 在 --guild 用的模型與強度；沒設定過時顯示預設模型（DEFAULT_MODEL）。"
+        ),
+        "examples": [f"model get {EG} {EGU}"],
         "args": {"guild": GUILD, "user": USER},
     },
     "model.set": {
-        "help": "設定成員的模型（同 /model）",
+        "help": "設定成員用的模型（同 /model）",
         "description": (
-            "--value 指定模型（例如 agy:gemini-3.8-flash、openrouter:<id>，"
-            "或配合 --provider 只寫 id）；只給 --provider＝用它的預設模型；--effort 設推理強度。"
+            "和 /model 的選單走同一個檢查，只能選它提供的模型與這個模型允許的強度：\n"
+            "  --value     模型，例如 agy:gemini-3.8-flash、openrouter:<id>，"
+            "或配合 --provider 只寫 id\n"
+            "  --provider  只給它＝改用這個來源的預設模型\n"
+            "  --effort    這個模型的預設推理強度\n"
+            "至少要給一個；不合時會被拒絕，並列出可選的模型。"
         ),
+        "examples": [
+            f"model set {EG} {EGU} --value agy:gemini-3.8-flash",
+            f"model set {EG} {EGU} --effort high",
+        ],
         "args": {
             "guild": GUILD,
             "user": USER,
@@ -418,15 +495,21 @@ SCHEMAS: dict[str, dict] = {
         },
     },
     "model.clear": {
-        "help": "清除成員的模型設定，回到預設",
+        "help": "清除成員的模型設定，回到預設（同 /model 清除）",
+        "examples": [f"model clear {EG} {EGU}"],
         "args": {"guild": GUILD, "user": USER},
     },
     "style.get": {
-        "help": "查看成員的個人回覆風格與人設",
+        "help": "查看成員的個人回覆風格與人設開關（同 /style 查看）",
+        "examples": [f"style get {EG} {EGU}"],
         "args": {"guild": GUILD, "user": USER},
     },
     "style.set": {
         "help": "設定成員的個人回覆風格（同 /style text）",
+        "description": (
+            "設定 --user 在 --guild 的個人回覆風格；它覆蓋預設輸出風格，只影響他的回答。"
+        ),
+        "examples": [f'style set {EG} {EGU} --text "回答盡量簡短，用條列"'],
         "args": {
             "guild": GUILD,
             "user": USER,
@@ -440,11 +523,14 @@ SCHEMAS: dict[str, dict] = {
         },
     },
     "style.clear": {
-        "help": "清除成員的個人回覆風格",
+        "help": "清除成員的個人回覆風格，回到預設輸出風格（同 /style 清除）",
+        "examples": [f"style clear {EG} {EGU}"],
         "args": {"guild": GUILD, "user": USER},
     },
     "style.persona": {
         "help": "保留或關閉成員的伺服器人設（同 /style persona）",
+        "description": "off＝他的回答不套用伺服器人設；keep＝照常套用。只影響 --user 自己。",
+        "examples": [f"style persona {EG} {EGU} --mode off"],
         "args": {
             "guild": GUILD,
             "user": USER,
@@ -452,32 +538,50 @@ SCHEMAS: dict[str, dict] = {
                 "type": "choice",
                 "required": True,
                 "choices": ["keep", "off"],
-                "help": "keep＝保留、off＝關閉",
+                "help": "keep＝保留；off＝關閉",
             },
         },
     },
     "reset": {
         "help": "忘掉成員在一個頻道的對話脈絡（同 /reset）",
+        "description": "--user 在 --channel 的下一題從頭開始；其他頻道的對話與他的記憶都不受影響。",
+        "examples": [f"reset {EGC} {EGU}"],
         "args": {"guild": GUILD, "channel": CHANNEL, "user": USER},
     },
     "stop": {
         "help": "取消成員進行中的請求（同 /stop）",
-        "description": "給 --channel 只取消那個頻道的；不給則取消他在這個伺服器所有頻道的。",
-        "args": {"guild": GUILD, "channel": _with(CHANNEL, required=False), "user": USER},
+        "description": (
+            "給 --channel 只取消那個頻道的（同 /stop）；不給則取消他在 --guild 所有頻道的。"
+        ),
+        "examples": [f"stop {EG} {EGU}"],
+        "args": {
+            "guild": GUILD,
+            "channel": _with(CHANNEL, required=False),
+            "user": USER,
+        },
     },
     "export": {
-        "help": "把成員的個人記憶打包成 zip（同 /export），回傳檔案路徑",
+        "help": "把成員的個人記憶打包成 zip（同 /export），印出檔案路徑",
         "description": (
-            "寫到 BACKUP_DIR/exports（沒有掛備份目錄時是 CODEX_HOME/exports），權限 0600；"
-            "印出的是 container 內的路徑。"
+            "zip 寫到 BACKUP_DIR/exports（沒有掛備份目錄時是 CODEX_HOME/exports），權限 0600，"
+            "不會傳給成員。\n印出的是 container 內的路徑；要拿到 host 上用 docker cp，"
+            "或從備份目錄的 bind mount 取。"
         ),
+        "examples": [f"export {EG} {EGU}"],
         "timeout": 120,
         "args": {"guild": GUILD, "user": USER},
     },
     "status": {
         "help": "成員的 /status：設定、續接、記憶與系統狀態",
-        "description": "續接是每個頻道各自的，要看就加 --channel。",
+        "description": (
+            "看 --user 會在 /status 看到的內容。續接是每個頻道各自的，要看就加 --channel。"
+        ),
+        "examples": [f"status {EGC} {EGU}"],
         "timeout": 120,
-        "args": {"guild": GUILD, "channel": _with(CHANNEL, required=False), "user": USER},
+        "args": {
+            "guild": GUILD,
+            "channel": _with(CHANNEL, required=False),
+            "user": USER,
+        },
     },
 }

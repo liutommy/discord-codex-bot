@@ -43,10 +43,23 @@ OPERATOR = "admin"
 OPTION_MAX_CHARS = 6000
 KINDS = {"persona": instructions.PERSONA, "style": instructions.OUTPUT_STYLE}
 
-GUILD = {"type": "id", "required": True, "help": "伺服器 id"}
-CHANNEL = {"type": "id", "required": True, "help": "頻道或討論串 id（要在允許清單內）"}
-MEMBER = {"type": "id", "required": True, "help": "以這位成員的身分（他的模型、風格與記憶）"}
+GUILD = {"type": "id", "required": True, "help": "伺服器 id（要在 ALLOWED_GUILD_IDS 內）"}
+CHANNEL = {
+    "type": "id",
+    "required": True,
+    "help": "頻道或討論串 id（要屬於 --guild，且是 Bot 開放的頻道）",
+}
+MEMBER = {
+    "type": "id",
+    "required": True,
+    "help": (
+        "以這位成員的身分：用他的模型、風格與記憶（要是 --guild 的現任成員，並看得到 --channel）"
+    ),
+}
 KIND = {"type": "choice", "choices": list(KINDS), "help": "persona＝人設；style＝預設輸出風格"}
+# Placeholder ids for the examples: guild, channel, member.
+EG = "--guild 123456789012345678"
+EGCU = f"{EG} --channel 234567890123456789 --user 345678901234567890"
 
 # Background tasks the Bot starts (setup_hook, on_ready): (attribute, label, runs forever).
 # A loop meant to run forever that has ended is the thing to look at; a one-off may finish.
@@ -490,13 +503,36 @@ HANDLERS: dict[str, Handler] = {
 }
 
 PERSONA_NOTE = (
-    "人設與預設輸出風格是所有伺服器共用的。改動會先備份被取代的版本，"
-    "重建 Codex 的工作目錄，並讓所有進行中的對話串重新開始（和 /persona 相同）。"
+    "人設與預設輸出風格是所有伺服器共用的（和 /persona 相同，那裡只有伺服器管理層能用）。\n"
+    "改動會先備份被取代的版本，重建 Codex 的工作目錄，並讓所有進行中的對話串重新開始。"
 )
+AS_MEMBER = (
+    "以 --user 的身分執行：用他的模型、風格與記憶，算是他進行中的請求，"
+    "他的 /stop 或 ❌ 可以取消它。\n"
+    "注意：回答裡的動作標籤照樣生效，就像成員自己問的一樣——會寫進他的記憶，\n"
+    "設下的提醒與追蹤之後會在頻道裡通知他。"
+)
+GROUPS: dict[str, str] = {
+    "linkclean": "伺服器的連結洗參數模式（同 /linkclean）：get 查詢、set 設定",
+    "embedfix": "伺服器的預覽修正開關（同 /embedfix）：get 查詢、set 開關",
+    "persona": "所有伺服器共用的人設與預設輸出風格（同 /persona）：get、set、clear",
+    "bot": "Bot 本身：status 系統狀態",
+    "alerts": "告警：list 告警狀態",
+}
+
 SCHEMAS: dict[str, dict] = {
-    "linkclean.get": {"help": "查詢伺服器的連結洗參數模式", "args": {"guild": GUILD}},
+    "linkclean.get": {
+        "help": "查詢伺服器的連結洗參數模式（同 /linkclean 查詢）",
+        "examples": [f"linkclean get {EG}"],
+        "args": {"guild": GUILD},
+    },
     "linkclean.set": {
-        "help": "設定伺服器的連結洗參數模式（和 /linkclean 相同）",
+        "help": "設定伺服器的連結洗參數模式（同 /linkclean）",
+        "description": (
+            "設定 --guild 的連結洗參數模式：之後成員在這個伺服器貼的連結照新模式處理。\n"
+            "這個指令本身不在頻道發訊息。"
+        ),
+        "examples": [f"linkclean set {EG} --mode links"],
         "args": {
             "guild": GUILD,
             "mode": {
@@ -507,22 +543,45 @@ SCHEMAS: dict[str, dict] = {
             },
         },
     },
-    "embedfix.get": {"help": "查詢伺服器的預覽修正開關", "args": {"guild": GUILD}},
+    "embedfix.get": {
+        "help": "查詢伺服器的預覽修正開關（同 /embedfix 查詢）",
+        "examples": [f"embedfix get {EG}"],
+        "args": {"guild": GUILD},
+    },
     "embedfix.set": {
-        "help": "開關伺服器的預覽修正（和 /embedfix 相同）",
+        "help": "開關伺服器的預覽修正（同 /embedfix）",
+        "description": (
+            "開關 --guild 的預覽修正：把社群貼文連結換成 Discord 能預覽的版本。\n"
+            "它隨連結洗參數一起投遞，連結洗參數為 off 時不會有作用。"
+        ),
+        "examples": [f"embedfix set {EG} --state on"],
         "args": {
             "guild": GUILD,
-            "state": {"type": "choice", "choices": ["on", "off"], "required": True},
+            "state": {
+                "type": "choice",
+                "choices": ["on", "off"],
+                "required": True,
+                "help": "on＝開；off＝關",
+            },
         },
     },
     "persona.get": {
         "help": "查詢人設與預設輸出風格；給 --kind 則印出現行全文",
+        "description": (
+            "不給 --kind：兩者各是上傳的還是 image 預設、各有幾個字。\n"
+            "給 --kind：印出那一份的現行全文（可以導到檔案，改完再用 persona set 上傳）。"
+        ),
+        "examples": ["persona get", "persona get --kind persona > persona.md"],
         "args": {"kind": KIND},
     },
     "persona.set": {
-        "help": "換上新的人設或預設輸出風格",
-        "description": PERSONA_NOTE + "\n例（docker exec 要加 -i 才讀得到標準輸入）："
-        "\n  python -m discord_codex_bot.admin persona set --kind persona --text - < persona.md",
+        "help": "換上新的人設或預設輸出風格（同 /persona 上傳）",
+        "description": PERSONA_NOTE
+        + "\n內容的檢查和 /persona 上傳 .md 檔相同。從檔案讀時 docker exec 要加 -i。",
+        "examples": [
+            "persona set --kind persona --text - < persona.md",
+            "persona set --kind style --text - < style.md",
+        ],
         "args": {
             "kind": {**KIND, "required": True},
             "text": {
@@ -537,39 +596,43 @@ SCHEMAS: dict[str, dict] = {
         },
     },
     "persona.clear": {
-        "help": "把人設或預設輸出風格還原成 image 預設",
+        "help": "把人設或預設輸出風格還原成 image 預設（同 /persona 還原）",
         "description": PERSONA_NOTE,
+        "examples": ["persona clear --kind style"],
         "args": {"kind": {**KIND, "required": True}},
     },
     "summary": {
-        "help": "摘要頻道最近的訊息，結果只回到這裡",
+        "help": "摘要頻道最近的訊息，結果只回到這裡（同 /summary）",
         "description": (
-            "和 /summary 相同，以 --user 的身分執行（用他的模型與風格），但摘要不會貼到頻道。"
-            "\n成員的 /stop 可以取消它；回答裡的動作標籤照樣算他的。"
+            "和 /summary 相同的摘要，但不貼到頻道，只印在這裡。預設最近 "
+            f"{DEFAULT_MESSAGES} 則；--count 與 --hours 擇一。\n"
+            "摘要是一次獨立的回答，不會變成成員在這個頻道的對話脈絡。\n" + AS_MEMBER
         ),
+        "examples": [
+            f"summary {EGCU}",
+            f'summary {EGCU} --hours 24 --focus "有哪些待辦"',
+        ],
         "timeout": 600,
         "args": {
             "guild": GUILD,
             "channel": CHANNEL,
             "user": MEMBER,
-            "count": {
-                "type": "int",
-                "min": 5,
-                "max": MAX_MESSAGES,
-                "help": f"最近幾則（預設 {DEFAULT_MESSAGES}）",
-            },
+            "count": {"type": "int", "min": 5, "max": MAX_MESSAGES, "help": "最近幾則訊息"},
             "hours": {"type": "int", "min": 1, "max": 168, "help": "改成最近幾小時內的訊息"},
             "focus": {"type": "str", "max_len": OPTION_MAX_CHARS, "help": "特別想知道什麼"},
         },
     },
     "ask": {
-        "help": "以成員的身分問 Bot，答案只回到這裡",
+        "help": "以成員的身分問 Bot，答案只回到這裡（同 /codex）",
         "description": (
-            "和成員自己用 /codex 問一樣：用他的模型、風格與記憶，接續他在這個頻道的對話"
-            "（--new 則重來），之後他在頻道裡也會接著這段對話。答案不會貼到頻道。\n"
-            "注意：答案裡的動作標籤照樣生效，就像成員自己問的一樣——會寫進他的記憶，"
-            "設下的提醒與追蹤之後會在頻道裡通知他。成員的 /stop 可以取消它。"
+            "和成員自己用 /codex 問一樣，接續他在 --channel 的對話（--new 則重來），"
+            "之後他在頻道裡也會接著這段對話。\n"
+            "答案不會貼到頻道，只印在這裡；回答產生的檔案不會附上，只列出檔名。\n" + AS_MEMBER
         ),
+        "examples": [
+            f'ask {EGCU} --prompt "幫我整理今天討論的結論"',
+            f"ask {EGCU} --new --effort high --prompt - < question.txt",
+        ],
         "timeout": 600,
         "args": {
             "guild": GUILD,
@@ -591,15 +654,25 @@ SCHEMAS: dict[str, dict] = {
         },
     },
     "help": {
-        "help": "成員看到的指令說明（/help）",
+        "help": "成員看到的指令說明（同 /help）",
+        "description": "印出 /help 的內容；--sheet 改印注入給模型的精簡版（<HELP> 區塊）。",
+        "examples": ["help", "help --sheet"],
         "args": {"sheet": {"type": "bool", "help": "改看注入給模型的精簡版"}},
     },
     "bot.status": {
         "help": "Bot 的系統狀態：額度、備援、自動挑選與背景工作",
         "description": (
-            "只有執行中的 Bot 知道的狀態：Codex／Grok／agy 額度與暫停標記、最近一次備援、"
-            "自動挑選的路由表，以及每個背景工作是否還活著。"
+            "只有執行中的 Bot 知道的狀態：連線與延遲、進行中的請求、"
+            "Codex／Grok／agy 額度與暫停標記、\n"
+            "最近一次備援、自動挑選的路由表，以及每個背景工作是否還活著（⚠️ 表示該看一下）。"
         ),
+        "examples": ["bot status", "bot status --json"],
     },
-    "alerts.list": {"help": "告警狀態：連續失敗、等恢復通知的告警、最近送出的告警"},
+    "alerts.list": {
+        "help": "告警狀態：連續失敗、等恢復通知的告警、最近送出的告警",
+        "description": (
+            "告警私訊給誰、各後端連續失敗幾次、哪些在等恢復通知，以及這次啟動後送出過的告警。"
+        ),
+        "examples": ["alerts list"],
+    },
 }

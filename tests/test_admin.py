@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import signal
 import stat
 import sys
@@ -586,6 +587,58 @@ def test_the_handler_modules_define_matching_valid_commands(config, tmp_path) ->
     client = DiscordCodexClient(replace(config, codex_home=tmp_path / "codex"))
     assert client.admin.root == tmp_path / "codex" / "admin"
     assert set(client.admin.handlers) == set(schemas) == set(client.admin.schemas)
+
+
+def _example_args(line: str) -> list[str]:
+    """A command line from the help or the docs as argv: the program and any docker exec in
+    front dropped, and shell redirections (< file, > file) left to the shell."""
+    words = shlex.split(line)
+    words = words[words.index("discord_codex_bot.admin") + 1 :]
+    argv, skip = [], False
+    for word in words:
+        if skip:
+            skip = False
+        elif word in ("<", ">"):
+            skip = True
+        else:
+            argv.append(word)
+    return argv
+
+
+def _parses(parser, schemas, argv: list[str]) -> None:
+    namespace = parser.parse_args(argv)
+    if getattr(namespace, "command", None):
+        schema = schemas[namespace.command]
+        values = {}
+        for name in schema.get("args", {}):  # without _arguments: "-" must not read stdin
+            if (value := getattr(namespace, f"arg_{name}")) is not None:
+                values[name] = value
+        admin.validate_args(schema, values)
+
+
+def test_every_help_example_is_a_valid_request(capsys) -> None:
+    schemas, groups = admin.load_schemas(), admin.load_groups()
+    parser = admin.build_parser(schemas, groups)
+    examples = [example for schema in schemas.values() for example in schema.get("examples", ())]
+    assert len(examples) >= len(schemas)
+    for example in examples:
+        _parses(parser, schemas, _example_args(f"{admin.PROG} {example}"))
+    for line in admin.SEE_ALSO.splitlines():
+        if "discord_codex_bot.admin " in line:
+            _parses(parser, schemas, _example_args(line))
+
+
+def test_every_group_says_what_it_is_for(capsys) -> None:
+    schemas, groups = admin.load_schemas(), admin.load_groups()
+    grouped = {command.split(".")[0] for command in schemas if "." in command}
+    assert set(groups) == grouped
+    parser = admin.build_parser(schemas, groups)
+    for command in schemas:
+        with pytest.raises(SystemExit) as shown:
+            parser.parse_args([*command.split("."), "--help"])
+        assert shown.value.code == 0
+        text = capsys.readouterr().out
+        assert "結束碼" in text and "show this help" not in text, command
 
 
 # --------------------------------------------------------------------------- context checks
