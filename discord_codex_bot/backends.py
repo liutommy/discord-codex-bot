@@ -168,14 +168,32 @@ async def run_batch(
             spare.model,
         )
         agy_module.check_pool(spare.model)  # under its reserve: the Codex failure stands
+
+        async def attempt() -> str:
+            try:
+                result = await run_agy(
+                    prompt, config, spare.model, raw=True, schema=schema, plain=True, images=images
+                )
+            except agy_module.AgyUnavailable as error:
+                agy_module.note_spent(spare.model, error)
+                raise
+            return result.text
+
         try:
-            result = await run_agy(
-                prompt, config, spare.model, raw=True, schema=schema, plain=True, images=images
-            )
+            return await attempt()
+        except agy_module.AgyNetworkError as dropped:
+            # Nobody is there to ask again, and a dropped connection usually holds the next
+            # time: once more, from the start. Resuming the broken conversation is not used —
+            # whether a cut-off --json-schema run can be continued is unverified, and what it
+            # had done so far was mostly web searches, cheap to redo.
+            LOGGER.warning("agy batch connection dropped (%s); trying once more", dropped)
+        try:
+            text = await attempt()
         except agy_module.AgyUnavailable as error:
-            agy_module.note_spent(spare.model, error)
+            LOGGER.warning("agy batch retry failed too: %s", error)
             raise
-        return result.text
+        LOGGER.info("agy batch retry succeeded")
+        return text
 
 
 def fallback_target(stored: str, codex_model: str, default_effort: str) -> Resolved | None:

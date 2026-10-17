@@ -294,6 +294,21 @@ async def test_run_agy_marks_only_availability_failures_for_fallback(
     assert isinstance(raised.value, agy.AgyUnavailable) is unavailable
 
 
+async def test_a_dropped_connection_is_its_own_kind_of_unavailable(
+    agy_config: Config, project, monkeypatch
+) -> None:
+    # What agy printed on 2026-10-17 for runs cut off partway: still a fallback, and told apart
+    # so a background batch can try it once more.
+    reply = (3, "", "ERROR: There was a network issue connecting to the server, please try again.")
+    monkeypatch.setattr(agy, "_run", FakeRun(reply))
+    with pytest.raises(agy.AgyNetworkError):
+        await run_agy("q", agy_config, "gemini-3.8-flash-high")
+    monkeypatch.setattr(agy, "_run", FakeRun((1, "", "HTTP 503 Service Unavailable")))
+    with pytest.raises(agy.AgyUnavailable) as other:
+        await run_agy("q", agy_config, "gemini-3.8-flash-high")
+    assert not isinstance(other.value, agy.AgyNetworkError)
+
+
 async def test_a_streamed_line_longer_than_64_kib_is_read(
     tmp_path: Path, config: Config, monkeypatch
 ) -> None:
