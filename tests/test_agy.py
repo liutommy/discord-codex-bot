@@ -323,3 +323,36 @@ async def test_a_streamed_line_longer_than_64_kib_is_read(
 
     code, out, _err = await agy._run([], "", tmp_path, config, on_delta=on_delta)
     assert code == 0 and seen == [len(text)] and text in out
+
+
+def test_a_schema_run_returns_only_the_structured_output() -> None:
+    from discord_codex_bot import agy as agy_module
+    from discord_codex_bot.tracking import ContentItem, parse_classifier_result
+
+    # The shape agy 1.x prints for --json-schema (seen on every tracking classification that
+    # fell back to agy): `response` repeats the finish call with its display fields.
+    decision = {
+        "category": "livestream",
+        "confidence": 0.95,
+        "external_item_id": "2111057712532647953",
+        "matched_topics": [],
+        "message": "",
+        "notify": False,
+        "reason": "直播宣傳，不是新卡情報。",
+    }
+    result = {
+        "conversation_id": "c9",
+        "status": "SUCCESS",
+        "response": json.dumps(
+            {"decisions": [decision], "toolAction": "Returning", "toolSummary": "Return decisions"}
+        )
+        + "\n",
+        "structured_output": {"decisions": [decision]},
+    }
+    out = json.dumps({"event": "result", "result": result}, ensure_ascii=False)
+    conversation, response, error = agy_module.parse_stream(out)
+    assert (conversation, error) == ("c9", "") and json.loads(response) == {"decisions": [decision]}
+    item = ContentItem(
+        1, 1, "2111057712532647953", "https://x.com/a/status/1", "t", "", "2026-10-17", "post"
+    )
+    assert parse_classifier_result(response, [item])[0].notify is False

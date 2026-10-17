@@ -225,6 +225,11 @@ def parse_stream(stdout: str) -> tuple[str, str, str]:
             result = event.get("result") or {}
             conversation = str(result.get("conversation_id") or conversation)
             response = str(result.get("response") or "")
+            # With --json-schema, `response` is the finish call's arguments as written, which
+            # also carry its display fields (toolAction, toolSummary) and fail a strict schema
+            # check; `structured_output` is the object the schema asked for, and nothing else.
+            if isinstance(result.get("structured_output"), (dict, list)):
+                response = json.dumps(result["structured_output"], ensure_ascii=False)
             if result.get("status") not in (None, "SUCCESS"):
                 error = f"{result.get('status')}: {result.get('error') or ''}"
         elif event.get("event") == "init":
