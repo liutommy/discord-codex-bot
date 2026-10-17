@@ -314,11 +314,13 @@ announcement: a start only lets due items already in the queue (an `--after-depl
 
 The operator can do anything a member or an admin can, without restarting the Bot, with
 `docker exec <container> python -m discord_codex_bot.admin <command> [<action>] [options]`
-(reminders, memory, model, style, reset, stop, export, status, tracking, link cleaning, persona,
-summary, ask, help, bot status, alerts; `--help` on each one lists its options, limits and
-examples). The CLI only drops a request into `CODEX_HOME/admin/inbox` (owner-only, 0700); the
-running Bot runs it once, through the same checks and code as the slash commands, and nothing
-the CLI asks for is posted in a channel. The operator guide, in Traditional Chinese, is
+(reminders, memory, model, style, reset, stop, export, status, tracking, link cleaning, embed
+fix, persona, summary, ask, help, bot status, alerts; `--help` on each one lists its options,
+limits and examples). The CLI only drops a request into `CODEX_HOME/admin/inbox` (owner-only,
+0700); the running Bot runs it at most once (never again after a restart), through the same
+checks and code as the slash commands. Nothing the CLI asks for is posted in a channel at the
+time, but a reminder or watch it sets still fires later in the channel like any other. The
+operator guide, in Traditional Chinese, is
 [docs/admin-cli.md](docs/admin-cli.md): finding ids, every command with examples, the checks,
 result statuses and exit codes, timeouts and withdrawal, the inbox's security boundary and
 troubleshooting.

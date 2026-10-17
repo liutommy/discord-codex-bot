@@ -31,7 +31,8 @@ OWNER = {"type": "id", "required": True, "owner": True, "help": "追蹤的主人
 GUILD = {"type": "id", "required": True, "help": "伺服器 id（要在 ALLOWED_GUILD_IDS 內）"}
 WHERE = {**GUILD, "help": "追蹤所在的伺服器 id（要在 ALLOWED_GUILD_IDS 內）"}
 TIMES_HELP = (
-    f"每天固定判斷的時間（台灣時間），逗號或空白分隔，最多 {MAX_TRACK_TIMES} 個，例如 12:01,20:01"
+    "每天固定判斷的時間（台灣時間），逗號或空白分隔，"
+    f"最多 {MAX_TRACK_TIMES} 個（多的會被忽略），例如 12:01,20:01"
 )
 # Placeholder ids for the examples: guild, channel, member, another member.
 EG = "--guild 123456789012345678"
@@ -325,7 +326,7 @@ SCHEMAS: dict[str, dict] = {
         },
     },
     "track.at": {
-        "help": "把成員的追蹤改成每天固定時間判斷（同 /track times）",
+        "help": "把成員的追蹤改成每天固定時間判斷（同 <track_at> 標籤）",
         "description": "改成每天在 --times 的時間（台灣時間）判斷，從下一個時間開始。",
         "examples": [f"track at {EG} {EGU} --id 7 --times 09:00,21:00"],
         "args": {

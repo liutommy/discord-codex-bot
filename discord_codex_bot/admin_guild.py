@@ -3,9 +3,11 @@ ask, help, bot.status and alerts.list. The schema format is in admin_server.py.
 
 Nothing here posts to a channel: ask, summary and help hand their text back to the CLI. ask and
 summary run as the member named by --user, through the same answer path as /codex and /summary:
-the member's model, style and memory apply, the request is the member's in-flight one (their
-/stop cancels it), and action tags in the answer take effect as if the member had asked, so a
-reminder or watch it sets fires later in the channel like any other.
+the member's model, style and memory apply, and the request is the member's in-flight one (their
+/stop cancels it). Action tags in ask's answer take effect as if the member had asked in
+--channel, so a reminder or watch it sets fires later in the channel like any other. summary,
+like /summary, answers with no channel: its memory tags, reminder cancels and changes to existing
+watches take effect, but a new reminder or watch is not set.
 """
 
 from __future__ import annotations
@@ -504,13 +506,21 @@ HANDLERS: dict[str, Handler] = {
 
 PERSONA_NOTE = (
     "人設與預設輸出風格是所有伺服器共用的（和 /persona 相同，那裡只有伺服器管理層能用）。\n"
-    "改動會先備份被取代的版本，重建 Codex 的工作目錄，並讓所有進行中的對話串重新開始。"
+    "有設定 BACKUP_DIR 時，改動會先備份被取代的版本；接著重建 Codex 的工作目錄，\n"
+    "並讓所有進行中的對話串重新開始。persona clear 只有真的還原了東西才會這樣做"
+    "（本來就是 image 預設時什麼都不變）。"
 )
 AS_MEMBER = (
     "以 --user 的身分執行：用他的模型、風格與記憶，算是他進行中的請求，"
     "他的 /stop 或 ❌ 可以取消它。\n"
+)
+ASK_TAGS = (
     "注意：回答裡的動作標籤照樣生效，就像成員自己問的一樣——會寫進他的記憶，\n"
     "設下的提醒與追蹤之後會在頻道裡通知他。"
+)
+SUMMARY_TAGS = (
+    "注意：和 /summary 一樣，摘要不帶頻道執行：回答裡的記憶標籤、取消提醒，以及修改或取消\n"
+    "既有追蹤的標籤會生效；新的提醒與新的追蹤不會設下。"
 )
 GROUPS: dict[str, str] = {
     "linkclean": "伺服器的連結洗參數模式（同 /linkclean）：get 查詢、set 設定",
@@ -606,7 +616,7 @@ SCHEMAS: dict[str, dict] = {
         "description": (
             "和 /summary 相同的摘要，但不貼到頻道，只印在這裡。預設最近 "
             f"{DEFAULT_MESSAGES} 則；--count 與 --hours 擇一。\n"
-            "摘要是一次獨立的回答，不會變成成員在這個頻道的對話脈絡。\n" + AS_MEMBER
+            "摘要是一次獨立的回答，不會變成成員在這個頻道的對話脈絡。\n" + AS_MEMBER + SUMMARY_TAGS
         ),
         "examples": [
             f"summary {EGCU}",
@@ -627,7 +637,8 @@ SCHEMAS: dict[str, dict] = {
         "description": (
             "和成員自己用 /codex 問一樣，接續他在 --channel 的對話（--new 則重來），"
             "之後他在頻道裡也會接著這段對話。\n"
-            "答案不會貼到頻道，只印在這裡；回答產生的檔案不會附上，只列出檔名。\n" + AS_MEMBER
+            "答案不會貼到頻道，只印在這裡；回答產生的檔案不會附上：文字輸出只說有幾個，\n"
+            "檔名在 --json 的 files 裡。\n" + AS_MEMBER + ASK_TAGS
         ),
         "examples": [
             f'ask {EGCU} --prompt "幫我整理今天討論的結論"',

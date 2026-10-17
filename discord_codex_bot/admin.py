@@ -27,8 +27,10 @@ writes done/<id>.json — or rejected/<id>.json with the reason when it did not 
 result already is never run again, a request left in processing/ by a restart is not run again
 (rejected/ when it had not begun, done/ as failed, "may be partly done", when its handler had),
 and a request more than two hours old is refused: nobody is waiting for it any more, and one
-pruned from done/ (after 7 days) cannot come back. Ctrl-C, SIGTERM or SIGHUP withdraws a request
-not yet claimed. Exit codes: 0 done, 1 failed or rejected, 2 not finished in time.
+pruned from done/ (after 7 days) cannot come back. SIGINT, SIGTERM or SIGHUP reaching the CLI
+inside the container withdraws a request not yet claimed; `docker exec` forwards no signals, so
+without -t a Ctrl-C or a killed `docker exec` stops only the host client and the CLI waits on
+until its timeout. Exit codes: 0 done, 1 failed or rejected, 2 not finished in time.
 """
 
 from __future__ import annotations
@@ -126,7 +128,10 @@ CLI 只把請求放進 CODEX_HOME/admin/inbox；Bot 在自己的行程裡用和 
   id 都是 Discord 的數字 id（使用者設定 → 進階 → 開發者模式，之後右鍵 → 複製 ID）。
 
 {EXIT_CODES}
-逾時、Ctrl-C 或終端機關閉時，Bot 還沒接手的請求會撤回；pending 列出還在排隊或執行中的。"""
+逾時，或 container 裡的 CLI 收到中斷（Ctrl-C、SIGTERM、SIGHUP）時，Bot 還沒接手的請求會撤回；
+pending 列出還在排隊或執行中的。注意 docker exec 不轉送訊號：沒加 -t 時（從檔案用 < 餵內容就
+不能加），Ctrl-C 或砍掉 docker exec 只停掉 host 上的 client，container 裡的 CLI 會一直等到
+--timeout；而 Bot 通常 2 秒內就接手，之後就撤不回來了。"""
 LEAF_FOOTER = f"""\
 完成時結果印到標準輸出（--json 則是完整 JSON）；失敗、被拒絕或還沒完成的說明印到標準錯誤。
 {EXIT_CODES}"""
@@ -757,8 +762,8 @@ def _arguments(namespace: argparse.Namespace, schema: Mapping[str, Any]) -> dict
     return args
 
 
-# Ctrl-C, a killed `docker exec` (SIGTERM) and a closed terminal (SIGHUP) all mean nobody waits
-# for the answer any more.
+# Ctrl-C on a tty, SIGTERM sent to the CLI inside the container and a closed terminal (SIGHUP)
+# all mean nobody waits for the answer any more. `docker exec` itself forwards no signals.
 STOP_SIGNALS = tuple(
     getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name)
 )

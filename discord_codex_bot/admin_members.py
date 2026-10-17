@@ -42,6 +42,11 @@ CHANNEL = {
 USER = {
     "type": "id",
     "required": True,
+    "help": "以這位成員的身分（要是 --guild 的現任成員）",
+}
+# For the commands that take a channel: the member must also see it.
+USER_IN_CHANNEL = {
+    **USER,
     "help": "以這位成員的身分（要是 --guild 的現任成員；有 --channel 時要看得到它）",
 }
 # Whose stored items these are: a member who has left keeps them firing, so they must still
@@ -340,7 +345,8 @@ SCHEMAS: dict[str, dict] = {
         "description": (
             "以 --user 的身分設定一個提醒，和他自己用 /remind 一樣：時間要在 "
             f"{MAX_DAYS_AHEAD} 天內，每人最多 {MAX_PER_USER} 個，\n"
-            "一分鐘內內容相同的提醒不會重複設定。\n"
+            "和他既有的提醒頻道、內容與要 @ 的人都相同，且到期時間相差不到 1 分鐘時不會重複設定，\n"
+            "而是以「已經有一樣的提醒 #N」失敗（結束碼 1）。\n"
             "到時 Bot 在 --channel 發提醒並 @ --user；給了 --who 則改 @ 那些成員"
             "（要含 --user 請一併列出）。\n"
             "那則提醒是提醒功能本身；這個指令現在不會在頻道發任何訊息。"
@@ -471,12 +477,14 @@ SCHEMAS: dict[str, dict] = {
     "model.set": {
         "help": "設定成員用的模型（同 /model）",
         "description": (
-            "和 /model 的選單走同一個檢查，只能選它提供的模型與這個模型允許的強度：\n"
+            "和 /model 的選單走同一個檢查，只能選它提供的模型：\n"
             "  --value     模型，例如 agy:gemini-3.8-flash、openrouter:<id>，"
             "或配合 --provider 只寫 id\n"
             "  --provider  只給它＝改用這個來源的預設模型\n"
-            "  --effort    這個模型的預設推理強度\n"
-            "至少要給一個；不合時會被拒絕，並列出可選的模型。"
+            "  --effort    預設推理強度，low／medium／high／xhigh／max 之一"
+            "（和 /model 一樣，不對照模型檢查）\n"
+            "至少要給一個。--value 的模型不合時會被拒絕，並列出可選的模型；"
+            "只給 --provider 而它沒有預設模型時，\n會被拒絕並請你用 --value 指定。"
         ),
         "examples": [
             f"model set {EG} {EGU} --value agy:gemini-3.8-flash",
@@ -490,7 +498,7 @@ SCHEMAS: dict[str, dict] = {
             "effort": {
                 "type": "choice",
                 "choices": list(REASONING_EFFORTS),
-                "help": "這個模型的預設推理強度",
+                "help": "預設推理強度（和 /model 一樣，不對照模型檢查）",
             },
         },
     },
@@ -546,7 +554,7 @@ SCHEMAS: dict[str, dict] = {
         "help": "忘掉成員在一個頻道的對話脈絡（同 /reset）",
         "description": "--user 在 --channel 的下一題從頭開始；其他頻道的對話與他的記憶都不受影響。",
         "examples": [f"reset {EGC} {EGU}"],
-        "args": {"guild": GUILD, "channel": CHANNEL, "user": USER},
+        "args": {"guild": GUILD, "channel": CHANNEL, "user": USER_IN_CHANNEL},
     },
     "stop": {
         "help": "取消成員進行中的請求（同 /stop）",
@@ -557,15 +565,17 @@ SCHEMAS: dict[str, dict] = {
         "args": {
             "guild": GUILD,
             "channel": _with(CHANNEL, required=False),
-            "user": USER,
+            "user": USER_IN_CHANNEL,
         },
     },
     "export": {
         "help": "把成員的個人記憶打包成 zip（同 /export），印出檔案路徑",
         "description": (
-            "zip 寫到 BACKUP_DIR/exports（沒有掛備份目錄時是 CODEX_HOME/exports），權限 0600，"
-            "不會傳給成員。\n印出的是 container 內的路徑；要拿到 host 上用 docker cp，"
-            "或從備份目錄的 bind mount 取。"
+            "有設定 BACKUP_DIR 且該目錄存在時，zip 寫到 BACKUP_DIR/exports"
+            "（.env.example 設為 /backups，\n"
+            "compose 把 host 的 ./backups 掛在那裡）；否則寫到 volume 裡的 CODEX_HOME/exports。\n"
+            "權限 0600，不會傳給成員。印出的是 container 內的路徑：在 BACKUP_DIR 下的從 host 的\n"
+            "bind mount 取，在 CODEX_HOME 下的用 docker cp 拿出來。"
         ),
         "examples": [f"export {EG} {EGU}"],
         "timeout": 120,
@@ -581,7 +591,7 @@ SCHEMAS: dict[str, dict] = {
         "args": {
             "guild": GUILD,
             "channel": _with(CHANNEL, required=False),
-            "user": USER,
+            "user": USER_IN_CHANNEL,
         },
     },
 }
