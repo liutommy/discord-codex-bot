@@ -37,6 +37,16 @@ class AgyUnavailable(BackendUnavailable):
     (bad settings, registration, the output limit) stays a plain error and is alerted."""
 
 
+# agy lost its connection to the model service partway through a run. Seen at any point of a
+# run (before the first step, after 41 s, after 87 s) while runs of 280 s went through, so it is
+# a passing failure, not a limit on how long a run may take.
+NETWORK = re.compile(r"network issue", re.IGNORECASE)
+
+
+class AgyNetworkError(AgyUnavailable):
+    """The connection dropped mid-run: the same request may well go through a moment later."""
+
+
 def _environment(config: Config) -> dict[str, str]:
     return {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -304,7 +314,10 @@ async def run_agy(
     conversation, response, error = parse_stream(out)
     if code != 0 or error:
         summary = error or " | ".join(err.strip().splitlines()[-3:])
-        kind = AgyUnavailable if _UNAVAILABLE.search(summary) else RuntimeError
+        if NETWORK.search(summary):
+            kind: type[Exception] = AgyNetworkError
+        else:
+            kind = AgyUnavailable if _UNAVAILABLE.search(summary) else RuntimeError
         raise kind(f"agy exited with code {code}: {summary}")
     if not response.strip():
         detail = f" ({err.strip()[-160:]})" if err.strip() else ""

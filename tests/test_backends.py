@@ -66,6 +66,66 @@ async def test_run_batch_moves_to_the_spare_backend_when_codex_is_overloaded(
     assert seen == {"model": "gemini-3.8-flash-medium", "plain": True}
 
 
+@pytest.mark.parametrize(
+    ("errors", "outcome", "calls"),
+    [
+        # a dropped connection is tried once more, and the second answer is the result
+        (["network"], "第二次的結果", 2),
+        # dropped twice: the second failure is reported as it is, with no third try
+        (["network", "network"], "network", 2),
+        # any other agy failure is not retried
+        (["quota"], "quota", 1),
+    ],
+)
+async def test_run_batch_retries_a_dropped_agy_connection_once(
+    config, monkeypatch, caplog, errors, outcome, calls
+) -> None:
+    import logging
+
+    from discord_codex_bot import agy as agy_module
+    from discord_codex_bot import codex as codex_module
+    from discord_codex_bot.agy import AgyNetworkError, AgyUnavailable
+    from discord_codex_bot.backends import run_batch
+    from discord_codex_bot.codex import CodexResult, CodexUsageLimit
+
+    caplog.set_level(logging.INFO, logger="discord_codex_bot.backends")
+    raised = {
+        "network": AgyNetworkError("agy exited with code 3: ERROR: There was a network issue"),
+        "quota": AgyUnavailable("agy exited with code 1: resource exhausted"),
+    }
+    queue = [raised[name] for name in errors]
+    seen = []
+
+    async def spent(*_args, **_kw):
+        raise CodexUsageLimit("You've hit your usage limit.")
+
+    async def spare(prompt, cfg, model, **kw):
+        seen.append((prompt, kw.get("schema"), kw.get("resume", "")))
+        if queue:
+            raise queue.pop(0)
+        return CodexResult("第二次的結果")
+
+    monkeypatch.setattr(codex_module, "run_codex", spent)
+    monkeypatch.setattr(agy_module, "run_agy", spare)
+    if outcome == "第二次的結果":
+        assert await run_batch("classify", config, schema=Path("/s.json")) == outcome
+        assert "agy batch retry succeeded" in caplog.text
+    else:
+        with pytest.raises(AgyUnavailable, match=outcome if outcome != "quota" else "exhausted"):
+            await run_batch("classify", config, schema=Path("/s.json"))
+        assert ("agy batch retry failed too" in caplog.text) == (outcome == "network")
+    assert len(seen) == calls
+    # the retry is the same request from the start: same prompt and schema, no resume
+    assert all(call == ("classify", Path("/s.json"), "") for call in seen)
+
+
+def test_a_dropped_connection_is_told_apart_from_other_failures() -> None:
+    from discord_codex_bot.agy import NETWORK
+
+    assert NETWORK.search("ERROR: There was a network issue connecting to the server")
+    assert not NETWORK.search("RESOURCE_EXHAUSTED: quota")
+
+
 async def test_run_batch_reports_the_failure_when_there_is_no_spare(config, monkeypatch) -> None:
     from dataclasses import replace
 
