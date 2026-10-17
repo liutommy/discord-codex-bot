@@ -638,7 +638,7 @@ SCHEMAS: dict[str, dict] = {
             "和成員自己用 /codex 問一樣，接續他在 --channel 的對話（--new 則重來），"
             "之後他在頻道裡也會接著這段對話。\n"
             "答案不會貼到頻道，只印在這裡；回答產生的檔案不會附上：文字輸出只說有幾個，\n"
-            "檔名在 --json 的 files 裡。\n" + AS_MEMBER + ASK_TAGS
+            "檔名在 --json 的 result.files 裡。\n" + AS_MEMBER + ASK_TAGS
         ),
         "examples": [
             f'ask {EGCU} --prompt "幫我整理今天討論的結論"',

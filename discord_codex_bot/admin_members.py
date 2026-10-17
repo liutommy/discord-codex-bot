@@ -267,8 +267,8 @@ async def stop(client: Any, args: dict) -> dict:
 
 
 def export_dir(config: Any) -> Path:
-    """BACKUP_DIR/exports when the backup volume is mounted, else CODEX_HOME/exports: either
-    way a host directory the operator can reach."""
+    """BACKUP_DIR/exports when the backup bind mount is there, else CODEX_HOME/exports inside
+    the volume (fetched with docker cp)."""
     mounted = config.backup_dir is not None and config.backup_dir.is_dir()
     return (config.backup_dir if mounted else config.codex_home) / EXPORTS
 
@@ -480,10 +480,10 @@ SCHEMAS: dict[str, dict] = {
             "和 /model 的選單走同一個檢查，只能選它提供的模型：\n"
             "  --value     模型，例如 agy:gemini-3.8-flash、openrouter:<id>，"
             "或配合 --provider 只寫 id\n"
-            "  --provider  只給它＝改用這個來源的預設模型\n"
+            "  --provider  只給它＝改用這個來源的預設模型（他已經在用這個來源時不變）\n"
             "  --effort    預設推理強度，low／medium／high／xhigh／max 之一"
             "（和 /model 一樣，不對照模型檢查）\n"
-            "至少要給一個。--value 的模型不合時會被拒絕，並列出可選的模型；"
+            "至少要給一個。--value 的模型不合時會被拒絕，並列出可選的模型（最多 10 個）；"
             "只給 --provider 而它沒有預設模型時，\n會被拒絕並請你用 --value 指定。"
         ),
         "examples": [

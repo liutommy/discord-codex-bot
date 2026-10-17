@@ -107,7 +107,7 @@ Discord 有關的部分。任何一項不通過，請求就被拒絕，什麼都
 **已離開伺服器的成員**：只讀取、取消或改時間的指令——`remind list`、`remind cancel`、
 `track list`、`track cancel`、`track every`、`track at`、`track log`——不要求 `--user` 還是成員。
 成員離開後，他設的提醒和追蹤仍會照常發出，所以必須還能列出來、停掉。這些指令只會碰到
-**`--user` 自己的、在 `--guild` 的**項目：打錯編號不會動到同一個人在別的伺服器的東西。
+**`--user` 自己的、在 `--guild` 的**項目（`track list` 不給 `--user` 時列出整個伺服器的追蹤）：打錯編號不會動到同一個人在別的伺服器的東西。
 其他指令（設定新提醒、改模型、提問等）仍要求現任成員。
 
 每個指令都有：
@@ -188,9 +188,9 @@ $ python -m discord_codex_bot.admin memory forget --scope user --guild 123456789
 
 `model set` 和 `/model` 的選單走同一個檢查：只能選它提供的模型。
 `--value` 寫模型（例如 `agy:gemini-3.8-flash`、`openrouter:<id>`，或配合 `--provider` 只寫 id），
-只給 `--provider` 則改用它的預設模型，`--effort` 設預設推理強度（`low`／`medium`／`high`／
+只給 `--provider` 則改用它的預設模型（他已經在用這個來源時不變），`--effort` 設預設推理強度（`low`／`medium`／`high`／
 `xhigh`／`max` 之一，和 `/model` 一樣不對照模型檢查）；三者至少給一個。`--value` 的模型不合時
-會被拒絕，並列出可選的模型；只給 `--provider` 而它沒有預設模型時，會被拒絕並請你改用 `--value`
+會被拒絕，並列出可選的模型（最多 10 個）；只給 `--provider` 而它沒有預設模型時，會被拒絕並請你改用 `--value`
 指定。
 
 ```console
@@ -302,7 +302,7 @@ $ python -m discord_codex_bot.admin persona clear --kind style
 > 提醒與追蹤之後會在頻道裡通知他。要只看答案而不留下任何東西，問題裡就不要叫 Bot 做這些事。
 
 `ask` 接續他在 `--channel` 的對話（`--new` 則從頭開始），之後他在頻道裡也會接著這段對話。
-答案不貼到頻道；回答產生的檔案不會附上：文字輸出只說有幾個，檔名在 `--json` 的 `files` 裡。
+答案不貼到頻道；回答產生的檔案不會附上：文字輸出只說有幾個，檔名在 `--json` 的 `result.files` 裡。
 
 ```console
 $ python -m discord_codex_bot.admin ask --guild 123456789012345678 --channel 234567890123456789 --user 345678901234567890 --prompt "幫我整理今天討論的結論"
@@ -358,7 +358,7 @@ $ python -m discord_codex_bot.admin alerts list
 完成時結果印到**標準輸出**；失敗、被拒絕、撤回或還在執行的說明印到**標準錯誤**。
 `--json` 時，Bot 寫下的結果（以及 withdrawn、running）印到標準輸出，`status` 是下列之一。例外：
 送出前的錯誤（參數不合、目錄權限不對）一律是印到標準錯誤的純文字；`result <id> --json` 遇到還在
-排隊的 id（結束碼 2）或找不到的 id（結束碼 1），也是印到標準錯誤的純文字。
+排隊的 id（結束碼 2），或找不到、格式不對的 id（結束碼 1），也是印到標準錯誤的純文字。
 
 - **`done`、`ok: true`**：執行完成，`result` 是指令的完整結果（文字在 `result.text`）。
 - **`done`、`ok: false`**：執行了但失敗，原因在 `error`，例如「找不到這位成員在這個伺服器的提醒 #12。」、
@@ -407,16 +407,18 @@ $ python -m discord_codex_bot.admin pending
 
 ## 逾時、Ctrl-C 與撤回
 
-- 時限到，或 container 裡的 CLI 收到 SIGINT、SIGTERM、SIGHUP（例如在 container 裡對它送訊號、
-  加了 `-t` 時在終端機按 Ctrl-C 或關掉終端機）時，CLI 會試著把請求從 `inbox/` 拿掉。成功就是
+- 時限到，或 container 裡的 CLI 收到 SIGINT、SIGTERM、SIGHUP（例如在 container 裡對它送訊號，
+  或加了 `-t` 時在終端機按 Ctrl-C）時，CLI 會試著把請求從 `inbox/` 拿掉。成功就是
   `withdrawn`：**什麼都沒執行，之後也不會執行**。
 - **`docker exec` 不會轉送訊號。** 沒加 `-t` 時（本文件的範例都沒加；從檔案用 `<` 餵內容時也
   不能加），按 Ctrl-C 或砍掉 `docker exec` 只會停掉 host 上的 client，container 裡的 CLI 會繼續
   等到 `--timeout` 為止。而 Bot 通常 2 秒內就接手，接手後就撤不回來了；想確定請求沒有被執行，
-  只能在 Bot 接手前撤回，事後用 `pending`／`result` 確認實際狀況。
+  只能在 Bot 接手前撤回，事後用 `pending`／`result` 確認實際狀況。加了 `-t` 時關掉終端機也一樣，
+  只會停掉 host 上的 client。
 - 如果 Bot 已經接手（請求已在 `processing/`），就撤不回來了：它會照常跑完，結果寫到 `done/`，
   CLI 印出「仍在執行中」並以 2 結束，之後用 `result <id>` 查。
-- 在送出之前就收到中斷，CLI 不寫任何請求，結束碼 1。
+- 在送出之前就收到中斷，CLI 不寫任何請求（通常結束碼 1；還在讀標準輸入等更早的時候，是 Python
+  預設的中斷結束碼）。
 - Bot 給每個指令有自己的時限（預設 60 秒；`export`、`status` 120 秒；`ask`、`summary`、
   `track add` 600 秒）；超過就中止，記為失敗「可能只做了一部分」。
 
@@ -434,8 +436,8 @@ $ python -m discord_codex_bot.admin pending
   或超過 256 KB 的請求。
 - 這個目錄**故意不進每晚的備份**：還原的收件匣不能讓舊請求再跑一次。
 - 請求只帶參數，不能帶程式碼；每個指令都走和 slash 指令相同的檢查（允許清單、頻道、成員與
-  看得到頻道），不會以成員身分做他在 Discord 上做不到的事。拒絕原因與失敗訊息會寫進 Bot 的
-  log，所以不會引用成員的文字。
+  看得到頻道），不會以成員身分做他在 Discord 上做不到的事。拒絕原因（以及重啟、無法記錄時的
+  失敗說明）會寫進 Bot 的 log，所以不會引用成員的文字。
 - 請求裡的 `by` 是送出者的系統使用者名稱；container 裡沒有這個 uid 的名稱時是 uid
   （Bot 的 container 沒有 uid 1000 的 passwd 項目，所以是 `1000`）。只用於 `pending` 與紀錄。
 

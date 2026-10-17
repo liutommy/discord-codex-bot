@@ -133,7 +133,9 @@ pending 列出還在排隊或執行中的。注意 docker exec 不轉送訊號�
 不能加），Ctrl-C 或砍掉 docker exec 只停掉 host 上的 client，container 裡的 CLI 會一直等到
 --timeout；而 Bot 通常 2 秒內就接手，之後就撤不回來了。"""
 LEAF_FOOTER = f"""\
-完成時結果印到標準輸出（--json 則是完整 JSON）；失敗、被拒絕或還沒完成的說明印到標準錯誤。
+完成時結果印到標準輸出；失敗、被拒絕或還沒完成的說明印到標準錯誤。
+加 --json 時，Bot 寫下的結果（含失敗、被拒絕、withdrawn、running）都以 JSON 印到標準輸出；
+送出前的錯誤仍是印到標準錯誤的純文字。
 {EXIT_CODES}"""
 SEE_ALSO = f"""\
 例：
@@ -762,8 +764,9 @@ def _arguments(namespace: argparse.Namespace, schema: Mapping[str, Any]) -> dict
     return args
 
 
-# Ctrl-C on a tty, SIGTERM sent to the CLI inside the container and a closed terminal (SIGHUP)
-# all mean nobody waits for the answer any more. `docker exec` itself forwards no signals.
+# Ctrl-C on a tty (docker exec -t) and SIGTERM or SIGHUP sent to the CLI inside the container all
+# mean nobody waits for the answer any more. `docker exec` itself forwards no signals, and closing
+# its terminal does not reach the CLI either.
 STOP_SIGNALS = tuple(
     getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name)
 )
