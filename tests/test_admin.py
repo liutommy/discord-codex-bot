@@ -1,9 +1,11 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import signal
 import stat
+import sys
 import time
 import types
 from dataclasses import replace
@@ -855,15 +857,64 @@ def test_a_signal_while_sending_withdraws_the_request(
     # had not caught the signal before writing.
     before = signal.signal(signum, lambda *_: missed.append(signum))
     try:
-        code = admin.main(["test", "echo", "--n", "1", "--timeout", "1"], root)
+        started = time.monotonic()
+        # A long timeout: the signal itself, not the deadline, must end the wait.
+        code = admin.main(["test", "echo", "--n", "1", "--timeout", "60"], root)
+        elapsed = time.monotonic() - started
         assert signal.getsignal(signum) is not None and not isinstance(
             signal.getsignal(signum), admin._Stop
         )  # put back
     finally:
         signal.signal(signum, before)
     assert missed == []
+    assert elapsed < 5
     assert _files(root / "inbox") == []  # withdrawn: it cannot run later behind their back
     assert code == 2 and "已撤回，什麼都沒執行" in capsys.readouterr().err
+
+
+def test_a_signal_before_sending_sends_nothing(root, server, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "load_schemas", _schemas)
+    real = admin._catch_signals
+
+    def catch_then_signal(stop):
+        previous = real(stop)
+        os.kill(os.getpid(), signal.SIGTERM)  # after the handler is in, before the write
+        return previous
+
+    monkeypatch.setattr(admin, "_catch_signals", catch_then_signal)
+    assert admin.main(["test", "echo", "--n", "1", "--timeout", "60"], root) == 1
+    assert _files(root / "inbox") == []
+    assert "沒有送出" in capsys.readouterr().err
+
+
+class _GoneStream:
+    """stderr of a closed terminal or of a pipe whose reader was killed."""
+
+    def write(self, _text):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_a_gone_stderr_does_not_leave_the_request_queued(root, server, monkeypatch) -> None:
+    monkeypatch.setattr(admin, "load_schemas", _schemas)
+    monkeypatch.setattr(sys, "stderr", _GoneStream())
+    with contextlib.suppress(OSError):  # the final report may fail to print too
+        admin.main(["test", "echo", "--n", "1", "--timeout", "0.2"], root)
+    assert _files(root / "inbox") == []
+
+
+def test_any_failure_while_waiting_withdraws_the_request(root, server, monkeypatch) -> None:
+    monkeypatch.setattr(admin, "load_schemas", _schemas)
+
+    def broken(*_args, **_kw):
+        raise RuntimeError("unreadable result")
+
+    monkeypatch.setattr(admin, "wait_result", broken)
+    with pytest.raises(RuntimeError):
+        admin.main(["test", "echo", "--n", "1", "--timeout", "60"], root)
+    assert _files(root / "inbox") == []
 
 
 async def test_a_request_nobody_waits_for_any_more_does_not_run(root, server, calls) -> None:

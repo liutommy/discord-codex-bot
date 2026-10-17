@@ -689,8 +689,18 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         except ValueError as error:
             print(f"沒有送出：{error}", file=sys.stderr)
             return 1
-        print(f"已送出 {request_id}，等 Bot 處理…", file=sys.stderr)
-        status, document = wait_result(root, request_id, timeout, stopped=lambda: stop.signalled)
+        try:
+            # A closed terminal or a reader gone from the pipe must not skip the wait below.
+            with contextlib.suppress(OSError):
+                print(f"已送出 {request_id}，等 Bot 處理…", file=sys.stderr)
+            status, document = wait_result(
+                root, request_id, timeout, stopped=lambda: stop.signalled
+            )
+        except BaseException:
+            # Whatever ends the CLI here, a request nobody waits for must not run later.
+            with contextlib.suppress(OSError):
+                withdraw(root, request_id)
+            raise
     finally:
         for signum, handler in previous.items():
             if handler is not None:  # None: set outside Python, cannot be put back from here
