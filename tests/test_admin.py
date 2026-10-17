@@ -628,6 +628,24 @@ def test_every_help_example_is_a_valid_request(capsys) -> None:
             _parses(parser, schemas, _example_args(line))
 
 
+def test_the_operator_guide_examples_are_valid_requests() -> None:
+    schemas = admin.load_schemas()
+    parser = admin.build_parser(schemas, admin.load_groups())
+    guide = (Path(__file__).parent.parent / "docs" / "admin-cli.md").read_text("utf-8")
+    lines = [
+        line.strip().removeprefix("$ ")
+        for line in guide.splitlines()
+        if "discord_codex_bot.admin " in line
+        and not line.lstrip().startswith(("#", "|", "-"))
+        and "`" not in line
+    ]
+    assert len(lines) >= 30
+    for line in lines:
+        argv = _example_args(line)
+        if "--help" not in argv:
+            _parses(parser, schemas, argv)
+
+
 def test_every_group_says_what_it_is_for(capsys) -> None:
     schemas, groups = admin.load_schemas(), admin.load_groups()
     grouped = {command.split(".")[0] for command in schemas if "." in command}
