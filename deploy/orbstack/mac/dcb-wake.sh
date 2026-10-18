@@ -144,7 +144,8 @@ else
         { kind = ($1 in known) ? $1 : "unknown"; min = $2; sub(/min$/, "", min)
           if (min !~ /^[0-9]+$/) min = "?"
           printf "- %s（持續 %s 分鐘）\n", kind, min }')
-    kinds=$(printf '%s\n' "$reasons" | awk '{print $2}' | sort -u | tr '\n' ' ')
+    # "- kind（持續 N 分鐘）": the kind is the text between "- " and the full-width parenthesis.
+    kinds=$(printf '%s\n' "$reasons" | sed 's/^- //; s/（.*//' | sort -u | tr '\n' ' ')
     [ -d "$DCB_WAKE_WORKDIR" ] || { defer "work dir $DCB_WAKE_WORKDIR missing"; exit 1; }
     # Fail closed: a counter that is present but not a number must not read as 0.
     if ! last=$(read_num "$STATE/last-wake"); then
@@ -183,7 +184,7 @@ else
 fi
 find "$STATE" -maxdepth 1 \( -name 'wakes-*' -o -name 'cap-mailed-*' -o -name 'garbled-mailed-*' \) -mtime +7 -delete 2>/dev/null
 find "$STATE/reports" -name 'wake-*.txt' -mtime +60 -delete 2>/dev/null
-if [ "$mode" = test ]; then first=test; else first=$(printf '%s\n' "$reasons" | head -1 | awk '{print $2}'); fi
+if [ "$mode" = test ]; then first=test; else first=$(printf '%s\n' "$reasons" | head -1 | sed 's/^- //; s/（.*//'); fi
 
 [ -d "$DCB_WAKE_WORKDIR" ] || { log "work dir $DCB_WAKE_WORKDIR missing; not waking"; exit 1; }
 targets=()

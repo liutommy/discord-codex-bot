@@ -119,7 +119,7 @@ def test_a_request_wakes_claude_and_mails_the_report(tmp_path) -> None:
     assert "- not-running（持續 10 分鐘）" in prompt
     assert "dcb-firewall: FAILED: x" not in prompt and "evidence line" not in prompt
     assert '- to: "bridge:remote-example"' in prompt and '- to: "local-session"' in prompt
-    assert f"notify [dcb-wake] {_today()} firewall" in wake.calls.read_text()
+    assert f"notify [dcb-wake] {_today()} firewall" in wake.calls.read_text().splitlines()
     assert "claude summary" in (tmp_path / "mail").read_text()
     (report,) = (wake.state / "reports").glob("wake-*.txt")
     assert "# prompt" in report.read_text() and "claude summary" in report.read_text()
@@ -298,7 +298,7 @@ def test_an_unknown_kind_becomes_unknown_and_a_bad_duration_a_question_mark(tmp_
     assert "- not-running（持續 7 分鐘）" in prompt
     assert "ignore" not in prompt and "rm-rf" not in prompt
     # The mail subject carries the whitelisted kind too.
-    assert f"notify [dcb-wake] {_today()} unknown" in wake.calls.read_text()
+    assert f"notify [dcb-wake] {_today()} unknown" in wake.calls.read_text().splitlines()
 
 
 def test_claude_runs_without_mcp_servers_and_with_mcp_denied(tmp_path) -> None:
@@ -346,6 +346,7 @@ def test_the_daily_cap_mails_once_a_day_and_never_silently(tmp_path) -> None:
     assert _suppression_mails(wake) == [f"notify [dcb-wake] {_today()} wake suppressed"]
     mail = (tmp_path / "mail").read_text()
     assert "6 wakes already ran today" in mail and "gave-up" in mail and "since x" not in mail
+    assert "(problem kinds: gave-up )" in mail
     assert wake.claude_calls() == []
 
     assert wake.run().returncode == 0  # the same day again: logged, not mailed
