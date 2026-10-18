@@ -44,12 +44,14 @@ services:
       - no-new-privileges:true
     pids_limit: 512  # full Chromium alone needs >128 tasks (threads count); Codex + agy on top
     stop_grace_period: 20s
+    # Live means the event loop is running and Discord has been reachable within 15 minutes
+    # (discord_codex_bot/health.py); the old `os.kill(1, 0)` asked tini, which is always alive.
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      test: ["CMD", "python", "-m", "discord_codex_bot.health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 60s
     logging:
       driver: json-file
       options:
