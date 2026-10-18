@@ -884,6 +884,9 @@ name build exits non-zero. The last output line is the summary: `data-refresh: c
 …` or `data-refresh: unchanged; …`. Schedule the command on the host (cron or a timer) as often
 as wanted; running it when nothing changed costs a few requests.
 
+The volume is not in the daily backup: it is a cache the refresh rebuilds from the upstream
+sources. After restoring a backup onto a new host, run the command above once.
+
 The copies in the repository (`config/lol-names.json`, `config/clearurls.json`, and the tables in
 the operator's `permanent/topics/`) are baked into the image as the floor, used while the volume
 has no copy (a fresh volume) or only a broken one. Nothing is regenerated into the working tree
