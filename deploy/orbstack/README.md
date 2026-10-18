@@ -146,8 +146,8 @@ systemctl enable --now dcb-data-refresh.timer
 ```
 
 `dcb-deploy` no longer resets generated data files in the checkout, because nothing writes them
-there any more; a checkout with leftover local changes to them fails the fast-forward until
-`git checkout -- <file>` restores them once.
+there any more. Any tracked local change in the checkout stops the deploy before `git fetch`
+(`tracked local changes`); run `git checkout -- <file>` once to restore leftover files.
 
 ## Install on the Mac
 
