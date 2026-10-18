@@ -236,7 +236,11 @@ M="orb -m $DCB_WAKE_MACHINE -u root"
   echo; echo "# report"; } > "$report"
 
 log "WAKE claude -> $report :: $(printf '%s' "$req" | tr '\n' ';' | cut -c1-300)"
-(cd "$DCB_WAKE_WORKDIR" && run_limited "$DCB_WAKE_TIME_LIMIT" \
+# claude and every tool it runs see only these variables: nothing the caller exported (a token in an
+# interactive shell, a launchd EnvironmentVariables entry) reaches the model.
+claude_env=(HOME="$HOME" PATH="$PATH" USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}"
+            LANG="${LANG:-en_US.UTF-8}" TMPDIR="${TMPDIR:-/tmp}" SHELL=/bin/bash)
+(cd "$DCB_WAKE_WORKDIR" && run_limited "$DCB_WAKE_TIME_LIMIT" env -i "${claude_env[@]}" \
     claude -p --permission-mode auto --strict-mcp-config --disallowedTools "Edit Write NotebookEdit mcp__*") < "$prompt" >> "$report" 2>&1
 rc=$?
 echo "# exit $rc at $(date '+%F %T')" >> "$report"

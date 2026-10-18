@@ -34,6 +34,10 @@ STUBS = {
     ),
     "notify": 'echo "notify $1" >> "$CALLS"; cat > "$MAIL"\n',
 }
+CLAUDE_PATHS = (
+    'CALLS="$HOME/../calls"; PROMPT="$HOME/../prompt"; CHILD="$HOME/../child.pid"\n'
+    'PARENT="$HOME/../parent.pid"; CLAUDE_ENV="$HOME/../claude.env"\n'
+)
 HANGING_CLAUDE = (
     'echo "claude $*" >> "$CALLS"\nsleep 300 & echo $! > "$CHILD"\necho $$ > "$PARENT"\nsleep 300\n'
 )
@@ -58,6 +62,8 @@ class Wake:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         for name, body in {**STUBS, **({"claude": claude} if claude else {})}.items():
+            if name == "claude":  # runs under env -i: its paths come from HOME (tmp_path/home)
+                body = CLAUDE_PATHS + body
             (bin_dir / name).write_text("#!/bin/sh\n" + body)
             (bin_dir / name).chmod(0o755)
         self.calls = tmp_path / "calls"
@@ -411,3 +417,30 @@ def test_the_time_limit_kills_claude_and_its_children(tmp_path) -> None:
     (report,) = (wake.state / "reports").glob("wake-*.txt")
     assert "# exit 124" in report.read_text()
     assert "killed after 2s" in report.read_text()
+
+
+def test_claude_sees_only_an_allowlisted_environment(tmp_path) -> None:
+    wake = Wake(tmp_path, claude='env > "$CLAUDE_ENV"; cat > "$PROMPT"; echo "claude summary"\n')
+    wake.env["DISCORD_TOKEN"] = "exported-by-the-caller"
+    wake.request.write_text("firewall 12min x\n")
+    assert wake.run().returncode == 0, wake.log()
+    seen = dict(
+        line.split("=", 1)
+        for line in (tmp_path / "claude.env").read_text().splitlines()
+        if "=" in line
+    )
+    assert "DISCORD_TOKEN" not in seen and "CALLS" not in seen
+    assert seen["HOME"] == str(wake.home)
+    assert set(seen) <= {
+        "HOME",
+        "PATH",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "TMPDIR",
+        "SHELL",
+        "PWD",
+        "SHLVL",
+        "_",
+        "OLDPWD",
+    }
