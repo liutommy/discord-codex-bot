@@ -62,7 +62,7 @@ case $? in
 esac
 
 [ -e "$DCB_REPO/.hold" ] && { rm -f "$since_file"; wake_update; exit 0; }
-cd "$DCB_REPO" || { log "repo $DCB_REPO missing"; exit 1; }
+cd "$DCB_REPO" || { log "repo $DCB_REPO missing"; problem not-running "repo $DCB_REPO missing"; wake_update; exit 1; }
 
 if ! wanted=$(compose config --services 2>/dev/null | sort); then
     log "compose config failed -> dcb-up (stops the stack)"
@@ -96,7 +96,9 @@ awk -v c=$(( now - DCB_GIVEUP_WINDOW )) '$1 >= c' "$exits" > "$exits.tmp" && mv 
 n=$(wc -l < "$exits")
 if [ ! -e "$gave_up" ] && [ "$n" -ge "$DCB_GIVEUP_EXITS" ]; then
     last=$(tail -1 "$exits" | cut -d' ' -f2-)
-    echo "since $(date '+%F %T'): $n exits in ${DCB_GIVEUP_WINDOW}s; last: exit $last" > "$gave_up"
+    # Written whole, then renamed: dcb-up and this guard trust the marker's mere existence.
+    echo "since $(date '+%F %T'): $n exits in ${DCB_GIVEUP_WINDOW}s; last: exit $last" > "$gave_up.tmp" \
+        && mv -f "$gave_up.tmp" "$gave_up"
     log "giving up: bot exited $n times in ${DCB_GIVEUP_WINDOW}s; last: exit $last"
 fi
 if [ -e "$gave_up" ]; then
@@ -120,7 +122,9 @@ no_problem not-running
 botlog="$DCB_REPO/logs/bot.log"
 if [ -r "$botlog" ]; then
     cutoff=$(TZ="$DCB_BOT_LOG_TZ" date -d "-$DCB_GATEWAY_WINDOW seconds" '+%F %T')
-    hits=$(tail -n 5000 "$botlog" | awk -v c="$cutoff" 'substr($0,1,19) >= c' | grep -cE "$DCB_GATEWAY_REGEX")
+    # The whole window: today's log plus the segment rotated at midnight (bot.log.<date>, ~100 KB a day).
+    prev="$botlog.$(TZ="$DCB_BOT_LOG_TZ" date -d "-$DCB_GATEWAY_WINDOW seconds" +%F)"
+    hits=$(cat "$prev" "$botlog" 2>/dev/null | awk -v c="$cutoff" 'substr($0,1,19) >= c' | grep -cE "$DCB_GATEWAY_REGEX")
     if [ "$hits" -le "$DCB_GATEWAY_MAX" ]; then
         no_problem gateway
     else

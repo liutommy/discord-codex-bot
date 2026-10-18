@@ -86,6 +86,21 @@ def test_every_exec_and_exit_after_the_checks_updates_the_wake_request_first() -
     start = next(i for i, line in enumerate(lines) if line.startswith("wake_update() {"))
     for i in range(start + 1, len(lines)):
         line = lines[i]
-        if re.search(r"\bexec /usr/local/sbin/dcb-up\b|\bexit 0\b", line):
-            context = " ".join(lines[max(0, i - 1) : i + 1])
+        if re.search(r"\bexec /usr/local/sbin/dcb-up\b|\bexit [01]\b", line):
+            # `cmd || { ...; exit N; }` must update on that line; otherwise the line before.
+            one_line = "{" in line and "}" in line
+            context = line if one_line else " ".join(lines[max(0, i - 1) : i + 1])
             assert "wake_update" in context, f"line {i + 1}: {line.strip()}"
+
+
+def test_the_give_up_marker_is_written_whole_then_renamed() -> None:
+    """dcb-up and dcb-guard trust the marker's mere existence: no truncated marker may be left."""
+    text = GUARD.read_text()
+    assert '> "$gave_up.tmp"' in text and 'mv -f "$gave_up.tmp" "$gave_up"' in text
+    assert not re.search(r'echo [^\n]*> "\$gave_up"\s*$', text, re.M)
+
+
+def test_the_gateway_check_reads_the_whole_window_including_the_rotated_segment() -> None:
+    text = GUARD.read_text()
+    assert "tail -n 5000" not in text
+    assert 'cat "$prev" "$botlog"' in text and 'prev="$botlog.$(' in text
