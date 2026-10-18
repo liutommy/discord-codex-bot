@@ -118,3 +118,16 @@ def test_the_firewall_caches_the_wan_address_whole_then_renamed() -> None:
     assert '> "$DCB_STATEDIR/wan-ip.tmp"' in fw and 'mv -f "$DCB_STATEDIR/wan-ip.tmp"' in fw
     assert 'echo "$wan" > "$DCB_STATEDIR/wan-ip";' not in fw
     assert 'echo "ok $wan" > /run/dcb/wan-status' in fw  # dcb-probe parses "<state> <address>"
+
+
+def test_the_crash_ledger_is_rebuilt_and_renamed_never_appended_in_place() -> None:
+    text = GUARD.read_text()
+    assert '>> "$exits"' not in text
+    assert '} > "$exits.tmp" && mv -f "$exits.tmp" "$exits"' in text
+
+
+def test_deploy_refuses_tracked_local_changes_before_the_fast_forward() -> None:
+    deploy = (GUARD.parent / "dcb-deploy").read_text()
+    check = deploy.index("git status --porcelain --untracked-files=no")
+    assert check < deploy.index("git merge -q --ff-only")
+    assert 'die "tracked local changes' in deploy

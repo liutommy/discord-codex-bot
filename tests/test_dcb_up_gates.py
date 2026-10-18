@@ -32,7 +32,8 @@ STUBS = {
         '  *" config --format json") cat "$COMPOSE_CONFIG" ;;\n'
         '  "ps -q "*) echo "$RUNNING" ;;\n'
         '  "ps -aq "*) echo cid1 ;;\n'
-        '  "network ls "*) echo proj_default ;;\n'
+        '  "network ls "*) [ -n "$NETLS_FAIL" ] && { echo proj_partial; exit 1; }\n'
+        "    echo proj_default ;;\n"
         '  "inspect -f "*) [ -n "$INSPECT_FAIL" ] && exit 1; echo "cid1 /bot ${POLICY:-no}" ;;\n'
         "esac\n"
     ),
@@ -150,3 +151,13 @@ def test_a_service_with_network_mode_refuses_to_start(tmp_path, mode) -> None:
     assert rc == 1 and f"bot(network_mode={mode})" in log, log
     assert not _started(calls), calls
     assert _stopped(calls), calls
+
+
+def test_a_network_list_that_fails_is_an_inconclusive_probe_never_a_partial_one(tmp_path) -> None:
+    rc, calls, log = _run(tmp_path, NETLS_FAIL="1", RUNNING="cid1")
+    assert rc == 1 and "probe inconclusive" in log and "cannot list the project networks" in log, (
+        log
+    )
+    assert not [c for c in calls if c.startswith("probe")], calls  # proj_partial is never probed
+    assert not any(c.endswith(" up -d") for c in calls), calls
+    assert (tmp_path / "run" / "probe-inconclusive-since").exists()  # timed like any inconclusive

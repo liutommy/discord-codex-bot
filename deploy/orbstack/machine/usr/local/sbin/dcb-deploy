@@ -26,6 +26,9 @@ exec 9>/run/dcb-up.lock
 flock -w 300 9 || die "dcb-up lock busy for 5 min"
 cd "$DCB_REPO" || die "repo $DCB_REPO missing"
 
+# A tracked local change would survive the fast-forward and end up in the image: refuse it.
+dirty=$(as_owner git status --porcelain --untracked-files=no) || die "git status"
+[ -z "$dirty" ] || die "tracked local changes in $DCB_REPO; nothing built: $(echo "$dirty" | head -3 | tr '\n' ' ')"
 before_head=$(as_owner git rev-parse --short HEAD)
 as_owner git fetch -q origin || die "git fetch"
 as_owner git merge -q --ff-only origin/main 9>&- || die "git merge --ff-only origin/main"

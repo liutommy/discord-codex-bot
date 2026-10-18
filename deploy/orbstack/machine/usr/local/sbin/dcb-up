@@ -92,10 +92,16 @@ if ! out=$(compose up --no-start 2>&1); then
     log "compose up --no-start FAILED: $(echo "$out" | tail -2 | tr '\n' ' ')"; exit 1
 fi
 nets=()   # while-read rather than mapfile: runs on bash 3.2 too (the tests run on macOS)
-while read -r n; do [ -n "$n" ] && nets+=("$n"); done < <(docker network ls --format '{{.Name}}' --filter "label=com.docker.compose.project=$DCB_PROJECT")
-[ ${#nets[@]} -gt 0 ] || { log "no project networks after up --no-start"; exit 1; }
-
-probe=$("$sbin/dcb-probe" "${nets[@]}" 2>&1); prc=$?
+# A network list that cannot be read (or comes back empty) means no probe: inconclusive, which is
+# timed like any other inconclusive probe, never a partial list probed and then started.
+if netlist=$(docker network ls --format '{{.Name}}' --filter "label=com.docker.compose.project=$DCB_PROJECT" 2>&1); then
+    while read -r n; do [ -n "$n" ] && nets+=("$n"); done <<< "$netlist"
+fi
+if [ ${#nets[@]} -gt 0 ]; then
+    probe=$("$sbin/dcb-probe" "${nets[@]}" 2>&1); prc=$?
+else
+    probe="cannot list the project networks: $(echo "$netlist" | tail -1)"; prc=2
+fi
 case $prc in
     0) rm -f "$since_file" ;;
     1)
