@@ -3,11 +3,12 @@
 
     uv run python scripts/fetch_clearurls.py
 
-Upstream: https://gitlab.com/ClearURLs/rules (LGPL-3.0). Providers whose regex Python
-cannot compile are dropped here, at fetch time, so the Bot never loads a rule it would only
-skip with a warning at every start. Fewer than MIN_PROVIDERS usable providers means the
-upstream format moved: the file is left untouched and the exit code is non-zero, so the
-daily job keeps the last good copy."""
+That file is the copy baked into the image; the running Bot's copy is refreshed in the
+generated-data volume by scripts/refresh_data.py, which calls build(). Upstream:
+https://gitlab.com/ClearURLs/rules (LGPL-3.0). Providers whose regex Python cannot compile are
+dropped here, at fetch time, so the Bot never loads a rule it would only skip with a warning.
+Fewer than MIN_PROVIDERS usable providers means the upstream format moved: nothing is written
+and the exit code is non-zero, so the last good copy stays."""
 
 from __future__ import annotations
 
@@ -37,27 +38,31 @@ def usable(name: str, spec: dict) -> bool:
     return True
 
 
-def main() -> int:
+def build() -> tuple[str, str]:
+    """(file text, "N providers (M dropped)"). ValueError when upstream no longer looks like a
+    rule set; network errors propagate."""
     with urllib.request.urlopen(URL, timeout=30) as response:
         data = json.load(response)
     providers = data.get("providers") if isinstance(data, dict) else None
     if not isinstance(providers, dict):
-        print("clearurls: no providers in upstream payload", file=sys.stderr)
-        return 1
+        raise ValueError("no providers in upstream payload")
     kept = {name: spec for name, spec in providers.items() if usable(name, spec)}
     if len(kept) < MIN_PROVIDERS:
-        print(
-            f"clearurls: only {len(kept)} usable providers; keeping the old file", file=sys.stderr
-        )
-        return 1
+        raise ValueError(f"only {len(kept)} usable providers")
     text = json.dumps({"providers": kept}, sort_keys=True, ensure_ascii=False) + "\n"
+    return text, f"{len(kept)} providers ({len(providers) - len(kept)} dropped)"
+
+
+def main() -> int:
+    try:
+        text, note = build()
+    except ValueError as error:
+        print(f"clearurls: {error}; keeping the old file", file=sys.stderr)
+        return 1
     changed = not OUT.exists() or OUT.read_text(encoding="utf-8") != text
     if changed:
         OUT.write_text(text, encoding="utf-8")
-    print(
-        f"clearurls: {len(kept)} providers ({len(providers) - len(kept)} dropped), "
-        f"{'updated' if changed else 'unchanged'}"
-    )
+    print(f"clearurls: {note}, {'updated' if changed else 'unchanged'}")
     return 0
 
 

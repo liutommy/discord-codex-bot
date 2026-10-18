@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import datafiles
+
 DISCORD_ID = re.compile(r"^\d{17,20}$")
 # Discord command names: lowercase, digits, hyphen; the prefix leaves room for "-remember" etc.
 COMMAND_PREFIX = re.compile(r"^[a-z0-9][a-z0-9-]{0,19}$")
@@ -178,6 +180,7 @@ class Config:
     memory_recall_rounds: int
     output_style_path: Path
     permanent_memory_dir: Path
+    data_dir: Path
     persona_dir: Path
     agy_home: Path
     agy_probe_model: str
@@ -333,6 +336,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         permanent_memory_dir=Path(
             values.get("PERMANENT_MEMORY_DIR", "/opt/discord-codex/permanent")
         ),
+        # Generated data (ClearURLs rules, LoL name tables) that data-refresh keeps current in
+        # the generated-data volume; read-only here, reloaded when a file changes.
+        data_dir=datafiles.data_dir(values),
         # Operator persona shipped in the image; an upload overrides it without touching this.
         persona_dir=Path(values.get("PERSONA_DIR", "/opt/discord-codex/persona")),
         # Antigravity CLI backend (second backend; members pick it per user with /<prefix>-model).

@@ -455,7 +455,10 @@ A third, operator-only tier lives outside the Bot's control: `permanent/` in the
 is injected into every prompt verbatim as `[永久記憶索引]` — no line/byte window, never evicted,
 never consolidated — and `permanent/topics/*.md` are searchable/recallable with
 `scope="permanent"`. The Bot never writes there and has no command for it; edit the files and
-rebuild.
+rebuild. The three generated name tables (`*譯名對照.md`) are the exception: `data-refresh` keeps
+them current in the generated-data volume, and a copy there takes the place of the baked topic of
+the same name, so links in `MEMORY.md` reach the refreshed table without a rebuild (see
+[Generated data](#generated-data)).
 
 Finished conversations feed memory too. When a thread can no longer be resumed — its TTL passed,
 the persona/style was rebuilt, or the member used `new:True` / `-reset` — a background pass (every
@@ -785,9 +788,9 @@ posted (and with no Manage Messages nothing happens); `off` disables the member-
 operators listed in `LINKCLEAN_ADMIN_IDS` may use this command.
 
 Two layers remove tracking parameters. The [ClearURLs](https://gitlab.com/ClearURLs/rules)
-rule set (LGPL-3.0, 200+ site-scoped providers, fetched daily by `scripts/fetch_clearurls.py`
-into `config/clearurls.json`; a change rebuilds the image (no commit), restarting the Bot,
-through `scripts/daily_rebuild.sh`) is applied first, including its known redirector unwrapping
+rule set (LGPL-3.0, 200+ site-scoped providers, refreshed by `data-refresh` and reloaded by the
+Bot without a restart; see [Generated data](#generated-data)) is applied first, including its
+known redirector unwrapping
 (for example `google.com/url?q=`); its affiliate-id (`referralMarketing`) and request-blocking
 (`completeProvider`) rules are not used. The Bot's own blocklist (`utm_*`, click ids such as
 `fbclid`, `gclid`, `ttclid`, `igsh`) is then applied as the floor, so cleaning still works
@@ -860,14 +863,36 @@ docker compose exec bot codex --version
 docker compose exec bot codex login status
 ```
 
-### Daily name tables
+### Generated data
 
-The Taiwan/mainland name tables the hexdata API relies on (`config/lol-names.json` for the
-Bot, `permanent/topics/*譯名對照.md` for the model) are generated from Data Dragon,
-CommunityDragon and hexdata by `scripts/build_lol_names.py`. `scripts/daily_rebuild.sh` runs it
-from the operator's crontab at 05:00 (after the 02:00 memory consolidation) and rebuilds the
-image **only when a table changed** — a new champion, augment or item arrives with a patch,
-not every day. A change is only baked into the image, never committed: the regenerated JSON stays
-a working-tree change until it is sent as a PR. Log:
-`logs/daily-rebuild.log`. To run it by hand: `scripts/daily_rebuild.sh` (`DRY_RUN=1` to see
-what it would do without rebuilding).
+Three data sets change on their own schedule, not with the code: the ClearURLs rule set
+(`scripts/fetch_clearurls.py`), and the Taiwan/mainland name tables the hexdata API relies on —
+`lol-names.json` for the Bot and `*譯名對照.md` for the model — built from Data Dragon,
+CommunityDragon and hexdata by `scripts/build_lol_names.py`. A new champion, augment or item
+arrives with a patch; upstream rules move about monthly.
+
+The one-shot `data-refresh` service runs both into the `generated-data` volume, which the Bot
+mounts read-only at `/var/lib/discord-codex/data`; compose fixes that path for both services, so
+it is not an `.env` setting:
+
+```bash
+docker compose --profile refresh run --rm data-refresh
+```
+
+Each file is written only when its content changed, after the Bot's own parser accepted it, and
+replaced atomically. The Bot checks the files at most every few seconds and reloads a changed one
+on its own: no rebuild and no restart. A file it cannot parse is logged and the last good copy
+stays in use. A failed ClearURLs fetch keeps the old rules and the run still succeeds; a failed
+name build exits non-zero. The last output line is the summary: `data-refresh: changed <files>;
+…` or `data-refresh: unchanged; …`. Schedule the command on the host (cron or a timer) as often
+as wanted; running it when nothing changed costs a few requests.
+
+The volume is not in the daily backup: it is a cache the refresh rebuilds from the upstream
+sources. After restoring a backup onto a new host, run the command above once.
+
+The copies in the repository (`config/lol-names.json`, `config/clearurls.json`, and the tables in
+the operator's `permanent/topics/`) are baked into the image as the floor, used while the volume
+has no copy (a fresh volume) or only a broken one. Nothing is regenerated into the working tree
+on the host, so pulling never conflicts with generated data. To refresh the repository copies,
+run the scripts directly (`uv run python scripts/fetch_clearurls.py`,
+`uv run python scripts/build_lol_names.py`) and send the result as a pull request.

@@ -538,12 +538,16 @@ class PermanentMemory:
 
     <root>/MEMORY.md      injected into every prompt verbatim — no line/byte window, never evicted
     <root>/topics/*.md    read on demand by file stem via <search/> and <recall/>
+    <overlay>/*.md        generated topics (the name tables data-refresh writes into the
+                          generated-data volume); one wins over the baked topic of the same name,
+                          so the index's links keep resolving to the current copy
     Nothing in the Bot writes here; there is no slash command for it.
     """
 
-    def __init__(self, root: Path, limits: MemoryLimits) -> None:
+    def __init__(self, root: Path, limits: MemoryLimits, overlay: Path | None = None) -> None:
         self._root = root
         self._limits = limits
+        self._overlay = overlay
 
     def index_text(self) -> str:
         try:
@@ -555,8 +559,11 @@ class PermanentMemory:
         return len(self._topics())
 
     def _topics(self) -> list[Path]:
-        topics = self._root / TOPIC_DIR
-        return sorted(p for p in topics.glob("*.md") if p.is_file()) if topics.is_dir() else []
+        by_name: dict[str, Path] = {}
+        for directory in (self._root / TOPIC_DIR, self._overlay):
+            if directory is not None and directory.is_dir():
+                by_name.update((p.name, p) for p in directory.glob("*.md") if p.is_file())
+        return [by_name[name] for name in sorted(by_name)]
 
     def search(self, query: str) -> str:
         sources = [
