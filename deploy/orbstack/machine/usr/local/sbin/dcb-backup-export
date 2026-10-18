@@ -1,0 +1,15 @@
+#!/bin/bash
+# Offsite export for the bot's daily backup. Plaintext never leaves this machine: the newest
+# backups/*.tar.gz is encrypted here to the offsite recipient and only ciphertext goes to stdout.
+#   dcb-backup-export --name   print the object name for the newest backup (and its age in hours)
+#   dcb-backup-export          write the age ciphertext of the newest backup to stdout
+set -euo pipefail
+. "${DCB_CONFIG:-/etc/default/dcb}"
+B=$DCB_REPO/backups
+newest=$(ls -1t "$B"/*.tar.gz 2>/dev/null | head -1)
+[ -n "$newest" ] || { echo "dcb-backup-export: no backups in $B" >&2; exit 1; }
+if [ "${1:-}" = --name ]; then
+    echo "dcb-$(basename "$newest" .tar.gz).tar.age $(( ($(date +%s) - $(stat -c %Y "$newest")) / 3600 ))"
+    exit 0
+fi
+exec age -R /etc/offsite-backup/recipient.pub < "$newest"

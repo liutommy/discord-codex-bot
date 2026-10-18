@@ -1,0 +1,16 @@
+[Unit]
+Description=dcb: container egress firewall (DOCKER-USER + DCB-INPUT, v4/v6)
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target docker.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/dcb-firewall
+ExecReload=/usr/local/sbin/dcb-firewall
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=docker.service

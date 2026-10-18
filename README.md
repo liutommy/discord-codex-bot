@@ -823,6 +823,9 @@ both messages may remain. The switch controls visible reposts; internal link cle
 
 ## Operations
 
+A deployment where nothing starts by itself (firewall and probe first, a guard, a daily data
+refresh, a diagnosing wake from the Mac) is in [`deploy/orbstack/`](deploy/orbstack/README.md).
+
 ```bash
 # Status
 docker compose ps

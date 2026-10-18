@@ -1,0 +1,61 @@
+#!/bin/bash
+# Deploy a merged repo commit to the dcb stack:  dcb-deploy <merge commit>
+#   1. take the dcb-up lock (held for the whole deploy; dcb-up runs inside it)
+#   2. fetch, ff-only merge; HEAD must equal the given commit (prefix ok) or nothing is built
+#   3. docker compose build as the repo owner
+#   4. dcb-up --manual: firewall, every-network probe, up -d (recreates what changed)
+#   5. bot healthy + `admin bot status` reports the bot connected
+# Prints the commit, which services were recreated and the health result. With .hold present the
+# image is built but nothing is started (dcb-up honours .hold).
+set -uo pipefail
+. "${DCB_CONFIG:-/etc/default/dcb}"
+mkdir -p "$DCB_LOGDIR"
+log() { echo "$(date '+%F %T') dcb-deploy: $*" | tee -a "$DCB_LOGDIR/dcb-deploy.log"; }
+die() { log "FAILED: $*"; exit 1; }
+as_owner() { runuser -u "$DCB_USER" -- env HOME="/home/$DCB_USER" "$@"; }
+compose() { docker compose --project-directory "$DCB_REPO" -p "$DCB_PROJECT" "$@" 9>&-; }
+ids() {  # "<service> <container id>" for every project container
+    docker ps -a --filter "label=com.docker.compose.project=$DCB_PROJECT" \
+        --format '{{.Label "com.docker.compose.service"}} {{.ID}}' | sort
+}
+
+want=${1:-}
+[[ $want =~ ^[0-9a-f]{7,40}$ ]] || { echo "usage: dcb-deploy <merge commit sha>" >&2; exit 2; }
+
+exec 9>/run/dcb-up.lock
+flock -w 300 9 || die "dcb-up lock busy for 5 min"
+cd "$DCB_REPO" || die "repo $DCB_REPO missing"
+
+before_head=$(as_owner git rev-parse --short HEAD)
+as_owner git fetch -q origin || die "git fetch"
+as_owner git merge -q --ff-only origin/main 9>&- || die "git merge --ff-only origin/main"
+head=$(as_owner git rev-parse HEAD)
+[[ $head == "$want"* ]] || die "HEAD $head is not $want after ff-only merge (origin/main moved on or the commit is not on main); nothing built"
+log "repo $before_head -> ${head:0:12}"
+
+out=$(as_owner docker compose --project-directory "$DCB_REPO" -p "$DCB_PROJECT" build 9>&- 2>&1) \
+    || die "docker compose build: $(echo "$out" | tail -3 | tr '\n' ' ')"
+log "build ok"
+
+pre=$(ids)
+DCB_LOCK_HELD=1 /usr/local/sbin/dcb-up --manual 9>&9
+up_rc=$?
+post=$(ids)
+recreated=$(join -a2 <(echo "$pre") <(echo "$post") | awk 'NF == 2 || $2 != $3 {print $1}' | tr '\n' ' ')
+[ $up_rc -eq 0 ] || die "dcb-up rc=$up_rc (see dcb-up.log); recreated: ${recreated:-none}"
+if [ -e "$DCB_REPO/.hold" ]; then
+    log "deployed ${head:0:12}; .hold present, nothing started; recreated: ${recreated:-none}"; exit 0
+fi
+
+cid=$(compose ps -q bot)
+health=unknown
+for _ in $(seq 1 60); do
+    health=$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo gone)
+    case $health in healthy|gone) break ;; esac
+    sleep 3
+done
+[ "$health" = healthy ] || die "bot is $health after deploy of ${head:0:12}; recreated: ${recreated:-none}"
+status=$(docker exec "$cid" python -m discord_codex_bot.admin bot status 2>&1) || die "admin bot status failed"
+conn=$(echo "$status" | grep -m1 '^Bot：' | sed -E 's/[0-9]{15,20}/<id>/g')
+[[ $conn == *已連線* ]] || die "admin bot status does not report connected: $conn"
+log "deployed ${head:0:12}; recreated: ${recreated:-none}; bot $health; $conn"

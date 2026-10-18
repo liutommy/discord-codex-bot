@@ -1,0 +1,78 @@
+#!/bin/bash
+# Positive control for dcb-firewall, run from every network given (default: $DCB_PROBE_NET).
+#   dcb-probe [network ...]
+# Per network: every MUST_FAIL target unreachable and every DNS_MUST_FAIL name unresolvable; on
+# a non-internal network MUST_PASS reachable and DNS_MUST_PASS resolvable; on an internal network
+# MUST_PASS must be unreachable too. Each network's subnet must lie in the Docker pool.
+#
+# Not vacuous: a listener is opened on this machine's own address for the duration (tests
+# DCB-INPUT), the WAN IP's :80/:443 are added, and the listener plus at least one other MUST_FAIL
+# target must be reachable from the machine itself -- so "closed from the container" is the
+# firewall's doing, not a dead target.
+# Exit 0 = all match; 1 = a leak (something blocked got through, or a network outside the pool);
+# 2 = inconclusive (WAN IP unknown, nothing reachable from the host, no internet/DNS, cannot run).
+set -uo pipefail
+. "${DCB_CONFIG:-/etc/default/dcb}"
+
+d=/usr/local/share/dcb-probe
+image="dcb-probe:$(cat "$d/Dockerfile" "$d/probe.sh" | sha256sum | cut -c1-12)"
+docker image inspect "$image" >/dev/null 2>&1 \
+    || docker build -q -t "$image" "$d" >/dev/null \
+    || { echo "dcb-probe: cannot build $image"; exit 2; }
+
+nets=("$@")
+if [ ${#nets[@]} -eq 0 ]; then
+    docker network inspect "$DCB_PROBE_NET" >/dev/null 2>&1 || docker network create "$DCB_PROBE_NET" >/dev/null \
+        || { echo "dcb-probe: cannot create network $DCB_PROBE_NET"; exit 2; }
+    nets=("$DCB_PROBE_NET")
+fi
+
+read -r wan_state wan < /run/dcb/wan-status 2>/dev/null || wan_state=none
+if [ "$wan_state" != ok ]; then
+    echo "dcb-probe: inconclusive -- WAN IP is $wan_state${wan:+ ($wan)}"; exit 2
+fi
+
+self_ip=$(ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1 | head -1)
+self_port=$(( 20000 + RANDOM % 20000 ))
+nc -lk -s "$self_ip" -p "$self_port" </dev/null >/dev/null 2>&1 &
+listener=$!
+trap 'kill $listener 2>/dev/null' EXIT
+sleep 0.3
+must_fail="$self_ip:$self_port $wan:80 $wan:443 $DCB_PROBE_MUST_FAIL"
+
+open_from_host=0
+for t in $must_fail; do
+    nc -z -w3 "${t%:*}" "${t##*:}" >/dev/null 2>&1 && open_from_host=$((open_from_host + 1))
+done
+if ! nc -z -w2 "$self_ip" "$self_port" >/dev/null 2>&1 || [ "$open_from_host" -lt 2 ]; then
+    echo "dcb-probe: inconclusive -- only $open_from_host MUST_FAIL target(s) reachable from the machine itself (need self listener + 1)"
+    exit 2
+fi
+
+worst=0
+for net in "${nets[@]}"; do
+    info=$(docker network inspect -f '{{.Internal}} {{range .IPAM.Config}}{{.Subnet}} {{end}}' "$net" 2>/dev/null) \
+        || { echo "[$net] cannot inspect"; [ $worst -eq 0 ] && worst=2; continue; }
+    read -r internal subnets <<< "$info"
+    for s in $subnets; do
+        case $s in
+            "$DCB_POOL_PREFIX"*/2[4-9]|"$DCB_POOL_PREFIX"*/3[0-2]) ;;
+            *) echo "[$net] LEAK subnet $s is outside $DCB_POOL_NETS"; worst=1 ;;
+        esac
+    done
+    if [ "$internal" = true ]; then
+        env=(-e MUST_FAIL="$must_fail $DCB_PROBE_MUST_PASS" -e DNS_MUST_FAIL="$DCB_PROBE_DNS_MUST_FAIL" -e MUST_PASS= -e DNS_MUST_PASS=)
+    else
+        env=(-e MUST_FAIL="$must_fail" -e DNS_MUST_FAIL="$DCB_PROBE_DNS_MUST_FAIL" -e MUST_PASS="$DCB_PROBE_MUST_PASS" -e DNS_MUST_PASS="$DCB_PROBE_DNS_MUST_PASS")
+    fi
+    out=$(docker run --rm --network "$net" --cap-drop ALL --read-only "${env[@]}" "$image" 2>&1)
+    rc=$?
+    echo "$out" | sed "s/^/[$net$([ "$internal" = true ] && echo ' internal')] /"
+    case $rc in
+        0) ;;
+        1) worst=1 ;;
+        *) [ $worst -eq 0 ] && worst=2 ;;
+    esac
+done
+echo "dcb-probe: ${#nets[@]} network(s); $open_from_host MUST_FAIL target(s) open from the machine itself; wan $wan; result $worst"
+exit $worst

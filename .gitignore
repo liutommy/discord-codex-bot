@@ -21,3 +21,11 @@ logs/
 state/
 compose.override.yaml
 .hold
+# Host-local copies of the deploy/orbstack examples (real addresses and mail commands); only the
+# *.example files are tracked. Installed copies live outside the checkout, these guard a copy made
+# in place.
+deploy/orbstack/dcb.default
+deploy/orbstack/mac/dcb-wake.config
+deploy/orbstack/mac/targets
+deploy/orbstack/mac/*.plist
+!deploy/orbstack/mac/com.example.dcb-wake.plist

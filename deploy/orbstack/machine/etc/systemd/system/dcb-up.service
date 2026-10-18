@@ -1,0 +1,10 @@
+[Unit]
+Description=dcb: start the stack behind firewall + probe (fail-closed)
+Requisite=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dcb-up
+TimeoutStartSec=15min
