@@ -10,11 +10,13 @@ dependencies = [
     "pypdf>=5,<7",
     "discord.py>=2.6,<3",
     "playwright>=1.47,<2",
+    # scripts/build_lol_names.py, which data-refresh runs inside the image: both script forms
+    # of every name in the path aliases.
+    "opencc-python-reimplemented>=0.1.7",
 ]
 
 [dependency-groups]
 dev = [
-    "opencc-python-reimplemented>=0.1.7",
     "pytest>=8.4,<10",
     "pytest-asyncio>=1.2,<2",
     "ruff>=0.13,<1",

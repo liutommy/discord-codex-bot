@@ -14,9 +14,10 @@ not transliterations. Three topics, one per kind:
 
     uv run python scripts/build_lol_names.py
 
-writes permanent/topics/{英雄,海克斯,裝備}譯名對照.md. permanent/ is operator-managed and baked
-into the image (permanent/README.md), so rebuild afterwards. Re-run when a patch adds content;
-the summary line prints what hexdata lists that the sources lack, so drift is visible.
+writes permanent/topics/{英雄,海克斯,裝備}譯名對照.md and config/lol-names.json, the copies baked
+into the image. The running Bot's copies are refreshed in the generated-data volume by
+scripts/refresh_data.py, which calls build() and needs no rebuild. The summary line prints what
+hexdata lists that the sources lack, so drift is visible.
 """
 
 from __future__ import annotations
@@ -115,13 +116,12 @@ def cn_to_tw(*pairs: list[tuple[str, str]]) -> dict[str, str]:
 def _script_variants():
     """name -> {name, its Traditional form, its Simplified form}. Members type the mainland
     name in Traditional glyphs as often as not (亞索 for 亚索), and neither table has that
-    spelling. OpenCC is a dev dependency of this script only; without it, names pass through
-    unexpanded and the run says so."""
+    spelling. OpenCC is a runtime dependency (the data-refresh image runs this script); a missing
+    install fails the run rather than writing aliases that carry one script only."""
     try:
         from opencc import OpenCC
-    except ImportError:
-        print("opencc not installed: aliases carry one script only", file=sys.stderr)
-        return lambda name: {name}
+    except ImportError as error:
+        raise RuntimeError("opencc is required to build the name aliases (uv sync)") from error
     s2t, t2s = OpenCC("s2t"), OpenCC("t2s")
     return lambda name: {name, s2t.convert(name), t2s.convert(name)}
 
@@ -139,7 +139,7 @@ def path_aliases(
         for name in names:
             if name and target:
                 # sorted: a set's iteration order changes per process (hash randomization), and
-                # a JSON that differs on every run would make daily_rebuild.sh rebuild daily.
+                # a JSON that differs on every run would count as a change on every refresh.
                 for spelling in sorted(variants(name)):
                     out.setdefault(f"{kind}/{spelling}", target)
 
@@ -173,7 +173,10 @@ def render(heading: str, intro: str, columns: list[str], rows: list[list[str]]) 
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
+def build() -> tuple[dict[str, str], str]:
+    """({file name: text}, summary). The names are relative to the data directory:
+    "topics/<table>.md" for the three tables and NAMES_JSON's name for the machine map. Raises
+    ValueError when a table comes out empty (a source moved), so nothing half-built is written."""
     version = fetch_json(f"{DDRAGON}/api/versions.json")[0]
     summary = fetch_json(f"{HEXDATA}/data/ai-summary.json")
     patch, day = summary["reportPatch"], summary["reportDate"]
@@ -181,55 +184,46 @@ def main() -> int:
         f"hexdata.com.cn（Patch {patch}，{day}）。由 scripts/build_lol_names.py 產生，勿手改。"
         " 名稱全是查表對照：成員用台服名問，hexdata 只認陸服名與數字 id。"
     )
-    TOPICS.mkdir(parents=True, exist_ok=True)
+    files: dict[str, str] = {}
 
     tw = fetch_json(f"{DDRAGON}/cdn/{version}/data/zh_TW/champion.json")["data"]
     cn = fetch_json(f"{DDRAGON}/cdn/{version}/data/zh_CN/champion.json")["data"]
     champions = champion_rows(tw, cn, summary["heroAliases"])
-    (TOPICS / "英雄譯名對照.md").write_text(
-        render(
-            "英雄譯名對照（台服 ↔ 陸服）",
-            f"來源：Riot Data Dragon {version}（zh_TW／zh_CN）＋ {source} "
-            "查到列後，hexdata 英雄頁路徑就是 `hero/<hexdata 路徑>`"
-            "（例：逆命 → `hero/4-twistedfate`）。"
-            "陸服暱稱是玩家俗稱，成員提問裡也可能出現。",
-            ["key", "台服名", "台服稱號", "陸服名", "陸服稱號", "hexdata 路徑", "陸服暱稱"],
-            champions,
-        ),
-        "utf-8",
+    files["topics/英雄譯名對照.md"] = render(
+        "英雄譯名對照（台服 ↔ 陸服）",
+        f"來源：Riot Data Dragon {version}（zh_TW／zh_CN）＋ {source} "
+        "查到列後，hexdata 英雄頁路徑就是 `hero/<hexdata 路徑>`"
+        "（例：逆命 → `hero/4-twistedfate`）。"
+        "陸服暱稱是玩家俗稱，成員提問裡也可能出現。",
+        ["key", "台服名", "台服稱號", "陸服名", "陸服稱號", "hexdata 路徑", "陸服暱稱"],
+        champions,
     )
 
     aug_paths = hexdata_paths(fetch(f"{HEXDATA}/augments"), "augment")
     aug_tw = fetch_json(f"{CDRAGON}/zh_tw/v1/cherry-augments.json")
     aug_cn = fetch_json(f"{CDRAGON}/zh_cn/v1/cherry-augments.json")
     augments = augment_rows(aug_tw, aug_cn, aug_paths)
-    (TOPICS / "海克斯譯名對照.md").write_text(
-        render(
-            "海克斯（強化符文）譯名對照（台服 ↔ 陸服）",
-            f"來源：CommunityDragon cherry-augments（zh_tw／zh_cn）＋ {source} "
-            "只列 hexdata 有統計的海克斯。hexdata 英雄頁的「推荐海克斯」用陸服名，"
-            "回答成員時對照成台服名；符文頁路徑是「hexdata 路徑」欄。"
-            "稀有度：銀／金／棱彩。",
-            ["id", "台服名", "陸服名", "稀有度", "hexdata 路徑"],
-            augments,
-        ),
-        "utf-8",
+    files["topics/海克斯譯名對照.md"] = render(
+        "海克斯（強化符文）譯名對照（台服 ↔ 陸服）",
+        f"來源：CommunityDragon cherry-augments（zh_tw／zh_cn）＋ {source} "
+        "只列 hexdata 有統計的海克斯。hexdata 英雄頁的「推荐海克斯」用陸服名，"
+        "回答成員時對照成台服名；符文頁路徑是「hexdata 路徑」欄。"
+        "稀有度：銀／金／棱彩。",
+        ["id", "台服名", "陸服名", "稀有度", "hexdata 路徑"],
+        augments,
     )
 
     item_paths = hexdata_paths(fetch(f"{HEXDATA}/items"), "item")
     item_tw = fetch_json(f"{DDRAGON}/cdn/{version}/data/zh_TW/item.json")["data"]
     item_cn = fetch_json(f"{DDRAGON}/cdn/{version}/data/zh_CN/item.json")["data"]
     items = item_rows(item_tw, item_cn, item_paths)
-    (TOPICS / "裝備譯名對照.md").write_text(
-        render(
-            "裝備譯名對照（台服 ↔ 陸服）",
-            f"來源：Riot Data Dragon {version} item.json（zh_TW／zh_CN）＋ {source} "
-            "只列 hexdata 有統計的裝備。hexdata 英雄頁的裝備適配度用陸服名，"
-            "回答成員時對照成台服名。",
-            ["id", "台服名", "陸服名", "hexdata 路徑"],
-            items,
-        ),
-        "utf-8",
+    files["topics/裝備譯名對照.md"] = render(
+        "裝備譯名對照（台服 ↔ 陸服）",
+        f"來源：Riot Data Dragon {version} item.json（zh_TW／zh_CN）＋ {source} "
+        "只列 hexdata 有統計的裝備。hexdata 英雄頁的裝備適配度用陸服名，"
+        "回答成員時對照成台服名。",
+        ["id", "台服名", "陸服名", "hexdata 路徑"],
+        items,
     )
 
     # The same tables the other way round, as a machine map: apis.json points hexdata at it and
@@ -244,17 +238,21 @@ def main() -> int:
     # ...and the same tables as a path resolver, so the model can ask for hero/逆命 in whatever
     # name the member used instead of translating and remembering Riot ids itself.
     paths = path_aliases(champions, augments, items)
-    NAMES_JSON.write_text(
+    if not (champions and augments and items and names and paths):
+        raise ValueError(
+            f"empty table: champions {len(champions)}, augments {len(augments)},"
+            f" items {len(items)}, names {len(names)}, paths {len(paths)}"
+        )
+    files[NAMES_JSON.name] = (
         json.dumps({"names": names, "paths": paths}, ensure_ascii=False, indent=0, sort_keys=True)
-        + "\n",
-        "utf-8",
+        + "\n"
     )
 
     no_champion = [row[1] for row in champions if not row[5]]
     no_augment = sorted(set(aug_paths) - {row[0] for row in augments}, key=int)
     no_item = sorted(set(item_paths) - {row[0] for row in items}, key=int)
-    print(
-        f"{TOPICS}: champions {len(champions)}"
+    line = (
+        f"champions {len(champions)}"
         f" (not on hexdata: {'、'.join(no_champion) or 'none'}),"
         f" augments {len(augments)}/{len(aug_paths)}"
         f" (hexdata ids missing in CDragon: {no_augment or 'none'}),"
@@ -263,6 +261,16 @@ def main() -> int:
         f" Data Dragon {version}, hexdata Patch {patch} ({day});"
         f" {NAMES_JSON.name}: {len(names)} names, {len(paths)} path aliases"
     )
+    return files, line
+
+
+def main() -> int:
+    files, summary = build()
+    for name, text in files.items():
+        target = NAMES_JSON if name == NAMES_JSON.name else TOPICS / Path(name).name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, "utf-8")
+    print(f"{TOPICS}: {summary}")
     return 0
 
 

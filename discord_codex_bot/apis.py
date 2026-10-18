@@ -23,6 +23,7 @@ from yarl import URL
 
 from . import tags
 from .config import Config
+from .datafiles import LiveFile
 from .links import _read_bounded, html_to_text
 
 LOGGER = logging.getLogger(__name__)
@@ -57,6 +58,13 @@ class Api:
     # Optional {alias path: real path}, e.g. {"hero/逆命": "hero/4-twistedfate"}: the model
     # passes the member's own words and the Bot resolves them before the request goes out.
     paths: dict[str, str] = field(default_factory=dict)
+    # The names file apis.json points at, when it does; it replaces `names` and `paths` above and
+    # is read again whenever data-refresh replaces it.
+    names_file: LiveFile[tuple[dict[str, str], dict[str, str]]] | None = None
+
+    def name_maps(self) -> tuple[dict[str, str], dict[str, str]]:
+        """({foreign name: local name}, {alias path: real path}) as of now."""
+        return self.names_file.get() if self.names_file else (self.names, self.paths)
 
 
 # One cookie jar per API for the life of the process, so the login survives between calls
@@ -69,8 +77,9 @@ def _expand(value: str) -> str:
     return _ENV.sub(lambda m: os.environ.get(m.group(1), ""), value)
 
 
-def load_registry(path: Path | None) -> dict[str, Api]:
-    """apis.json → {name: Api}; unreadable or malformed files register nothing (logged)."""
+def load_registry(path: Path | None, data_dir: Path | None = None) -> dict[str, Api]:
+    """apis.json → {name: Api}; unreadable or malformed files register nothing (logged). A names
+    file is looked up in `data_dir` (the refreshed copy) first, then next to apis.json."""
     if path is None:
         return {}
     try:
@@ -87,23 +96,40 @@ def load_registry(path: Path | None) -> dict[str, Api]:
         login = {str(k): _expand(str(v)) for k, v in (spec.get("login") or {}).items()}
         if not (login.get("user") and login.get("password")):
             login = {}  # credentials not configured: stay anonymous rather than fail every call
-        names, paths = _names(path.parent / str(spec["names"])) if spec.get("names") else ({}, {})
+        names_file = None
+        if spec.get("names"):
+            file = str(spec["names"])
+            candidates = ([data_dir / file] if data_dir else []) + [path.parent / file]
+            names_file = LiveFile(f"names map {file}", candidates, parse_names, ({}, {}))
+            names_file.get()  # load now, so the start-up log says which copy is in use
         out[str(name)] = Api(
-            str(name), str(spec["base"]), headers, str(spec.get("doc") or ""), login, names, paths
+            str(name),
+            str(spec["base"]),
+            headers,
+            str(spec.get("doc") or ""),
+            login,
+            names_file=names_file,
         )
     return out
 
 
-def _names(path: Path) -> tuple[dict[str, str], dict[str, str]]:
-    """({foreign: local}, {alias path: real path}) from the JSON next to apis.json; missing or
-    malformed registers nothing (logged) and the API still works, just untranslated."""
+def parse_names(text: str) -> tuple[dict[str, str], dict[str, str]]:
+    """({foreign: local}, {alias path: real path}) from a names file. ValueError when it is not
+    one, or carries neither map: an empty table must not replace a good one. With no usable file
+    at all the API still works, just untranslated."""
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
     try:
-        data = json.loads(path.read_text("utf-8"))
-    except (OSError, ValueError) as error:
-        LOGGER.warning("names map %s unreadable: %s", path, type(error).__name__)
-        return {}, {}
-    names = {str(k): str(v) for k, v in (data.get("names") or {}).items() if k and v and k != v}
-    paths = {str(k): str(v) for k, v in (data.get("paths") or {}).items() if k and v}
+        raw_names, raw_paths = data.get("names") or {}, data.get("paths") or {}
+        if not isinstance(raw_names, dict) or not isinstance(raw_paths, dict):
+            raise ValueError("names and paths must be objects")
+        names = {str(k): str(v) for k, v in raw_names.items() if k and v and k != v}
+        paths = {str(k): str(v) for k, v in raw_paths.items() if k and v}
+    except (TypeError, AttributeError) as error:
+        raise ValueError(f"malformed names file: {type(error).__name__}: {error}") from error
+    if not names and not paths:
+        raise ValueError("no names and no paths")
     return names, paths
 
 
@@ -269,7 +295,8 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
     if api is None:
         return f"（沒有叫 {name} 的 API；可用：{'、'.join(registry) or '無'}）"
     path = html.unescape(path)  # models tend to write &amp; inside tag attributes
-    path, note = resolve_path(path, api.paths)  # hero/逆命 -> hero/4-twistedfate
+    names, aliases = api.name_maps()
+    path, note = resolve_path(path, aliases)  # hero/逆命 -> hero/4-twistedfate
     if not path:
         return note
     if "://" in path or path.startswith("//") or ".." in unquote(path):
@@ -318,7 +345,7 @@ async def call_api(name: str, path: str, registry: dict[str, Api], config: Confi
             # the raw form the model went to a web search for the same numbers instead.
             title, text = html_to_text(body, url)
             body = f"{title}\n\n{text}" if title else text
-        body = note + (localize(body.strip(), api.names) or "（空回應）")
+        body = note + (localize(body.strip(), names) or "（空回應）")
         # Which source answered is otherwise invisible: the answer cites what it likes.
         LOGGER.info("api %s %s -> HTTP %s, %d chars", name, path, status, len(body))
         return _bounded(body, config.apis_max_chars)

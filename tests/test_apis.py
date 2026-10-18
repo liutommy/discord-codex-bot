@@ -219,8 +219,9 @@ async def test_call_api_applies_the_names_map_from_next_to_the_registry(
     spec = {"hx": {"base": "https://hx.example/", "names": "names.json"}}
     (tmp_path / "apis.json").write_text(json.dumps(spec), "utf-8")
     registry = load_registry(tmp_path / "apis.json")
-    assert registry["hx"].names == {"回响施放": "共鳴施放"}  # identical pairs dropped
-    assert registry["hx"].paths["hero/TF"] == "hero/4-twistedfate"
+    names, paths = registry["hx"].name_maps()
+    assert names == {"回响施放": "共鳴施放"}  # identical pairs dropped
+    assert paths["hero/TF"] == "hero/4-twistedfate"
     page = "<html><body>推荐 回响施放 98.0</body></html>".encode()
     session = Session(Response(page, 200, "text/html"))
     monkeypatch.setattr(apis.aiohttp, "ClientSession", lambda **kw: session)
@@ -234,7 +235,7 @@ async def test_call_api_applies_the_names_map_from_next_to_the_registry(
     # a missing map is a warning, not a broken API
     spec["hx"]["names"] = "gone.json"
     (tmp_path / "apis.json").write_text(json.dumps(spec), "utf-8")
-    assert load_registry(tmp_path / "apis.json")["hx"].names == {}
+    assert load_registry(tmp_path / "apis.json")["hx"].name_maps() == ({}, {})
 
 
 async def test_call_api_hands_a_page_over_as_text_not_markup(monkeypatch, config) -> None:
