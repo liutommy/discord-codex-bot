@@ -94,13 +94,14 @@ fi
 nets=()   # while-read rather than mapfile: runs on bash 3.2 too (the tests run on macOS)
 # A network list that cannot be read (or comes back empty) means no probe: inconclusive, which is
 # timed like any other inconclusive probe, never a partial list probed and then started.
-if netlist=$(docker network ls --format '{{.Name}}' --filter "label=com.docker.compose.project=$DCB_PROJECT" 2>&1); then
+# Names come from stdout only: a warning on stderr must not be probed as a network name.
+if netlist=$(docker network ls --format '{{.Name}}' --filter "label=com.docker.compose.project=$DCB_PROJECT" 2>"$run/netls.err"); then
     while read -r n; do [ -n "$n" ] && nets+=("$n"); done <<< "$netlist"
 fi
 if [ ${#nets[@]} -gt 0 ]; then
     probe=$("$sbin/dcb-probe" "${nets[@]}" 2>&1); prc=$?
 else
-    probe="cannot list the project networks: $(echo "$netlist" | tail -1)"; prc=2
+    probe="cannot list the project networks: $(tail -1 "$run/netls.err" 2>/dev/null)"; prc=2
 fi
 case $prc in
     0) rm -f "$since_file" ;;

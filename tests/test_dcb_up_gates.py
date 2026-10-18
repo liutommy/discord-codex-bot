@@ -32,7 +32,8 @@ STUBS = {
         '  *" config --format json") cat "$COMPOSE_CONFIG" ;;\n'
         '  "ps -q "*) echo "$RUNNING" ;;\n'
         '  "ps -aq "*) echo cid1 ;;\n'
-        '  "network ls "*) [ -n "$NETLS_FAIL" ] && { echo proj_partial; exit 1; }\n'
+        '  "network ls "*) [ -n "$NETLS_WARN" ] && echo "WARNING: context" >&2\n'
+        '    [ -n "$NETLS_FAIL" ] && { echo proj_partial; exit 1; }\n'
         "    echo proj_default ;;\n"
         '  "inspect -f "*) [ -n "$INSPECT_FAIL" ] && exit 1; echo "cid1 /bot ${POLICY:-no}" ;;\n'
         "esac\n"
@@ -161,3 +162,9 @@ def test_a_network_list_that_fails_is_an_inconclusive_probe_never_a_partial_one(
     assert not [c for c in calls if c.startswith("probe")], calls  # proj_partial is never probed
     assert not any(c.endswith(" up -d") for c in calls), calls
     assert (tmp_path / "run" / "probe-inconclusive-since").exists()  # timed like any inconclusive
+
+
+def test_a_warning_on_stderr_is_never_probed_as_a_network(tmp_path) -> None:
+    rc, calls, log = _run(tmp_path, NETLS_WARN="1")
+    assert rc == 0, log
+    assert [c for c in calls if c.startswith("probe")] == ["probe proj_default"], calls
