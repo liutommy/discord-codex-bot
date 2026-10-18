@@ -18,24 +18,40 @@ from .config import Config
 
 LOGGER = logging.getLogger(__name__)
 RETRY_AFTER_FAILURE_SECONDS = 60
+CONNECT_RETRY_SECONDS = 1
 UNSTABLE = "（免費模型可能暫時不可用，換一個試試）"
 # The routers' reasoning.effort vocabulary; the shared option's "max" is their "xhigh".
 _EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
+_THINK_OPEN, _THINK_CLOSE = "<think>", "</think>"
 
 
 @dataclass(frozen=True, slots=True)
 class Router:
-    """One OpenAI-compatible model router. Both are stateless (the Bot keeps the transcript),
+    """One OpenAI-compatible model router. All are stateless (the Bot keeps the transcript),
     list a catalog at /models and take chat completions; they differ in host, key, how a free
     model is marked, and the thread-id prefix that tells their transcripts apart."""
 
     key: str  # backend id stored per member ("<key>:<model>")
     label: str  # shown to members
-    api: str  # base URL
+    api: Callable[[Config], str]  # base URL
     thread_prefix: str
     api_key: Callable[[Config], str]
+    enabled: Callable[[Config], bool]  # offered to members at all
     is_free: Callable[[dict], bool]
     excluded: tuple[str, ...] = ()
+    unstable: str = UNSTABLE  # appended to every error the member sees
+    free_tier: bool = True  # the catalog is a free tier that comes and goes
+    # Refused connections retried, a second apart: nothing reached the server, so a retry
+    # cannot run a request twice. The local relay refuses while every worker is busy.
+    connect_retries: int = 0
+    # Drop a leading <think>…</think> block (local reasoning models). Off for the hosted
+    # routers: an answer may start with a literal "<think>" there.
+    drops_think: bool = False
+
+    @property
+    def models_word(self) -> str:
+        """What its catalog is called to members: "N 個免費模型", or "N 個模型" locally."""
+        return "免費模型" if self.free_tier else "模型"
 
 
 def _openrouter_free(entry: dict) -> bool:
@@ -55,9 +71,10 @@ ROUTERS: dict[str, Router] = {
     "openrouter": Router(
         key="openrouter",
         label="OpenRouter",
-        api="https://openrouter.ai/api/v1",
+        api=lambda config: "https://openrouter.ai/api/v1",
         thread_prefix="or-",
         api_key=lambda config: config.openrouter_api_key,
+        enabled=lambda config: bool(config.openrouter_api_key),
         is_free=_openrouter_free,
         # Free entries that are not chat models for our purpose (probed 2026-09-12): safety
         # classifiers answer "User Safety: safe"; inkling refuses plain chat (403 "agentic").
@@ -66,10 +83,26 @@ ROUTERS: dict[str, Router] = {
     "orcarouter": Router(
         key="orcarouter",
         label="OrcaRouter",
-        api="https://api.orcarouter.ai/v1",
+        api=lambda config: "https://api.orcarouter.ai/v1",
         thread_prefix="oc-",
         api_key=lambda config: config.orcarouter_api_key,
+        enabled=lambda config: bool(config.orcarouter_api_key),
         is_free=_orcarouter_free,
+    ),
+    # A server on the Docker host the operator runs: whatever it serves is offered, no price
+    # rule; llama-server and mlx_lm.server list no architecture, so models count as text-only.
+    "local": Router(
+        key="local",
+        label="地端模型",
+        api=lambda config: config.local_llm_url.rstrip("/"),
+        thread_prefix="lo-",
+        api_key=lambda config: config.local_llm_api_key,
+        enabled=lambda config: bool(config.local_llm_url),
+        is_free=lambda entry: True,
+        unstable="（地端模型可能沒有在跑，換一個試試）",
+        free_tier=False,
+        connect_retries=3,
+        drops_think=True,
     ),
 }
 OPENROUTER_ROUTER = ROUTERS["openrouter"]
@@ -117,13 +150,19 @@ def _session(
     config: Config, timeout_seconds: int, router: Router = OPENROUTER_ROUTER
 ) -> aiohttp.ClientSession:
     return aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=timeout_seconds),
-        headers={
-            "Authorization": f"Bearer {router.api_key(config)}",
-            "HTTP-Referer": "https://github.com/liutommy/discord-codex-bot",
-            "X-Title": "discord-codex-bot",
-        },
+        timeout=aiohttp.ClientTimeout(total=timeout_seconds), headers=_headers(config, router)
     )
+
+
+def _headers(config: Config, router: Router) -> dict[str, str]:
+    """No Authorization header without a key: a local server may run without one."""
+    headers = {
+        "HTTP-Referer": "https://github.com/liutommy/discord-codex-bot",
+        "X-Title": "discord-codex-bot",
+    }
+    if key := router.api_key(config):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
 
 
 class Catalog:
@@ -149,7 +188,7 @@ class Catalog:
             try:
                 timeout = self._config.link_timeout_seconds
                 async with _session(self._config, timeout, self.router) as session:
-                    async with session.get(f"{self.router.api}/models") as response:
+                    async with session.get(f"{self.router.api(self._config)}/models") as response:
                         response.raise_for_status()
                         payload = await response.json(content_type=None)
                 self.models = parse_catalog(payload, self.router)
@@ -293,28 +332,35 @@ async def run_router(
             "type": "json_schema",
             "json_schema": {"name": "answer", "strict": True, "schema": json.loads(raw_schema)},
         }
-    label = router.label
+    label, unstable = router.label, router.unstable
+    if not router.enabled(config):
+        raise RuntimeError(f"{label} 未設定")
     if on_delta is not None:
         body["stream"] = True
     try:
-        async with _session(config, config.codex_timeout_seconds, router) as session:
-            async with session.post(f"{router.api}/chat/completions", json=body) as response:
-                status = response.status
-                if on_delta is not None and status == 200:
-                    payload = await _read_sse(response, on_delta)
-                else:
-                    payload = await response.json(content_type=None)
+        for attempt in range(router.connect_retries + 1):
+            try:
+                status, payload = await _post(router, config, body, on_delta)
+                break
+            except aiohttp.ClientConnectorError as refused:
+                if attempt == router.connect_retries or not isinstance(
+                    refused.os_error, ConnectionRefusedError
+                ):
+                    raise
+                await asyncio.sleep(CONNECT_RETRY_SECONDS)
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
-        raise RuntimeError(f"{label} 連線失敗：{type(error).__name__}{UNSTABLE}") from error
+        raise RuntimeError(f"{label} 連線失敗：{type(error).__name__}{unstable}") from error
     error = payload.get("error") if isinstance(payload, dict) else None
     if status != 200 or error:
         detail = (error or {}).get("message") if isinstance(error, dict) else str(error or "")
         where = f"HTTP {status}" if status != 200 else "上游錯誤"
-        raise RuntimeError(f"{label} {where}：{detail or '無說明'}{UNSTABLE}")
+        raise RuntimeError(f"{label} {where}：{detail or '無說明'}{unstable}")
     choices = payload.get("choices") or []
     text = message_text((choices[0].get("message") or {}).get("content") or "") if choices else ""
+    if router.drops_think:
+        text = strip_think(text)
     if not text.strip():
-        raise RuntimeError(f"{label} 沒有回傳文字{UNSTABLE}")
+        raise RuntimeError(f"{label} 沒有回傳文字{unstable}")
     # Stored without the image bytes: replaying base64 every turn would swamp the history.
     stored_user = prompt + (f"\n\n[附圖 {len(images)} 張]" if images else "")
     _save_transcript(
@@ -330,9 +376,32 @@ async def run_router(
     return CodexResult(text.strip(), (), None, thread_id, resumed)
 
 
-async def _read_sse(response, on_delta) -> dict:
+def strip_think(text: str, streaming: bool = False) -> str:
+    """The answer without a leading <think>…</think> block, where Qwen-style local models put
+    their reasoning. An unclosed block is reasoning so far: no answer yet. While `streaming`, a
+    start that may still grow into <think> ("<thi") counts as one too."""
+    body = text.lstrip()
+    if streaming and body and _THINK_OPEN.startswith(body):
+        return ""
+    if not body.startswith(_THINK_OPEN):
+        return text
+    _, closed, answer = body.partition(_THINK_CLOSE)
+    return answer.lstrip() if closed else ""
+
+
+async def _post(router: Router, config: Config, body: dict, on_delta) -> tuple[int, dict]:
+    async with _session(config, config.codex_timeout_seconds, router) as session:
+        url = f"{router.api(config)}/chat/completions"
+        async with session.post(url, json=body) as response:
+            if on_delta is not None and response.status == 200:
+                return response.status, await _read_sse(response, on_delta, router.drops_think)
+            return response.status, await response.json(content_type=None)
+
+
+async def _read_sse(response, on_delta, drops_think: bool = False) -> dict:
     """Consume an OpenAI-style SSE stream, reporting the accumulated answer text after each
-    content delta (reasoning deltas are not shown), and return a completion-shaped payload."""
+    content delta (reasoning deltas and a leading <think> block are not shown), and return a
+    completion-shaped payload."""
     accumulated = ""
     async for raw in response.content:
         line = raw.decode("utf-8", errors="replace").strip()
@@ -352,7 +421,9 @@ async def _read_sse(response, on_delta) -> dict:
         piece = delta.get("content")
         if piece:
             accumulated += str(piece)
-            await on_delta(accumulated)
+            shown = strip_think(accumulated, streaming=True) if drops_think else accumulated
+            if shown:
+                await on_delta(shown)
     return {"choices": [{"message": {"content": accumulated}}]}
 
 

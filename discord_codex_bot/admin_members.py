@@ -18,7 +18,7 @@ from typing import Any
 
 from .admin import write_private
 from .admin_server import AdminError, Handler, Rejected
-from .backends import AGY, CODEX, GROK, OPENROUTER, ORCAROUTER, split_stored
+from .backends import AGY, CODEX, GROK, LOCAL, OPENROUTER, ORCAROUTER, split_stored
 from .backup import export_memory_zip
 from .config import REASONING_EFFORTS
 from .memory import SCOPES, STYLE_MAX_CHARS
@@ -26,7 +26,7 @@ from .reminders import MAX_DAYS_AHEAD, MAX_PER_USER, describe, parse_when, targe
 from .threads import ThreadStore
 
 LOGGER = logging.getLogger(__name__)
-PROVIDERS = (GROK, CODEX, AGY, OPENROUTER, ORCAROUTER)
+PROVIDERS = (GROK, CODEX, AGY, OPENROUTER, ORCAROUTER, LOCAL)
 SLASH_TEXT_MAX = 6000  # what a slash command's text option holds
 REMINDER_TEXT_MAX = 500  # what ReminderStore keeps of a reminder's text
 NAME_MAX = 100

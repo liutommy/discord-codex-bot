@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains a private Discord gateway to AI backends: the subscription-authenticated Codex CLI, Grok (through the xsearch sidecar), Antigravity (`agy`) and the OpenAI-compatible routers (OpenRouter, OrcaRouter).
+This repository contains a private Discord gateway to AI backends: the subscription-authenticated Codex CLI, Grok (through the xsearch sidecar), Antigravity (`agy`) and the OpenAI-compatible routers (OpenRouter, OrcaRouter, and a local server on the Docker host).
 
 ## Rules
 

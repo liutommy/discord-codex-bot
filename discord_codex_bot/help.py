@@ -30,9 +30,10 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         ["/{p}-status"],
     ),
     "-model": (
-        "選你要用的模型：provider（Grok／Codex／Antigravity／OpenRouter／OrcaRouter）→ "
-        "model（打字會自動篩選；OpenRouter、OrcaRouter 只列免費模型）→ effort（這個模型的預設"
-        "強度）。只選 provider 就用它的預設模型（OpenRouter、OrcaRouter 要選 model）；全部留空＝"
+        "選你要用的模型：provider（Grok／Codex／Antigravity／OpenRouter／OrcaRouter／地端模型）"
+        "→ model（打字會自動篩選；OpenRouter、OrcaRouter 只列免費模型）→ effort（這個模型的預設"
+        "強度）。只選 provider 就用它的預設模型（OpenRouter、OrcaRouter、地端模型要選 model）；"
+        "全部留空＝"
         "查看目前設定；clear 回到伺服器預設（{default}）。換模型後下一題會新開對話。",
         [
             "/{p}-model provider:Codex（只選來源：用 Codex 的模型）",
@@ -182,8 +183,8 @@ FEATURES: list[str] = [
     "Reddit、Streamable 等會抓下來看；長片會先回「🎬 處理中」再改成正式答案。",
     "**模型來源**：Grok（會自己用 X 搜尋查貼文與帳號；看得到 PNG／JPEG 圖，"
     "GIF／WebP 改由 Codex 回答）、Codex、Antigravity（Gemini／Claude）、"
-    "OpenRouter 與 OrcaRouter 的免費模型；伺服器預設用 {default}。"
-    "免費模型可能不穩或下架，回錯就換一個。",
+    "OpenRouter 與 OrcaRouter 的免費模型、伺服器自己跑的地端模型（有開才會列出）；"
+    "伺服器預設用 {default}。免費模型可能不穩或下架，回錯就換一個。",
     "**記憶**分個人與伺服器兩層，另有管理者維護的永久記憶；Bot 會在需要時自己查閱。"
     "每週還會從你最近幾段對話推測出「（推測）」開頭的個人記憶，從多位成員都提到的事整理出"
     "「（多人提及）」開頭的伺服器記憶；不對就用 `/{p}-forget` 刪掉。",
