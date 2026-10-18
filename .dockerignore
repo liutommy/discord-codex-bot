@@ -8,3 +8,11 @@ __pycache__
 .ruff_cache
 tests
 
+# Host-local files never COPY'd into an image. Sent as build context they are still read (a
+# non-root build fails on state/, mode 700) and kept in the builder cache: sign-ins and DBs.
+state
+backups
+logs
+compose.override.yaml
+.hold
+**/*.age
