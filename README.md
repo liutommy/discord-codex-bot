@@ -786,7 +786,7 @@ operators listed in `LINKCLEAN_ADMIN_IDS` may use this command.
 
 Two layers remove tracking parameters. The [ClearURLs](https://gitlab.com/ClearURLs/rules)
 rule set (LGPL-3.0, 200+ site-scoped providers, fetched daily by `scripts/fetch_clearurls.py`
-into `config/clearurls.json`; a change is committed locally and rebuilds the image, restarting the Bot,
+into `config/clearurls.json`; a change rebuilds the image (no commit), restarting the Bot,
 through `scripts/daily_rebuild.sh`) is applied first, including its known redirector unwrapping
 (for example `google.com/url?q=`); its affiliate-id (`referralMarketing`) and request-blocking
 (`completeProvider`) rules are not used. The Bot's own blocklist (`utm_*`, click ids such as
@@ -864,6 +864,7 @@ Bot, `permanent/topics/*譯名對照.md` for the model) are generated from Data 
 CommunityDragon and hexdata by `scripts/build_lol_names.py`. `scripts/daily_rebuild.sh` runs it
 from the operator's crontab at 05:00 (after the 02:00 memory consolidation) and rebuilds the
 image **only when a table changed** — a new champion, augment or item arrives with a patch,
-not every day. On a change it commits `config/lol-names.json` locally (never pushes). Log:
+not every day. A change is only baked into the image, never committed: the regenerated JSON stays
+a working-tree change until it is sent as a PR. Log:
 `logs/daily-rebuild.log`. To run it by hand: `scripts/daily_rebuild.sh` (`DRY_RUN=1` to see
 what it would do without rebuilding).
