@@ -148,7 +148,16 @@ else
     [ -d "$DCB_WAKE_WORKDIR" ] || { defer "work dir $DCB_WAKE_WORKDIR missing"; exit 1; }
     # Fail closed: a counter that is present but not a number must not read as 0.
     if ! last=$(read_num "$STATE/last-wake"); then
-        defer "$STATE/last-wake is not a number; treated as a wake just now"; exit 0
+        defer "$STATE/last-wake is not a number; treated as a wake just now"
+        # Until someone fixes the file every request is deferred: say so once a day, not only in the log.
+        if [ ! -e "$STATE/garbled-mailed-$day" ]; then
+            if send_mail "[dcb-wake] $day wakes blocked" "dcb-wake cannot read $STATE/last-wake (not a number), so every wake request is deferred until the file is fixed or removed. The machine is asking for one (problem kinds: $kinds). Log: $LOG"; then
+                : > "$STATE/garbled-mailed-$day"
+            else
+                log "WARN the blocked-wakes notice could not be mailed"
+            fi
+        fi
+        exit 0
     fi
     if ! count=$(read_num "$count_file"); then
         defer "$count_file is not a number; treated as the daily cap reached"; count=$DCB_WAKE_MAX_PER_DAY
@@ -172,7 +181,7 @@ else
         log "ERROR cannot record the wake in $STATE; not waking"; exit 1
     fi
 fi
-find "$STATE" -maxdepth 1 \( -name 'wakes-*' -o -name 'cap-mailed-*' \) -mtime +7 -delete 2>/dev/null
+find "$STATE" -maxdepth 1 \( -name 'wakes-*' -o -name 'cap-mailed-*' -o -name 'garbled-mailed-*' \) -mtime +7 -delete 2>/dev/null
 find "$STATE/reports" -name 'wake-*.txt' -mtime +60 -delete 2>/dev/null
 if [ "$mode" = test ]; then first=test; else first=$(printf '%s\n' "$reasons" | head -1 | awk '{print $2}'); fi
 

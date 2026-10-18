@@ -444,3 +444,14 @@ def test_claude_sees_only_an_allowlisted_environment(tmp_path) -> None:
         "_",
         "OLDPWD",
     }
+
+
+def test_a_garbled_last_wake_is_mailed_once_a_day(tmp_path) -> None:
+    wake = Wake(tmp_path)
+    wake.request.write_text("gave-up 20min since x\n")
+    (wake.state / "last-wake").write_text("12x")
+    for _ in range(2):
+        assert wake.run().returncode == 0
+    mails = [c for c in wake.calls.read_text().splitlines() if c.startswith("notify ")]
+    assert mails == [f"notify [dcb-wake] {_today()} wakes blocked"]
+    assert wake.claude_calls() == []

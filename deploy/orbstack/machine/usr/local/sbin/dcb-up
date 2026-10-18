@@ -78,6 +78,15 @@ fi
 if [ -n "$badnet" ]; then
     log "compose network is external or not driver bridge: $badnet"; rm -f "$since_file"; stop_stack "network policy"; exit 1
 fi
+# network_mode (host, container:…, none) puts a container outside the project's bridge networks:
+# host traffic leaves through OUTPUT, which DOCKER-USER never sees.
+if ! badmode=$(echo "$cfg" | jq -r '.services | to_entries[] | select(.value.network_mode != null)
+        | "\(.key)(network_mode=\(.value.network_mode))"' | tr '\n' ' '); then
+    log "cannot read the services' network_mode (jq failed); not starting"; rm -f "$since_file"; stop_stack "network_mode unreadable"; exit 1
+fi
+if [ -n "$badmode" ]; then
+    log "service sets network_mode: $badmode"; rm -f "$since_file"; stop_stack "network_mode"; exit 1
+fi
 
 if ! out=$(compose up --no-start 2>&1); then
     log "compose up --no-start FAILED: $(echo "$out" | tail -2 | tr '\n' ' ')"; exit 1

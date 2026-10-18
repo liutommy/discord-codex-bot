@@ -46,6 +46,12 @@ badnet=$(echo "$cfg" | jq -r '(.networks // {}) | to_entries[]
         | "\(.key)(external=\(.value.external // false) driver=\(.value.driver // "bridge"))"' | tr '\n' ' ') \
     || { log "cannot read the compose networks; skip"; exit 1; }
 [ -z "$badnet" ] || { log "compose network is external or not driver bridge: $badnet; skip"; exit 1; }
+# network_mode (host, container:…, none) puts a container outside the project's bridge networks:
+# host traffic leaves through OUTPUT, which DOCKER-USER never sees.
+badmode=$(echo "$cfg" | jq -r '.services | to_entries[] | select(.value.network_mode != null)
+        | "\(.key)(network_mode=\(.value.network_mode))"' | tr '\n' ' ') \
+    || { log "cannot read the services' network_mode; skip"; exit 1; }
+[ -z "$badmode" ] || { log "service sets network_mode: $badmode; skip"; exit 1; }
 # Every network any service joins (not only data-refresh's): all must exist and pass the probe.
 nets=()
 while read -r n; do [ -n "$n" ] && nets+=("$n"); done < <(echo "$cfg" \

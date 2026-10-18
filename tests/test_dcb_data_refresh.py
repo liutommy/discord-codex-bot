@@ -225,3 +225,10 @@ def test_a_jq_that_fails_never_reads_as_no_findings(tmp_path) -> None:
     rc, calls, log = _run(tmp_path, JQ_FAIL="1", REAL_JQ=shutil.which("jq"), wrap_jq=True)
     assert rc == 1 and "cannot read the compose config" in log, log
     assert not [c for c in calls if " run " in c or c.startswith("probe")], calls
+
+
+def test_a_service_with_network_mode_host_skips_the_run(tmp_path) -> None:
+    services = {**CONFIG["services"], "data-refresh": {"restart": "no", "network_mode": "host"}}
+    rc, calls, log = _run(tmp_path, config={**CONFIG, "services": services})
+    assert rc == 1 and "data-refresh(network_mode=host)" in log, log
+    assert not [c for c in calls if " run " in c or c.startswith("probe")], calls

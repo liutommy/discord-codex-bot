@@ -141,3 +141,12 @@ def test_default_and_bridge_networks_proceed(tmp_path, network) -> None:
     rc, calls, log = _run(tmp_path, config={**CONFIG, "networks": {"default": network}})
     assert rc == 0, log
     assert any(c.endswith(" up -d") for c in calls), calls
+
+
+@pytest.mark.parametrize("mode", ["host", "container:other", "none"])
+def test_a_service_with_network_mode_refuses_to_start(tmp_path, mode) -> None:
+    services = {"bot": {"restart": "no", "network_mode": mode}}
+    rc, calls, log = _run(tmp_path, config={**CONFIG, "services": services}, RUNNING="cid1")
+    assert rc == 1 and f"bot(network_mode={mode})" in log, log
+    assert not _started(calls), calls
+    assert _stopped(calls), calls

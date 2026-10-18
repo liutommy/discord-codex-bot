@@ -16,7 +16,7 @@ Mac side.
 |---|---|
 | `machine/usr/local/sbin/dcb-firewall` | Owns `DOCKER-USER` and `DCB-INPUT` (IPv4 and IPv6): containers reach the internet but no private or special address (the Mac, the LAN, the router's WAN address, OrbStack's networks, the machine's own services). Loads atomically and verifies the live chains. |
 | `machine/usr/local/sbin/dcb-probe` | Positive control for the firewall, run from each network it is given: blocked targets must be unreachable, public ones reachable, and every subnet must lie in the Docker pool. |
-| `machine/usr/local/sbin/dcb-up` | The only path to "up": firewall, compose config check (every service `restart: "no"`), probe from every project network, `compose up -d`, then the containers' restart policies. Also refuses external and non-bridge networks. A gate whose tool fails (`jq`, `docker inspect`) counts as failed, never as "nothing found": a running stack is stopped. Stops a running stack when the firewall fails or the probe finds a leak. |
+| `machine/usr/local/sbin/dcb-up` | The only path to "up": firewall, compose config check (every service `restart: "no"`), probe from every project network, `compose up -d`, then the containers' restart policies. Also refuses external and non-bridge networks, and any service that sets `network_mode`. A gate whose tool fails (`jq`, `docker inspect`) counts as failed, never as "nothing found": a running stack is stopped. Stops a running stack when the firewall fails or the probe finds a leak. |
 | `machine/usr/local/sbin/dcb-guard` | Every 2 minutes: re-applies the firewall, starts missing services and restarts a bot unhealthy for too long (both through `dcb-up`), gives up after repeated crashes, flags gateway anomalies, and writes the wake request (below). |
 | `machine/usr/local/sbin/dcb-deploy` | `dcb-deploy <merge commit>`: fast-forwards the checkout to that commit, builds as the checkout owner, runs `dcb-up --manual` and checks that the bot is healthy and connected. |
 | `machine/usr/local/sbin/dcb-data-refresh` | 05:00 daily: runs the one-shot `data-refresh` service (`docker compose --profile refresh run --rm data-refresh`) behind the same lock, firewall and probe gates as `dcb-up`. Never builds an image and never restarts the bot, which reloads the generated data itself. |
@@ -41,7 +41,7 @@ restart-policy check and `dcb-guard`'s list of wanted services never include it,
 they should do: it runs only when called. `dcb-data-refresh` expands the profile and checks the whole
 result instead, failing closed: every service, `data-refresh` included, must have restart policy
 `"no"`, every compose network must be non-external with driver `bridge` (macvlan, ipvlan and
-external networks bypass `DOCKER-USER`; `dcb-up` applies the same rule), and every network any
+external networks bypass `DOCKER-USER`; `dcb-up` applies the same rule), no service may set `network_mode` (a host-mode container's traffic leaves through `OUTPUT`, which `DOCKER-USER` never sees), and every network any
 service joins must already exist and pass `dcb-probe` (exit 0; a leak
 or an inconclusive probe both skip the run) after the firewall has been applied, all before
 `compose run`. The last line it prints must be `data-refresh: changed ...` or
