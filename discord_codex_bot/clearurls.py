@@ -1,9 +1,10 @@
 """ClearURLs rules applied to a link: the maintained per-site knowledge of tracking params
 that a hand-kept blocklist cannot keep up with (206 providers upstream vs. ~20 names here).
 
-Rule data: https://gitlab.com/ClearURLs/rules (LGPL-3.0), fetched daily by
-scripts/fetch_clearurls.py into config/clearurls.json. Only the data is theirs; this matcher
-is ours, and it applies a deliberate subset of what the browser extension does:
+Rule data: https://gitlab.com/ClearURLs/rules (LGPL-3.0), fetched by scripts/fetch_clearurls.py
+into config/clearurls.json (the image's copy) and, through scripts/refresh_data.py, into the
+generated-data volume, which is read again whenever it changes. Only the data is theirs; this
+matcher is ours, and it applies a deliberate subset of what the browser extension does:
 
     redirections -> unwrap to the target in group(1) (percent-decoded) and clean that instead
     rawRules     -> regex removed from the whole URL (Amazon's ``/ref=...`` path segment)
@@ -26,6 +27,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
+
+from .datafiles import LiveFile, data_dir
 
 LOGGER = logging.getLogger(__name__)
 
@@ -88,9 +91,23 @@ class Rules:
         return cls(providers)
 
     @classmethod
+    def parse(cls, text: str) -> Rules:
+        """ValueError for anything but a rule file (including one with no usable provider), so a
+        truncated or reshaped one is refused rather than loaded as "no rules"."""
+        data = json.loads(text)
+        if not isinstance(data, dict) or not isinstance(data.get("providers"), dict):
+            raise ValueError("no providers object")
+        try:
+            rules = cls.from_dict(data)
+        except (TypeError, AttributeError, re.error) as error:
+            raise ValueError(f"malformed rule file: {type(error).__name__}: {error}") from error
+        if not rules.providers:
+            raise ValueError("no usable providers")  # an empty set must not replace a good one
+        return rules
+
+    @classmethod
     def load(cls, path: Path) -> Rules:
-        with open(path, encoding="utf-8") as fh:
-            return cls.from_dict(json.load(fh))
+        return cls.parse(path.read_text("utf-8"))
 
     def clean(self, url: str, depth: int = 0) -> str:
         for provider in self.providers:
@@ -138,27 +155,20 @@ def _drop_params(url: str, rules: tuple[re.Pattern[str], ...]) -> str:
     return urlunsplit(parts._replace(query=query, fragment=fragment))
 
 
-_RULES: Rules | None = None
+_RULES: LiveFile[Rules] | None = None
 
 
 def rules() -> Rules:
-    """The process-wide rule set: CLEARURLS_FILE, else the first DEFAULT_PATHS that exists."""
+    """The process-wide rule set: DATA_DIR/clearurls.json (the refreshed copy), else the image's
+    copy (CLEARURLS_FILE, or the first DEFAULT_PATHS that exists); a changed file is picked up
+    without a restart."""
     global _RULES
     if _RULES is None:
-        _RULES = Rules.empty()
         env = os.environ.get("CLEARURLS_FILE", "").strip()
-        candidates = [Path(env)] if env else list(DEFAULT_PATHS)
-        for path in candidates:
-            if not path.is_file():
-                continue
-            try:
-                _RULES = Rules.load(path)
-            except (OSError, ValueError) as exc:
-                LOGGER.warning("clearurls: %s unreadable (%s); using no rules", path, exc)
-            break
-        else:
-            LOGGER.warning("clearurls: no rules file at %s; using no rules", candidates)
-    return _RULES
+        floor = [Path(env)] if env else list(DEFAULT_PATHS)
+        candidates = [data_dir() / "clearurls.json", *floor]
+        _RULES = LiveFile("clearurls", candidates, Rules.parse, Rules.empty())
+    return _RULES.get()
 
 
 def clean(url: str) -> str:

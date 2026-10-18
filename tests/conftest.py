@@ -41,6 +41,7 @@ def config() -> Config:
         memory_recall_rounds=10,
         output_style_path=Path("/opt/discord-codex/output-style.md"),
         permanent_memory_dir=Path("/opt/discord-codex/permanent"),
+        data_dir=Path("/var/lib/discord-codex/data"),
         persona_dir=Path("/opt/discord-codex/persona"),
         agy_home=Path("/home/node"),
         agy_probe_model="gemini-3.8-flash-low",

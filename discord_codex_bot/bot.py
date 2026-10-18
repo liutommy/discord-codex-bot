@@ -726,7 +726,9 @@ class DiscordCodexClient(discord.Client):
             config.memory_search_context_lines,
         )
         self.memory = MemoryStore(config.codex_home / "memory", limits)
-        self.permanent = PermanentMemory(config.permanent_memory_dir, limits)
+        self.permanent = PermanentMemory(
+            config.permanent_memory_dir, limits, config.data_dir / "topics"
+        )
         # The server's custom emoji and how members use them (emoji.py); None while off.
         self.emoji = EmojiStore(config.emoji_db_path) if config.emoji_enabled else None
         # channel id -> (id, text) of its latest message: the "previous" of an emoji sample.
@@ -747,7 +749,7 @@ class DiscordCodexClient(discord.Client):
         )
         self._emoji_cache: dict[int, dict[str, discord.PartialEmoji]] = {}
         self.reminders = ReminderStore(config.codex_home / "reminders.json")
-        self.apis = apis.load_registry(config.apis_path)
+        self.apis = apis.load_registry(config.apis_path, config.data_dir)
         self.openrouter = Catalog(config)
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
         self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}

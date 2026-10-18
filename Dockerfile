@@ -15,6 +15,8 @@ COPY config/codex-config.toml /opt/discord-codex/config.toml
 # The operator's own file is gitignored, so a fresh clone has only the sample; the glob copies
 # whichever exist and the last RUN falls back to the sample.
 COPY config/output-style*.md /opt/discord-codex/
+# lol-names.json and clearurls.json are the floor: the Bot prefers the copies data-refresh keeps
+# current in the generated-data volume (/var/lib/discord-codex/data) and falls back to these.
 COPY config/consolidate-schema.json config/harvest-schema.json config/tracking-schema.json \
      config/digest-user-schema.json config/digest-guild-schema.json \
      config/apis.json config/lol-names.json config/clearurls.json config/agy-settings.json \
@@ -58,16 +60,17 @@ COPY --from=files --chown=1000:1000 / /
 # (AGY_CLI_DISABLE_AUTO_UPDATE). /home/node/.gemini is a named volume; creating it here (owned by
 # 1000) makes Docker seed a fresh volume with that ownership instead of root's.
 # The Codex working directories live in the named volume, because the persona they are composed
-# from can be replaced at runtime and the image's filesystem is read-only.
+# from can be replaced at runtime and the image's filesystem is read-only. The generated-data
+# mount point is created owned by 1000 for the same reason as .gemini: data-refresh writes there.
 RUN mkdir -p /home/node \
     && HOME=/home/node bash -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash' \
     && /home/node/.local/bin/agy --version \
     && mkdir -p /home/node/.gemini \
     && chown -R 1000:1000 /home/node \
-    && mkdir -p /var/lib/codex \
+    && mkdir -p /var/lib/codex /var/lib/discord-codex/data \
     && { [ -f /opt/discord-codex/output-style.md ] \
          || cp /opt/discord-codex/output-style.example.md /opt/discord-codex/output-style.md; } \
-    && chown -R 1000:1000 /var/lib/codex /opt/discord-codex /app \
+    && chown -R 1000:1000 /var/lib/codex /var/lib/discord-codex /opt/discord-codex /app \
     && chown root:root /opt \
     && chmod 0555 /app/scripts/entrypoint.sh
 

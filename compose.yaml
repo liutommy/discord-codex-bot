@@ -35,6 +35,12 @@ services:
       - type: bind
         source: ./logs
         target: /logs
+      # Generated data (ClearURLs rules, LoL name tables), written by data-refresh below and
+      # reloaded by the Bot when a file changes. Read-only here; the image's copies are the floor.
+      - type: volume
+        source: generated-data
+        target: /var/lib/discord-codex/data
+        read_only: true
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
@@ -64,6 +70,47 @@ services:
       - default
       - sandbox_net
       - xsearch_net
+
+  # One-shot refresh of the generated data into the generated-data volume, on whatever schedule
+  # the host keeps; the Bot picks the new files up without a rebuild or a restart. Not started
+  # by `up` (profile), run from the repo directory:
+  #
+  #   docker compose --profile refresh run --rm data-refresh
+  #
+  # Exit 0 means refreshed, whether or not anything changed; the last output line is the summary
+  # (scripts/refresh_data.py). Same image and hardening as the Bot, but none of its secrets or
+  # state: no .env, only the data volume, and only the default network (it needs the internet).
+  # Not backed up: a run rebuilds everything in the volume from the upstream sources.
+  data-refresh:
+    profiles: ["refresh"]
+    image: discord-codex-bot:local
+    pull_policy: never  # built by the bot service; never pulled from a registry
+    restart: "no"
+    init: true
+    user: "1000:1000"
+    entrypoint: ["python", "-m", "scripts.refresh_data"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TZ: ${TZ:-Asia/Taipei}
+    volumes:
+      - type: volume
+        source: generated-data
+        target: /var/lib/discord-codex/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - default
 
   # Self-hosted web search. The Bot's <web> tool reaches it by name on the compose network
   # (http://searxng:8080); other agents on this host reach it through the loopback port below.
@@ -174,3 +221,5 @@ volumes:
     name: ${BOT_CONTAINER_NAME:-tommy_test}_agy_home
   xsearch-home:
     name: ${BOT_CONTAINER_NAME:-tommy_test}_xsearch_home
+  generated-data:
+    name: ${BOT_CONTAINER_NAME:-tommy_test}_generated_data

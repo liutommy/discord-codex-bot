@@ -1,6 +1,10 @@
+import sys
 from pathlib import Path
 
+import pytest
+
 from discord_codex_bot.apis import load_registry
+from scripts import build_lol_names
 from scripts.build_lol_names import (
     NOT_ON_HEXDATA,
     augment_rows,
@@ -134,8 +138,15 @@ def test_shipped_registry_loads_and_documents_hexdata() -> None:
     for table in ("英雄譯名對照", "海克斯譯名對照", "裝備譯名對照"):
         assert table in hexdata.doc  # the model is told where each TW/CN table lives
     # the shipped map is the mechanical fallback for names the model would otherwise mistranslate
-    assert hexdata.names["崔斯特"] == "逆命" and hexdata.names["回响施放"] == "共鳴施放"
-    assert "易" not in hexdata.names and len(hexdata.names) > 300
-    assert hexdata.paths["hero/逆命"] == hexdata.paths["hero/TF"] == "hero/4-twistedfate"
-    assert hexdata.paths["augment/靈光一閃"] == "augment/1030-eureka"
-    assert hexdata.paths["item/無盡之刃"] == "item/3031"
+    names, paths = hexdata.name_maps()
+    assert names["崔斯特"] == "逆命" and names["回响施放"] == "共鳴施放"
+    assert "易" not in names and len(names) > 300
+    assert paths["hero/逆命"] == paths["hero/TF"] == "hero/4-twistedfate"
+    assert paths["augment/靈光一閃"] == "augment/1030-eureka"
+    assert paths["item/無盡之刃"] == "item/3031"
+
+
+def test_a_missing_opencc_fails_the_build_instead_of_dropping_a_script(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "opencc", None)  # import raises ImportError
+    with pytest.raises(RuntimeError, match="opencc"):
+        build_lol_names._script_variants()
