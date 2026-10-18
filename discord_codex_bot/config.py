@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import datafiles
 
@@ -281,6 +282,24 @@ class Config:
     linkclean_admin_ids: frozenset[int]
 
 
+def _plain_http_url(value: str) -> bool:
+    """A base URL the routers can append /models to: http(s), a host, nothing else."""
+    try:
+        url = urlsplit(value)
+        url.port  # noqa: B018 — raises ValueError on a bad port
+    except ValueError:
+        return False
+    return (
+        url.scheme in ("http", "https")
+        and bool(url.hostname)
+        and url.username is None
+        and url.password is None
+        and not url.query
+        and not url.fragment
+        and not any(c.isspace() for c in value)
+    )
+
+
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     values = os.environ if env is None else env
     application_id = _required(values, "DISCORD_APPLICATION_ID")
@@ -553,6 +572,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         raise ValueError("JEV_ENABLED needs TYPESAFE_API_KEY")
     if config.jev_enabled and not config.jev_url.startswith("https://"):
         raise ValueError("JEV_URL must be an https:// URL")  # the key travels with every call
-    if config.local_llm_url and not config.local_llm_url.startswith(("http://", "https://")):
-        raise ValueError("LOCAL_LLM_URL must be an http:// or https:// URL")
+    if config.local_llm_url and not _plain_http_url(config.local_llm_url):
+        raise ValueError(
+            "LOCAL_LLM_URL must be an http:// or https:// URL with a host and no credentials, "
+            "query or fragment"
+        )
     return config

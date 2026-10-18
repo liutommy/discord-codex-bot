@@ -44,6 +44,9 @@ class Router:
     # Refused connections retried, a second apart: nothing reached the server, so a retry
     # cannot run a request twice. The local relay refuses while every worker is busy.
     connect_retries: int = 0
+    # Drop a leading <think>…</think> block (local reasoning models). Off for the hosted
+    # routers: an answer may start with a literal "<think>" there.
+    drops_think: bool = False
 
     @property
     def models_word(self) -> str:
@@ -99,6 +102,7 @@ ROUTERS: dict[str, Router] = {
         unstable="（地端模型可能沒有在跑，換一個試試）",
         free_tier=False,
         connect_retries=3,
+        drops_think=True,
     ),
 }
 OPENROUTER_ROUTER = ROUTERS["openrouter"]
@@ -329,6 +333,8 @@ async def run_router(
             "json_schema": {"name": "answer", "strict": True, "schema": json.loads(raw_schema)},
         }
     label, unstable = router.label, router.unstable
+    if not router.enabled(config):
+        raise RuntimeError(f"{label} 未設定")
     if on_delta is not None:
         body["stream"] = True
     try:
@@ -336,8 +342,10 @@ async def run_router(
             try:
                 status, payload = await _post(router, config, body, on_delta)
                 break
-            except aiohttp.ClientConnectorError:
-                if attempt == router.connect_retries:
+            except aiohttp.ClientConnectorError as refused:
+                if attempt == router.connect_retries or not isinstance(
+                    refused.os_error, ConnectionRefusedError
+                ):
                     raise
                 await asyncio.sleep(CONNECT_RETRY_SECONDS)
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
@@ -349,7 +357,8 @@ async def run_router(
         raise RuntimeError(f"{label} {where}：{detail or '無說明'}{unstable}")
     choices = payload.get("choices") or []
     text = message_text((choices[0].get("message") or {}).get("content") or "") if choices else ""
-    text = strip_think(text)
+    if router.drops_think:
+        text = strip_think(text)
     if not text.strip():
         raise RuntimeError(f"{label} 沒有回傳文字{unstable}")
     # Stored without the image bytes: replaying base64 every turn would swamp the history.
@@ -385,11 +394,11 @@ async def _post(router: Router, config: Config, body: dict, on_delta) -> tuple[i
         url = f"{router.api(config)}/chat/completions"
         async with session.post(url, json=body) as response:
             if on_delta is not None and response.status == 200:
-                return response.status, await _read_sse(response, on_delta)
+                return response.status, await _read_sse(response, on_delta, router.drops_think)
             return response.status, await response.json(content_type=None)
 
 
-async def _read_sse(response, on_delta) -> dict:
+async def _read_sse(response, on_delta, drops_think: bool = False) -> dict:
     """Consume an OpenAI-style SSE stream, reporting the accumulated answer text after each
     content delta (reasoning deltas and a leading <think> block are not shown), and return a
     completion-shaped payload."""
@@ -412,7 +421,8 @@ async def _read_sse(response, on_delta) -> dict:
         piece = delta.get("content")
         if piece:
             accumulated += str(piece)
-            if shown := strip_think(accumulated, streaming=True):
+            shown = strip_think(accumulated, streaming=True) if drops_think else accumulated
+            if shown:
                 await on_delta(shown)
     return {"choices": [{"message": {"content": accumulated}}]}
 

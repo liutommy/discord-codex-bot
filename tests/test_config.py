@@ -204,6 +204,16 @@ def test_local_llm_url_is_optional_and_must_be_http() -> None:
         "k",
     )
     assert load_config({**base, "LOCAL_LLM_URL": "https://llm.lan/v1"}).local_llm_url
-    for bad in ("ftp://host/v1", "host.orb.internal:8080/v1", "file:///etc/passwd"):
+    for bad in (
+        "ftp://host/v1",
+        "host.orb.internal:8080/v1",
+        "file:///etc/passwd",
+        "http://",
+        "http://user:pw@host/v1",
+        "http://host /v1",
+        "http://host/v1?x=1",
+        "http://host/v1#frag",
+        "http://host:99999/v1",
+    ):
         with pytest.raises(ValueError, match="LOCAL_LLM_URL"):
             load_config({**base, "LOCAL_LLM_URL": bad})

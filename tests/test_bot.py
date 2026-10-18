@@ -1187,7 +1187,7 @@ async def test_local_models_are_offered_only_with_a_url(client, monkeypatch) -> 
     # no LOCAL_LLM_URL: not offered, not listed
     assert await client.model_options("local", "") == []
     system = (await client._status_text(GUILD, 555, USER)).split("【系統】")[1]
-    assert "地端模型" not in system and "OpenRouter／OrcaRouter：未設定" in system
+    assert "個模型" not in system and "OpenRouter／OrcaRouter／地端模型：未設定" in system
 
     client.config = replace(client.config, local_llm_url="http://host.orb.internal:8080/v1")
     assert [c.value for c in await client.model_options("local", "")] == ["local:qwen3-8b"]

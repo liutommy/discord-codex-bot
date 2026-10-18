@@ -451,8 +451,14 @@ async def test_run_router_on_local_uses_the_url_prefix_and_its_own_hint(
 
 
 class _Refused(aiohttp.ClientConnectorError):
+    os_error = ConnectionRefusedError()
+
     def __init__(self) -> None:  # no real connection key: nothing was connected
         pass
+
+
+class _NoSuchHost(_Refused):
+    os_error = OSError("nodename nor servname provided")
 
     def __str__(self) -> str:
         return "refused"
@@ -480,11 +486,32 @@ async def test_local_retries_a_refused_connection_but_the_routers_do_not(
         await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
     assert calls == ["local"] * 4
 
+    # only a refusal: a name or certificate failure will not change in a second
+    calls.clear()
+
+    async def unresolved(router, config, body, on_delta):
+        calls.append(router.key)
+        raise _NoSuchHost()
+
+    monkeypatch.setattr(openrouter, "_post", unresolved)
+    with pytest.raises(RuntimeError, match="^地端模型 連線失敗"):
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
+    assert calls == ["local"]
+
     calls.clear()
     monkeypatch.setattr(openrouter, "_post", partial(post, refusals=1))
     with pytest.raises(RuntimeError, match="^OrcaRouter 連線失敗"):
         await run_router(ORCA, "q", local_cfg, "m")
     assert calls == ["orcarouter"]
+
+
+async def test_an_unconfigured_local_router_says_so(monkeypatch, cfg: Config) -> None:
+    async def post(*args):
+        raise AssertionError("nothing is sent without LOCAL_LLM_URL")
+
+    monkeypatch.setattr(openrouter, "_post", post)
+    with pytest.raises(RuntimeError, match="^地端模型 未設定$"):
+        await run_router(LOCAL_ROUTER, "q", replace(cfg, local_llm_url=""), "m")
 
 
 def test_strip_think_drops_only_a_leading_block() -> None:
@@ -498,21 +525,28 @@ def test_strip_think_drops_only_a_leading_block() -> None:
 
 
 async def test_think_block_is_stripped_from_the_answer_and_the_transcript(
-    monkeypatch, cfg: Config
+    monkeypatch, local_cfg: Config
 ) -> None:
+    cfg = local_cfg
     content = "<think>\n使用者打招呼。\n</think>\n\n哈囉"
     session = Session([Response({"choices": [{"message": {"content": content}}]})])
     monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
-    result = await run_router(ORCA, "q", cfg, "tencent/hy3-free")  # every router
+    result = await run_router(LOCAL_ROUTER, "q", cfg, "m")
     assert result.text == "哈囉"
     assert load_transcript(cfg, result.thread_id)[1]["content"] == "哈囉"
+    # a hosted router answers as it was written: "<think>" may be the topic
+    literal = {"choices": [{"message": {"content": "<think> 是推理標籤"}}]}
+    monkeypatch.setattr(
+        openrouter, "_session", lambda config, timeout, router=None: Session([Response(literal)])
+    )
+    assert (await run_router(ORCA, "q", cfg, "tencent/hy3-free")).text == "<think> 是推理標籤"
     # reasoning only: the usual empty-answer error
     only = {"choices": [{"message": {"content": "<think>想不完"}}]}
     monkeypatch.setattr(
         openrouter, "_session", lambda config, timeout, router=None: Session([Response(only)])
     )
     with pytest.raises(RuntimeError, match="沒有回傳文字"):
-        await run_router(ORCA, "q", cfg, "tencent/hy3-free")
+        await run_router(LOCAL_ROUTER, "q", cfg, "m")
 
 
 async def test_streamed_display_hides_a_leading_think_block(monkeypatch, local_cfg: Config) -> None:

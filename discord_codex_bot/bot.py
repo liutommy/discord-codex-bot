@@ -3660,7 +3660,7 @@ class DiscordCodexClient(discord.Client):
             )
         system += [
             "Antigravity：可選（Gemini／Claude）",
-            " · ".join(routers) if routers else "OpenRouter／OrcaRouter：未設定",
+            " · ".join(routers) if routers else "OpenRouter／OrcaRouter／地端模型：未設定",
             f"影片理解：{'開' if gemini.available(self.config) else '關'} · 讀連結：開"
             f" · 搜尋：{'／'.join(n for n, _ in search.providers(self.config)) or '關'}"
             f" · 沙盒：{'開' if sandbox.available(self.config) else '關'}"
