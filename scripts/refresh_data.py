@@ -42,6 +42,22 @@ def publish(out: Path, files: dict[str, str]) -> list[str]:
     return changed
 
 
+MIN_TABLE_ROWS = 20  # the smallest real table (items) has about 120 rows
+
+
+def check_topics(files: dict[str, str]) -> None:
+    """The name-table topics have no parser in the Bot (permanent memory reads them as text), so
+    check here that each still is a table: an empty or cut-off topic would otherwise displace the
+    image's copy. Raises ValueError."""
+    for name, text in files.items():
+        if not name.endswith(".md"):
+            continue
+        rows = [line for line in text.splitlines() if line.startswith("|")]
+        body = max(len(rows) - 2, 0)  # minus the header and the separator line
+        if body < MIN_TABLE_ROWS:
+            raise ValueError(f"{name}: {body} table rows, expected {MIN_TABLE_ROWS}+")
+
+
 def _detail(error: BaseException) -> str:
     text = " ".join(str(error).split()) or "no detail"
     return f"{type(error).__name__}: {text}"[:300]
@@ -71,6 +87,7 @@ def _refresh(out: Path, changed: list[str], notes: list[str]) -> tuple[int, str]
     try:
         files, note = build_lol_names.build()
         apis.parse_names(files[build_lol_names.NAMES_JSON.name])
+        check_topics(files)
     except Exception as error:
         return 1, f"data-refresh: failed; name tables: {_detail(error)}; " + "; ".join(notes)
     changed += publish(out, files)

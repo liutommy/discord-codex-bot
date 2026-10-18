@@ -14,10 +14,16 @@ from scripts import build_lol_names, fetch_clearurls, refresh_data
 
 ROOT = Path(__file__).resolve().parents[1]
 RULES = json.dumps({"providers": {"x": {"urlPattern": "^https://x"}}}) + "\n"
+
+
+def table(row: str, rows: int = refresh_data.MIN_TABLE_ROWS) -> str:
+    return "| 台服 | 陸服 |\n| --- | --- |\n" + f"{row}\n" * rows
+
+
 NAMES = {
-    "topics/英雄譯名對照.md": "| 逆命 | 崔斯特 |\n",
-    "topics/海克斯譯名對照.md": "| 靈光一閃 | 尤里卡 |\n",
-    "topics/裝備譯名對照.md": "| 無盡之刃 | 无尽之刃 |\n",
+    "topics/英雄譯名對照.md": table("| 逆命 | 崔斯特 |"),
+    "topics/海克斯譯名對照.md": table("| 靈光一閃 | 尤里卡 |"),
+    "topics/裝備譯名對照.md": table("| 無盡之刃 | 无尽之刃 |"),
     "lol-names.json": json.dumps({"names": {"崔斯特": "逆命"}, "paths": {"hero/逆命": "hero/4"}}),
 }
 
@@ -116,6 +122,18 @@ def test_a_failed_name_build_fails_the_run_and_writes_no_table(tmp_path, sources
     sources["names"] = (files, "champions 1")  # a map the Bot would refuse
     assert refresh_data.refresh(tmp_path)[0] == 1
     assert not (tmp_path / "lol-names.json").exists()
+
+
+@pytest.mark.parametrize("text", ["", "# 英雄譯名對照\n", table("| 逆命 | 崔斯特 |", rows=3)])
+def test_an_empty_or_cut_off_topic_table_fails_the_run_and_replaces_nothing(
+    tmp_path, sources, text
+) -> None:
+    refresh_data.refresh(tmp_path)
+    good = (tmp_path / "topics" / "英雄譯名對照.md").read_text("utf-8")
+    sources["names"] = (dict(NAMES, **{"topics/英雄譯名對照.md": text}), "champions 1")
+    code, line = refresh_data.refresh(tmp_path)
+    assert code == 1 and "table rows" in line
+    assert (tmp_path / "topics" / "英雄譯名對照.md").read_text("utf-8") == good
 
 
 def test_main_prints_the_summary_last_and_exits_by_it(tmp_path, sources, capsys) -> None:
