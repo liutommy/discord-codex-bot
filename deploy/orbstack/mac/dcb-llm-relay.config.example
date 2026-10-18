@@ -1,0 +1,25 @@
+# dcb-llm-relay.py settings. Install as ~/.config/dcb-llm-relay/config; KEY=value lines, '#'
+# comments. Every key except the two ports is optional (the values below are the defaults); an
+# environment variable of the same name overrides the file.
+
+# The OrbStack machine running the stack, and the machine user the listeners run as (empty: the
+# Mac's user name, OrbStack's default machine user). Not root: the port is 1024 or higher.
+DCB_LLM_RELAY_MACHINE=dcb
+DCB_LLM_RELAY_USER=
+
+# Where the listeners wait inside the machine: the gateway of compose.yaml's llm network, and the
+# machine's DCB_LLM_RELAY_PORT (/etc/default/dcb there). Required: the port.
+DCB_LLM_RELAY_LISTEN_ADDR=172.31.254.1
+DCB_LLM_RELAY_LISTEN_PORT=<DCB_LLM_RELAY_PORT>
+
+# The Mac's LLM server (com.example.local-llm.plist). Required: the port.
+DCB_LLM_RELAY_UPSTREAM_HOST=127.0.0.1
+DCB_LLM_RELAY_UPSTREAM_PORT=<PORT>
+
+# Connections served at once (match the server's --decode-concurrency); with all busy a new one is
+# refused and the Bot retries. Seconds without traffic before a connection is closed.
+DCB_LLM_RELAY_WORKERS=2
+DCB_LLM_RELAY_IDLE=900
+
+# One line per served connection (bytes each way, duration), never any content.
+DCB_LLM_RELAY_LOG=~/Library/Logs/dcb-llm-relay.log

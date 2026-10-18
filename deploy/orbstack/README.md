@@ -14,8 +14,8 @@ Mac side.
 
 | File | Purpose |
 |---|---|
-| `machine/usr/local/sbin/dcb-firewall` | Owns `DOCKER-USER` and `DCB-INPUT` (IPv4 and IPv6): containers reach the internet but no private or special address (the Mac, the LAN, the router's WAN address, OrbStack's networks, the machine's own services). Loads atomically and verifies the live chains. |
-| `machine/usr/local/sbin/dcb-probe` | Positive control for the firewall, run from each network it is given: blocked targets must be unreachable, public ones reachable, and every subnet must lie in the Docker pool. |
+| `machine/usr/local/sbin/dcb-firewall` | Owns `DOCKER-USER` and `DCB-INPUT` (IPv4 and IPv6): containers reach the internet but no private or special address (the Mac, the LAN, the router's WAN address, OrbStack's networks, the machine's own services). Loads atomically and verifies the live chains. With `DCB_LLM_RELAY_PORT` set, the one exception is the llm bridge's gateway on that port (local LLM relay, below). |
+| `machine/usr/local/sbin/dcb-probe` | Positive control for the firewall, run from each network it is given: blocked targets must be unreachable, public ones reachable, and every subnet must lie in the Docker pool, except compose.yaml's llm network (`172.31.254.0/24`), accepted only on its bridge `br-dcb-llm`. |
 | `machine/usr/local/sbin/dcb-up` | The only path to "up": firewall, compose config check (every service `restart: "no"`), probe from every project network, `compose up -d`, then the containers' restart policies. Also refuses external and non-bridge networks, and any service that sets `network_mode`. A gate whose tool fails (`jq`, `docker inspect`) counts as failed, never as "nothing found": a running stack is stopped. Stops a running stack when the firewall fails or the probe finds a leak. |
 | `machine/usr/local/sbin/dcb-guard` | Every 2 minutes: re-applies the firewall, starts missing services and restarts a bot unhealthy for too long (both through `dcb-up`), gives up after repeated crashes, flags gateway anomalies, and writes the wake request (below). |
 | `machine/usr/local/sbin/dcb-deploy` | `dcb-deploy <merge commit>`: fast-forwards the checkout to that commit, builds as the checkout owner, runs `dcb-up --manual` and checks that the bot is healthy and connected. |
@@ -29,6 +29,10 @@ Mac side.
 | `mac/dcb-wake.sh` | Run by launchd every 2 minutes; turns the machine's wake request into a rate-limited `claude -p` and mails the report. |
 | `mac/com.example.dcb-wake.plist` | launchd template for `dcb-wake.sh`. |
 | `mac/dcb-wake.config.example` | Settings for `dcb-wake.sh`, installed as `~/.config/dcb-wake/config`. |
+| `mac/dcb-llm-relay.py` | Local LLM relay (launchd, always running): keeps socat listeners open inside the machine through `orb` and splices each connection to the Mac's LLM server. |
+| `mac/dcb-llm-relay.config.example` | Settings for `dcb-llm-relay.py`, installed as `~/.config/dcb-llm-relay/config`. |
+| `mac/com.example.dcb-llm-relay.plist` | launchd template for `dcb-llm-relay.py`. |
+| `mac/com.example.local-llm.plist` | launchd template for the LLM server (`mlx_lm.server` on `127.0.0.1`). |
 
 The checkout also needs a host-local `compose.override.yaml` (gitignored) that sets
 `restart: "no"` on `bot`, `searxng`, `sandbox` and `xsearch`; `dcb-up` refuses to start the stack
@@ -100,6 +104,41 @@ has no `setsid` or `timeout`) and sends the whole group TERM, then KILL 10 s lat
 cleaned up the same way after a normal exit. A process that starts its own session leaves the
 group and is not reached.
 
+### Local LLM relay
+
+The Bot can use an LLM server on the Mac (`mlx_lm.server`, OpenAI-compatible, bound to
+`127.0.0.1`). The machine is isolated and cannot connect to the Mac, and OrbStack's ssh proxy
+refuses `ssh -R`, so the Mac opens the path:
+
+```
+bot --(llm network)--> 172.31.254.1:<port> in the machine   socat listener, started by:
+Mac: dcb-llm-relay.py --orb -m dcb socat ... STDIO (pipe)--> 127.0.0.1:<upstream port> (LLM server)
+```
+
+- compose.yaml's `llm` network (bridge `br-dcb-llm`, `172.31.254.0/24`, gateway `172.31.254.1`)
+  has only the `bot` service on it. The subnet lies outside the address pool so that the firewall
+  and the probe can name it.
+- `dcb-firewall` lets `br-dcb-llm` open TCP connections to `172.31.254.1` on `DCB_LLM_RELAY_PORT`
+  only. Every other port there, and every other bridge, stays rejected, so the probe's checks from
+  every network still hold. Empty `DCB_LLM_RELAY_PORT`: nothing on the llm bridge reaches the
+  machine.
+- Each relay worker runs `orb -m <machine> -u <user> socat -T<idle> -t<idle>
+  TCP-LISTEN:<port>,bind=172.31.254.1,reuseaddr,reuseport STDIO,shut-close` as the machine's
+  unprivileged user. `reuseport` lets the workers listen at the same time; socat without `fork`
+  stops listening once it has a connection, so with every worker busy a new connection is refused,
+  which the Bot retries. The worker connects to the LLM server only when the connection's first
+  bytes arrive. `shut-close` and `-t<idle>` pass a client's half-close on: socat 1.7.4 (Debian 12)
+  otherwise keeps the pipe open and gives up on the response 0.5 s after the client's EOF.
+- A listener that exits before any connection with an error (stack down, so `172.31.254.1` does not
+  exist yet) is retried with a backoff from 1 s to 30 s, logged once per streak.
+- The relay's log (`~/Library/Logs/dcb-llm-relay.log`) has one line per connection with the bytes
+  each way and the duration, never any content.
+- A connection that arrives in the instant between socat's `accept()` and the closing of its
+  listening socket is reset instead of refused (measured with socat 1.7.4); the Bot sees it as a
+  failed request.
+
+The Bot's `.env` points at the relay: `LOCAL_LLM_URL=http://172.31.254.1:<DCB_LLM_RELAY_PORT>/v1`.
+
 ## Install on the machine
 
 Run as root inside the machine, from a checkout of this repository:
@@ -127,6 +166,18 @@ systemctl enable --now dcb-up.timer dcb-guard.timer dcb-data-refresh.timer
 
 Create the checkout's `compose.override.yaml` (above) before the first `dcb-up`; `touch .hold` in
 the checkout keeps the stack down while everything else is prepared.
+
+For the local LLM relay, also as root in the machine:
+
+```sh
+apt-get install -y socat
+# /etc/default/dcb: DCB_LLM_RELAY_PORT=<port>, an integer 1024-65535
+systemctl reload dcb-firewall
+iptables -S DCB-INPUT | grep br-dcb-llm    # the one rule for 172.31.254.1 on that port
+```
+
+The listeners run as the machine's default (unprivileged) user and are started by the Mac's relay;
+nothing new runs from systemd.
 
 ## Update the machine
 
@@ -166,3 +217,28 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.dcb-wake.plist
 
 Update the script by installing it again; launchd uses it at the next run. After changing the
 plist, `launchctl bootout gui/$(id -u)/com.$USER.dcb-wake` and bootstrap it again.
+
+### Local LLM server and relay
+
+The relay runs on the system `/usr/bin/python3` (stdlib only). Pick the LLM server's port
+(`<PORT>`) and the machine's `DCB_LLM_RELAY_PORT`:
+
+```sh
+sed -e "s#__HOME__#$HOME#g" -e "s#com\.example#com.$USER#g" -e "s#__PORT__#<PORT>#" \
+    -e "s#__MLX_LM_SERVER__#$(command -v mlx_lm.server)#" -e "s#__MODEL_DIR__#<MODEL_DIR>#" \
+    deploy/orbstack/mac/com.example.local-llm.plist > ~/Library/LaunchAgents/com.$USER.local-llm.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.local-llm.plist
+curl -s http://127.0.0.1:<PORT>/v1/models     # the server answers
+
+install -m 755 deploy/orbstack/mac/dcb-llm-relay.py ~/.local/bin/dcb-llm-relay.py
+mkdir -p ~/.config/dcb-llm-relay
+cp deploy/orbstack/mac/dcb-llm-relay.config.example ~/.config/dcb-llm-relay/config   # set both ports
+sed -e "s#__HOME__#$HOME#g" -e "s#com\.example#com.$USER#g" \
+    deploy/orbstack/mac/com.example.dcb-llm-relay.plist > ~/Library/LaunchAgents/com.$USER.dcb-llm-relay.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.dcb-llm-relay.plist
+tail ~/Library/Logs/dcb-llm-relay.log
+```
+
+Then set `LOCAL_LLM_URL=http://172.31.254.1:<DCB_LLM_RELAY_PORT>/v1` in the checkout's `.env` and
+deploy. After changing the relay script, install it again and `launchctl kickstart -k
+gui/$(id -u)/com.$USER.dcb-llm-relay`.

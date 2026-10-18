@@ -3,7 +3,9 @@
 #   dcb-probe [network ...]
 # Per network: every MUST_FAIL target unreachable and every DNS_MUST_FAIL name unresolvable; on
 # a non-internal network MUST_PASS reachable and DNS_MUST_PASS resolvable; on an internal network
-# MUST_PASS must be unreachable too. Each network's subnet must lie in the Docker pool.
+# MUST_PASS must be unreachable too. Each network's subnet must lie in the Docker pool; the one
+# exception is compose.yaml's llm network (bridge br-dcb-llm, 172.31.254.0/24, fixed so dcb-firewall
+# can name its gateway), accepted only on a bridge with that name.
 #
 # Not vacuous: a listener is opened on this machine's own address for the duration (tests
 # DCB-INPUT), the WAN IP's :80/:443 are added, and the listener plus at least one other MUST_FAIL
@@ -49,16 +51,22 @@ if ! nc -z -w2 "$self_ip" "$self_port" >/dev/null 2>&1 || [ "$open_from_host" -l
     exit 2
 fi
 
+subnet_ok() {  # subnet_ok <subnet> <bridge name>
+    case $1 in
+        "$DCB_POOL_PREFIX"*/2[4-9]|"$DCB_POOL_PREFIX"*/3[0-2]) return 0 ;;
+        172.31.254.0/24) [ "$2" = br-dcb-llm ] ;;
+        *) return 1 ;;
+    esac
+}
+
 worst=0
 for net in "${nets[@]}"; do
-    info=$(docker network inspect -f '{{.Internal}} {{range .IPAM.Config}}{{.Subnet}} {{end}}' "$net" 2>/dev/null) \
+    info=$(docker network inspect -f '{{.Internal}} bridge={{index .Options "com.docker.network.bridge.name"}} {{range .IPAM.Config}}{{.Subnet}} {{end}}' "$net" 2>/dev/null) \
         || { echo "[$net] cannot inspect"; [ $worst -eq 0 ] && worst=2; continue; }
-    read -r internal subnets <<< "$info"
+    read -r internal bridge subnets <<< "$info"
+    bridge=${bridge#bridge=}
     for s in $subnets; do
-        case $s in
-            "$DCB_POOL_PREFIX"*/2[4-9]|"$DCB_POOL_PREFIX"*/3[0-2]) ;;
-            *) echo "[$net] LEAK subnet $s is outside $DCB_POOL_NETS"; worst=1 ;;
-        esac
+        subnet_ok "$s" "$bridge" || { echo "[$net] LEAK subnet $s is outside $DCB_POOL_NETS"; worst=1; }
     done
     if [ "$internal" = true ]; then
         env=(-e MUST_FAIL="$must_fail $DCB_PROBE_MUST_PASS" -e DNS_MUST_FAIL="$DCB_PROBE_DNS_MUST_FAIL" -e MUST_PASS= -e DNS_MUST_PASS=)

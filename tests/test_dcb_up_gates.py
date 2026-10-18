@@ -136,8 +136,16 @@ def test_an_external_or_non_bridge_network_refuses_to_start(tmp_path, network, e
     assert _stopped(calls), calls
 
 
+LLM_NETWORK = {  # compose.yaml's llm network as `compose config --format json` renders it
+    "name": "proj_llm",
+    "driver": "bridge",
+    "driver_opts": {"com.docker.network.bridge.name": "br-dcb-llm"},
+    "ipam": {"config": [{"subnet": "172.31.254.0/24", "gateway": "172.31.254.1"}]},
+}
+
+
 @pytest.mark.parametrize(
-    "network", [{"name": "proj_default"}, {"name": "x", "driver": "bridge"}, {}]
+    "network", [{"name": "proj_default"}, {"name": "x", "driver": "bridge"}, {}, LLM_NETWORK]
 )
 def test_default_and_bridge_networks_proceed(tmp_path, network) -> None:
     rc, calls, log = _run(tmp_path, config={**CONFIG, "networks": {"default": network}})

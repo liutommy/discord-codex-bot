@@ -70,6 +70,7 @@ services:
       - default
       - sandbox_net
       - xsearch_net
+      - llm
 
   # One-shot refresh of the generated data into the generated-data volume, on whatever schedule
   # the host keeps; the Bot picks the new files up without a rebuild or a restart. Not started
@@ -213,6 +214,19 @@ networks:
   sandbox_net:
     internal: true
   xsearch_net:
+  # The local LLM relay (deploy/orbstack/README.md): the Bot reaches the Mac's LLM server at the
+  # gateway, 172.31.254.1, where the Mac keeps listeners open through `orb`. Only the Bot joins it.
+  # Fixed bridge name and subnet: dcb-firewall lets exactly that bridge reach exactly that address
+  # and port, and dcb-probe accepts exactly that subnet outside the address pool. Not internal:
+  # the gateway must be reachable; nothing else on it is.
+  llm:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-dcb-llm
+    ipam:
+      config:
+        - subnet: 172.31.254.0/24
+          gateway: 172.31.254.1
 
 volumes:
   codex-home:
