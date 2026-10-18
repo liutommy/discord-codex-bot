@@ -97,8 +97,13 @@ n=$(wc -l < "$exits")
 if [ ! -e "$gave_up" ] && [ "$n" -ge "$DCB_GIVEUP_EXITS" ]; then
     last=$(tail -1 "$exits" | cut -d' ' -f2-)
     # Written whole, then renamed: dcb-up and this guard trust the marker's mere existence.
-    echo "since $(date '+%F %T'): $n exits in ${DCB_GIVEUP_WINDOW}s; last: exit $last" > "$gave_up.tmp" \
-        && mv -f "$gave_up.tmp" "$gave_up"
+    if ! { echo "since $(date '+%F %T'): $n exits in ${DCB_GIVEUP_WINDOW}s; last: exit $last" > "$gave_up.tmp" \
+            && mv -f "$gave_up.tmp" "$gave_up"; }; then
+        # The decision cannot be persisted: still never restart a crash-looping bot on this run.
+        log "ERROR cannot write $gave_up; not starting the bot this run"
+        problem gave-up "give-up marker could not be written"; wake_update
+        exit 1
+    fi
     log "giving up: bot exited $n times in ${DCB_GIVEUP_WINDOW}s; last: exit $last"
 fi
 if [ -e "$gave_up" ]; then

@@ -61,7 +61,10 @@ done
 # The most common answer, if at least two sources gave it.
 wan=$(printf '%s\n' "${answers[@]:-}" | grep . | sort | uniq -c | sort -rn | awk '$1 >= 2 {print $2; exit}')
 if [ -n "$wan" ]; then
-    echo "$wan" > "$DCB_STATEDIR/wan-ip"; echo "ok $wan" > /run/dcb/wan-status
+    # Written whole, then renamed: a cut-short write must not lose the last accepted address.
+    echo "$wan" > "$DCB_STATEDIR/wan-ip.tmp" && mv -f "$DCB_STATEDIR/wan-ip.tmp" "$DCB_STATEDIR/wan-ip" \
+        || echo "dcb-firewall: WARN cannot cache the WAN address in $DCB_STATEDIR" >&2
+    echo "ok $wan" > /run/dcb/wan-status   # dcb-probe reads "<state> <address>"
 else
     wan=$(cat "$DCB_STATEDIR/wan-ip" 2>/dev/null || true)
     acceptable "$wan" || wan=""

@@ -104,3 +104,17 @@ def test_the_gateway_check_reads_the_whole_window_including_the_rotated_segment(
     text = GUARD.read_text()
     assert "tail -n 5000" not in text
     assert 'cat "$prev" "$botlog"' in text and 'prev="$botlog.$(' in text
+
+
+def test_a_give_up_that_cannot_be_written_never_restarts_the_bot() -> None:
+    text = GUARD.read_text()
+    block = text[text.index('if ! { echo "since') :]
+    block = block[: block.index("\n    fi\n")]
+    assert "exit 1" in block and "dcb-up" not in block
+
+
+def test_the_firewall_caches_the_wan_address_whole_then_renamed() -> None:
+    fw = (GUARD.parent / "dcb-firewall").read_text()
+    assert '> "$DCB_STATEDIR/wan-ip.tmp"' in fw and 'mv -f "$DCB_STATEDIR/wan-ip.tmp"' in fw
+    assert 'echo "$wan" > "$DCB_STATEDIR/wan-ip";' not in fw
+    assert 'echo "ok $wan" > /run/dcb/wan-status' in fw  # dcb-probe parses "<state> <address>"
