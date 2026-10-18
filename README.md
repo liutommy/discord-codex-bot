@@ -282,9 +282,9 @@ see what it judged and why.
 Notification delivery is intentionally at-least-once; a process crash after Discord accepts a
 message but before SQLite records delivery can produce one duplicate after restart.
 
-Four backends share that pipeline. Codex CLI is the default; Google's Antigravity CLI (`agy`) is
+Five backends share that pipeline. Codex CLI is the default; Google's Antigravity CLI (`agy`) is
 the second; OpenRouter and OrcaRouter (free models only, one shared OpenAI-compatible router core
-— they differ in host, key, free-model rule and thread prefix) the third and fourth. OrcaRouter's
+— they differ in host, key, free-model rule and thread prefix) the third and fourth, a local OpenAI-compatible server (described below) the fifth. OrcaRouter's
 free tier is its `-free` ids (plus `orcarouter/free`); the account must have a GitHub login linked
 or the API answers `429 free_rate_limited`. Each member picks `provider` → `model`
 (autocomplete, typing filters; the OpenRouter list is the live free-model catalog, image-capable
@@ -297,7 +297,12 @@ balance is too low`), `argon_failed` sends the question back to the cell it repl
 OpenRouter is stateless, so the Bot keeps those conversations itself (`OPENROUTER_DIR`,
 replayed within `OPENROUTER_HISTORY_CHARS`), sends the persona as the system message, inlines
 images for models the catalog marks image-capable and `reasoning.effort` for models that take it;
-picking one reminds the member that free models are unstable and may vanish. The shared `effort`
+picking one reminds the member that free models are unstable and may vanish. A local
+OpenAI-compatible server (llama.cpp `llama-server`, `mlx_lm.server`) on the Docker host runs on
+the same router core as the provider 地端模型 when `LOCAL_LLM_URL` is set to an address the
+container can reach (e.g. `http://<gateway>:<port>/v1`; `LOCAL_LLM_API_KEY` optional): every model its `/models`
+lists is offered, transcripts use the same `OPENROUTER_DIR` and budget, and a leading
+`<think>…</think>` block is dropped from the answer and from the streamed display. The shared `effort`
 option is mapped onto what each family can run
 — agy bakes the effort into the model slug (Argon, Flash and Claude: low/medium/high; gpt-oss
 fixed). `agy` runs headless

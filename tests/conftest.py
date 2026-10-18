@@ -48,6 +48,8 @@ def config() -> Config:
         agy_settings_path=Path("/opt/discord-codex/agy-settings.json"),
         openrouter_api_key="test-key",
         orcarouter_api_key="test-orca",
+        local_llm_url="",
+        local_llm_api_key="",
         alert_user_id=0,
         alert_after_failures=3,
         alert_cooldown_minutes=30,

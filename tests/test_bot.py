@@ -1159,6 +1159,56 @@ async def test_model_options_lists_orcarouter_free_models_only_with_a_key(
     assert await client.model_options("orcarouter", "") == []  # no key → not offered
 
 
+async def test_local_models_are_offered_only_with_a_url(client, monkeypatch) -> None:
+    from discord_codex_bot.openrouter import Model
+
+    calls = []
+
+    async def no_refresh():
+        return client.local.models
+
+    async def fake_router(router, text, config, model, **kw):
+        calls.append((router.key, model, kw["catalog"]))
+        return CodexResult("LO", (), None, "lo-1", False)
+
+    async def login(config):
+        return "ChatGPT 訂閱登入有效"
+
+    async def usage(config):
+        return RateLimits(12.0, 3.0, "test")
+
+    monkeypatch.setattr(client.local, "free_models", no_refresh)
+    monkeypatch.setattr(bot_module, "run_router", fake_router)
+    monkeypatch.setattr(bot_module, "codex_login_status", login)
+    monkeypatch.setattr(bot_module, "probe_rate_limits", usage)
+    client.local.models = [Model("qwen3-8b", "qwen3-8b", False, False, 0)]
+    client.config = replace(client.config, openrouter_api_key="", orcarouter_api_key="")
+
+    # no LOCAL_LLM_URL: not offered, not listed
+    assert await client.model_options("local", "") == []
+    system = (await client._status_text(GUILD, 555, USER)).split("【系統】")[1]
+    assert "地端模型" not in system and "OpenRouter／OrcaRouter：未設定" in system
+
+    client.config = replace(client.config, local_llm_url="http://host.orb.internal:8080/v1")
+    assert [c.value for c in await client.model_options("local", "")] == ["local:qwen3-8b"]
+    system = (await client._status_text(GUILD, 555, USER)).split("【系統】")[1]
+    assert "地端模型 1 個模型" in system and "免費" not in system
+    described = client._describe("local:qwen3-8b", "")
+    assert "地端模型 · qwen3-8b" in described and "（看不到圖片）" in described
+    assert "免費" not in described
+    # a provider alone has no default: the member picks from what the server serves
+    assert await client._change_model(GUILD, USER, "local", None, None) == (
+        "",
+        "這個來源的模型會變動",
+    )
+    assert await client._change_model(GUILD, USER, "local", "qwen3-8b", None) == (
+        "local:qwen3-8b",
+        "",
+    )
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "LO" and calls == [("local", "qwen3-8b", client.local)]
+
+
 async def test_status_text_reports_member_settings_and_system(client, monkeypatch) -> None:
     from discord_codex_bot.openrouter import Model
     from discord_codex_bot.threads import ThreadStore

@@ -186,3 +186,24 @@ def test_agy_reserve_settings_default_and_stay_in_bounds() -> None:
     for name, bad in (("AGY_RESERVE_PERCENT", "101"), ("AGY_USAGE_MINUTES", "-1")):
         with pytest.raises(ValueError, match=name):
             load_config({**base, name: bad})
+
+
+def test_local_llm_url_is_optional_and_must_be_http() -> None:
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    config = load_config(base)
+    assert (config.local_llm_url, config.local_llm_api_key) == ("", "")
+    config = load_config(
+        {**base, "LOCAL_LLM_URL": " http://host.orb.internal:8080/v1 ", "LOCAL_LLM_API_KEY": "k"}
+    )
+    assert (config.local_llm_url, config.local_llm_api_key) == (
+        "http://host.orb.internal:8080/v1",
+        "k",
+    )
+    assert load_config({**base, "LOCAL_LLM_URL": "https://llm.lan/v1"}).local_llm_url
+    for bad in ("ftp://host/v1", "host.orb.internal:8080/v1", "file:///etc/passwd"):
+        with pytest.raises(ValueError, match="LOCAL_LLM_URL"):
+            load_config({**base, "LOCAL_LLM_URL": bad})

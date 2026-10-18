@@ -187,6 +187,8 @@ class Config:
     agy_settings_path: Path
     openrouter_api_key: str
     orcarouter_api_key: str
+    local_llm_url: str
+    local_llm_api_key: str
     alert_user_id: int
     alert_after_failures: int
     alert_cooldown_minutes: int
@@ -353,6 +355,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # OrcaRouter: same shape (OpenAI-compatible, free = -free ids); shares the transcript
         # dir, catalog TTL and history budget above.
         orcarouter_api_key=values.get("ORCAROUTER_API_KEY", "").strip(),
+        # A local OpenAI-compatible server (llama-server, mlx_lm.server) as a third router: its
+        # base URL ending in /v1; empty = not offered. The key is optional (sent only when set).
+        local_llm_url=values.get("LOCAL_LLM_URL", "").strip(),
+        local_llm_api_key=values.get("LOCAL_LLM_API_KEY", "").strip(),
         # Operator alerts by DM: repeated failures / lost login. Empty id = the application owner.
         alert_user_id=int(values.get("ALERT_USER_ID", "").strip() or 0),
         alert_after_failures=_positive_int(values, "ALERT_AFTER_FAILURES", 3),
@@ -547,4 +553,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         raise ValueError("JEV_ENABLED needs TYPESAFE_API_KEY")
     if config.jev_enabled and not config.jev_url.startswith("https://"):
         raise ValueError("JEV_URL must be an https:// URL")  # the key travels with every call
+    if config.local_llm_url and not config.local_llm_url.startswith(("http://", "https://")):
+        raise ValueError("LOCAL_LLM_URL must be an http:// or https:// URL")
     return config
