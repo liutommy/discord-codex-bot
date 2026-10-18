@@ -88,7 +88,8 @@ so they survive a reboot. A counter file that is not a plain number (half-writte
 counts as the limit reached and is logged; both are written through a temp file and `mv`, and when
 they cannot be written no wake happens. The wake request is read through `head -c 4097`; one over
 4096 bytes is refused and logged (a compromised machine cannot flood the Mac). A wake suppressed by the daily cap sends one mail that day (marker
-`cap-mailed-<date>`) saying so; later suppressions the same day are only logged.
+`cap-mailed-<date>`) saying so; later suppressions the same day are only logged. An unreadable `last-wake` blocks every wake until the file is fixed or removed, so it also sends
+one mail a day (marker `garbled-mailed-<date>`).
 
 One wake runs at a time: the script re-runs itself as the child of a Perl wrapper that holds an
 `flock(2)` lock on `instance.lock` until the child exits (macOS has no `flock` command). The kernel
