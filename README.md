@@ -694,7 +694,10 @@ docker run --rm --user 0 -v tommy_test_xsearch_home:/v -v ~/.grok/auth.json:/in/
 docker compose up -d xsearch
 ```
 
-Then set `XSEARCH_URL=http://xsearch:8090` and restart the Bot. After changing `GROK_VERSION`,
+Then set `XSEARCH_URL=http://xsearch:8090` and restart the Bot. The image builds on amd64 and
+arm64 hosts alike (an Apple Silicon Mac included): `xsearch/Dockerfile` picks Grok's x86_64 or
+aarch64 build and pins each by its own checksum. After changing `GROK_VERSION`, update both
+`GROK_SHA256_AMD64` and `GROK_SHA256_ARM64`, then
 re-run the negative control for the enforced hook (one Grok session):
 `docker compose exec xsearch sh /srv/smoke-layer2.sh` must print `OK`. Then the file-mention check
 (8 sessions): `docker compose exec xsearch python /srv/smoke-mentions.py` must print `OK`. The CLI

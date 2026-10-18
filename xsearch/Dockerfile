@@ -6,15 +6,25 @@
 FROM python:3.12-slim-bookworm
 
 # The binary itself, pinned by checksum (the official installer verifies nothing beyond TLS).
-# Changing the version: update both, then re-run /srv/smoke-layer2.sh (see README).
+# One build per architecture: x86_64 for amd64 hosts, aarch64 for arm64 ones (an Apple Silicon
+# Mac; "-linux-arm64" is a 404). TARGETARCH comes from BuildKit; the classic builder leaves it
+# empty, so the build's own architecture stands in. Changing the version: update it and both
+# checksums, then re-run /srv/smoke-layer2.sh (see README).
 ARG GROK_VERSION=1.0.46
-ARG GROK_SHA256=41626a53292324140b92556b9d42ff5542e3dcd04aff85eafb8689dd4adb44fc
+ARG GROK_SHA256_AMD64=41626a53292324140b92556b9d42ff5542e3dcd04aff85eafb8689dd4adb44fc
+ARG GROK_SHA256_ARM64=45b0943e736f00a249b9cf02af2be9e0749d97c09a6f55cfcf3029a1a836f23e
+ARG TARGETARCH
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL "https://x.ai/cli/grok-${GROK_VERSION}-linux-x86_64" -o /usr/local/bin/grok \
-    && echo "${GROK_SHA256}  /usr/local/bin/grok" | sha256sum -c - \
+    && case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+         amd64) build=x86_64 sum="${GROK_SHA256_AMD64}" ;; \
+         arm64) build=aarch64 sum="${GROK_SHA256_ARM64}" ;; \
+         *) echo "no Grok build for this architecture" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://x.ai/cli/grok-${GROK_VERSION}-linux-${build}" -o /usr/local/bin/grok \
+    && echo "${sum}  /usr/local/bin/grok" | sha256sum -c - \
     && chmod 0755 /usr/local/bin/grok \
     && grok --version \
     && useradd --uid 1000 --create-home grok \

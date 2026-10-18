@@ -9,8 +9,11 @@ services:
     image: discord-codex-bot:local
     restart: always
     init: true
+    # Optional, so `docker compose build` works on a checkout without one (a new host, CI);
+    # the Bot itself still refuses to start without DISCORD_TOKEN.
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       CODEX_HOME: /var/lib/codex
       # CODEX_WORKSPACE / CODEX_WORKSPACE_PLAIN / CODEX_RULES stay at the image defaults: the

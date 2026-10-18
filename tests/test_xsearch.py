@@ -146,9 +146,40 @@ def test_policy_allows_no_hooks_or_mcp_servers_from_anywhere_else() -> None:
 
 def test_image_runs_a_pinned_binary_as_an_unprivileged_user() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text()
-    assert "sha256sum -c" in dockerfile and "ARG GROK_SHA256=" in dockerfile
+    assert "sha256sum -c" in dockerfile and "ARG GROK_SHA256_AMD64=" in dockerfile
     assert "install.sh" not in dockerfile
     assert "\nUSER grok\n" in dockerfile
+
+
+AMD64_SHA = "41626a53292324140b92556b9d42ff5542e3dcd04aff85eafb8689dd4adb44fc"
+ARM64_SHA = "45b0943e736f00a249b9cf02af2be9e0749d97c09a6f55cfcf3029a1a836f23e"
+
+
+def _pick(target: str) -> subprocess.CompletedProcess[str]:
+    """Run the Dockerfile's own architecture switch, as written, under sh."""
+    dockerfile = (ROOT / "Dockerfile").read_text().replace("\\\n", "\n")
+    case = dockerfile[dockerfile.index("case ") : dockerfile.index("esac") + 4]
+    pins = [line[4:].split("=", 1) for line in dockerfile.splitlines() if "ARG GROK_SHA" in line]
+    script = "".join(f'{key}="{value}"\n' for key, value in pins)
+    script += f'TARGETARCH="{target}"\n{case}\necho "$build $sum"\n'
+    return subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+
+
+def test_each_architecture_gets_its_own_pinned_grok_build() -> None:
+    # amd64 is the build the Bot has always run; Apple Silicon gets the aarch64 one
+    assert _pick("amd64").stdout.split() == ["x86_64", AMD64_SHA]
+    assert _pick("arm64").stdout.split() == ["aarch64", ARM64_SHA]
+    unknown = _pick("riscv64")
+    assert unknown.returncode != 0 and "no Grok build" in unknown.stderr
+    url = '"https://x.ai/cli/grok-${GROK_VERSION}-linux-${build}"'
+    assert url in (ROOT / "Dockerfile").read_text()
+
+
+def test_compose_builds_without_a_dot_env() -> None:
+    # a new host (or CI) has no .env yet; the build must not need one
+    compose = (ROOT.parent / "compose.yaml").read_text()
+    assert "- path: .env\n        required: false\n" in compose
+    assert "env_file:\n      - .env\n" not in compose
 
 
 def _gate(event: str) -> str:
