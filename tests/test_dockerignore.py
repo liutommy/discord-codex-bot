@@ -54,6 +54,9 @@ def test_host_local_files_stay_out_of_the_build_context() -> None:
         "dcb-state.tar.age",
         "migrate/dot-env.age",
         ".env",
+        "discord_codex_bot/__pycache__/bot.cpython-312.pyc",
+        "scripts/__pycache__/build_lol_names.cpython-312.pyc",
+        "discord_codex_bot/stray.pyc",
     ):
         assert _ignored(path), path
 
