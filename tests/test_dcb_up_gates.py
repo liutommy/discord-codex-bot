@@ -29,7 +29,8 @@ STUBS = {
     "docker": (
         'echo "docker $*" >> "$CALLS"\n'
         'case "$*" in\n'
-        '  *" config --format json") cat "$COMPOSE_CONFIG" ;;\n'
+        '  *" config --format json") [ -n "$CONFIG_WARN" ] && echo "WARN[0000] obsolete" >&2\n'
+        '    cat "$COMPOSE_CONFIG" ;;\n'
         '  "ps -q "*) echo "$RUNNING" ;;\n'
         '  "ps -aq "*) echo cid1 ;;\n'
         '  "network ls "*) [ -n "$NETLS_WARN" ] && echo "WARNING: context" >&2\n'
@@ -168,3 +169,9 @@ def test_a_warning_on_stderr_is_never_probed_as_a_network(tmp_path) -> None:
     rc, calls, log = _run(tmp_path, NETLS_WARN="1")
     assert rc == 0, log
     assert [c for c in calls if c.startswith("probe")] == ["probe proj_default"], calls
+
+
+def test_a_compose_warning_on_stderr_does_not_stop_the_stack(tmp_path) -> None:
+    rc, calls, log = _run(tmp_path, CONFIG_WARN="1", RUNNING="cid1")
+    assert rc == 0, log
+    assert not _stopped(calls), calls

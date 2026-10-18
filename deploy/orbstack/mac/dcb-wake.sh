@@ -131,8 +131,16 @@ if [ "$mode" = test ]; then
     reasons="- TEST：這是手動要求的測試喚醒。只確認你看得到 machine 的狀態（例如 docker ps），並照下面「完成後」的第 2、3 步回報；不要執行任何修復或重啟。"
 else
     # At most 4097 bytes are read: one more than the cap, so an oversize request is told from one of exactly the cap.
-    run_limited 60 bash -c 'orb -m "$1" -u root cat "$2" 2>/dev/null | head -c 4097 > "$3"' \
-        _ "$DCB_WAKE_MACHINE" "$DCB_WAKE_STATEDIR/wake-request" "$reqfile" || : > "$reqfile"
+    # A missing request is exit 0 inside the machine; any other status (orb down, the machine
+    # stopped, the 60 s limit) is a read failure, logged rather than taken for "no request".
+    # 141: the local head stopped reading a flood, which the size check below refuses.
+    run_limited 60 bash -c 'orb -m "$1" -u root sh -c '\''test ! -e "$1" || head -c 4097 -- "$1"'\'' sh "$2" \
+            2>/dev/null | head -c 4097 > "$3"; s=${PIPESTATUS[0]}; [ "$s" -eq 0 ] || [ "$s" -eq 141 ]' \
+        _ "$DCB_WAKE_MACHINE" "$DCB_WAKE_STATEDIR/wake-request" "$reqfile"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        defer "cannot read the wake request (rc=$rc)"; exit 0
+    fi
     [ -s "$reqfile" ] || exit 0
     if [ "$(wc -c < "$reqfile")" -gt 4096 ]; then
         defer "wake-request is larger than 4096 bytes; refused"; exit 0
@@ -217,7 +225,8 @@ M="orb -m $DCB_WAKE_MACHINE -u root"
     echo "  journalctl -u 'dcb-*' -n 50）；docker ps、docker inspect、docker logs --tail；"
     echo "  執行 /usr/local/sbin/dcb-up --manual、/usr/local/sbin/dcb-firewall、/usr/local/sbin/dcb-probe；"
     echo "  docker compose --project-directory \$DCB_REPO -p \$DCB_PROJECT restart <服務>；"
-    echo "  診斷完成後移除 \$DCB_STATEDIR/bot-giving-up（dcb-guard 放棄拉起 bot 的標記）。"
+    echo "  bot 已被放棄（\$DCB_STATEDIR/bot-giving-up）時，診斷完成後執行 dcb-up --manual 並確認 bot healthy；"
+    echo "  dcb-guard 看到 healthy 才清除標記與崩潰紀錄，只刪標記會在下一輪被重寫。"
     echo "- 不可以：修改任何程式碼、腳本、設定或 systemd unit；rebuild image；任何 git 寫入操作；"
     echo "  讀取或印出 .env、任何憑證或登入／auth 檔（含 \$DCB_REPO/state/ 底下各服務的 home）、rclone 設定；"
     echo "  刪除資料；建立或移除 \$DCB_REPO/.hold；永久停掉 bot；發公告；寫入雲端儲存；寄任何信（報告由腳本寄出）。"

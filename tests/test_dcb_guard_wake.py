@@ -131,3 +131,12 @@ def test_deploy_refuses_tracked_local_changes_before_the_fast_forward() -> None:
     check = deploy.index("git status --porcelain --untracked-files=no")
     assert check < deploy.index("git merge -q --ff-only")
     assert 'die "tracked local changes' in deploy
+
+
+def test_a_given_up_bot_drops_a_stale_unhealthy_first_seen_time() -> None:
+    """Health is not checked while given up; a first-seen time kept from before would make the
+    first "starting" after recovery a wake request at once."""
+    text = GUARD.read_text()
+    block = text[text.index('if [ -e "$gave_up" ]; then') :]
+    block = block[: block.index("\nfi\n")]
+    assert "no_problem unhealthy" in block and "exit 0" in block

@@ -33,7 +33,10 @@ flock -w 600 9 || { log "dcb-up lock busy for 10 min; skip"; exit 1; }
 fw=$("$sbin/dcb-firewall" 2>&1) || { log "firewall FAILED; skip: $(echo "$fw" | tail -1)"; exit 1; }
 
 cd "$DCB_REPO" || { log "repo $DCB_REPO missing; skip"; exit 1; }
-cfg=$(compose config --format json 2>&1) || { log "compose config FAILED; skip: $(echo "$cfg" | tail -1)"; exit 1; }
+# JSON from stdout only: a compose warning on stderr would make every gate below fail.
+err=$(mktemp) || { log "cannot create a scratch file; skip"; exit 1; }
+trap 'rm -f "$err"' EXIT
+cfg=$(compose config --format json 2>"$err") || { log "compose config FAILED; skip: $(tail -1 "$err")"; exit 1; }
 # Every service of the profile-expanded config, data-refresh included, must have restart "no" (the
 # same rule dcb-up applies to the services without the profile).
 bad=$(echo "$cfg" | jq -r --arg s "$svc" 'if .services[$s] then
@@ -65,7 +68,7 @@ probe=$("$sbin/dcb-probe" "${nets[@]}" 2>&1) \
 
 held && { log ".hold appeared during checks; skip"; exit 0; }
 out=$(mktemp) || { log "mktemp failed"; exit 1; }
-trap 'rm -f "$out"' EXIT
+trap 'rm -f "$err" "$out"' EXIT
 compose run --rm "$svc" > "$out" 2>> "$logfile"
 rc=$?
 cat "$out" >> "$logfile"

@@ -28,7 +28,8 @@ STUBS = {
     "docker": (
         'echo "docker $*" >> "$CALLS"\n'
         'case "$*" in\n'
-        '  *" config --format json") cat "$COMPOSE_CONFIG" ;;\n'
+        '  *" config --format json") [ -n "$CONFIG_WARN" ] && echo "WARN[0000] obsolete" >&2\n'
+        '    cat "$COMPOSE_CONFIG" ;;\n'
         '  "network inspect "*) [ "$3" = proj_default ] || [ "$3" = proj_backend ] ;;\n'
         '  *" run --rm data-refresh")\n'
         '    echo "lol-names unchanged"; echo "${RUN_OUT:-data-refresh: changed}" ;;\n'
@@ -232,3 +233,9 @@ def test_a_service_with_network_mode_host_skips_the_run(tmp_path) -> None:
     rc, calls, log = _run(tmp_path, config={**CONFIG, "services": services})
     assert rc == 1 and "data-refresh(network_mode=host)" in log, log
     assert not [c for c in calls if " run " in c or c.startswith("probe")], calls
+
+
+def test_a_compose_warning_on_stderr_does_not_skip_the_run(tmp_path) -> None:
+    rc, calls, log = _run(tmp_path, CONFIG_WARN="1")
+    assert rc == 0, log
+    assert log.splitlines()[-1].endswith("data-refresh: changed"), log

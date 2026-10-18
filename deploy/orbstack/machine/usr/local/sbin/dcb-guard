@@ -110,7 +110,10 @@ if [ ! -e "$gave_up" ] && [ "$n" -ge "$DCB_GIVEUP_EXITS" ]; then
 fi
 if [ -e "$gave_up" ]; then
     log "given up on the bot ($(head -1 "$gave_up")); not starting -- dcb-up --manual or rm $gave_up"
-    problem gave-up "$(head -1 "$gave_up" | cut -d';' -f1)"; wake_update
+    problem gave-up "$(head -1 "$gave_up" | cut -d';' -f1)"
+    # Health is not checked while given up: an unhealthy first-seen time kept from before would
+    # make the Bot's first "starting" after recovery a wake request at once.
+    no_problem unhealthy; wake_update
     exit 0
 fi
 no_problem gave-up

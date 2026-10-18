@@ -59,8 +59,9 @@ if [ -e "$gave_up" ] && [ "$mode" != --manual ]; then
 fi
 
 cd "$DCB_REPO" || { log "repo $DCB_REPO missing"; stop_stack "repo missing"; exit 1; }
-if ! cfg=$(compose config --format json 2>&1); then
-    log "compose config FAILED: $(echo "$cfg" | tail -1)"; rm -f "$since_file"; stop_stack "compose config does not parse"; exit 1
+# JSON from stdout only: a compose warning on stderr would break the jq gates below and stop the Bot.
+if ! cfg=$(compose config --format json 2>"$run/config.err"); then
+    log "compose config FAILED: $(tail -1 "$run/config.err")"; rm -f "$since_file"; stop_stack "compose config does not parse"; exit 1
 fi
 if ! bad=$(echo "$cfg" | jq -r '.services | to_entries[] | select((.value.restart // "") != "no") | "\(.key)=\(.value.restart // "unset")"' | tr '\n' ' '); then
     log "cannot read the compose config (jq failed); not starting"; rm -f "$since_file"; stop_stack "restart policy unreadable"; exit 1
