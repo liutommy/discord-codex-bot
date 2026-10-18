@@ -4,10 +4,13 @@ per interval and a few times a day, one at a time, and a hung claude is killed w
 from __future__ import annotations
 
 import datetime
+import fcntl
 import os
 import subprocess
 import time
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy" / "orbstack" / "mac" / "dcb-wake.sh"
@@ -138,22 +141,112 @@ def test_at_most_six_wakes_a_day(tmp_path) -> None:
     assert "DEFER wake: 6 wakes today" in wake.log()
 
 
-def test_a_held_lock_skips_and_a_stale_one_is_taken_over(tmp_path) -> None:
+def test_a_held_lock_skips(tmp_path) -> None:
     wake = Wake(tmp_path)
     wake.request.write_text("gave-up 20min since x\n")
-    lock = wake.state / "lock"
-    lock.mkdir()
-    (lock / "owner").write_text(f"{os.getpid()} {int(time.time())}\n")
-    assert wake.run().returncode == 0
-    assert wake.claude_calls() == []
-    assert lock.exists()
-
-    gone = subprocess.Popen(["true"])
-    gone.wait()
-    (lock / "owner").write_text(f"{gone.pid} {int(time.time())}\n")
+    with open(wake.state / "instance.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert wake.run().returncode == 0
+        assert wake.claude_calls() == []
+        assert "another dcb-wake holds the lock; skip" in wake.log()
+    # The lock goes with its holder: no stale lock to clean up.
     assert wake.run().returncode == 0
     assert len(wake.claude_calls()) == 1
-    assert "removing stale lock" in wake.log()
+
+
+def test_two_concurrent_starts_run_exactly_one_wake(tmp_path) -> None:
+    wake = Wake(
+        tmp_path,
+        claude='echo "claude $*" >> "$CALLS"; cat > "$PROMPT"; sleep 3; echo "claude summary"\n',
+    )
+    # --test-wake is exempt from the rate limits, so only the lock can keep the second one out.
+    procs = [
+        subprocess.Popen(
+            ["bash", str(SCRIPT), "--test-wake"],
+            env=wake.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(2)
+    ]
+    for proc in procs:
+        proc.communicate(timeout=60)
+        assert proc.returncode == 0
+    assert len(wake.claude_calls()) == 1, wake.log()
+    assert wake.log().count("another dcb-wake holds the lock; skip") == 1
+
+
+def test_an_oversize_wake_request_is_refused_and_logged(tmp_path) -> None:
+    wake = Wake(tmp_path)
+    wake.request.write_text("gave-up 20min " + "x" * 5000 + "\n")
+    assert wake.run().returncode == 0
+    assert wake.claude_calls() == []
+    assert "wake-request is larger than 4096 bytes; refused" in wake.log()
+    assert not (wake.state / f"wakes-{_today()}").exists()
+    # A request at the cap is still served.
+    wake.request.write_text("gave-up 20min " + "x" * (4096 - 15) + "\n")
+    assert wake.request.stat().st_size == 4096
+    (wake.state / "last-defer-log").unlink()
+    assert wake.run().returncode == 0
+    assert len(wake.claude_calls()) == 1
+
+
+def test_a_flooding_orb_is_read_only_up_to_the_cap(tmp_path) -> None:
+    flood = (
+        'echo "orb $*" >> "$CALLS"\n'
+        "yes gave-up | head -c 50000000\n"  # 50 MB, to be cut off by the reader
+    )
+    wake = Wake(tmp_path)
+    (tmp_path / "bin" / "orb").write_text("#!/bin/sh\n" + flood)
+    assert wake.run().returncode == 0
+    assert wake.claude_calls() == []
+    assert "larger than 4096 bytes" in wake.log()
+
+
+@pytest.mark.parametrize("garbage", ["", "abc", "12x", "-5", "1.5"])
+def test_a_garbled_daily_count_counts_as_the_cap_reached(tmp_path, garbage) -> None:
+    wake = Wake(tmp_path)
+    wake.request.write_text("gave-up 20min since x\n")
+    (wake.state / f"wakes-{_today()}").write_text(garbage)
+    assert wake.run().returncode == 0
+    assert wake.claude_calls() == []
+    assert "is not a number; treated as the daily cap reached" in wake.log()
+    assert _suppression_mails(wake)  # the cap path is never silent
+
+
+@pytest.mark.parametrize("garbage", ["", "abc", "12x", "-5"])
+def test_a_garbled_last_wake_blocks_the_wake(tmp_path, garbage) -> None:
+    wake = Wake(tmp_path)
+    wake.request.write_text("gave-up 20min since x\n")
+    (wake.state / "last-wake").write_text(garbage)
+    assert wake.run().returncode == 0
+    assert wake.claude_calls() == []
+    assert "last-wake is not a number; treated as a wake just now" in wake.log()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_a_wake_that_cannot_be_recorded_does_not_happen(tmp_path) -> None:
+    wake = Wake(tmp_path)
+    wake.request.write_text("gave-up 20min since x\n")
+    for name in ("instance.lock", "dcb-wake.log"):  # appendable although the directory is not
+        (wake.state / name).touch()
+    wake.state.chmod(0o555)
+    try:
+        assert wake.run().returncode == 1
+        assert wake.claude_calls() == []
+        assert "ERROR cannot record the wake" in wake.log()
+    finally:
+        wake.state.chmod(0o755)
+    assert not (wake.state / "last-wake").exists()
+
+
+def test_the_counters_are_written_whole(tmp_path) -> None:
+    wake = Wake(tmp_path)
+    wake.request.write_text("gave-up 20min since x\n")
+    assert wake.run().returncode == 0
+    assert (wake.state / f"wakes-{_today()}").read_text() == "1\n"
+    assert (wake.state / "last-wake").read_text().strip().isdigit()
+    assert not [p for p in wake.state.iterdir() if ".XXXX" in p.name or p.name.startswith("tmp")]
 
 
 def test_the_test_wake_needs_no_request_and_ignores_the_rate_limit(tmp_path) -> None:

@@ -16,7 +16,7 @@ Mac side.
 |---|---|
 | `machine/usr/local/sbin/dcb-firewall` | Owns `DOCKER-USER` and `DCB-INPUT` (IPv4 and IPv6): containers reach the internet but no private or special address (the Mac, the LAN, the router's WAN address, OrbStack's networks, the machine's own services). Loads atomically and verifies the live chains. |
 | `machine/usr/local/sbin/dcb-probe` | Positive control for the firewall, run from each network it is given: blocked targets must be unreachable, public ones reachable, and every subnet must lie in the Docker pool. |
-| `machine/usr/local/sbin/dcb-up` | The only path to "up": firewall, compose config check (every service `restart: "no"`), probe from every project network, `compose up -d`, then the containers' restart policies. Stops a running stack when the firewall fails or the probe finds a leak. |
+| `machine/usr/local/sbin/dcb-up` | The only path to "up": firewall, compose config check (every service `restart: "no"`), probe from every project network, `compose up -d`, then the containers' restart policies. Also refuses external and non-bridge networks. A gate whose tool fails (`jq`, `docker inspect`) counts as failed, never as "nothing found": a running stack is stopped. Stops a running stack when the firewall fails or the probe finds a leak. |
 | `machine/usr/local/sbin/dcb-guard` | Every 2 minutes: re-applies the firewall, starts missing services and restarts a bot unhealthy for too long (both through `dcb-up`), gives up after repeated crashes, flags gateway anomalies, and writes the wake request (below). |
 | `machine/usr/local/sbin/dcb-deploy` | `dcb-deploy <merge commit>`: fast-forwards the checkout to that commit, builds as the checkout owner, runs `dcb-up --manual` and checks that the bot is healthy and connected. |
 | `machine/usr/local/sbin/dcb-data-refresh` | 05:00 daily: runs the one-shot `data-refresh` service (`docker compose --profile refresh run --rm data-refresh`) behind the same lock, firewall and probe gates as `dcb-up`. Never builds an image and never restarts the bot, which reloads the generated data itself. |
@@ -40,7 +40,9 @@ otherwise. `data-refresh` already has `restart: "no"` in `compose.yaml`.
 restart-policy check and `dcb-guard`'s list of wanted services never include it, which is what
 they should do: it runs only when called. `dcb-data-refresh` expands the profile and checks the whole
 result instead, failing closed: every service, `data-refresh` included, must have restart policy
-`"no"`, and every network any service joins must already exist and pass `dcb-probe` (exit 0; a leak
+`"no"`, every compose network must be non-external with driver `bridge` (macvlan, ipvlan and
+external networks bypass `DOCKER-USER`; `dcb-up` applies the same rule), and every network any
+service joins must already exist and pass `dcb-probe` (exit 0; a leak
 or an inconclusive probe both skip the run) after the firewall has been applied, all before
 `compose run`. The last line it prints must be `data-refresh: changed ...` or
 `data-refresh: unchanged ...`; anything else counts as a failure.
@@ -82,10 +84,16 @@ mails a notice with the output through `DCB_WAKE_NOTIFY`, masking token-shaped s
 (`Bearer …`, `…token=…`, Discord and `sk-` keys) in the mail.
 
 The interval and the daily count live in `~/.local/state/dcb-wake/` (`last-wake`, `wakes-<date>`),
-so they survive a reboot. A wake suppressed by the daily cap sends one mail that day (marker
+so they survive a reboot. A counter file that is not a plain number (half-written, disk full)
+counts as the limit reached and is logged; both are written through a temp file and `mv`, and when
+they cannot be written no wake happens. The wake request is read through `head -c 4097`; one over
+4096 bytes is refused and logged (a compromised machine cannot flood the Mac). A wake suppressed by the daily cap sends one mail that day (marker
 `cap-mailed-<date>`) saying so; later suppressions the same day are only logged.
 
-One wake runs at a time (a `mkdir` lock with stale-lock takeover; macOS has no `flock`). The hard
+One wake runs at a time: the script re-runs itself as the child of a Perl wrapper that holds an
+`flock(2)` lock on `instance.lock` until the child exits (macOS has no `flock` command). The kernel
+drops the lock when the holder dies, so there is no stale lock to take over; a second start logs
+`another dcb-wake holds the lock; skip` and exits. The hard
 limit (`DCB_WAKE_TIME_LIMIT`, 25 min) starts Claude in its own process group through Perl (macOS
 has no `setsid` or `timeout`) and sends the whole group TERM, then KILL 10 s later; the group is
 cleaned up the same way after a normal exit. A process that starts its own session leaves the

@@ -7,9 +7,13 @@
 #   dcb-wake.sh --test-wake   wake once with a harmless prompt (see the state, report, change nothing)
 #
 # Wakes are rate limited: DCB_WAKE_MIN_INTERVAL apart and DCB_WAKE_MAX_PER_DAY a day (the test wake
-# is exempt and not counted). Both counters live in the state directory, so they survive a reboot. One instance at a time: a mkdir lock (macOS has no flock) holding the
-# owner's pid and start time; a lock whose owner is gone, or older than the hard limit plus 10 min,
-# is stale and taken over.
+# is exempt and not counted). Both counters live in the state directory, so they survive a reboot. A counter that is not a plain
+# number (half-written, disk full) counts as the limit reached, and the counters are written through a
+# temp file and mv; if they cannot be written no wake happens. One instance at a time: an flock(2)
+# lock on $STATE/instance.lock, taken by a Perl wrapper (macOS has no flock command) that runs this
+# script as its child and holds the lock until the child exits; the kernel drops it when the holder
+# dies, so there is no stale lock to take over. The wake-request read from the machine is capped at
+# 4096 bytes; a larger one is refused (the machine is not trusted to bound it).
 # Hard limit: claude runs in its own process group (perl setpgrp, macOS has no setsid or timeout);
 # after DCB_WAKE_TIME_LIMIT seconds the whole group gets TERM, then KILL 10 s later, and once claude
 # exits on its own the group is cleaned up the same way, so no tool process outlives the wake. A
@@ -74,26 +78,26 @@ run_limited() {  # run_limited <seconds> <command...>: exit 124 when the limit k
     ' "$@"
 }
 
-lock="$STATE/lock"
-take_lock() {
-    local pid since
-    if mkdir "$lock" 2>/dev/null; then echo "$$ $now" > "$lock/owner"; return 0; fi
-    if read -r pid since < "$lock/owner" 2>/dev/null; then
-        if kill -0 "$pid" 2>/dev/null && [ $(( now - since )) -lt $(( DCB_WAKE_TIME_LIMIT + 600 )) ]; then
-            return 1
-        fi
-    else
-        # Between another run's mkdir and its owner file, or that run died there.
-        since=$(perl -e 'print +(stat shift)[9] // 0' "$lock")
-        [ $(( now - since )) -lt 60 ] && return 1
-    fi
-    log "removing stale lock (owner ${pid:-unknown})"
-    rm -rf "$lock"
-    mkdir "$lock" 2>/dev/null || return 1
-    echo "$$ $now" > "$lock/owner"
-}
-take_lock || { log "another dcb-wake holds the lock; skip"; exit 0; }
-trap 'rm -rf "$lock"' EXIT
+# Single instance: re-run this script under a Perl wrapper that holds an flock on instance.lock for
+# the child's lifetime (the fd is close-on-exec, so no grandchild keeps the lock alive). Exit 75 =
+# lock busy.
+if [ -z "${DCB_WAKE_LOCKED:-}" ]; then
+    DCB_WAKE_LOCKED=1 perl -MFcntl=:flock -e '
+        open(my $f, ">>", shift) or exit 76;
+        flock($f, LOCK_EX | LOCK_NB) or exit 75;
+        my $r = system { $ARGV[0] } @ARGV;
+        exit 70 if $r == -1;
+        exit($r & 127 ? 128 + ($r & 127) : $r >> 8);
+    ' "$STATE/instance.lock" bash "$0" "$@"
+    rc=$?
+    case $rc in
+        75) log "another dcb-wake holds the lock; skip"; exit 0 ;;
+        76) log "cannot open $STATE/instance.lock; not running"; exit 1 ;;
+    esac
+    exit $rc
+fi
+reqfile=$(mktemp "${TMPDIR:-/tmp}/dcb-wake-req.XXXXXX") || { log "mktemp failed"; exit 1; }
+trap 'rm -f "$reqfile"' EXIT
 
 m() { orb -m "$DCB_WAKE_MACHINE" -u root "$@"; }
 send_mail() {  # send_mail <subject> <body>: through DCB_WAKE_NOTIFY; 0 = mailed
@@ -108,14 +112,32 @@ defer() {  # log a deferral at most every 10 min
     log "DEFER wake: $*"
 }
 
+read_num() {  # read_num <file>: prints the number in it (0 if the file does not exist); 1 if it is not a plain number
+    [ -e "$1" ] || { echo 0; return 0; }
+    local v; v=$(cat "$1" 2>/dev/null) || return 1
+    case $v in ''|*[!0-9]*) return 1 ;; esac
+    [ ${#v} -le 12 ] || return 1
+    echo $(( 10#$v ))
+}
+write_atomic() {  # write_atomic <file> <value>: temp file + mv, so a reader never sees half a number
+    local tmp; tmp=$(mktemp "$1.XXXXXX" 2>/dev/null) || return 1
+    printf '%s\n' "$2" > "$tmp" 2>/dev/null && mv -f "$tmp" "$1" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
 day=$(date +%F)
 count_file="$STATE/wakes-$day"
 if [ "$mode" = test ]; then
     req="test 0min test wake requested by hand"
     reasons="- TEST：這是手動要求的測試喚醒。只確認你看得到 machine 的狀態（例如 docker ps），並照下面「完成後」的第 2、3 步回報；不要執行任何修復或重啟。"
 else
-    req=$(run_limited 60 orb -m "$DCB_WAKE_MACHINE" -u root cat "$DCB_WAKE_STATEDIR/wake-request" 2>/dev/null) || req=""
-    [ -n "$req" ] || exit 0
+    # At most 4097 bytes are read: one more than the cap, so an oversize request is told from one of exactly the cap.
+    run_limited 60 bash -c 'orb -m "$1" -u root cat "$2" 2>/dev/null | head -c 4097 > "$3"' \
+        _ "$DCB_WAKE_MACHINE" "$DCB_WAKE_STATEDIR/wake-request" "$reqfile" || : > "$reqfile"
+    [ -s "$reqfile" ] || exit 0
+    if [ "$(wc -c < "$reqfile")" -gt 4096 ]; then
+        defer "wake-request is larger than 4096 bytes; refused"; exit 0
+    fi
+    req=$(cat "$reqfile")
     # Whitelisted kinds and numeric minutes only; the free-text evidence stays out of $kinds/$reasons.
     reasons=$(printf '%s\n' "$req" | awk -v ok="$DCB_WAKE_KINDS" '
         BEGIN { n = split(ok, a, " "); for (i = 1; i <= n; i++) known[a[i]] = 1 }
@@ -124,8 +146,13 @@ else
           printf "- %s（持續 %s 分鐘）\n", kind, min }')
     kinds=$(printf '%s\n' "$reasons" | awk '{print $2}' | sort -u | tr '\n' ' ')
     [ -d "$DCB_WAKE_WORKDIR" ] || { defer "work dir $DCB_WAKE_WORKDIR missing"; exit 1; }
-    last=$(cat "$STATE/last-wake" 2>/dev/null || echo 0)
-    count=$(cat "$count_file" 2>/dev/null || echo 0)
+    # Fail closed: a counter that is present but not a number must not read as 0.
+    if ! last=$(read_num "$STATE/last-wake"); then
+        defer "$STATE/last-wake is not a number; treated as a wake just now"; exit 0
+    fi
+    if ! count=$(read_num "$count_file"); then
+        defer "$count_file is not a number; treated as the daily cap reached"; count=$DCB_WAKE_MAX_PER_DAY
+    fi
     if [ $(( now - last )) -lt "$DCB_WAKE_MIN_INTERVAL" ]; then
         defer "last wake $(( (now - last) / 60 )) min ago (min interval $(( DCB_WAKE_MIN_INTERVAL / 60 )) min)"; exit 0
     fi
@@ -141,7 +168,9 @@ else
         exit 0
     fi
     # Counted before claude runs, so a wake that hangs or crashes still uses up its slot.
-    echo "$now" > "$STATE/last-wake"; echo $(( count + 1 )) > "$count_file"
+    if ! write_atomic "$STATE/last-wake" "$now" || ! write_atomic "$count_file" $(( count + 1 )); then
+        log "ERROR cannot record the wake in $STATE; not waking"; exit 1
+    fi
 fi
 find "$STATE" -maxdepth 1 \( -name 'wakes-*' -o -name 'cap-mailed-*' \) -mtime +7 -delete 2>/dev/null
 find "$STATE/reports" -name 'wake-*.txt' -mtime +60 -delete 2>/dev/null

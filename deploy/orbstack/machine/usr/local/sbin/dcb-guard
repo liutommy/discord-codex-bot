@@ -84,6 +84,9 @@ if [ -n "$bot_cid" ]; then
             echo "$fin $b_code $reason" >> "$exits"
         fi
     fi
+    # Deliberate: one healthy observation clears the exit history. Giving up targets crash loops that
+    # never reach healthy; a bot that serves between crashes should keep being restarted, and each
+    # crash is still recorded in $exits.
     if [ "${b_running:-}" = true ] && [ "${b_health:-}" = healthy ]; then
         [ -e "$gave_up" ] && log "bot healthy again; give-up cleared"
         rm -f "$gave_up"; : > "$exits"

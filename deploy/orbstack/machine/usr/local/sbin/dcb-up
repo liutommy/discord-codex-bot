@@ -10,6 +10,9 @@
 # Every run, .hold or not: apply + verify the firewall; failure stops a running stack.
 # Then, without .hold:
 #   compose config must parse and give every service restart "no"   (else stop, no up)
+#   every compose network must be non-external with driver bridge (or unset): macvlan/ipvlan/external
+#     networks bypass DOCKER-USER                                    (else stop, no up)
+#   Fail closed: a gate whose tool (jq, docker inspect) fails counts as failed, never as "nothing found".
 #   compose up --no-start creates the project's networks; dcb-probe runs from each of them
 #     rc 1 (leak)          -> stop the stack, no up
 #     rc 2 (inconclusive)  -> no up; a running stack is stopped once this has lasted
@@ -19,7 +22,11 @@
 # itself cannot parse the project any more.
 set -uo pipefail
 . "${DCB_CONFIG:-/etc/default/dcb}"
-mkdir -p "$DCB_LOGDIR" /run/dcb
+# Fixed on the machine; overridable only so the tests can run this script without root.
+sbin=${DCB_SBIN:-/usr/local/sbin}
+run=${DCB_RUNDIR:-/run/dcb}
+lock=${DCB_LOCK_FILE:-/run/dcb-up.lock}
+mkdir -p "$DCB_LOGDIR" "$run"
 log() { echo "$(date '+%F %T') dcb-up: $*" | tee -a "$DCB_LOGDIR/dcb-up.log"; }
 held() { [ -e "$DCB_REPO/.hold" ]; }
 compose() { docker compose --project-directory "$DCB_REPO" -p "$DCB_PROJECT" "$@" 9>&-; }
@@ -28,21 +35,21 @@ stop_stack() {
     local ids; ids=$(running_ids)
     [ -n "$ids" ] || return 0
     log "STOPPING running stack: $1"
-    date +%s > /run/dcb/stopped-at   # dcb-guard does not count the exits this causes
+    date +%s > $run/stopped-at   # dcb-guard does not count the exits this causes
     # shellcheck disable=SC2086
     docker stop -t 20 $ids >/dev/null 2>&1 || docker kill $ids >/dev/null 2>&1 || log "stop/kill FAILED"
 }
-since_file=/run/dcb/probe-inconclusive-since
+since_file=$run/probe-inconclusive-since
 mode=${1:-}
 gave_up="$DCB_STATEDIR/bot-giving-up"
 
 # dcb-deploy holds the lock itself and passes its fd 9 down with DCB_LOCK_HELD=1.
 if [ "${DCB_LOCK_HELD:-0}" = 1 ] && flock -n 9 2>/dev/null; then :; else
-    exec 9>/run/dcb-up.lock
+    exec 9>"$lock"
     flock -n 9 || { log "another dcb-up holds the lock; skip"; exit 0; }
 fi
 
-if ! fw=$(/usr/local/sbin/dcb-firewall 2>&1); then
+if ! fw=$("$sbin/dcb-firewall" 2>&1); then
     log "firewall FAILED: $(echo "$fw" | tail -1)"; stop_stack "firewall failed"; exit 1
 fi
 held && { rm -f "$since_file"; exit 0; }   # operator keeps the stack down on purpose; firewall still enforced above
@@ -55,18 +62,31 @@ cd "$DCB_REPO" || { log "repo $DCB_REPO missing"; stop_stack "repo missing"; exi
 if ! cfg=$(compose config --format json 2>&1); then
     log "compose config FAILED: $(echo "$cfg" | tail -1)"; rm -f "$since_file"; stop_stack "compose config does not parse"; exit 1
 fi
-bad=$(echo "$cfg" | jq -r '.services | to_entries[] | select((.value.restart // "") != "no") | "\(.key)=\(.value.restart // "unset")"' | tr '\n' ' ')
+if ! bad=$(echo "$cfg" | jq -r '.services | to_entries[] | select((.value.restart // "") != "no") | "\(.key)=\(.value.restart // "unset")"' | tr '\n' ' '); then
+    log "cannot read the compose config (jq failed); not starting"; rm -f "$since_file"; stop_stack "restart policy unreadable"; exit 1
+fi
 if [ -n "$bad" ]; then
     log "restart policy is not \"no\" for: $bad(compose.override.yaml missing or changed?)"; rm -f "$since_file"; stop_stack "restart policy"; exit 1
+fi
+# macvlan/ipvlan and external networks are not filtered by DOCKER-USER: only bridge networks the
+# project creates itself are allowed.
+if ! badnet=$(echo "$cfg" | jq -r '(.networks // {}) | to_entries[]
+        | select(((.value.external // false) != false) or ((.value.driver // "bridge") != "bridge"))
+        | "\(.key)(external=\(.value.external // false) driver=\(.value.driver // "bridge"))"' | tr '\n' ' '); then
+    log "cannot read the compose networks (jq failed); not starting"; rm -f "$since_file"; stop_stack "network policy unreadable"; exit 1
+fi
+if [ -n "$badnet" ]; then
+    log "compose network is external or not driver bridge: $badnet"; rm -f "$since_file"; stop_stack "network policy"; exit 1
 fi
 
 if ! out=$(compose up --no-start 2>&1); then
     log "compose up --no-start FAILED: $(echo "$out" | tail -2 | tr '\n' ' ')"; exit 1
 fi
-mapfile -t nets < <(docker network ls --format '{{.Name}}' --filter "label=com.docker.compose.project=$DCB_PROJECT")
+nets=()   # while-read rather than mapfile: runs on bash 3.2 too (the tests run on macOS)
+while read -r n; do [ -n "$n" ] && nets+=("$n"); done < <(docker network ls --format '{{.Name}}' --filter "label=com.docker.compose.project=$DCB_PROJECT")
 [ ${#nets[@]} -gt 0 ] || { log "no project networks after up --no-start"; exit 1; }
 
-probe=$(/usr/local/sbin/dcb-probe "${nets[@]}" 2>&1); prc=$?
+probe=$("$sbin/dcb-probe" "${nets[@]}" 2>&1); prc=$?
 case $prc in
     0) rm -f "$since_file" ;;
     1)
@@ -92,8 +112,11 @@ else
     log "compose up -d FAILED: $(echo "$out" | tail -3 | tr '\n' ' ')"; exit 1
 fi
 
-bad=$(docker ps -aq --filter "label=com.docker.compose.project=$DCB_PROJECT" \
-      | xargs -r docker inspect -f '{{.Id}} {{.Name}} {{.HostConfig.RestartPolicy.Name}}' | awk '$3 != "no" {print}')
+# pipefail: a failing docker ps / docker inspect fails the substitution, which must not read as "all fine".
+if ! bad=$(docker ps -aq --filter "label=com.docker.compose.project=$DCB_PROJECT" \
+      | xargs -r docker inspect -f '{{.Id}} {{.Name}} {{.HostConfig.RestartPolicy.Name}}' | awk '$3 != "no" {print}'); then
+    log "cannot read the containers' restart policies (docker inspect failed)"; stop_stack "restart policy unverifiable"; exit 1
+fi
 if [ -n "$bad" ]; then
     log "container restart policy is not \"no\": $(echo "$bad" | awk '{print $2"="$3}' | tr '\n' ' ')"
     stop_stack "container restart policy"

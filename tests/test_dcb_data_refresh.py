@@ -49,13 +49,20 @@ def _write_stubs(directory: Path, stubs: dict[str, str]) -> None:
         (directory / name).chmod(0o755)
 
 
-def _run(tmp_path: Path, *, hold=False, config=None, **env_extra) -> tuple[int, list[str], str]:
+def _run(
+    tmp_path: Path, *, hold=False, config=None, wrap_jq=False, **env_extra
+) -> tuple[int, list[str], str]:
     repo, logs = tmp_path / "repo", tmp_path / "logs"
     repo.mkdir()
     if hold:
         (repo / ".hold").touch()
     _write_stubs(tmp_path / "bin", STUBS)
     _write_stubs(tmp_path / "sbin", SBIN)
+    if wrap_jq:  # fails like a broken jq when JQ_FAIL is set, else the real one
+        (tmp_path / "bin" / "jq").write_text(
+            '#!/bin/sh\n[ -n "$JQ_FAIL" ] && exit 5\nexec "$REAL_JQ" "$@"\n'
+        )
+        (tmp_path / "bin" / "jq").chmod(0o755)
     (tmp_path / "compose.json").write_text(json.dumps(config or CONFIG))
     (tmp_path / "dcb").write_text(
         f"DCB_REPO={repo}\nDCB_PROJECT=proj\nDCB_LOGDIR={logs}\n"
@@ -191,3 +198,30 @@ def test_only_a_changed_or_unchanged_summary_counts_as_a_refresh(tmp_path, out, 
         assert log.splitlines()[-1].endswith(out), log
     else:
         assert "without a changed/unchanged summary" in log, log
+
+
+@pytest.mark.parametrize(
+    ("network", "expect"),
+    [
+        ({"name": "proj_default", "external": True}, "default(external=true driver=bridge)"),
+        ({"name": "proj_default", "driver": "macvlan"}, "default(external=false driver=macvlan)"),
+        ({"name": "proj_default", "driver": "ipvlan"}, "driver=ipvlan"),
+    ],
+    ids=["external", "macvlan", "ipvlan"],
+)
+def test_a_non_bridge_or_external_network_skips_the_run(tmp_path, network, expect) -> None:
+    rc, calls, log = _run(tmp_path, config={**CONFIG, "networks": {"default": network}})
+    assert rc == 1 and "external or not driver bridge" in log and expect in log, log
+    assert not [c for c in calls if " run " in c or c.startswith("probe")], calls
+
+
+def test_an_explicit_bridge_network_is_fine(tmp_path) -> None:
+    config = {**CONFIG, "networks": {"default": {"name": "proj_default", "driver": "bridge"}}}
+    rc, _, log = _run(tmp_path, config=config)
+    assert rc == 0, log
+
+
+def test_a_jq_that_fails_never_reads_as_no_findings(tmp_path) -> None:
+    rc, calls, log = _run(tmp_path, JQ_FAIL="1", REAL_JQ=shutil.which("jq"), wrap_jq=True)
+    assert rc == 1 and "cannot read the compose config" in log, log
+    assert not [c for c in calls if " run " in c or c.startswith("probe")], calls

@@ -40,6 +40,12 @@ bad=$(echo "$cfg" | jq -r --arg s "$svc" 'if .services[$s] then
         [.services | to_entries[] | select((.value.restart // "") != "no") | "\(.key)=\(.value.restart // "unset")"] | join(" ")
     else "missing-service:\($s)" end') || { log "cannot read the compose config; skip"; exit 1; }
 [ -z "$bad" ] || { log "restart policy is not \"no\" (or $svc missing) for: $bad; skip"; exit 1; }
+# Networks must be non-external bridge networks: macvlan/ipvlan/external ones bypass DOCKER-USER.
+badnet=$(echo "$cfg" | jq -r '(.networks // {}) | to_entries[]
+        | select(((.value.external // false) != false) or ((.value.driver // "bridge") != "bridge"))
+        | "\(.key)(external=\(.value.external // false) driver=\(.value.driver // "bridge"))"' | tr '\n' ' ') \
+    || { log "cannot read the compose networks; skip"; exit 1; }
+[ -z "$badnet" ] || { log "compose network is external or not driver bridge: $badnet; skip"; exit 1; }
 # Every network any service joins (not only data-refresh's): all must exist and pass the probe.
 nets=()
 while read -r n; do [ -n "$n" ] && nets+=("$n"); done < <(echo "$cfg" \
