@@ -891,8 +891,6 @@ class DiscordCodexClient(discord.Client):
         )
 
     async def setup_hook(self) -> None:
-        # Before the first await, so the heartbeat starts before anything here can be slow.
-        self._heartbeat = self.loop.create_task(health.beat_forever(self._gateway_up))
         # Scratch files of writes killed mid-way (atomic_write only cleans up after its errors).
         try:
             if removed := await asyncio.to_thread(self.memory.sweep_scratch):
@@ -900,6 +898,9 @@ class DiscordCodexClient(discord.Client):
         except OSError:
             LOGGER.exception("Memory scratch sweep failed")
         self.add_dynamic_items(AnswerButton)  # answer buttons keep working across restarts
+        # Right after the quick scratch sweep and before the slow steps below (command sync,
+        # the background loops), so the healthcheck's clock starts as early as it can.
+        self._heartbeat = self.loop.create_task(health.beat_forever(self._gateway_up))
         self._sweeper = self.loop.create_task(sweep_forever(self.config))
         self._backup_loop = self.loop.create_task(backup_forever(self.config))
         if self.emoji is not None and self.config.emoji_describe_hour >= 0:
