@@ -27,6 +27,7 @@ from . import (
     embedfix,
     gemini,
     grok,
+    health,
     instructions,
     quota,
     routing,
@@ -897,6 +898,8 @@ class DiscordCodexClient(discord.Client):
         except OSError:
             LOGGER.exception("Memory scratch sweep failed")
         self.add_dynamic_items(AnswerButton)  # answer buttons keep working across restarts
+        # First, so the healthcheck's clock starts before anything in here can be slow.
+        self._heartbeat = self.loop.create_task(health.beat_forever(self._gateway_up))
         self._sweeper = self.loop.create_task(sweep_forever(self.config))
         self._backup_loop = self.loop.create_task(backup_forever(self.config))
         if self.emoji is not None and self.config.emoji_describe_hour >= 0:
@@ -938,6 +941,10 @@ class DiscordCodexClient(discord.Client):
     async def close(self) -> None:
         self.admin.stop()
         await super().close()
+
+    def _gateway_up(self) -> bool:
+        ws = self.ws
+        return self.is_ready() and ws is not None and ws.open
 
     async def warm_emojis(self) -> None:
         """Cache each guild's custom emojis by name (REST, so it works even without the intent
