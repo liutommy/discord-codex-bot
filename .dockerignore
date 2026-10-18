@@ -3,7 +3,10 @@
 .github
 .uv-cache
 .venv
-__pycache__
+# At any depth: a bare name matches only the top level, and the host's bytecode (from
+# whatever ran there last, unmerged branches included) was baked into the image.
+**/__pycache__
+**/*.pyc
 .pytest_cache
 .ruff_cache
 tests
