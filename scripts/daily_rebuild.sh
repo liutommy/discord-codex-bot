@@ -8,9 +8,13 @@
 #
 # Paths come from the script's own location and $HOME (cron sets it), not a fixed home directory.
 #
-# 05:00 Taipei is after the 02:00 memory consolidation (CONSOLIDATE_HOUR). On a change the
-# regenerated config/lol-names.json is committed locally (never pushed) so the tree stays clean;
-# permanent/topics/*.md are gitignored and only baked. DRY_RUN=1 prints what would happen.
+# 05:00 Taipei is after the 02:00 memory consolidation (CONSOLIDATE_HOUR). A change is only
+# baked into the image, never committed: a local commit on the deployment checkout diverged it
+# from origin, and every host would grow its own. The regenerated config/lol-names.json and
+# config/clearurls.json stay as working-tree changes (git status shows them) until someone sends
+# them as a PR; before pulling, `git checkout -- config/lol-names.json config/clearurls.json` and
+# the next run makes them again. permanent/topics/*.md are gitignored and only baked.
+# DRY_RUN=1 prints what would happen.
 set -euo pipefail
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 cd "$(dirname "$0")/.."
@@ -31,11 +35,9 @@ if [ "$before" = "$(digest)" ]; then
     exit 0
 fi
 if [ "${DRY_RUN:-0}" = 1 ]; then
-    echo "$(stamp) DRY_RUN: tables changed ($before -> $(digest)); would commit + rebuild"
+    echo "$(stamp) DRY_RUN: tables changed ($before -> $(digest)); would rebuild"
     exit 0
 fi
-git add config/lol-names.json config/clearurls.json
-git commit -q -m "chore(data): 每日重產譯名表／ClearURLs 規則（$(date +%F)）" -- config/lol-names.json config/clearurls.json || true
 # .hold means the operator keeps the stack down on purpose: refresh the image, start nothing.
 if [ -e .hold ]; then
     docker compose build bot >/dev/null
