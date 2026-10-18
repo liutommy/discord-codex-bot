@@ -171,7 +171,8 @@ def _publish(target: Path, body: str) -> None:
     directory = target.parent
     directory.mkdir(parents=True, exist_ok=True)
     _chmod(directory, 0o755)
-    _chmod(target, 0o644)
+    if target.exists():  # a fresh volume has none yet: nothing to unlock, nothing to warn about
+        _chmod(target, 0o644)
     _write(target, body)
     _chmod(target, 0o444)
     _chmod(directory, 0o555)

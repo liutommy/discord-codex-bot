@@ -86,6 +86,22 @@ def test_compose_writes_both_working_directories(config: Config, tmp_path: Path)
     assert (cfg.codex_workspace / "AGENTS.md").read_text("utf-8") == "RULES\n"  # no persona at all
 
 
+def test_a_fresh_volume_composes_without_warnings_and_ends_read_only(
+    config: Config, tmp_path: Path, caplog
+) -> None:
+    """A new host starts with no AGENTS.md: unlocking a file that is not there is not a problem
+    (it once logged "could not set mode 644" on every fresh install)."""
+    cfg = _config(config, tmp_path)
+    with caplog.at_level("WARNING", logger="discord_codex_bot.instructions"):
+        assert instructions.compose_workspaces(cfg) is True
+        assert instructions.compose_workspaces(cfg) is True  # and again over the existing files
+    assert not caplog.records, [record.getMessage() for record in caplog.records]
+    for directory in (cfg.codex_workspace, cfg.codex_workspace_plain):
+        assert directory.stat().st_mode & 0o777 == 0o555
+        assert (directory / "AGENTS.md").stat().st_mode & 0o777 == 0o444
+        directory.chmod(0o755)  # let pytest clean up
+
+
 def test_compose_leaves_the_old_directories_alone_when_the_rules_are_missing(
     config: Config, tmp_path: Path
 ) -> None:
