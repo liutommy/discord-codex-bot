@@ -40,11 +40,30 @@ def test_a_replaced_file_is_reloaded_without_a_restart(tmp_path: Path, caplog) -
     live = _live(volume, baked)
     caplog.set_level(logging.INFO, logger="discord_codex_bot.datafiles")
     assert live.get() == {"v": 1}
-    _replace(volume, '{"v": 2}')  # same size and, often, the same mtime: the inode differs
+    _replace(volume, '{"v": 2}')  # same size and, often, the same mtime
     assert live.get() == {"v": 2}
     assert live.get() == {"v": 2}
     loads = [r for r in caplog.records if "loaded" in r.getMessage()]
     assert len(loads) == 2  # one info line per new version, none for an unchanged file
+
+
+def test_a_new_content_with_identical_metadata_is_still_reloaded(tmp_path: Path) -> None:
+    """Same path, size, mtime and inode (an in-place rewrite, or a freed inode handed to the
+    next scratch file within one mtime tick): only the content tells the versions apart."""
+    volume, baked = tmp_path / "data" / "x.json", tmp_path / "image" / "x.json"
+    _replace(volume, '{"v": 1}')
+    live = _live(volume, baked)
+    assert live.get() == {"v": 1}
+    before = volume.stat()
+    volume.write_text('{"v": 2}', "utf-8")  # in place: same inode, same size
+    os.utime(volume, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = volume.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    assert live.get() == {"v": 2}
 
 
 def test_a_broken_file_keeps_the_last_good_copy_and_warns_once(tmp_path: Path, caplog) -> None:
@@ -95,14 +114,14 @@ def test_an_unreadable_source_keeps_the_last_good_value(tmp_path, monkeypatch) -
     _replace(volume, '{"v": 1}')
     live = _live(volume, baked)
     assert live.get() == {"v": 1}
-    real = Path.read_text
+    real = Path.read_bytes
 
     def deny(self, *args, **kwargs):
         if self == volume:
             raise PermissionError("denied")
         return real(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", deny)
+    monkeypatch.setattr(Path, "read_bytes", deny)
     _replace(volume, '{"v": 2}')  # a new version nobody may read
     assert live.get() == {"v": 1}  # not the baked copy either
     monkeypatch.setattr(Path, "stat", _stat_denied_for(volume))

@@ -3,11 +3,12 @@
 `python -m scripts.refresh_data` (the compose `data-refresh` service) writes them into the
 generated-data volume, which the Bot mounts read-only at DATA_DIR. The image keeps the
 git-tracked copies as the floor, so a fresh or broken volume still works. A reader checks the
-file's identity again at most every CHECK_SECONDS and reloads it when it changed: a refresh needs
+file again at most every CHECK_SECONDS and reloads it when its content changed: a refresh needs
 neither an image rebuild nor a restart."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import stat
@@ -26,16 +27,21 @@ def data_dir(env: Mapping[str, str] | None = None) -> Path:
     return Path(values.get("DATA_DIR", "").strip() or DEFAULT_DIR)
 
 
-def _version(path: Path) -> tuple[str, int, int, int] | None:
-    """What identifies one copy of a file: os.replace gives the new copy a new inode even when
-    its size and mtime match the old one. None when there is no regular file there."""
+Version = tuple[str, str]  # (path, sha256 of the content)
+
+
+def _read(path: Path) -> tuple[Version, bytes] | None:
+    """The file's content and what identifies it: the content itself. Metadata does not: an
+    inode freed by os.replace or unlink is often handed to the next scratch file, and a rewrite
+    of the same size can land within one mtime tick. None when there is no readable regular
+    file there. The files are a few hundred KB, so reading one every few seconds is cheap."""
     try:
-        st = path.stat()
+        if not stat.S_ISREG(path.stat().st_mode):
+            return None
+        data = path.read_bytes()
     except OSError:
         return None
-    if not stat.S_ISREG(st.st_mode):
-        return None
-    return str(path), st.st_mtime_ns, st.st_size, st.st_ino
+    return (str(path), hashlib.sha256(data).hexdigest()), data
 
 
 class LiveFile[T]:
@@ -64,11 +70,11 @@ class LiveFile[T]:
         self._parse = parse
         self._value = empty
         self._interval = CHECK_SECONDS if interval is None else interval
-        self._loaded: tuple[str, int, int, int] | None = None
-        self._bad: set[tuple[str, int, int, int]] = set()
+        self._loaded: Version | None = None
+        self._bad: set[Version] = set()
         self._checked: float | None = None
         self._warned_missing = False
-        self._warned_gone: tuple[str, int, int, int] | None = None
+        self._warned_gone: Version | None = None
 
     def get(self) -> T:
         now = time.monotonic()
@@ -80,12 +86,13 @@ class LiveFile[T]:
             source = [str(p) for p in paths].index(self._loaded[0])
             paths = paths[: source + 1]
         for path in paths:
-            version = _version(path)
-            if version is None:
+            found = _read(path)
+            if found is None:
                 continue
+            version, data = found
             if version == self._loaded:
                 return self._value
-            if version not in self._bad and self._load(path, version):
+            if version not in self._bad and self._load(path, version, data):
                 return self._value
             if self._loaded is not None:
                 return self._value  # a bad newer copy never displaces the last good one
@@ -101,9 +108,9 @@ class LiveFile[T]:
             LOGGER.warning("%s: no usable file at %s", self._label, [str(p) for p in self._paths])
         return self._value
 
-    def _load(self, path: Path, version: tuple[str, int, int, int]) -> bool:
+    def _load(self, path: Path, version: Version, data: bytes) -> bool:
         try:
-            value = self._parse(path.read_text("utf-8"))
+            value = self._parse(data.decode("utf-8"))
         except Exception as error:  # a parser's TypeError must not escape get() either
             self._bad.add(version)
             kept = "keeping the last good copy" if self._loaded else "trying the next copy"
