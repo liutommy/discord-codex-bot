@@ -34,6 +34,12 @@ def _safe_environment(config: Config) -> dict[str, str]:
     }
 
 
+class BackendError(RuntimeError):
+    """A failure whose message is written for members (Traditional Chinese, names the backend,
+    says what went wrong): the reply shows it as is. Any other exception is internal detail and
+    the member gets the generic failure text instead."""
+
+
 @dataclass(frozen=True, slots=True)
 class CodexResult:
     text: str

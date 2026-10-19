@@ -5,16 +5,17 @@ import base64
 import json
 import logging
 import mimetypes
+import re
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import aiohttp
 
-from .codex import CodexResult, _prompt, output_style
-from .config import Config
+from .codex import BackendError, CodexResult, _prompt, output_style
+from .config import Config, local_params
 
 LOGGER = logging.getLogger(__name__)
 RETRY_AFTER_FAILURE_SECONDS = 60
@@ -47,6 +48,13 @@ class Router:
     # Drop a leading <think>…</think> block (local reasoning models). Off for the hosted
     # routers: an answer may start with a literal "<think>" there.
     drops_think: bool = False
+    # Output cap sent with every request; None leaves the provider's own default.
+    max_tokens: Callable[[Config], int] | None = None
+    # Extra request fields (sampling) under the Bot's own: the Bot's keys always win.
+    params: Callable[[Config], dict] | None = None
+    # Path-shaped ids shown by their last part: mlx_lm.server and llama-server list a model by
+    # its file path on the host, which members must not see.
+    short_ids: bool = False
 
     @property
     def models_word(self) -> str:
@@ -103,6 +111,9 @@ ROUTERS: dict[str, Router] = {
         free_tier=False,
         connect_retries=3,
         drops_think=True,
+        max_tokens=lambda config: config.local_llm_max_tokens,
+        params=local_params,
+        short_ids=True,
     ),
 }
 OPENROUTER_ROUTER = ROUTERS["openrouter"]
@@ -115,6 +126,7 @@ class Model:
     image: bool  # accepts image input
     reasoning: bool  # accepts the reasoning.effort parameter
     context: int
+    api_id: str = ""  # the id the server takes, when `id` is a shortened one
 
 
 def parse_catalog(payload: dict, router: Router = OPENROUTER_ROUTER) -> list[Model]:
@@ -142,7 +154,31 @@ def parse_catalog(payload: dict, router: Router = OPENROUTER_ROUTER) -> list[Mod
                 context=int(entry.get("context_length") or 0),
             )
         )
+    if router.short_ids:
+        out = _shorten(out)
     out.sort(key=lambda m: (not m.image, m.name.lower()))
+    return out
+
+
+def short_id(model_id: str) -> str:
+    """A path-shaped id (`/Users/x/models/qwen`, `C:\\models\\qwen.gguf`) as its last part;
+    anything else (a repo id like `mlx-community/qwen`) unchanged."""
+    if not re.match(r"^(/|~|[A-Za-z]:[\\/])", model_id):
+        return model_id
+    return re.split(r"[\\/]", model_id.rstrip("/\\"))[-1] or model_id
+
+
+def _shorten(models: list[Model]) -> list[Model]:
+    """Each model under its short id, keeping the full one for requests. Two paths ending in the
+    same name keep their full ids: neither short id would say which model it is."""
+    short = [short_id(m.id) for m in models]
+    out = []
+    for model, name in zip(models, short, strict=True):
+        if name == model.id or short.count(name) > 1:
+            out.append(model)
+            continue
+        shown = name if model.name == model.id else model.name
+        out.append(replace(model, id=name, name=shown, api_id=model.id))
     return out
 
 
@@ -323,7 +359,13 @@ async def run_router(
     messages = [{"role": "system", "content": system}] if system else []
     messages += trim_history(history, config.openrouter_history_chars)
     messages.append({"role": "user", "content": parts if len(parts) > 1 else parts[0]["text"]})
-    body: dict = {"model": model, "messages": messages}
+    body: dict = {
+        **(router.params(config) if router.params is not None else {}),
+        "model": (info.api_id if info else "") or model,
+        "messages": messages,
+    }
+    if router.max_tokens is not None:
+        body["max_tokens"] = router.max_tokens(config)
     if effort and (info is None or info.reasoning) and effort in _EFFORT:
         body["reasoning"] = {"effort": _EFFORT[effort]}
     if schema is not None:
@@ -334,7 +376,7 @@ async def run_router(
         }
     label, unstable = router.label, router.unstable
     if not router.enabled(config):
-        raise RuntimeError(f"{label} 未設定")
+        raise BackendError(f"{label} 未設定")
     if on_delta is not None:
         body["stream"] = True
     try:
@@ -349,18 +391,30 @@ async def run_router(
                     raise
                 await asyncio.sleep(CONNECT_RETRY_SECONDS)
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
-        raise RuntimeError(f"{label} 連線失敗：{type(error).__name__}{unstable}") from error
+        raise BackendError(f"{label} 連線失敗：{type(error).__name__}{unstable}") from error
     error = payload.get("error") if isinstance(payload, dict) else None
     if status != 200 or error:
         detail = (error or {}).get("message") if isinstance(error, dict) else str(error or "")
         where = f"HTTP {status}" if status != 200 else "上游錯誤"
-        raise RuntimeError(f"{label} {where}：{detail or '無說明'}{unstable}")
+        raise BackendError(f"{label} {where}：{detail or '無說明'}{unstable}")
     choices = payload.get("choices") or []
-    text = message_text((choices[0].get("message") or {}).get("content") or "") if choices else ""
-    if router.drops_think:
-        text = strip_think(text)
+    choice = choices[0] if choices else {}
+    message = choice.get("message") or {}
+    raw = message_text(message.get("content") or "")
+    text = strip_think(raw) if router.drops_think else raw
+    # The server answered, so "may not be running" no longer applies: say what came back.
+    truncated = choice.get("finish_reason") == "length"
     if not text.strip():
-        raise RuntimeError(f"{label} 沒有回傳文字{unstable}")
+        if not truncated:
+            raise BackendError(f"{label} 有回應，但沒有答案文字，換一個模型試試")
+        thought = bool(message.get("reasoning") or message.get("reasoning_content")) or (
+            router.drops_think and raw.lstrip().startswith(_THINK_OPEN)
+        )
+        cap = f"（{body['max_tokens']} token）" if "max_tokens" in body else ""
+        spent = "思考過程就用完了輸出長度上限" if thought else "輸出在寫出答案前就達到長度上限"
+        raise BackendError(
+            f"{label} {spent}{cap}，還沒寫出答案。把問題問得更具體，或換一個模型試試"
+        )
     # Stored without the image bytes: replaying base64 every turn would swamp the history.
     stored_user = prompt + (f"\n\n[附圖 {len(images)} 張]" if images else "")
     _save_transcript(
@@ -373,7 +427,8 @@ async def run_router(
             {"role": "assistant", "content": text.strip()},
         ],
     )
-    return CodexResult(text.strip(), (), None, thread_id, resumed)
+    shown = text.strip() + ("\n\n（回答達到長度上限，後面被截斷。）" if truncated else "")
+    return CodexResult(shown, (), None, thread_id, resumed)
 
 
 def strip_think(text: str, streaming: bool = False) -> str:
@@ -402,7 +457,8 @@ async def _read_sse(response, on_delta, drops_think: bool = False) -> dict:
     """Consume an OpenAI-style SSE stream, reporting the accumulated answer text after each
     content delta (reasoning deltas and a leading <think> block are not shown), and return a
     completion-shaped payload."""
-    accumulated = ""
+    accumulated = reasoning = ""
+    finish_reason = None
     async for raw in response.content:
         line = raw.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
@@ -418,13 +474,16 @@ async def _read_sse(response, on_delta, drops_think: bool = False) -> dict:
             return chunk  # surfaced by the caller like a non-streaming error payload
         choices = chunk.get("choices") or []
         delta = (choices[0].get("delta") or {}) if choices else {}
+        finish_reason = (choices[0].get("finish_reason") if choices else None) or finish_reason
+        reasoning += str(delta.get("reasoning") or delta.get("reasoning_content") or "")
         piece = delta.get("content")
         if piece:
             accumulated += str(piece)
             shown = strip_think(accumulated, streaming=True) if drops_think else accumulated
             if shown:
                 await on_delta(shown)
-    return {"choices": [{"message": {"content": accumulated}}]}
+    message = {"content": accumulated, "reasoning": reasoning}
+    return {"choices": [{"message": message, "finish_reason": finish_reason}]}
 
 
 async def run_openrouter(user_prompt: str, config: Config, model: str, **kw) -> CodexResult:

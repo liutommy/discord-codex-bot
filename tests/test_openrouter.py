@@ -10,6 +10,7 @@ import pytest
 
 from discord_codex_bot import openrouter
 from discord_codex_bot.backends import OPENROUTER, parse_choice, resolve
+from discord_codex_bot.codex import BackendError
 from discord_codex_bot.config import Config
 from discord_codex_bot.harvest import transcript
 from discord_codex_bot.openrouter import (
@@ -234,7 +235,7 @@ async def test_run_openrouter_reports_api_errors_with_the_free_model_hint(
         await run_openrouter("q", cfg, "a/text:free")
     session = Session([Response({"choices": [{"message": {"content": ""}}]})])
     monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
-    with pytest.raises(RuntimeError, match="沒有回傳文字"):
+    with pytest.raises(RuntimeError, match="有回應，但沒有答案文字"):
         await run_openrouter("q", cfg, "a/text:free")
     assert load_transcript(cfg, "or-nothing") == []
 
@@ -424,6 +425,35 @@ async def test_local_catalog_takes_every_entry_from_the_configured_url(
     assert LOCAL_ROUTER.enabled(local_cfg)
 
 
+async def test_local_path_ids_are_shown_by_name_and_sent_in_full(
+    monkeypatch, local_cfg: Config
+) -> None:
+    # mlx_lm.server lists the model it was started with by its absolute path on the host.
+    catalog_payload = {
+        "data": [
+            {"id": "/Users/someone/models/mimo-q4"},
+            {"id": "mlx-community/Qwen3-4B-4bit"},
+            {"id": "/srv/a/same.gguf"},
+            {"id": "/srv/b/same.gguf"},
+        ]
+    }
+    session = Session(
+        [Response(catalog_payload), Response({"choices": [{"message": {"content": "好"}}]})]
+    )
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    catalog = Catalog(local_cfg, LOCAL_ROUTER)
+    models = await catalog.free_models()
+    assert sorted((m.id, m.name) for m in models) == [
+        ("/srv/a/same.gguf", "/srv/a/same.gguf"),  # two paths, one name: kept in full
+        ("/srv/b/same.gguf", "/srv/b/same.gguf"),
+        ("mimo-q4", "mimo-q4"),
+        ("mlx-community/Qwen3-4B-4bit", "mlx-community/Qwen3-4B-4bit"),
+    ]
+    await run_router(LOCAL_ROUTER, "q", local_cfg, "mimo-q4", catalog=catalog)
+    assert session.calls[-1][2]["model"] == "/Users/someone/models/mimo-q4"
+    assert openrouter.short_id("C:\\models\\qwen.gguf") == "qwen.gguf"
+
+
 async def test_authorization_header_only_with_a_key(local_cfg: Config) -> None:
     async with openrouter._session(local_cfg, 5, LOCAL_ROUTER) as session:
         assert "Authorization" not in session.headers
@@ -443,6 +473,18 @@ async def test_run_router_on_local_uses_the_url_prefix_and_its_own_hint(
     result = await run_router(LOCAL_ROUTER, "q", local_cfg, "qwen3-8b-q4")
     assert result.text == "哈囉" and result.thread_id.startswith("lo-")
     assert session.calls[0][1] == "http://host.orb.internal:8080/v1/chat/completions"
+    assert session.calls[0][2]["max_tokens"] == local_cfg.local_llm_max_tokens == 8192
+    # Sampling from LOCAL_LLM_PARAMS rides along; it cannot replace the Bot's own fields.
+    tuned = replace(local_cfg, local_llm_params='{"temperature": 1.0, "presence_penalty": 1.5}')
+    session = Session([Response({"choices": [{"message": {"content": "好"}}]})])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    await run_router(LOCAL_ROUTER, "q", tuned, "qwen3-8b-q4")
+    sent = session.calls[0][2]
+    assert (sent["temperature"], sent["presence_penalty"], sent["model"]) == (
+        1.0,
+        1.5,
+        "qwen3-8b-q4",
+    )
     session = Session([Response({"error": {"message": "model not loaded"}}, 500)])
     monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
     hint = "（地端模型可能沒有在跑，換一個試試）"
@@ -545,7 +587,7 @@ async def test_think_block_is_stripped_from_the_answer_and_the_transcript(
     monkeypatch.setattr(
         openrouter, "_session", lambda config, timeout, router=None: Session([Response(only)])
     )
-    with pytest.raises(RuntimeError, match="沒有回傳文字"):
+    with pytest.raises(RuntimeError, match="有回應，但沒有答案文字"):
         await run_router(LOCAL_ROUTER, "q", cfg, "m")
 
 
@@ -577,6 +619,104 @@ async def test_streamed_display_hides_a_leading_think_block(monkeypatch, local_c
     result = await run_router(LOCAL_ROUTER, "q", local_cfg, "qwen3-8b-q4", on_delta=on_delta)
     assert seen == ["答", "答案"] and result.text == "答案"
     assert load_transcript(local_cfg, result.thread_id)[1]["content"] == "答案"
+
+
+def _sse(chunks: list[dict]) -> Response:
+    lines = [("data: " + json.dumps(c) + "\n").encode() for c in chunks] + [b"data: [DONE]\n"]
+
+    class Body:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            for line in lines:
+                yield line
+
+    class Streaming(Response):
+        content = Body()
+
+    return Streaming({})
+
+
+async def test_hosted_routers_send_no_output_cap(monkeypatch, cfg: Config) -> None:
+    session = Session([Response({"choices": [{"message": {"content": "好"}}]})])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    await run_openrouter("q", cfg, "a/text:free")
+    assert "max_tokens" not in session.calls[0][2]
+
+
+async def test_thinking_that_uses_up_the_cap_is_reported_as_such(
+    monkeypatch, local_cfg: Config
+) -> None:
+    # mlx_lm.server streams the thinking as `reasoning` deltas and ends on finish_reason length.
+    session = Session(
+        [
+            _sse(
+                [{"choices": [{"delta": {"reasoning": "想"}, "finish_reason": None}]}] * 3
+                + [{"choices": [{"delta": {}, "finish_reason": "length"}]}]
+            )
+        ]
+    )
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+
+    async def on_delta(text):
+        raise AssertionError("no answer text to show")
+
+    with pytest.raises(BackendError) as caught:
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "m", on_delta=on_delta)
+    assert str(caught.value) == (
+        "地端模型 思考過程就用完了輸出長度上限（8192 token），還沒寫出答案。"
+        "把問題問得更具體，或換一個模型試試"
+    )
+    # An unclosed <think> block in the content is the same case on servers without the field.
+    session = Session(
+        [Response({"choices": [{"message": {"content": "<think>想"}, "finish_reason": "length"}]})]
+    )
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    with pytest.raises(BackendError, match="^地端模型 思考過程就用完了輸出長度上限"):
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
+
+
+async def test_an_empty_answer_does_not_claim_the_server_is_down(
+    monkeypatch, local_cfg: Config
+) -> None:
+    session = Session(
+        [Response({"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]})]
+    )
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    with pytest.raises(BackendError, match="^地端模型 有回應，但沒有答案文字，換一個模型試試$"):
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
+    session = Session(
+        [Response({"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})]
+    )
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    with pytest.raises(
+        BackendError, match="^地端模型 輸出在寫出答案前就達到長度上限（8192 token）"
+    ):
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
+
+
+async def test_a_cut_off_answer_says_so_but_the_transcript_keeps_the_answer(
+    monkeypatch, local_cfg: Config
+) -> None:
+    session = Session(
+        [
+            _sse(
+                [
+                    {"choices": [{"delta": {"content": "前半"}, "finish_reason": None}]},
+                    {"choices": [{"delta": {}, "finish_reason": "length"}]},
+                ]
+            )
+        ]
+    )
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+
+    async def on_delta(text):
+        pass
+
+    result = await run_router(LOCAL_ROUTER, "q", local_cfg, "m", on_delta=on_delta)
+    assert result.text == "前半\n\n（回答達到長度上限，後面被截斷。）"
+    assert load_transcript(local_cfg, result.thread_id)[1]["content"] == "前半"
 
 
 def test_backends_accept_local_ids() -> None:

@@ -333,8 +333,9 @@ from dataclasses import replace  # noqa: E402
 import pytest  # noqa: E402
 
 from discord_codex_bot import bot as bot_module  # noqa: E402
-from discord_codex_bot.bot import FAILURE_MESSAGE, QUEUE_FULL_MESSAGE  # noqa: E402
+from discord_codex_bot.bot import QUEUE_FULL_MESSAGE  # noqa: E402
 from discord_codex_bot.codex import (  # noqa: E402
+    BackendError,
     CodexResult,
     CodexServerOverloaded,
     CodexUnauthorized,
@@ -730,7 +731,11 @@ async def test_answer_truncates_and_reports_failures(client, backends, monkeypat
 
     monkeypatch.setattr(bot_module, "run_codex", boom)
     failed = await client._answer("q", [], GUILD, USER)
-    assert failed.text == FAILURE_MESSAGE.format(prefix="codex") and failed.thread_id == ""
+    assert (
+        failed.text
+        == "Codex 執行失敗。請用 /codex-status 檢查登入狀態，並通知 Bot 管理者查看 container log。"
+        and failed.thread_id == ""
+    )
     assert agy.calls == []  # arbitrary RuntimeError must not be hidden by the spare backend
     client.queue = SerialQueue(0)
     assert (await client._answer("q", [], GUILD, USER)).text == QUEUE_FULL_MESSAGE
@@ -1468,6 +1473,18 @@ async def test_answer_feeds_the_alerter(client, backends, monkeypatch) -> None:
     result = await client._answer("q", [], GUILD, USER)
     assert result.text.startswith("Codex 執行失敗")
     assert events[-1] == ("fail", "codex", "Codex exited with co")
+
+
+async def test_a_failure_names_the_backend_and_shows_its_own_reason(client, monkeypatch) -> None:
+    async def cut_off(*args, **kwargs):
+        raise BackendError("地端模型 思考過程就用完了輸出長度上限（8192 token），還沒寫出答案。")
+
+    monkeypatch.setattr(bot_module, "run_codex", cut_off)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "地端模型 思考過程就用完了輸出長度上限（8192 token），還沒寫出答案。"
+    assert bot_module.failure_text("local", RuntimeError("x"), "codex") == (
+        "地端模型 執行失敗。請通知 Bot 管理者查看 container log。"
+    )
 
 
 async def test_answer_reads_attached_documents_into_a_files_block(
@@ -3080,7 +3097,7 @@ async def test_a_routed_agy_turn_falls_back_to_grok_then_codex(client, monkeypat
 
     client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
     result = await client._answer("q", [], GUILD, USER)
-    assert result.text == FAILURE_MESSAGE.format(prefix=client.config.command_prefix)
+    assert result.text == "Antigravity 執行失敗。請通知 Bot 管理者查看 container log。"
     assert len(codex.calls) == 1  # the member chose agy: no spare, as before
 
 
