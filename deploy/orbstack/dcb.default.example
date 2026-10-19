@@ -56,3 +56,10 @@ DCB_BOT_LOG_TZ=Asia/Taipei
 # dcb-guard: a problem seen on every run for this long (seconds) goes into
 # $DCB_STATEDIR/wake-request, which the Mac's dcb-wake.sh turns into a diagnosing claude -p.
 DCB_WAKE_AFTER=600
+
+# Local LLM relay (deploy/orbstack/mac/dcb-llm-relay.py): the Mac keeps socat listeners on
+# 172.31.254.1 (the gateway of compose.yaml's llm network, bridge br-dcb-llm) at this port, and
+# dcb-firewall lets that bridge open connections to that address and port only. Must equal the
+# relay's DCB_LLM_RELAY_LISTEN_PORT on the Mac; integer 1024-65535. Empty = no relay: everything on
+# the llm bridge stays rejected.
+DCB_LLM_RELAY_PORT=

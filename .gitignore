@@ -26,6 +26,7 @@ compose.override.yaml
 # in place.
 deploy/orbstack/dcb.default
 deploy/orbstack/mac/dcb-wake.config
+deploy/orbstack/mac/dcb-llm-relay.config
 deploy/orbstack/mac/targets
 deploy/orbstack/mac/*.plist
-!deploy/orbstack/mac/com.example.dcb-wake.plist
+!deploy/orbstack/mac/com.example.*.plist

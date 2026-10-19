@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: replace com.example with your own reverse-DNS prefix (label and file name) and
+     __HOME__ with the absolute home directory; launchd expands neither ~ nor $HOME. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.dcb-llm-relay</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__HOME__/.local/bin/dcb-llm-relay.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/dcb-llm-relay.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/dcb-llm-relay.launchd.log</string>
+</dict>
+</plist>
