@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime
 import fcntl
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -420,6 +421,28 @@ def test_the_time_limit_kills_claude_and_its_children(tmp_path) -> None:
     (report,) = (wake.state / "reports").glob("wake-*.txt")
     assert "# exit 124" in report.read_text()
     assert "killed after 2s" in report.read_text()
+
+
+def test_a_zombie_left_in_the_group_does_not_hold_the_time_limit(tmp_path) -> None:
+    # The holder forks a child that exits at once, never reaps it, and leaves the group,
+    # so after TERM the group holds only that zombie.
+    claude = (
+        'echo "claude $*" >> "$CALLS"\n'
+        "perl -e 'exit 0 unless fork; setpgrp(0, 0); print \"$$\\n\"; sleep 30' > \"$CHILD\" &\n"
+        "sleep 300\n"
+    )
+    wake = Wake(tmp_path, time_limit=2, claude=claude)
+    wake.request.write_text("unhealthy 15min bot healthcheck unhealthy\n")
+    started = time.monotonic()
+    try:
+        assert wake.run().returncode == 0
+        assert time.monotonic() - started < 9
+    finally:
+        holder = (tmp_path / "child.pid").read_text().strip()
+        if holder:
+            os.kill(int(holder), signal.SIGKILL)
+    (report,) = (wake.state / "reports").glob("wake-*.txt")
+    assert "# exit 124" in report.read_text()
 
 
 def test_claude_sees_only_an_allowlisted_environment(tmp_path) -> None:

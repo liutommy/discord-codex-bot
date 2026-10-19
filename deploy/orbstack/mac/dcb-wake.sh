@@ -55,11 +55,16 @@ run_limited() {  # run_limited <seconds> <command...>: exit 124 when the limit k
         my $pid = fork() // die "fork: $!\n";
         if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\n"; }
         setpgrp($pid, $pid);   # also from the parent, so the group exists before any kill
+        sub group_live {  # a zombie still counts for kill 0, so ask ps for live members
+            open(my $ps, "-|", "ps", "-A", "-o", "pgid=,stat=") or return kill 0, -$pid;
+            while (<$ps>) { my ($g, $s) = split; return 1 if $g == $pid && $s !~ /^Z/; }
+            return 0;
+        }
         sub reap_group {
             kill "TERM", -$pid;
             for (1 .. 20) {
                 waitpid($pid, WNOHANG);
-                last unless kill 0, -$pid;
+                last unless group_live();
                 select(undef, undef, undef, 0.5);
             }
             kill "KILL", -$pid;
