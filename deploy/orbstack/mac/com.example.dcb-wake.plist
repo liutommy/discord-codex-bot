@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: replace com.example with your own reverse-DNS prefix (label and file name) and
+     __HOME__ with the absolute home directory; launchd expands neither ~ nor $HOME. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.dcb-wake</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__HOME__/.local/bin/dcb-wake.sh</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>120</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>__HOME__/.local/state/dcb-wake/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.local/state/dcb-wake/launchd.log</string>
+</dict>
+</plist>

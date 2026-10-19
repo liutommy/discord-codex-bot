@@ -1,0 +1,147 @@
+#!/bin/bash
+# Containers on this machine may reach the internet but no private or special address: not the
+# Mac (LAN, Tailscale or OrbStack host-NAT), not the LAN, not the router's own WAN address, not
+# OrbStack's networks or resolver, not this machine's own services. Owns DOCKER-USER (v4+v6) and
+# DCB-INPUT. Container DNS goes to public resolvers (daemon.json "dns"), never OrbStack's.
+#
+# Atomic: each family is loaded with one iptables-restore --noflush (a single nft transaction),
+# so the chains are never empty while the stack runs. Verified: after loading, the live chains
+# must equal the wanted ones exactly (canonicalised by loading the same rules into scratch
+# chains), or this exits 1. When they already match nothing is loaded. After a real change,
+# conntrack entries from containers to blocked ranges are dropped.
+#
+# The WAN IP is re-detected every run and accepted only when at least two sources agree and it is
+# none of the addresses the stack must reach (MUST_PASS hosts, the daemon.json resolvers, what
+# DNS_MUST_PASS resolves to). Otherwise the last accepted one is kept and /run/dcb/wan-status says
+# "stale <ip>" or "none"; dcb-probe treats both as inconclusive.
+# Serialised by its own lock (boot unit, systemctl reload, dcb-up and dcb-guard may overlap).
+# Exit 0 = rules in force (prints applied|unchanged); 1 = failed.
+set -uo pipefail
+. "${DCB_CONFIG:-/etc/default/dcb}"
+mkdir -p /run/dcb "$DCB_STATEDIR"
+
+die() { echo "dcb-firewall: FAILED: $*" >&2; exit 1; }
+exec 8>/run/dcb/firewall.lock
+flock -w 60 8 || die "firewall lock busy for 60s"
+
+BLOCK4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4"
+BLOCK6="::1/128 ::ffff:0:0/96 64:ff9b::/96 fc00::/7 fe80::/10 ff00::/8"   # fc00::/7: Tailscale fd7a:115c:a1e0::/48, OrbStack fd07:...
+
+# --- WAN IP ---
+public_ipv4() {  # canonical dotted quad (0-255, no leading zeros), not in any BLOCK4 range
+    local ip=$1 o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])' a b
+    [[ $ip =~ ^$o\.$o\.$o\.$o$ ]] || return 1
+    a=${BASH_REMATCH[1]}; b=${BASH_REMATCH[2]}
+    [ "$a" -eq 0 ] || [ "$a" -eq 10 ] || [ "$a" -eq 127 ] || [ "$a" -ge 224 ] && return 1
+    [ "$a" -eq 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ] && return 1
+    [ "$a" -eq 169 ] && [ "$b" -eq 254 ] && return 1
+    [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 1
+    [ "$a" -eq 192 ] && [ "$b" -eq 168 ] && return 1
+    [ "$a" -eq 192 ] && [ "$b" -eq 0 ] && [ "$(echo "$ip" | cut -d. -f3)" -eq 0 ] && return 1
+    [ "$a" -eq 198 ] && { [ "$b" -eq 18 ] || [ "$b" -eq 19 ]; } && return 1
+    return 0
+}
+must_reach() {  # addresses that blocking would cut the stack off from
+    local h
+    for h in $DCB_PROBE_MUST_PASS; do echo "${h%:*}"; done
+    jq -r '.dns[]?' /etc/docker/daemon.json 2>/dev/null
+    for h in $DCB_PROBE_DNS_MUST_PASS; do getent ahostsv4 "$h" 2>/dev/null | awk '{print $1}'; done
+}
+reach=$(must_reach)   # once per run; not piped into grep -q (SIGPIPE under pipefail would invert the test)
+acceptable() {
+    public_ipv4 "$1" || return 1
+    case $'\n'"$reach"$'\n' in *$'\n'"$1"$'\n'*) return 1 ;; esac
+    return 0
+}
+answers=()
+for u in $DCB_WAN_URLS; do
+    ip=$(curl -4 -fsS --max-time 4 "$u" 2>/dev/null | tr -d '[:space:]') || continue
+    acceptable "$ip" && answers+=("$ip")
+done
+# The most common answer, if at least two sources gave it.
+wan=$(printf '%s\n' "${answers[@]:-}" | grep . | sort | uniq -c | sort -rn | awk '$1 >= 2 {print $2; exit}')
+if [ -n "$wan" ]; then
+    # Written whole, then renamed: a cut-short write must not lose the last accepted address.
+    echo "$wan" > "$DCB_STATEDIR/wan-ip.tmp" && mv -f "$DCB_STATEDIR/wan-ip.tmp" "$DCB_STATEDIR/wan-ip" \
+        || echo "dcb-firewall: WARN cannot cache the WAN address in $DCB_STATEDIR" >&2
+    echo "ok $wan" > /run/dcb/wan-status   # dcb-probe reads "<state> <address>"
+else
+    wan=$(cat "$DCB_STATEDIR/wan-ip" 2>/dev/null || true)
+    acceptable "$wan" || wan=""
+    if [ -n "$wan" ]; then echo "stale $wan" > /run/dcb/wan-status; else echo "none" > /run/dcb/wan-status; fi
+fi
+
+# --- rule sets (chain names are parameters so the same text can be loaded into scratch chains) ---
+rules4() {  # rules4 <user-chain> <input-chain>
+    local U=$1 I=$2
+    echo "*filter"; echo ":$U - [0:0]"; echo ":$I - [0:0]"
+    echo "-F $U"
+    echo "-A $U -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+    # Same-bridge traffic between containers (bot -> searxng/sandbox/xsearch): br_netfilter sends
+    # it through FORWARD. Matched on Docker's own interfaces AND its exact address ranges; Docker's
+    # isolation chains (after this RETURN) still separate networks and enforce internal: networks.
+    echo "-A $U -i br-+ -o br-+ -s $DCB_POOL_NETS -d $DCB_POOL_NETS -j RETURN"
+    echo "-A $U -i docker0 -o docker0 -s $DCB_BIP_NET -d $DCB_BIP_NET -j RETURN"
+    [ -n "$wan" ] && echo "-A $U -d $wan/32 -j REJECT --reject-with icmp-port-unreachable"
+    for n in $BLOCK4; do echo "-A $U -d $n -j REJECT --reject-with icmp-port-unreachable"; done
+    echo "-A $U -j RETURN"
+    # Container DNS does not come here: the embedded resolver (127.0.0.11) lives in the container's
+    # own netns and forwards to the daemon.json resolvers through FORWARD.
+    echo "-F $I"
+    echo "-A $I -i docker0 -m conntrack --ctstate NEW -j REJECT --reject-with icmp-port-unreachable"
+    echo "-A $I -i br-+ -m conntrack --ctstate NEW -j REJECT --reject-with icmp-port-unreachable"
+    echo "-A $I -j RETURN"
+    echo "COMMIT"
+}
+rules6() {
+    local U=$1 I=$2
+    echo "*filter"; echo ":$U - [0:0]"; echo ":$I - [0:0]"
+    echo "-F $U"
+    echo "-A $U -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+    for n in $BLOCK6; do echo "-A $U -d $n -j REJECT --reject-with icmp6-port-unreachable"; done
+    echo "-A $U -j RETURN"
+    echo "-F $I"
+    echo "-A $I -i docker0 -m conntrack --ctstate NEW -j REJECT --reject-with icmp6-port-unreachable"
+    echo "-A $I -i br-+ -m conntrack --ctstate NEW -j REJECT --reject-with icmp6-port-unreachable"
+    echo "-A $I -j RETURN"
+    echo "COMMIT"
+}
+
+show() {  # show <iptables|ip6tables> <user-chain> <input-chain>: rules only, chain names normalised
+    { "$1" -w -S "$2" && "$1" -w -S "$3"; } 2>/dev/null | grep -v '^-N' \
+        | sed -e "s/^-A $2 /-A DOCKER-USER /" -e "s/^-A $3 /-A DCB-INPUT /"
+}
+want() {  # canonical form of the wanted rules: load them into scratch chains and read them back
+    local t=$1 fn=$2 out
+    "$fn" DCB-CHK-U DCB-CHK-I | "$t-restore" -w --noflush || return 1
+    out=$(show "$t" DCB-CHK-U DCB-CHK-I)
+    "$t" -w -F DCB-CHK-U; "$t" -w -F DCB-CHK-I; "$t" -w -X DCB-CHK-U; "$t" -w -X DCB-CHK-I
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
+}
+
+changed=0
+for fam in "iptables rules4" "ip6tables rules6"; do
+    set -- $fam; t=$1; fn=$2
+    expected=$(want "$t" "$fn") || die "$t: could not build the wanted rule set"
+    [ "$(show "$t" DOCKER-USER DCB-INPUT)" = "$expected" ] && continue
+    "$fn" DOCKER-USER DCB-INPUT | "$t-restore" -w --noflush || die "$t-restore returned $?"
+    [ "$(show "$t" DOCKER-USER DCB-INPUT)" = "$expected" ] || die "$t: live rules differ from the wanted set after loading"
+    changed=1
+done
+
+# Jumps into the chains. Docker adds FORWARD -j DOCKER-USER itself when it starts; adding it here
+# too keeps the chain in force while dockerd is down or restarting.
+for t in iptables ip6tables; do
+    "$t" -w -C FORWARD -j DOCKER-USER 2>/dev/null || { "$t" -w -I FORWARD 1 -j DOCKER-USER || die "$t FORWARD jump"; changed=1; }
+    "$t" -w -C INPUT -j DCB-INPUT 2>/dev/null || { "$t" -w -I INPUT 1 -j DCB-INPUT || die "$t INPUT jump"; changed=1; }
+    "$t" -w -C FORWARD -j DOCKER-USER 2>/dev/null && "$t" -w -C INPUT -j DCB-INPUT 2>/dev/null || die "$t jumps missing"
+done
+
+if [ "$changed" = 1 ] && command -v conntrack >/dev/null; then
+    for n in $BLOCK4 ${wan:+$wan/32}; do
+        for s in $DCB_POOL_NETS $DCB_BIP_NET; do conntrack -D -s "$s" -d "$n" >/dev/null 2>&1 || true; done
+    done
+fi
+
+echo "dcb-firewall: $([ $changed = 1 ] && echo applied || echo unchanged) (wan $(cat /run/dcb/wan-status))"

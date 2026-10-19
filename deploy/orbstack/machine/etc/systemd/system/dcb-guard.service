@@ -1,0 +1,9 @@
+[Unit]
+Description=dcb: keep the stack running and restart a bot unhealthy for >6 min
+Requisite=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dcb-guard
+TimeoutStartSec=15min

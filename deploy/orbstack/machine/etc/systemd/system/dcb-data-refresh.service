@@ -1,0 +1,10 @@
+[Unit]
+Description=dcb: daily data refresh in the one-shot data-refresh service (no rebuild, no restart)
+Requisite=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dcb-data-refresh
+TimeoutStartSec=1h

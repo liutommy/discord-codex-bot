@@ -1,0 +1,185 @@
+#!/bin/bash
+# Every 2 min (dcb-guard.timer).
+#   - always: re-apply/verify the firewall (picks up a changed WAN IP); failure -> dcb-up, which stops
+#   - no .hold: start the stack through dcb-up when any service is not running, and restart the
+#     bot through dcb-up once it has stayed unhealthy past the limit (both firewall + probe gated)
+#   - crash-loop backoff: DCB_GIVEUP_EXITS non-zero bot exits within DCB_GIVEUP_WINDOW (exits
+#     caused by dcb-up's own stop_stack excluded) -> "giving up": from then on only log, never call
+#     dcb-up (and dcb-up.timer skips too) until $DCB_STATEDIR/bot-giving-up is removed by hand or
+#     the bot is healthy after a manual `dcb-up --manual`
+#   - gateway anomaly: more than DCB_GATEWAY_MAX matching bot.log lines in DCB_GATEWAY_WINDOW is
+#     logged
+#   - wake request: a problem kind (gave-up, not-running, firewall, unhealthy, gateway) seen on
+#     every run for DCB_WAKE_AFTER seconds (default 600) is listed in $DCB_STATEDIR/wake-request,
+#     one line per kind: "<kind> <minutes>min <evidence>". The Mac's dcb-wake.sh reads it and wakes
+#     a diagnosing `claude -p`. Removed when no problem has lasted that long, and while .hold exists.
+#     Only records; the actions above are the same with or without it.
+# The bot's healthcheck (discord_codex_bot/health.py) reports unhealthy when the event loop stops
+# or Discord has been unreachable for too long, which is what the unhealthy branch acts on.
+set -uo pipefail
+. "${DCB_CONFIG:-/etc/default/dcb}"
+mkdir -p "$DCB_LOGDIR" /run/dcb
+log() { echo "$(date '+%F %T') dcb-guard: $*" | tee -a "$DCB_LOGDIR/dcb-guard.log"; }
+compose() { docker compose --project-directory "$DCB_REPO" -p "$DCB_PROJECT" "$@"; }
+since_file=/run/dcb/bot-unhealthy-since
+gave_up="$DCB_STATEDIR/bot-giving-up"
+exits="$DCB_STATEDIR/bot-exits"   # "<finished epoch> <exit code> <last log line>" per counted exit
+mkdir -p "$DCB_STATEDIR"; touch "$exits"
+
+# --- wake request bookkeeping (call wake_update before every exit and exec) ---
+wake_dir="$DCB_STATEDIR/problems"   # <kind>: first-seen epoch; <kind>.now: this run's evidence
+wake_req="$DCB_STATEDIR/wake-request"
+mkdir -p "$wake_dir"; rm -f "$wake_dir"/*.now
+problem() {  # problem <kind> <evidence>: seen on this run
+    # Written whole then renamed; a first-seen time cut short (full disk) is written again.
+    [[ $(cat "$wake_dir/$1" 2>/dev/null) =~ ^[0-9]+$ ]] \
+        || { date +%s > "$wake_dir/$1.tmp" && mv -f "$wake_dir/$1.tmp" "$wake_dir/$1"; }
+    printf '%s\n' "$2" | head -1 | cut -c1-200 > "$wake_dir/$1.now"
+}
+no_problem() { rm -f "$wake_dir/$1"; }   # checked on this run and fine
+# A kind not checked on this run (an earlier branch exited first) keeps its first-seen time but is
+# not listed: its evidence would be stale.
+wake_update() {
+    local f k first age lines=""
+    if [ -e "$DCB_REPO/.hold" ]; then rm -f "$wake_dir"/* "$wake_req"; return 0; fi
+    for f in "$wake_dir"/*.now; do
+        [ -e "$f" ] || continue
+        k=$(basename "$f" .now)
+        first=$(cat "$wake_dir/$k" 2>/dev/null)
+        [[ $first =~ ^[0-9]+$ ]] || first=$(date +%s)   # no usable first-seen time: seen from now
+        age=$(( $(date +%s) - first ))
+        [ "$age" -ge "${DCB_WAKE_AFTER:-600}" ] && lines+="$k $(( age / 60 ))min $(cat "$f")"$'\n'
+    done
+    if [ -z "$lines" ]; then rm -f "$wake_req"; return 0; fi
+    if ! { printf '%s' "$lines" | sort > "$wake_req.tmp" && mv -f "$wake_req.tmp" "$wake_req"; }; then
+        # The previous request would describe an older state; dcb-wake also refuses one that has
+        # not been rewritten for 10 min, for when it cannot be removed either.
+        rm -f "$wake_req" "$wake_req.tmp"
+        log "ERROR cannot write $wake_req; the previous request was removed"
+        return 1
+    fi
+}
+
+# Under the dcb-up lock so the firewall is never re-applied while dcb-up is mid-check.
+fw=$(flock -E 75 -w 120 /run/dcb-up.lock /usr/local/sbin/dcb-firewall 2>&1)
+case $? in
+    0) no_problem firewall; [[ $fw == *applied* ]] && log "firewall re-applied: $fw" ;;
+    1)
+        log "firewall FAILED: $(echo "$fw" | tail -1) -> dcb-up"
+        problem firewall "$(echo "$fw" | tail -1)"; wake_update
+        exec /usr/local/sbin/dcb-up ;;
+    *) log "dcb-up lock busy; firewall check skipped this round" ;;
+esac
+
+[ -e "$DCB_REPO/.hold" ] && { rm -f "$since_file"; wake_update; exit 0; }
+cd "$DCB_REPO" || { log "repo $DCB_REPO missing"; problem not-running "repo $DCB_REPO missing"; wake_update; exit 1; }
+
+if ! wanted=$(compose config --services 2>/dev/null | sort); then
+    log "compose config failed -> dcb-up (stops the stack)"
+    problem not-running "compose config fails (dcb-up stops the stack)"; wake_update
+    exec /usr/local/sbin/dcb-up
+fi
+# --- crash-loop backoff ---
+now=$(date +%s)
+bot_cid=$(compose ps -aq bot 2>/dev/null | head -1)
+if [ -n "$bot_cid" ]; then
+    read -r b_running b_fin b_code b_health < <(docker inspect -f \
+        '{{.State.Running}} {{.State.FinishedAt}} {{.State.ExitCode}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$bot_cid" 2>/dev/null)
+    if [ "${b_running:-}" = false ] && [ "${b_code:-0}" != 0 ]; then
+        fin=$(date -d "$b_fin" +%s 2>/dev/null || echo 0)
+        stopped=$(cat /run/dcb/stopped-at 2>/dev/null || echo 0)
+        by_us=$(( fin >= stopped && fin - stopped <= 60 ))
+        if [ "$fin" -gt 0 ] && [ "$by_us" = 0 ] && ! awk -v f="$fin" '$1 == f {found=1} END {exit !found}' "$exits"; then
+            reason=$(docker logs --tail 1 "$bot_cid" 2>&1 | tr -d '\r' | cut -c1-200)
+            # Rebuilt and renamed, never appended in place: a cut-short write cannot merge two records.
+            if ! { { cat "$exits"; echo "$fin $b_code $reason"; } > "$exits.tmp" && mv -f "$exits.tmp" "$exits"; }; then
+                # An exit that is not counted could keep a crash loop below the give-up threshold.
+                log "ERROR cannot record the bot exit in $exits; not starting the bot this run"
+                problem gave-up "crash ledger could not be written"; wake_update
+                exit 1
+            fi
+        fi
+    fi
+    # Deliberate: one healthy observation clears the exit history. Giving up targets crash loops that
+    # never reach healthy; a bot that serves between crashes should keep being restarted, and each
+    # crash is still recorded in $exits.
+    if [ "${b_running:-}" = true ] && [ "${b_health:-}" = healthy ]; then
+        [ -e "$gave_up" ] && log "bot healthy again; give-up cleared"
+        rm -f "$gave_up"; : > "$exits"
+    fi
+fi
+awk -v c=$(( now - DCB_GIVEUP_WINDOW )) '$1 >= c' "$exits" > "$exits.tmp" && mv "$exits.tmp" "$exits"
+n=$(wc -l < "$exits")
+if [ ! -e "$gave_up" ] && [ "$n" -ge "$DCB_GIVEUP_EXITS" ]; then
+    last=$(tail -1 "$exits" | cut -d' ' -f2-)
+    # Written whole, then renamed: dcb-up and this guard trust the marker's mere existence.
+    if ! { echo "since $(date '+%F %T'): $n exits in ${DCB_GIVEUP_WINDOW}s; last: exit $last" > "$gave_up.tmp" \
+            && mv -f "$gave_up.tmp" "$gave_up"; }; then
+        # The decision cannot be persisted: still never restart a crash-looping bot on this run.
+        log "ERROR cannot write $gave_up; not starting the bot this run"
+        problem gave-up "give-up marker could not be written"; wake_update
+        exit 1
+    fi
+    log "giving up: bot exited $n times in ${DCB_GIVEUP_WINDOW}s; last: exit $last"
+fi
+if [ -e "$gave_up" ]; then
+    log "given up on the bot ($(head -1 "$gave_up")); not starting -- dcb-up --manual or rm $gave_up"
+    problem gave-up "$(head -1 "$gave_up" | cut -d';' -f1)"
+    # Health is not checked while given up: an unhealthy first-seen time kept from before would
+    # make the Bot's first "starting" after recovery a wake request at once.
+    no_problem unhealthy; wake_update
+    exit 0
+fi
+no_problem gave-up
+
+running=$(compose ps --status running --services 2>/dev/null | sort)
+missing=$(comm -23 <(echo "$wanted") <(echo "$running") | tr '\n' ' ')
+if [ -n "${missing// /}" ]; then
+    log "not running: $missing-> dcb-up"
+    rm -f "$since_file"
+    problem not-running "not running: $missing"; wake_update
+    exec /usr/local/sbin/dcb-up
+fi
+no_problem not-running
+
+# Gateway stalls / reconnects in the bot's own log (asctime "YYYY-MM-DD HH:MM:SS,mmm", same TZ).
+botlog="$DCB_REPO/logs/bot.log"
+if [ -r "$botlog" ]; then
+    cutoff=$(TZ="$DCB_BOT_LOG_TZ" date -d "-$DCB_GATEWAY_WINDOW seconds" '+%F %T')
+    # The whole window: today's log plus the segment rotated at midnight (bot.log.<date>, ~100 KB a day).
+    prev="$botlog.$(TZ="$DCB_BOT_LOG_TZ" date -d "-$DCB_GATEWAY_WINDOW seconds" +%F)"
+    hits=$(cat "$prev" "$botlog" 2>/dev/null | awk -v c="$cutoff" 'substr($0,1,19) >= c' | grep -cE "$DCB_GATEWAY_REGEX")
+    if [ "$hits" -le "$DCB_GATEWAY_MAX" ]; then
+        no_problem gateway
+    else
+        problem gateway "$hits stall/reconnect lines in ${DCB_GATEWAY_WINDOW}s (more than $DCB_GATEWAY_MAX)"
+        last=$(cat /run/dcb/gateway-flagged 2>/dev/null || echo 0)
+        if [ $(( $(date +%s) - last )) -ge "$DCB_GATEWAY_WINDOW" ]; then
+            date +%s > /run/dcb/gateway-flagged
+            log "GATEWAY ANOMALY: $hits stall/reconnect lines in the last ${DCB_GATEWAY_WINDOW}s (log only)"
+        fi
+    fi
+fi
+
+cid=$(compose ps -q bot)
+health=$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)
+# A restart through dcb-up passes through "starting"; that continues an unhealthy problem (so a
+# restart loop still adds up to a wake request) but never begins one.
+case $health in
+    unhealthy) problem unhealthy "bot healthcheck unhealthy" ;;
+    starting) [ -s "$wake_dir/unhealthy" ] && problem unhealthy "bot healthcheck starting again after unhealthy" ;;
+    *) no_problem unhealthy ;;
+esac
+if [ "$health" = unhealthy ]; then
+    [ -f "$since_file" ] || { echo "$now" > "$since_file"; log "bot unhealthy, timer started"; wake_update; exit 0; }
+    age=$(( now - $(cat "$since_file") ))
+    if [ "$age" -ge "$DCB_UNHEALTHY_RESTART_AFTER" ]; then
+        log "bot unhealthy for ${age}s -> dcb-up --restart-bot"
+        rm -f "$since_file"
+        wake_update
+        exec /usr/local/sbin/dcb-up --restart-bot
+    fi
+else
+    rm -f "$since_file"
+fi
+wake_update

@@ -1,0 +1,80 @@
+#!/bin/bash
+# 05:00 daily (dcb-data-refresh.timer). Regenerates the Bot's generated data (name tables, ClearURLs
+# rules) in the one-shot compose service data-refresh (profile "refresh"), which writes the
+# generated-data volume the bot mounts read-only and reloads by itself. Never builds an image, never
+# restarts or stops the bot.
+#
+# Same gates as dcb-up, under the same lock: the firewall is applied first, then dcb-probe runs from
+# every compose network. compose config without --profile leaves a profiled service out, so
+# dcb-up's restart-policy check and network list never see this one; with the profile it is checked
+# here instead (fail closed, nothing runs otherwise):
+#   - every service of the profile-expanded config, data-refresh included, must have restart "no"
+#   - every network any service joins must already exist (dcb-up's compose up --no-start creates the
+#     project's networks) and dcb-probe must exit 0 from all of them; 1 (leak) and 2
+#     (inconclusive) both skip the run
+# Skipped entirely while $DCB_REPO/.hold exists.
+# Exit 0 = refreshed (the last line logged says changed or unchanged; any other summary is a failure) or skipped for .hold;
+# 1 = a gate failed or the run failed. Log: $DCB_LOGDIR/data-refresh.log
+set -uo pipefail
+. "${DCB_CONFIG:-/etc/default/dcb}"
+# Fixed on the machine; overridable only so the tests can run this script without root.
+sbin=${DCB_SBIN:-/usr/local/sbin}
+lock=${DCB_LOCK_FILE:-/run/dcb-up.lock}
+mkdir -p "$DCB_LOGDIR"
+logfile="$DCB_LOGDIR/data-refresh.log"
+log() { echo "$(date '+%F %T') dcb-data-refresh: $*" | tee -a "$logfile"; }
+held() { [ -e "$DCB_REPO/.hold" ]; }
+compose() { docker compose --project-directory "$DCB_REPO" -p "$DCB_PROJECT" --profile refresh "$@" 9>&-; }
+svc=data-refresh
+
+held && { log ".hold present; skip"; exit 0; }
+exec 9>"$lock"
+flock -w 600 9 || { log "dcb-up lock busy for 10 min; skip"; exit 1; }
+fw=$("$sbin/dcb-firewall" 2>&1) || { log "firewall FAILED; skip: $(echo "$fw" | tail -1)"; exit 1; }
+
+cd "$DCB_REPO" || { log "repo $DCB_REPO missing; skip"; exit 1; }
+# JSON from stdout only: a compose warning on stderr would make every gate below fail.
+err=$(mktemp) || { log "cannot create a scratch file; skip"; exit 1; }
+trap 'rm -f "$err"' EXIT
+cfg=$(compose config --format json 2>"$err") || { log "compose config FAILED; skip: $(tail -1 "$err")"; exit 1; }
+# Every service of the profile-expanded config, data-refresh included, must have restart "no" (the
+# same rule dcb-up applies to the services without the profile).
+bad=$(echo "$cfg" | jq -r --arg s "$svc" 'if .services[$s] then
+        [.services | to_entries[] | select((.value.restart // "") != "no") | "\(.key)=\(.value.restart // "unset")"] | join(" ")
+    else "missing-service:\($s)" end') || { log "cannot read the compose config; skip"; exit 1; }
+[ -z "$bad" ] || { log "restart policy is not \"no\" (or $svc missing) for: $bad; skip"; exit 1; }
+# Networks must be non-external bridge networks: macvlan/ipvlan/external ones bypass DOCKER-USER.
+badnet=$(echo "$cfg" | jq -r '(.networks // {}) | to_entries[]
+        | select(((.value.external // false) != false) or ((.value.driver // "bridge") != "bridge"))
+        | "\(.key)(external=\(.value.external // false) driver=\(.value.driver // "bridge"))"' | tr '\n' ' ') \
+    || { log "cannot read the compose networks; skip"; exit 1; }
+[ -z "$badnet" ] || { log "compose network is external or not driver bridge: $badnet; skip"; exit 1; }
+# network_mode (host, container:…, none) puts a container outside the project's bridge networks:
+# host traffic leaves through OUTPUT, which DOCKER-USER never sees.
+badmode=$(echo "$cfg" | jq -r '.services | to_entries[] | select(.value.network_mode != null)
+        | "\(.key)(network_mode=\(.value.network_mode))"' | tr '\n' ' ') \
+    || { log "cannot read the services' network_mode; skip"; exit 1; }
+[ -z "$badmode" ] || { log "service sets network_mode: $badmode; skip"; exit 1; }
+# Every network any service joins (not only data-refresh's): all must exist and pass the probe.
+nets=()
+while read -r n; do [ -n "$n" ] && nets+=("$n"); done < <(echo "$cfg" \
+    | jq -r '.networks as $all | [.services[].networks // {} | keys[] | $all[.].name // .] | unique[]')
+[ ${#nets[@]} -gt 0 ] || { log "no compose network found; skip"; exit 1; }
+for n in "${nets[@]}"; do
+    docker network inspect "$n" >/dev/null 2>&1 || { log "network $n does not exist yet (dcb-up creates and probes it); skip"; exit 1; }
+done
+probe=$("$sbin/dcb-probe" "${nets[@]}" 2>&1) \
+    || { log "probe failed; skip: $(echo "$probe" | grep -E 'LEAK|DOWN|inconclusive|cannot' | head -3 | tr '\n' ' ')"; exit 1; }
+
+held && { log ".hold appeared during checks; skip"; exit 0; }
+out=$(mktemp) || { log "mktemp failed"; exit 1; }
+trap 'rm -f "$err" "$out"' EXIT
+compose run --rm "$svc" > "$out" 2>> "$logfile"
+rc=$?
+cat "$out" >> "$logfile"
+summary=$(grep . "$out" | tail -1)
+[ $rc -eq 0 ] || { log "$svc FAILED (exit $rc): ${summary:-no output}"; exit 1; }
+# Anchored at the start: "unchanged" contains "changed", an unanchored match would take both alike.
+echo "$summary" | grep -qE '^data-refresh: (changed|unchanged)\b' \
+    || { log "$svc exited 0 without a changed/unchanged summary line: ${summary:-no output}"; exit 1; }
+log "$summary"

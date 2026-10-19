@@ -1,0 +1,23 @@
+# dcb-wake.sh settings. Install as ~/.config/dcb-wake/config; every key is optional (the values
+# below are the defaults, except DCB_WAKE_NOTIFY).
+
+# The OrbStack machine running the stack, and its DCB_STATEDIR (/etc/default/dcb there).
+DCB_WAKE_MACHINE=dcb
+DCB_WAKE_STATEDIR=/var/lib/dcb
+
+# Where claude -p runs. Keep a README in it and open `claude` there once by hand to accept the
+# folder trust, so the headless runs start without asking.
+DCB_WAKE_WORKDIR="$HOME/dcb-wake"
+
+# SendMessage targets for the report, one address per line ('#' comments allowed), e.g. a remote
+# session's bridge address and a local resident session's name. Missing or empty: no SendMessage.
+DCB_WAKE_TARGETS="$HOME/.config/dcb-wake/targets"
+
+# Hard limit for one wake (seconds); wakes at least this far apart (seconds); wakes per day.
+DCB_WAKE_TIME_LIMIT=1500
+DCB_WAKE_MIN_INTERVAL=1800
+DCB_WAKE_MAX_PER_DAY=6
+
+# Mail command for the report notice: called as "${DCB_WAKE_NOTIFY[@]}" "<subject>" with the body
+# on stdin; it should deliver to the owner's own mailbox. Unset: the report is only saved locally.
+# DCB_WAKE_NOTIFY=(orb -m <mail-machine> -u root /usr/local/sbin/<notify-command>)

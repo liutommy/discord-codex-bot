@@ -1,0 +1,144 @@
+#!/bin/bash
+# Bring the stack up only when it is safe to. Run by dcb-up.timer (boot + every 5 min), dcb-guard,
+# and by hand. Never starts dockerd itself (dcb-up.service only has Requisite=docker.service).
+#   dcb-up                 check, then compose up -d
+#   dcb-up --restart-bot   check, then compose restart bot (dcb-guard's unhealthy path)
+#   dcb-up --manual        same as plain dcb-up, but also while dcb-guard has given up on the bot
+#                          (crash-loop backoff, $DCB_STATEDIR/bot-giving-up); a healthy bot after a
+#                          manual start makes dcb-guard clear the give-up
+#
+# Every run, .hold or not: apply + verify the firewall; failure stops a running stack.
+# Then, without .hold:
+#   compose config must parse and give every service restart "no"   (else stop, no up)
+#   every compose network must be non-external with driver bridge (or unset): macvlan/ipvlan/external
+#     networks bypass DOCKER-USER                                    (else stop, no up)
+#   Fail closed: a gate whose tool (jq, docker inspect) fails counts as failed, never as "nothing found".
+#   compose up --no-start creates the project's networks; dcb-probe runs from each of them
+#     rc 1 (leak)          -> stop the stack, no up
+#     rc 2 (inconclusive)  -> no up; a running stack is stopped once this has lasted
+#                             DCB_INCONCLUSIVE_STOP_AFTER (a short outage does not stop it)
+#   compose up -d, then every project container must have RestartPolicy "no" (else stop)
+# The stack is found by its compose project label, so it can be stopped even when compose
+# itself cannot parse the project any more.
+set -uo pipefail
+. "${DCB_CONFIG:-/etc/default/dcb}"
+# Fixed on the machine; overridable only so the tests can run this script without root.
+sbin=${DCB_SBIN:-/usr/local/sbin}
+run=${DCB_RUNDIR:-/run/dcb}
+lock=${DCB_LOCK_FILE:-/run/dcb-up.lock}
+mkdir -p "$DCB_LOGDIR" "$run"
+log() { echo "$(date '+%F %T') dcb-up: $*" | tee -a "$DCB_LOGDIR/dcb-up.log"; }
+held() { [ -e "$DCB_REPO/.hold" ]; }
+compose() { docker compose --project-directory "$DCB_REPO" -p "$DCB_PROJECT" "$@" 9>&-; }
+running_ids() { docker ps -q --filter "label=com.docker.compose.project=$DCB_PROJECT"; }
+stop_stack() {
+    local ids; ids=$(running_ids)
+    [ -n "$ids" ] || return 0
+    log "STOPPING running stack: $1"
+    date +%s > $run/stopped-at   # dcb-guard does not count the exits this causes
+    # shellcheck disable=SC2086
+    docker stop -t 20 $ids >/dev/null 2>&1 || docker kill $ids >/dev/null 2>&1 || log "stop/kill FAILED"
+}
+since_file=$run/probe-inconclusive-since
+mode=${1:-}
+gave_up="$DCB_STATEDIR/bot-giving-up"
+
+# dcb-deploy holds the lock itself and passes its fd 9 down with DCB_LOCK_HELD=1.
+if [ "${DCB_LOCK_HELD:-0}" = 1 ] && flock -n 9 2>/dev/null; then :; else
+    exec 9>"$lock"
+    flock -n 9 || { log "another dcb-up holds the lock; skip"; exit 0; }
+fi
+
+if ! fw=$("$sbin/dcb-firewall" 2>&1); then
+    log "firewall FAILED: $(echo "$fw" | tail -1)"; stop_stack "firewall failed"; exit 1
+fi
+held && { rm -f "$since_file"; exit 0; }   # operator keeps the stack down on purpose; firewall still enforced above
+if [ -e "$gave_up" ] && [ "$mode" != --manual ]; then
+    log "dcb-guard gave up on the bot ($(head -1 "$gave_up")); not starting -- dcb-up --manual or rm $gave_up"
+    exit 0
+fi
+
+cd "$DCB_REPO" || { log "repo $DCB_REPO missing"; stop_stack "repo missing"; exit 1; }
+# JSON from stdout only: a compose warning on stderr would break the jq gates below and stop the Bot.
+if ! cfg=$(compose config --format json 2>"$run/config.err"); then
+    log "compose config FAILED: $(tail -1 "$run/config.err")"; rm -f "$since_file"; stop_stack "compose config does not parse"; exit 1
+fi
+if ! bad=$(echo "$cfg" | jq -r '.services | to_entries[] | select((.value.restart // "") != "no") | "\(.key)=\(.value.restart // "unset")"' | tr '\n' ' '); then
+    log "cannot read the compose config (jq failed); not starting"; rm -f "$since_file"; stop_stack "restart policy unreadable"; exit 1
+fi
+if [ -n "$bad" ]; then
+    log "restart policy is not \"no\" for: $bad(compose.override.yaml missing or changed?)"; rm -f "$since_file"; stop_stack "restart policy"; exit 1
+fi
+# macvlan/ipvlan and external networks are not filtered by DOCKER-USER: only bridge networks the
+# project creates itself are allowed.
+if ! badnet=$(echo "$cfg" | jq -r '(.networks // {}) | to_entries[]
+        | select(((.value.external // false) != false) or ((.value.driver // "bridge") != "bridge"))
+        | "\(.key)(external=\(.value.external // false) driver=\(.value.driver // "bridge"))"' | tr '\n' ' '); then
+    log "cannot read the compose networks (jq failed); not starting"; rm -f "$since_file"; stop_stack "network policy unreadable"; exit 1
+fi
+if [ -n "$badnet" ]; then
+    log "compose network is external or not driver bridge: $badnet"; rm -f "$since_file"; stop_stack "network policy"; exit 1
+fi
+# network_mode (host, container:…, none) puts a container outside the project's bridge networks:
+# host traffic leaves through OUTPUT, which DOCKER-USER never sees.
+if ! badmode=$(echo "$cfg" | jq -r '.services | to_entries[] | select(.value.network_mode != null)
+        | "\(.key)(network_mode=\(.value.network_mode))"' | tr '\n' ' '); then
+    log "cannot read the services' network_mode (jq failed); not starting"; rm -f "$since_file"; stop_stack "network_mode unreadable"; exit 1
+fi
+if [ -n "$badmode" ]; then
+    log "service sets network_mode: $badmode"; rm -f "$since_file"; stop_stack "network_mode"; exit 1
+fi
+
+if ! out=$(compose up --no-start 2>&1); then
+    log "compose up --no-start FAILED: $(echo "$out" | tail -2 | tr '\n' ' ')"; exit 1
+fi
+nets=()   # while-read rather than mapfile: runs on bash 3.2 too (the tests run on macOS)
+# A network list that cannot be read (or comes back empty) means no probe: inconclusive, which is
+# timed like any other inconclusive probe, never a partial list probed and then started.
+# Names come from stdout only: a warning on stderr must not be probed as a network name.
+if netlist=$(docker network ls --format '{{.Name}}' --filter "label=com.docker.compose.project=$DCB_PROJECT" 2>"$run/netls.err"); then
+    while read -r n; do [ -n "$n" ] && nets+=("$n"); done <<< "$netlist"
+fi
+if [ ${#nets[@]} -gt 0 ]; then
+    probe=$("$sbin/dcb-probe" "${nets[@]}" 2>&1); prc=$?
+else
+    probe="cannot list the project networks: $(tail -1 "$run/netls.err" 2>/dev/null)"; prc=2
+fi
+case $prc in
+    0) rm -f "$since_file" ;;
+    1)
+        log "probe LEAK, not starting:"; echo "$probe" | grep -E 'LEAK|DOWN|result' | sed 's/^/    /' | tee -a "$DCB_LOGDIR/dcb-up.log"
+        stop_stack "probe found a leak"; exit 1 ;;
+    *)
+        now=$(date +%s); [ -f "$since_file" ] || echo "$now" > "$since_file"
+        age=$(( now - $(cat "$since_file") ))
+        log "probe inconclusive for ${age}s, not starting: $(echo "$probe" | grep -E 'inconclusive|DOWN|cannot' | head -3 | tr '\n' ' ')"
+        if [ -n "$(running_ids)" ] && [ "$age" -ge "$DCB_INCONCLUSIVE_STOP_AFTER" ]; then
+            stop_stack "probe inconclusive for ${age}s (>= ${DCB_INCONCLUSIVE_STOP_AFTER}s)"
+        fi
+        exit 1 ;;
+esac
+
+held && { log ".hold appeared during checks; not starting"; exit 0; }
+if [ "$mode" = --restart-bot ]; then
+    out=$(compose restart bot 2>&1) && log "bot restarted" || { log "restart bot FAILED: $(echo "$out" | tail -1)"; exit 1; }
+elif out=$(compose up -d 2>&1); then
+    [[ $fw == *unchanged* && ! $out =~ Started|Created|Recreated ]] \
+        || log "compose up -d ok; $(echo "$fw" | tail -1)"
+else
+    log "compose up -d FAILED: $(echo "$out" | tail -3 | tr '\n' ' ')"; exit 1
+fi
+
+# pipefail: a failing docker ps / docker inspect fails the substitution, which must not read as "all fine".
+if ! bad=$(docker ps -aq --filter "label=com.docker.compose.project=$DCB_PROJECT" \
+      | xargs -r docker inspect -f '{{.Id}} {{.Name}} {{.HostConfig.RestartPolicy.Name}}' | awk '$3 != "no" {print}'); then
+    log "cannot read the containers' restart policies (docker inspect failed)"; stop_stack "restart policy unverifiable"; exit 1
+fi
+if [ -n "$bad" ]; then
+    log "container restart policy is not \"no\": $(echo "$bad" | awk '{print $2"="$3}' | tr '\n' ' ')"
+    stop_stack "container restart policy"
+    # Changed out of band (docker update): compose would reuse the container as is, so remove it
+    # and let the next dcb-up recreate it from the checked config.
+    echo "$bad" | awk '{print $1}' | xargs -r docker rm -f >/dev/null 2>&1 && log "removed those containers; next dcb-up recreates them"
+    exit 1
+fi

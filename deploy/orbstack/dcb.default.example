@@ -1,0 +1,58 @@
+# discord-codex-bot on an OrbStack isolated machine -- shared settings for /usr/local/sbin/dcb-*.
+# Install as /etc/default/dcb (root:root 644) and replace every <...> placeholder.
+
+# The deployment checkout, its compose project name, and the user who owns the checkout
+# (git and docker compose build run as this user).
+DCB_REPO="/home/<user>/discord-codex-bot"
+DCB_PROJECT=discord-codex-bot
+DCB_USER="<user>"
+# Logs of every dcb-* script (rotated by /etc/logrotate.d/dcb) and state kept across reboots
+# (WAN IP, crash-loop give-up, wake request).
+DCB_LOGDIR=/var/log/dcb
+DCB_STATEDIR=/var/lib/dcb
+
+# Docker address ranges, exactly as /etc/docker/daemon.json allocates them (default-address-pools
+# and bip). Same-bridge container traffic is allowed only inside these; every other private or
+# special destination is rejected. Keep the two files in sync.
+DCB_POOL_NETS=172.30.0.0/16
+DCB_POOL_PREFIX=172.30.
+DCB_BIP_NET=172.31.255.0/24
+
+# The home's public IPv4: the router answers its own WAN address from the LAN side (admin UI), so
+# it is rejected like a private address. Re-detected at every dcb-firewall run; at least two of
+# these must agree.
+DCB_WAN_URLS="https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com"
+
+# Positive-control probe (dcb-probe). Each "host:port" must be unreachable / reachable from every
+# compose network of the project; names in DNS_MUST_FAIL must not resolve, DNS_MUST_PASS must.
+# The WAN IP (:80 :443) and a listener on the machine itself are added at run time.
+# MUST_FAIL: private addresses that answer when asked from the machine itself, so a closed result
+# from a container proves the firewall: e.g. the router's admin UI, the Mac's LAN and Tailscale
+# addresses (sshd), OrbStack's host address and resolver (0.250.250.254, 0.250.250.200), another
+# host on a private range.
+DCB_PROBE_MUST_FAIL="<router-lan-ip>:80 <mac-lan-ip>:22 <mac-tailscale-ip>:22 0.250.250.254:22 0.250.250.200:80 0.250.250.200:53 <other-private-host>:80"
+# MUST_PASS: a public address the stack must reach (one of the daemon.json resolvers works).
+DCB_PROBE_MUST_PASS="1.1.1.1:443"
+# DNS_MUST_FAIL: names that would lead to the Mac; DNS_MUST_PASS: a name the bot needs.
+DCB_PROBE_DNS_MUST_FAIL="<mac>.<tailnet>.ts.net host.orb.internal host.docker.internal"
+DCB_PROBE_DNS_MUST_PASS="discord.com"
+# The network dcb-probe creates and uses when called without arguments.
+DCB_PROBE_NET=dcb_probe
+
+# dcb-up: a running stack is stopped once the probe has been inconclusive this long (seconds).
+DCB_INCONCLUSIVE_STOP_AFTER=1800
+
+# dcb-guard: restart the bot after it has been unhealthy this long (seconds), and flag a gateway
+# anomaly when more than DCB_GATEWAY_MAX matching bot.log lines fall within DCB_GATEWAY_WINDOW.
+DCB_UNHEALTHY_RESTART_AFTER=360
+# dcb-guard crash-loop backoff: give up after this many non-zero bot exits within the window.
+DCB_GIVEUP_EXITS=3
+DCB_GIVEUP_WINDOW=1800
+DCB_GATEWAY_REGEX="stopped responding to the gateway|heartbeat blocked|Can.t keep up|Attempting a reconnect|websocket is .* behind"
+DCB_GATEWAY_WINDOW=600
+DCB_GATEWAY_MAX=3
+# bot.log asctime is in the container TZ (compose: TZ ${TZ:-Asia/Taipei}).
+DCB_BOT_LOG_TZ=Asia/Taipei
+# dcb-guard: a problem seen on every run for this long (seconds) goes into
+# $DCB_STATEDIR/wake-request, which the Mac's dcb-wake.sh turns into a diagnosing claude -p.
+DCB_WAKE_AFTER=600
