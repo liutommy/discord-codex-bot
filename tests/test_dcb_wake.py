@@ -23,7 +23,7 @@ STUBS = {
     "orb": (
         'echo "orb $*" >> "$CALLS"\n'
         'case "$*" in\n'
-        '  *wake-request*) [ -n "$ORB_FAIL" ] && exit 1\n'
+        '  *wake-request*) [ -n "$ORB_FAIL" ] && exit 1; [ -n "$ORB_STALE" ] && exit 3\n'
         '    [ -f "$REQUEST" ] && cat "$REQUEST"; exit 0 ;;\n'
         '  *) echo "${EVIDENCE:-evidence line}" ;;\n'
         "esac\n"
@@ -96,7 +96,9 @@ class Wake:
 
 
 READ = (
-    'orb -m dcb -u root sh -c test ! -e "$1" || head -c 4097 -- "$1" sh /var/lib/dcb/wake-request'
+    'orb -m dcb -u root sh -c test ! -e "$1" || '
+    '{ test -z "$(find "$1" -mmin +10)" || exit 3; head -c 4097 -- "$1"; } '
+    "sh /var/lib/dcb/wake-request"
 )
 
 
@@ -439,7 +441,7 @@ def test_a_zombie_left_in_the_group_does_not_hold_the_time_limit(tmp_path) -> No
     # so after TERM the group holds only that zombie.
     claude = (
         'echo "claude $*" >> "$CALLS"\n'
-        "perl -e 'exit 0 unless fork; setpgrp(0, 0); print \"$$\\n\"; sleep 30' > \"$CHILD\" &\n"
+        'perl -e \'exit 0 unless fork; setpgrp(0, 0); print "$$\\n"; sleep 30\' > "$CHILD" &\n'
         "sleep 300\n"
     )
     wake = Wake(tmp_path, time_limit=2, claude=claude)
@@ -501,6 +503,27 @@ def test_a_failed_request_read_is_logged_never_taken_for_no_request(tmp_path) ->
     assert wake.run().returncode == 0
     assert wake.claude_calls() == []
     assert "cannot read the wake request (rc=1)" in wake.log()
+
+
+def test_a_stale_request_is_deferred_not_acted_on(tmp_path) -> None:
+    wake = Wake(tmp_path)
+    wake.request.write_text("gave-up 20min since x\n")
+    wake.env["ORB_STALE"] = "1"
+    assert wake.run().returncode == 0
+    assert wake.claude_calls() == []
+    assert "has not been rewritten for 10 min" in wake.log()
+
+
+def test_the_staleness_check_reads_a_request_older_than_ten_minutes_as_stale(tmp_path) -> None:
+    inner = READ.split(" sh -c ", 1)[1].rsplit(" sh ", 1)[0]
+    request = tmp_path / "wake-request"
+    request.write_text("gave-up 20min since x\n")
+    fresh = subprocess.run(["sh", "-c", inner, "sh", str(request)], capture_output=True, text=True)
+    assert (fresh.returncode, fresh.stdout) == (0, "gave-up 20min since x\n")
+    old = time.time() - 11 * 60
+    os.utime(request, (old, old))
+    stale = subprocess.run(["sh", "-c", inner, "sh", str(request)], capture_output=True, text=True)
+    assert (stale.returncode, stale.stdout) == (3, "")
 
 
 def test_the_prompt_restarts_a_given_up_bot_through_dcb_up_not_by_removing_the_marker(

@@ -73,6 +73,32 @@ def test_a_kind_not_checked_this_run_keeps_its_time_but_is_not_listed(tmp_path) 
     assert _run(tmp_path, 'problem firewall "fw"; wake_update') == "firewall 12min fw\n"
 
 
+def test_a_first_seen_time_cut_short_neither_aborts_nor_counts(tmp_path) -> None:
+    problems = tmp_path / "state" / "problems"
+    problems.mkdir(parents=True)
+    (problems / "firewall").write_text("x")  # cut short or garbled: not a number
+    commands = 'problem firewall "fw"; wake_update; echo done > "$DCB_STATEDIR/after"'
+    assert _run(tmp_path, commands) is None
+    assert (tmp_path / "state" / "after").read_text() == "done\n"
+    assert re.fullmatch(r"\d+\n", (problems / "firewall").read_text())
+    # wake_update on its own, before problem() has rewritten the time
+    (problems / "firewall").write_text("")
+    commands = 'echo fw > "$wake_dir/firewall.now"; wake_update; echo done > "$DCB_STATEDIR/after2"'
+    assert _run(tmp_path, commands) is None
+    assert (tmp_path / "state" / "after2").read_text() == "done\n"
+
+
+def test_a_request_that_cannot_be_replaced_is_removed(tmp_path) -> None:
+    _seen_since(tmp_path, "firewall", 11)
+    (tmp_path / "state" / "wake-request").write_text("gave-up 58min old\n")
+    (tmp_path / "state" / "wake-request.tmp").mkdir()  # the write fails
+    commands = (
+        'log() { :; }; problem firewall "fw"; wake_update || echo failed > "$DCB_STATEDIR/rc"'
+    )
+    assert _run(tmp_path, commands) is None
+    assert (tmp_path / "state" / "rc").read_text() == "failed\n"
+
+
 def test_no_wake_request_while_held(tmp_path) -> None:
     _seen_since(tmp_path, "gave-up", 60)
     (tmp_path / "state").mkdir(exist_ok=True)

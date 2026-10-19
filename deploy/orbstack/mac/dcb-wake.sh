@@ -142,10 +142,14 @@ else
     # A missing request is exit 0 inside the machine; any other status (orb down, the machine
     # stopped, the 60 s limit) is a read failure, logged rather than taken for "no request".
     # 141: the local head stopped reading a flood, which the size check below refuses.
-    run_limited 60 bash -c 'orb -m "$1" -u root sh -c '\''test ! -e "$1" || head -c 4097 -- "$1"'\'' sh "$2" \
-            2>/dev/null | head -c 4097 > "$3"; s=${PIPESTATUS[0]}; [ "$s" -eq 0 ] || [ "$s" -eq 141 ]' \
+    # 3: dcb-guard rewrites the request on every run (2 min); one not rewritten for 10 min is stale.
+    run_limited 60 bash -c 'orb -m "$1" -u root sh -c '\''test ! -e "$1" || { test -z "$(find "$1" -mmin +10)" || exit 3; head -c 4097 -- "$1"; }'\'' sh "$2" \
+            2>/dev/null | head -c 4097 > "$3"; s=${PIPESTATUS[0]}; [ "$s" -eq 0 ] || [ "$s" -eq 141 ] || exit "$s"' \
         _ "$DCB_WAKE_MACHINE" "$DCB_WAKE_STATEDIR/wake-request" "$reqfile"
     rc=$?
+    if [ "$rc" -eq 3 ]; then
+        defer "the wake request has not been rewritten for 10 min; dcb-guard is not keeping it current"; exit 0
+    fi
     if [ "$rc" -ne 0 ]; then
         defer "cannot read the wake request (rc=$rc)"; exit 0
     fi
