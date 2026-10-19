@@ -452,3 +452,45 @@ def test_the_config_file_is_read_and_the_environment_overrides_it(tmp_path) -> N
     assert got["DCB_LLM_RELAY_LISTEN_PORT"] == "18080"
     assert got["DCB_LLM_RELAY_WORKERS"] == "4"
     assert got["DCB_LLM_RELAY_UPSTREAM_HOST"] == "127.0.0.1"
+
+
+def test_an_unwritable_log_does_not_stop_serving(make, tmp_path) -> None:
+    logdir = tmp_path / "log-is-a-directory"
+    logdir.mkdir()
+    h, _ = make(DCB_LLM_RELAY_LOG=str(logdir))
+    for _ in range(3):  # more connections than workers: each worker served and went on
+        with h.connect() as c:
+            c.sendall(_framed(b"ping"))
+            assert _read_framed(c) == b"ping"
+    assert h.proc.poll() is None
+
+
+def test_a_worker_that_dies_makes_the_relay_exit_for_launchd(tmp_path) -> None:
+    code = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('r', {str(RELAY)!r})\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "relay = m.Relay(m.load_config())\n"
+        "relay.remove_stale_listeners = lambda: None\n"
+        "relay.worker = lambda n: None  # returns at once, as a worker killed by an exception\n"
+        "sys.exit(relay.run())\n"
+    )
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "DCB_LLM_RELAY_CONFIG": str(tmp_path / "none"),
+        "DCB_LLM_RELAY_LISTEN_PORT": "18080",
+        "DCB_LLM_RELAY_UPSTREAM_PORT": "8080",
+        "DCB_LLM_RELAY_LOG": str(tmp_path / "relay.log"),
+    }
+    out = subprocess.run([PYTHON, "-c", code], env=env, capture_output=True, text=True, timeout=20)
+    assert out.returncode == 1, out.stderr
+    assert "a worker ended unexpectedly" in (tmp_path / "relay.log").read_text()
+
+
+def test_the_llm_server_cannot_download_a_model_a_request_names() -> None:
+    import plistlib
+
+    plist = plistlib.loads((RELAY.parent / "com.example.local-llm.plist").read_bytes())
+    assert plist["EnvironmentVariables"]["HF_HUB_OFFLINE"] == "1"
+    assert plist["ProgramArguments"][1:3] == ["--host", "127.0.0.1"]

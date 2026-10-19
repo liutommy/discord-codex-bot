@@ -4,7 +4,8 @@
      __HOME__ with the absolute home directory, __MLX_LM_SERVER__ with the absolute path of the
      mlx_lm.server executable, __PORT__ with the upstream port in dcb-llm-relay's config and
      __MODEL_DIR__ with the model directory. launchd expands neither ~ nor $HOME. Bound to
-     127.0.0.1: only the relay on this Mac reaches it. -->
+     127.0.0.1: only the relay on this Mac reaches it. mlx_lm.server loads the model a request
+     names; HF_HUB_OFFLINE keeps such a request from downloading one. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -23,6 +24,11 @@
         <string>--prompt-concurrency</string>
         <string>2</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HF_HUB_OFFLINE</key>
+        <string>1</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

@@ -117,8 +117,11 @@ class Relay:
     def log(self, msg: str) -> None:
         line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} dcb-llm-relay: {msg}\n"
         with self.lock:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(line)
+            try:
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(line)
+            except OSError:  # a full disk or an unwritable log must not end a worker
+                sys.stderr.write(line)
 
     def orb(self, *cmd: str) -> list[str]:
         return ["orb", "-m", self.machine, "-u", self.user, *cmd]
@@ -306,8 +309,14 @@ class Relay:
         ]
         for t in threads:
             t.start()
+        failed = False
         while not self.stop.is_set():
             self.stop.wait(1)
+            if not self.stop.is_set() and not all(t.is_alive() for t in threads):
+                # A worker that died serves nothing; exit so launchd's KeepAlive restarts the relay.
+                self.log("a worker ended unexpectedly; exiting")
+                failed = True
+                self.stop.set()
         self.kill_all()
         deadline = time.monotonic() + GRACE + 3
         for t in threads:
@@ -315,7 +324,7 @@ class Relay:
         self.kill_all()
         self.remove_stale_listeners()
         self.log("stopped")
-        return 0
+        return 1 if failed else 0
 
 
 def main() -> int:
