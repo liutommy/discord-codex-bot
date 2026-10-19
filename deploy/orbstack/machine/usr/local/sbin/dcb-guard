@@ -31,23 +31,33 @@ wake_dir="$DCB_STATEDIR/problems"   # <kind>: first-seen epoch; <kind>.now: this
 wake_req="$DCB_STATEDIR/wake-request"
 mkdir -p "$wake_dir"; rm -f "$wake_dir"/*.now
 problem() {  # problem <kind> <evidence>: seen on this run
-    [ -s "$wake_dir/$1" ] || date +%s > "$wake_dir/$1"
+    # Written whole then renamed; a first-seen time cut short (full disk) is written again.
+    [[ $(cat "$wake_dir/$1" 2>/dev/null) =~ ^[0-9]+$ ]] \
+        || { date +%s > "$wake_dir/$1.tmp" && mv -f "$wake_dir/$1.tmp" "$wake_dir/$1"; }
     printf '%s\n' "$2" | head -1 | cut -c1-200 > "$wake_dir/$1.now"
 }
 no_problem() { rm -f "$wake_dir/$1"; }   # checked on this run and fine
 # A kind not checked on this run (an earlier branch exited first) keeps its first-seen time but is
 # not listed: its evidence would be stale.
 wake_update() {
-    local f k age lines=""
+    local f k first age lines=""
     if [ -e "$DCB_REPO/.hold" ]; then rm -f "$wake_dir"/* "$wake_req"; return 0; fi
     for f in "$wake_dir"/*.now; do
         [ -e "$f" ] || continue
         k=$(basename "$f" .now)
-        age=$(( $(date +%s) - $(cat "$wake_dir/$k" 2>/dev/null || date +%s) ))
+        first=$(cat "$wake_dir/$k" 2>/dev/null)
+        [[ $first =~ ^[0-9]+$ ]] || first=$(date +%s)   # no usable first-seen time: seen from now
+        age=$(( $(date +%s) - first ))
         [ "$age" -ge "${DCB_WAKE_AFTER:-600}" ] && lines+="$k $(( age / 60 ))min $(cat "$f")"$'\n'
     done
     if [ -z "$lines" ]; then rm -f "$wake_req"; return 0; fi
-    printf '%s' "$lines" | sort > "$wake_req.tmp" && mv -f "$wake_req.tmp" "$wake_req"
+    if ! { printf '%s' "$lines" | sort > "$wake_req.tmp" && mv -f "$wake_req.tmp" "$wake_req"; }; then
+        # The previous request would describe an older state; dcb-wake also refuses one that has
+        # not been rewritten for 10 min, for when it cannot be removed either.
+        rm -f "$wake_req" "$wake_req.tmp"
+        log "ERROR cannot write $wake_req; the previous request was removed"
+        return 1
+    fi
 }
 
 # Under the dcb-up lock so the firewall is never re-applied while dcb-up is mid-check.
@@ -82,8 +92,12 @@ if [ -n "$bot_cid" ]; then
         if [ "$fin" -gt 0 ] && [ "$by_us" = 0 ] && ! awk -v f="$fin" '$1 == f {found=1} END {exit !found}' "$exits"; then
             reason=$(docker logs --tail 1 "$bot_cid" 2>&1 | tr -d '\r' | cut -c1-200)
             # Rebuilt and renamed, never appended in place: a cut-short write cannot merge two records.
-            { cat "$exits"; echo "$fin $b_code $reason"; } > "$exits.tmp" && mv -f "$exits.tmp" "$exits" \
-                || log "ERROR cannot record the bot exit in $exits"
+            if ! { { cat "$exits"; echo "$fin $b_code $reason"; } > "$exits.tmp" && mv -f "$exits.tmp" "$exits"; }; then
+                # An exit that is not counted could keep a crash loop below the give-up threshold.
+                log "ERROR cannot record the bot exit in $exits; not starting the bot this run"
+                problem gave-up "crash ledger could not be written"; wake_update
+                exit 1
+            fi
         fi
     fi
     # Deliberate: one healthy observation clears the exit history. Giving up targets crash loops that
@@ -110,7 +124,10 @@ if [ ! -e "$gave_up" ] && [ "$n" -ge "$DCB_GIVEUP_EXITS" ]; then
 fi
 if [ -e "$gave_up" ]; then
     log "given up on the bot ($(head -1 "$gave_up")); not starting -- dcb-up --manual or rm $gave_up"
-    problem gave-up "$(head -1 "$gave_up" | cut -d';' -f1)"; wake_update
+    problem gave-up "$(head -1 "$gave_up" | cut -d';' -f1)"
+    # Health is not checked while given up: an unhealthy first-seen time kept from before would
+    # make the Bot's first "starting" after recovery a wake request at once.
+    no_problem unhealthy; wake_update
     exit 0
 fi
 no_problem gave-up

@@ -44,7 +44,10 @@ config=${DCB_WAKE_CONFIG:-$HOME/.config/dcb-wake/config}
 
 STATE="$HOME/.local/state/dcb-wake"
 LOG="$STATE/dcb-wake.log"
+# Reports hold the request and Claude's diagnosis, which can quote member messages: owner only.
+umask 077
 mkdir -p "$STATE/reports"
+chmod go-rwx "$STATE" "$STATE/reports" 2>/dev/null   # tightens only; never adds owner write
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 now=$(date +%s)
 mode=run; [ "${1:-}" = --test-wake ] && mode=test
@@ -55,11 +58,16 @@ run_limited() {  # run_limited <seconds> <command...>: exit 124 when the limit k
         my $pid = fork() // die "fork: $!\n";
         if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\n"; }
         setpgrp($pid, $pid);   # also from the parent, so the group exists before any kill
+        sub group_live {  # a zombie still counts for kill 0, so ask ps for live members
+            open(my $ps, "-|", "ps", "-A", "-o", "pgid=,stat=") or return kill 0, -$pid;
+            while (<$ps>) { my ($g, $s) = split; return 1 if $g == $pid && $s !~ /^Z/; }
+            return 0;
+        }
         sub reap_group {
             kill "TERM", -$pid;
             for (1 .. 20) {
                 waitpid($pid, WNOHANG);
-                last unless kill 0, -$pid;
+                last unless group_live();
                 select(undef, undef, undef, 0.5);
             }
             kill "KILL", -$pid;
@@ -131,8 +139,20 @@ if [ "$mode" = test ]; then
     reasons="- TEST：這是手動要求的測試喚醒。只確認你看得到 machine 的狀態（例如 docker ps），並照下面「完成後」的第 2、3 步回報；不要執行任何修復或重啟。"
 else
     # At most 4097 bytes are read: one more than the cap, so an oversize request is told from one of exactly the cap.
-    run_limited 60 bash -c 'orb -m "$1" -u root cat "$2" 2>/dev/null | head -c 4097 > "$3"' \
-        _ "$DCB_WAKE_MACHINE" "$DCB_WAKE_STATEDIR/wake-request" "$reqfile" || : > "$reqfile"
+    # A missing request is exit 0 inside the machine; any other status (orb down, the machine
+    # stopped, the 60 s limit) is a read failure, logged rather than taken for "no request".
+    # 141: the local head stopped reading a flood, which the size check below refuses.
+    # 3: dcb-guard rewrites the request on every run (2 min); one not rewritten for 10 min is stale.
+    run_limited 60 bash -c 'orb -m "$1" -u root sh -c '\''test ! -e "$1" || { test -z "$(find "$1" -mmin +10)" || exit 3; head -c 4097 -- "$1"; }'\'' sh "$2" \
+            2>/dev/null | head -c 4097 > "$3"; s=${PIPESTATUS[0]}; [ "$s" -eq 0 ] || [ "$s" -eq 141 ] || exit "$s"' \
+        _ "$DCB_WAKE_MACHINE" "$DCB_WAKE_STATEDIR/wake-request" "$reqfile"
+    rc=$?
+    if [ "$rc" -eq 3 ]; then
+        defer "the wake request has not been rewritten for 10 min; dcb-guard is not keeping it current"; exit 0
+    fi
+    if [ "$rc" -ne 0 ]; then
+        defer "cannot read the wake request (rc=$rc)"; exit 0
+    fi
     [ -s "$reqfile" ] || exit 0
     if [ "$(wc -c < "$reqfile")" -gt 4096 ]; then
         defer "wake-request is larger than 4096 bytes; refused"; exit 0
@@ -217,7 +237,8 @@ M="orb -m $DCB_WAKE_MACHINE -u root"
     echo "  journalctl -u 'dcb-*' -n 50）；docker ps、docker inspect、docker logs --tail；"
     echo "  執行 /usr/local/sbin/dcb-up --manual、/usr/local/sbin/dcb-firewall、/usr/local/sbin/dcb-probe；"
     echo "  docker compose --project-directory \$DCB_REPO -p \$DCB_PROJECT restart <服務>；"
-    echo "  診斷完成後移除 \$DCB_STATEDIR/bot-giving-up（dcb-guard 放棄拉起 bot 的標記）。"
+    echo "  bot 已被放棄（\$DCB_STATEDIR/bot-giving-up）時，診斷完成後執行 dcb-up --manual 並確認 bot healthy；"
+    echo "  dcb-guard 看到 healthy 才清除標記與崩潰紀錄，只刪標記會在下一輪被重寫。"
     echo "- 不可以：修改任何程式碼、腳本、設定或 systemd unit；rebuild image；任何 git 寫入操作；"
     echo "  讀取或印出 .env、任何憑證或登入／auth 檔（含 \$DCB_REPO/state/ 底下各服務的 home）、rclone 設定；"
     echo "  刪除資料；建立或移除 \$DCB_REPO/.hold；永久停掉 bot；發公告；寫入雲端儲存；寄任何信（報告由腳本寄出）。"

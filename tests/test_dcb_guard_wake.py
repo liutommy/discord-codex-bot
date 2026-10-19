@@ -73,6 +73,32 @@ def test_a_kind_not_checked_this_run_keeps_its_time_but_is_not_listed(tmp_path) 
     assert _run(tmp_path, 'problem firewall "fw"; wake_update') == "firewall 12min fw\n"
 
 
+def test_a_first_seen_time_cut_short_neither_aborts_nor_counts(tmp_path) -> None:
+    problems = tmp_path / "state" / "problems"
+    problems.mkdir(parents=True)
+    (problems / "firewall").write_text("x")  # cut short or garbled: not a number
+    commands = 'problem firewall "fw"; wake_update; echo done > "$DCB_STATEDIR/after"'
+    assert _run(tmp_path, commands) is None
+    assert (tmp_path / "state" / "after").read_text() == "done\n"
+    assert re.fullmatch(r"\d+\n", (problems / "firewall").read_text())
+    # wake_update on its own, before problem() has rewritten the time
+    (problems / "firewall").write_text("")
+    commands = 'echo fw > "$wake_dir/firewall.now"; wake_update; echo done > "$DCB_STATEDIR/after2"'
+    assert _run(tmp_path, commands) is None
+    assert (tmp_path / "state" / "after2").read_text() == "done\n"
+
+
+def test_a_request_that_cannot_be_replaced_is_removed(tmp_path) -> None:
+    _seen_since(tmp_path, "firewall", 11)
+    (tmp_path / "state" / "wake-request").write_text("gave-up 58min old\n")
+    (tmp_path / "state" / "wake-request.tmp").mkdir()  # the write fails
+    commands = (
+        'log() { :; }; problem firewall "fw"; wake_update || echo failed > "$DCB_STATEDIR/rc"'
+    )
+    assert _run(tmp_path, commands) is None
+    assert (tmp_path / "state" / "rc").read_text() == "failed\n"
+
+
 def test_no_wake_request_while_held(tmp_path) -> None:
     _seen_since(tmp_path, "gave-up", 60)
     (tmp_path / "state").mkdir(exist_ok=True)
@@ -113,6 +139,13 @@ def test_a_give_up_that_cannot_be_written_never_restarts_the_bot() -> None:
     assert "exit 1" in block and "dcb-up" not in block
 
 
+def test_an_exit_that_cannot_be_recorded_never_restarts_the_bot() -> None:
+    text = GUARD.read_text()
+    block = text[text.index('if ! { { cat "$exits"') :]
+    block = block[: block.index("\n            fi\n")]
+    assert "exit 1" in block and "dcb-up" not in block
+
+
 def test_the_firewall_caches_the_wan_address_whole_then_renamed() -> None:
     fw = (GUARD.parent / "dcb-firewall").read_text()
     assert '> "$DCB_STATEDIR/wan-ip.tmp"' in fw and 'mv -f "$DCB_STATEDIR/wan-ip.tmp"' in fw
@@ -131,3 +164,12 @@ def test_deploy_refuses_tracked_local_changes_before_the_fast_forward() -> None:
     check = deploy.index("git status --porcelain --untracked-files=no")
     assert check < deploy.index("git merge -q --ff-only")
     assert 'die "tracked local changes' in deploy
+
+
+def test_a_given_up_bot_drops_a_stale_unhealthy_first_seen_time() -> None:
+    """Health is not checked while given up; a first-seen time kept from before would make the
+    first "starting" after recovery a wake request at once."""
+    text = GUARD.read_text()
+    block = text[text.index('if [ -e "$gave_up" ]; then') :]
+    block = block[: block.index("\nfi\n")]
+    assert "no_problem unhealthy" in block and "exit 0" in block

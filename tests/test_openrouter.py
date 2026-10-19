@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
+import aiohttp
 import pytest
 
 from discord_codex_bot import openrouter
@@ -292,8 +294,8 @@ def test_orcarouter_free_filter_is_the_dash_free_suffix_plus_its_free_router() -
     assert parse_catalog(ORCA_CATALOG) == []
 
 
-def test_router_descriptors_and_thread_prefixes() -> None:
-    assert isinstance(ORCA, Router) and ORCA.api == "https://api.orcarouter.ai/v1"
+def test_router_descriptors_and_thread_prefixes(config: Config) -> None:
+    assert isinstance(ORCA, Router) and ORCA.api(config) == "https://api.orcarouter.ai/v1"
     assert ORCA.thread_prefix == "oc-" and ROUTERS["openrouter"].thread_prefix == "or-"
     assert is_router_thread("oc-abc") and is_router_thread("or-abc")
     assert not is_router_thread("thread-1") and not is_router_thread("")
@@ -385,3 +387,201 @@ async def test_run_router_streams_content_deltas_and_ignores_reasoning(
     monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
     with pytest.raises(RuntimeError, match="上游錯誤：quota"):
         await run_router(ORCA, "q", cfg, "tencent/hy3-free", on_delta=on_delta)
+
+
+# ---------- Local server: a third router on the same core ----------
+from discord_codex_bot.backends import LOCAL  # noqa: E402
+from discord_codex_bot.openrouter import strip_think  # noqa: E402
+
+LOCAL_ROUTER = ROUTERS[LOCAL]
+# What llama-server lists (no price, no architecture); mlx_lm.server lists the same shape.
+LOCAL_CATALOG = {
+    "object": "list",
+    "data": [
+        {"id": "qwen3-8b-q4", "object": "model", "owned_by": "llamacpp", "meta": {"n_ctx": 8192}},
+        {"id": "mlx-community/Qwen3-4B-4bit", "object": "model", "created": 1760000000},
+    ],
+}
+
+
+@pytest.fixture
+def local_cfg(cfg: Config) -> Config:
+    return replace(cfg, local_llm_url="http://host.orb.internal:8080/v1/")
+
+
+async def test_local_catalog_takes_every_entry_from_the_configured_url(
+    monkeypatch, local_cfg: Config
+) -> None:
+    session = Session([Response(LOCAL_CATALOG)])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    models = await Catalog(local_cfg, LOCAL_ROUTER).free_models()
+    assert [m.id for m in models] == ["mlx-community/Qwen3-4B-4bit", "qwen3-8b-q4"]
+    assert all(not m.image and not m.reasoning for m in models)  # plain text models
+    # the configured URL, trailing slash dropped
+    assert session.calls[0][1] == "http://host.orb.internal:8080/v1/models"
+    assert LOCAL_ROUTER.thread_prefix == "lo-" and is_router_thread("lo-abc")
+    assert not LOCAL_ROUTER.enabled(replace(local_cfg, local_llm_url=""))
+    assert LOCAL_ROUTER.enabled(local_cfg)
+
+
+async def test_authorization_header_only_with_a_key(local_cfg: Config) -> None:
+    async with openrouter._session(local_cfg, 5, LOCAL_ROUTER) as session:
+        assert "Authorization" not in session.headers
+    keyed = replace(local_cfg, local_llm_api_key="sk-local")
+    async with openrouter._session(keyed, 5, LOCAL_ROUTER) as session:
+        assert session.headers["Authorization"] == "Bearer sk-local"
+    # the routers keep sending their key
+    async with openrouter._session(local_cfg, 5, ORCA) as session:
+        assert session.headers["Authorization"] == "Bearer test-orca"
+
+
+async def test_run_router_on_local_uses_the_url_prefix_and_its_own_hint(
+    monkeypatch, local_cfg: Config
+) -> None:
+    session = Session([Response({"choices": [{"message": {"content": "哈囉"}}]})])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    result = await run_router(LOCAL_ROUTER, "q", local_cfg, "qwen3-8b-q4")
+    assert result.text == "哈囉" and result.thread_id.startswith("lo-")
+    assert session.calls[0][1] == "http://host.orb.internal:8080/v1/chat/completions"
+    session = Session([Response({"error": {"message": "model not loaded"}}, 500)])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    hint = "（地端模型可能沒有在跑，換一個試試）"
+    with pytest.raises(RuntimeError, match=f"^地端模型 HTTP 500：model not loaded{hint}$"):
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "qwen3-8b-q4")
+
+
+class _Refused(aiohttp.ClientConnectorError):
+    os_error = ConnectionRefusedError()
+
+    def __init__(self) -> None:  # no real connection key: nothing was connected
+        pass
+
+
+class _NoSuchHost(_Refused):
+    os_error = OSError("nodename nor servname provided")
+
+    def __str__(self) -> str:
+        return "refused"
+
+
+async def test_local_retries_a_refused_connection_but_the_routers_do_not(
+    monkeypatch, local_cfg: Config
+) -> None:
+    monkeypatch.setattr(openrouter, "CONNECT_RETRY_SECONDS", 0)
+    calls = []
+
+    async def post(router, config, body, on_delta, *, refusals):
+        calls.append(router.key)
+        if len(calls) <= refusals:
+            raise _Refused()
+        return 200, {"choices": [{"message": {"content": "好"}}]}
+
+    monkeypatch.setattr(openrouter, "_post", partial(post, refusals=3))
+    result = await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
+    assert result.text == "好" and calls == ["local"] * 4  # three refusals, then the answer
+
+    calls.clear()
+    monkeypatch.setattr(openrouter, "_post", partial(post, refusals=4))
+    with pytest.raises(RuntimeError, match="^地端模型 連線失敗：_Refused"):
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
+    assert calls == ["local"] * 4
+
+    # only a refusal: a name or certificate failure will not change in a second
+    calls.clear()
+
+    async def unresolved(router, config, body, on_delta):
+        calls.append(router.key)
+        raise _NoSuchHost()
+
+    monkeypatch.setattr(openrouter, "_post", unresolved)
+    with pytest.raises(RuntimeError, match="^地端模型 連線失敗"):
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
+    assert calls == ["local"]
+
+    calls.clear()
+    monkeypatch.setattr(openrouter, "_post", partial(post, refusals=1))
+    with pytest.raises(RuntimeError, match="^OrcaRouter 連線失敗"):
+        await run_router(ORCA, "q", local_cfg, "m")
+    assert calls == ["orcarouter"]
+
+
+async def test_an_unconfigured_local_router_says_so(monkeypatch, cfg: Config) -> None:
+    async def post(*args):
+        raise AssertionError("nothing is sent without LOCAL_LLM_URL")
+
+    monkeypatch.setattr(openrouter, "_post", post)
+    with pytest.raises(RuntimeError, match="^地端模型 未設定$"):
+        await run_router(LOCAL_ROUTER, "q", replace(cfg, local_llm_url=""), "m")
+
+
+def test_strip_think_drops_only_a_leading_block() -> None:
+    assert strip_think("<think>\n想一下\n</think>\n\n答案") == "答案"
+    assert strip_think("  <think>x</think>答案") == "答案"
+    assert strip_think("<think>還在想") == ""  # unclosed: no answer yet
+    assert strip_think("答案 <think>x</think>") == "答案 <think>x</think>"  # not leading
+    assert strip_think("<thi") == "<thi"  # a final answer is what it is
+    assert strip_think("<thi", streaming=True) == ""  # a stream may still grow into <think>
+    assert strip_think("<b>粗體</b>", streaming=True) == "<b>粗體</b>"
+
+
+async def test_think_block_is_stripped_from_the_answer_and_the_transcript(
+    monkeypatch, local_cfg: Config
+) -> None:
+    cfg = local_cfg
+    content = "<think>\n使用者打招呼。\n</think>\n\n哈囉"
+    session = Session([Response({"choices": [{"message": {"content": content}}]})])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    result = await run_router(LOCAL_ROUTER, "q", cfg, "m")
+    assert result.text == "哈囉"
+    assert load_transcript(cfg, result.thread_id)[1]["content"] == "哈囉"
+    # a hosted router answers as it was written: "<think>" may be the topic
+    literal = {"choices": [{"message": {"content": "<think> 是推理標籤"}}]}
+    monkeypatch.setattr(
+        openrouter, "_session", lambda config, timeout, router=None: Session([Response(literal)])
+    )
+    assert (await run_router(ORCA, "q", cfg, "tencent/hy3-free")).text == "<think> 是推理標籤"
+    # reasoning only: the usual empty-answer error
+    only = {"choices": [{"message": {"content": "<think>想不完"}}]}
+    monkeypatch.setattr(
+        openrouter, "_session", lambda config, timeout, router=None: Session([Response(only)])
+    )
+    with pytest.raises(RuntimeError, match="沒有回傳文字"):
+        await run_router(LOCAL_ROUTER, "q", cfg, "m")
+
+
+async def test_streamed_display_hides_a_leading_think_block(monkeypatch, local_cfg: Config) -> None:
+    pieces = ["<thi", "nk>想", "一下</thi", "nk>\n\n", "答", "案"]
+    lines = [
+        ("data: " + json.dumps({"choices": [{"delta": {"content": p}}]}) + "\n").encode()
+        for p in pieces
+    ] + [b"data: [DONE]\n"]
+
+    class Body:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            for line in lines:
+                yield line
+
+    class Streaming(Response):
+        content = Body()
+
+    session = Session([Streaming({})])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    seen = []
+
+    async def on_delta(text):
+        seen.append(text)
+
+    result = await run_router(LOCAL_ROUTER, "q", local_cfg, "qwen3-8b-q4", on_delta=on_delta)
+    assert seen == ["答", "答案"] and result.text == "答案"
+    assert load_transcript(local_cfg, result.thread_id)[1]["content"] == "答案"
+
+
+def test_backends_accept_local_ids() -> None:
+    choice = parse_choice("local:mlx-community/Qwen3-4B-4bit|low", "gpt-5.6-luna")
+    assert choice.backend == LOCAL and choice.family == "mlx-community/Qwen3-4B-4bit"
+    assert choice.label == "地端模型 · mlx-community/Qwen3-4B-4bit"
+    target = resolve(choice, "low")
+    assert (target.backend, target.model) == (LOCAL, "mlx-community/Qwen3-4B-4bit")

@@ -12,10 +12,11 @@ AGY = "agy"
 GROK = "grok"
 OPENROUTER = "openrouter"
 ORCAROUTER = "orcarouter"
+LOCAL = "local"  # a local OpenAI-compatible server (llama-server, mlx_lm.server)
 # OpenAI-compatible routers: any model id is a valid choice value; the live catalog decides
 # what the autocomplete offers. Members store "<backend>:<model id>".
-ROUTER_BACKENDS = (OPENROUTER, ORCAROUTER)
-ROUTER_LABELS = {OPENROUTER: "OpenRouter", ORCAROUTER: "OrcaRouter"}
+ROUTER_BACKENDS = (OPENROUTER, ORCAROUTER, LOCAL)
+ROUTER_LABELS = {OPENROUTER: "OpenRouter", ORCAROUTER: "OrcaRouter", LOCAL: "地端模型"}
 # What a member reads for each backend (/status, the fallback line).
 BACKEND_LABELS = {CODEX: "Codex", GROK: "Grok", AGY: "Antigravity", **ROUTER_LABELS}
 

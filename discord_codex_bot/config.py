@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import datafiles
 
@@ -187,6 +188,8 @@ class Config:
     agy_settings_path: Path
     openrouter_api_key: str
     orcarouter_api_key: str
+    local_llm_url: str
+    local_llm_api_key: str
     alert_user_id: int
     alert_after_failures: int
     alert_cooldown_minutes: int
@@ -279,6 +282,24 @@ class Config:
     linkclean_admin_ids: frozenset[int]
 
 
+def _plain_http_url(value: str) -> bool:
+    """A base URL the routers can append /models to: http(s), a host, nothing else."""
+    try:
+        url = urlsplit(value)
+        url.port  # noqa: B018 — raises ValueError on a bad port
+    except ValueError:
+        return False
+    return (
+        url.scheme in ("http", "https")
+        and bool(url.hostname)
+        and url.username is None
+        and url.password is None
+        and not url.query
+        and not url.fragment
+        and not any(c.isspace() for c in value)
+    )
+
+
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     values = os.environ if env is None else env
     application_id = _required(values, "DISCORD_APPLICATION_ID")
@@ -353,6 +374,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # OrcaRouter: same shape (OpenAI-compatible, free = -free ids); shares the transcript
         # dir, catalog TTL and history budget above.
         orcarouter_api_key=values.get("ORCAROUTER_API_KEY", "").strip(),
+        # A local OpenAI-compatible server (llama-server, mlx_lm.server) as a third router: its
+        # base URL ending in /v1; empty = not offered. The key is optional (sent only when set).
+        local_llm_url=values.get("LOCAL_LLM_URL", "").strip(),
+        local_llm_api_key=values.get("LOCAL_LLM_API_KEY", "").strip(),
         # Operator alerts by DM: repeated failures / lost login. Empty id = the application owner.
         alert_user_id=int(values.get("ALERT_USER_ID", "").strip() or 0),
         alert_after_failures=_positive_int(values, "ALERT_AFTER_FAILURES", 3),
@@ -547,4 +572,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         raise ValueError("JEV_ENABLED needs TYPESAFE_API_KEY")
     if config.jev_enabled and not config.jev_url.startswith("https://"):
         raise ValueError("JEV_URL must be an https:// URL")  # the key travels with every call
+    if config.local_llm_url and not _plain_http_url(config.local_llm_url):
+        raise ValueError(
+            "LOCAL_LLM_URL must be an http:// or https:// URL with a host and no credentials, "
+            "query or fragment"
+        )
     return config

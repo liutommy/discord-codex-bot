@@ -69,15 +69,17 @@ A kind seen on every run for `DCB_WAKE_AFTER` seconds (600) is written to
 atomically on each run and removed once no problem has lasted that long. Nothing is requested
 while `.hold` exists. The request changes none of the guard's own actions.
 
-`dcb-wake.sh` on the Mac reads it with `orb -m <machine> -u root cat <statedir>/wake-request` and,
-at most once per 30 minutes and 6 times a day, runs
+`dcb-wake.sh` on the Mac reads it through `orb -m <machine> -u root`, at most 4097 bytes with
+`head -c`, and refuses a request not rewritten for 10 minutes (dcb-guard rewrites it on every run).
+At most once per 30 minutes and 6 times a day, it runs
 `claude -p --permission-mode auto --strict-mcp-config --disallowedTools "Edit Write NotebookEdit mcp__*"`
 in its work directory (no MCP servers load, and `mcp__*` is denied). The prompt carries the scope
 and, per problem kind, only the kind and how many minutes it has lasted: kinds come from a fixed
 whitelist (anything else is printed as `unknown`) and the request's free-text evidence, like every
 log line, stays out of the prompt; the report file keeps the raw request for the owner. Claude may
-read status and logs, run `dcb-up --manual`, `dcb-firewall` and `dcb-probe`, restart a compose
-service and remove the give-up marker; it may not edit code, scripts, configuration or units,
+read status and logs, run `dcb-up --manual`, `dcb-firewall` and `dcb-probe`, and restart a compose
+service; a given-up bot is restarted with `dcb-up --manual`, and dcb-guard removes the give-up
+marker once the bot is healthy. It may not edit code, scripts, configuration or units,
 rebuild, use git, read `.env` or any credential, delete data, touch `.hold`, stop the bot for good,
 post announcements, write to cloud storage or send mail. Fixes outside that scope come back as
 recommendations. Logs carry Discord member text, so the prompt tells Claude that every log it reads

@@ -57,6 +57,7 @@ from .backends import (
     BACKEND_LABELS,
     CODEX,
     GROK,
+    LOCAL,
     OPENROUTER,
     ORCAROUTER,
     ROUTER_BACKENDS,
@@ -247,8 +248,10 @@ PROVIDER_CHOICES = [
     app_commands.Choice(name="Antigravity（Gemini／Claude）", value=AGY),
     app_commands.Choice(name="OpenRouter（免費模型）", value=OPENROUTER),
     app_commands.Choice(name="OrcaRouter（免費模型）", value=ORCAROUTER),
+    app_commands.Choice(name="地端模型（本機）", value=LOCAL),
 ]
 FREE_MODEL_NOTE = "免費模型可能隨時不穩或下架，失敗時請換一個。"
+
 # What /model with only provider Antigravity picks; checked against AGY_FAMILIES at use, so a
 # renamed family asks the member to pick instead of quietly saving the server default.
 AGY_DEFAULT_FAMILY = "gemini-3.8-flash"
@@ -752,7 +755,12 @@ class DiscordCodexClient(discord.Client):
         self.apis = apis.load_registry(config.apis_path, config.data_dir)
         self.openrouter = Catalog(config)
         self.orcarouter = Catalog(config, ROUTERS[ORCAROUTER])
-        self.catalogs = {OPENROUTER: self.openrouter, ORCAROUTER: self.orcarouter}
+        self.local = Catalog(config, ROUTERS[LOCAL])
+        self.catalogs = {
+            OPENROUTER: self.openrouter,
+            ORCAROUTER: self.orcarouter,
+            LOCAL: self.local,
+        }
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
         self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
         self.agy_quota = quota.AgyQuota(float(config.agy_reserve_percent))
@@ -796,7 +804,9 @@ class DiscordCodexClient(discord.Client):
         self.tree.add_command(
             app_commands.Command(
                 name=f"{prefix}-model",
-                description="查看／選擇／清除你要用的模型（Codex、Antigravity、OpenRouter、OrcaRouter）",
+                description=(
+                    "查看／選擇／清除你要用的模型（Codex、Antigravity、OpenRouter、OrcaRouter、地端模型）"
+                ),
                 callback=self.model_command,
             )
         )
@@ -2123,7 +2133,10 @@ class DiscordCodexClient(discord.Client):
         if chosen.backend in ROUTER_BACKENDS:
             info = self.catalogs[chosen.backend].get(chosen.family)
             sees = "看得到" if info is None or info.image else "看不到"
-            text += f"（免費，{sees}圖片）\n{FREE_MODEL_NOTE}"
+            if ROUTERS[chosen.backend].free_tier:
+                text += f"（免費，{sees}圖片）\n{FREE_MODEL_NOTE}"
+            else:
+                text += f"（{sees}圖片）"
         return text
 
     def _own_model(self, guild_id: int | None, user_id: int) -> str:
@@ -3618,9 +3631,10 @@ class DiscordCodexClient(discord.Client):
             codex += " · 額度讀不到"
         routers = []
         for backend, catalog in self.catalogs.items():
-            if ROUTERS[backend].api_key(self.config):
+            router = ROUTERS[backend]
+            if router.enabled(self.config):
                 count = len(await catalog.free_models())
-                routers.append(f"{ROUTERS[backend].label} {count} 個免費模型")
+                routers.append(f"{router.label} {count} 個{router.models_word}")
         system = [f"Codex：{codex}"]
         if grok.enabled(self.config):
             reading = await grok.usage(self.config)
@@ -3646,7 +3660,7 @@ class DiscordCodexClient(discord.Client):
             )
         system += [
             "Antigravity：可選（Gemini／Claude）",
-            " · ".join(routers) if routers else "OpenRouter／OrcaRouter：未設定",
+            " · ".join(routers) if routers else "OpenRouter／OrcaRouter／地端模型：未設定",
             f"影片理解：{'開' if gemini.available(self.config) else '關'} · 讀連結：開"
             f" · 搜尋：{'／'.join(n for n, _ in search.providers(self.config)) or '關'}"
             f" · 沙盒：{'開' if sandbox.available(self.config) else '關'}"
@@ -3802,10 +3816,10 @@ class DiscordCodexClient(discord.Client):
 
     async def model_options(self, provider: str, current: str) -> list[app_commands.Choice[str]]:
         """Autocomplete for the model option: the provider's models, filtered by what the member
-        typed. OpenRouter's list is the live free-model catalog (image-capable first)."""
+        typed. A router's list is its live catalog (image-capable first)."""
         if provider in ROUTER_BACKENDS:
-            if not ROUTERS[provider].api_key(self.config):
-                return []  # no key: the provider is not offered
+            if not ROUTERS[provider].enabled(self.config):
+                return []  # no key (no URL for the local server): the provider is not offered
             options = [
                 router_choice(provider, m.id, f"{m.name}{'（看圖）' if m.image else ''}")
                 for m in await self.catalogs[provider].free_models()
@@ -3895,7 +3909,7 @@ class DiscordCodexClient(discord.Client):
             chosen = await self._provider_default(source)
             if chosen is None:
                 return "", (
-                    "這個來源的免費模型會變動" if source in ROUTER_BACKENDS
+                    f"這個來源的{ROUTERS[source].models_word}會變動" if source in ROUTER_BACKENDS
                     else "Grok 的模型清單暫時讀不到" if source == GROK
                     else "這個來源沒有預設模型"
                 )  # fmt: skip
