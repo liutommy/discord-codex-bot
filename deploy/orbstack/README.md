@@ -114,7 +114,7 @@ refuses `ssh -R`, so the Mac opens the path:
 
 ```
 bot --(llm network)--> 172.31.254.1:<port> in the machine   socat listener, started by:
-Mac: dcb-llm-relay.py --orb -m dcb socat ... STDIO (pipe)--> 127.0.0.1:<upstream port> (LLM server)
+Mac: dcb-llm-relay.py runs `orb -m dcb -u <user> socat ... STDIO` and pipes it to 127.0.0.1:<upstream port> (LLM server)
 ```
 
 - compose.yaml's `llm` network (bridge `br-dcb-llm`, `172.31.254.0/24`, gateway `172.31.254.1`)
