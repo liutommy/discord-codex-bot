@@ -111,6 +111,17 @@ def test_no_request_no_wake(tmp_path) -> None:
     assert wake.calls.read_text().splitlines() == [READ]
 
 
+def test_the_state_and_reports_are_owner_only(tmp_path) -> None:
+    wake = Wake(tmp_path)
+    wake.state.chmod(0o755)  # as an earlier version left it
+    wake.request.write_text("firewall 12min dcb-firewall: FAILED: x\n")
+    assert wake.run().returncode == 0, wake.log()
+    assert wake.state.stat().st_mode & 0o777 == 0o700
+    (report,) = (wake.state / "reports").glob("wake-*.txt")
+    assert report.stat().st_mode & 0o077 == 0
+    assert (wake.state / "dcb-wake.log").stat().st_mode & 0o077 == 0
+
+
 def test_a_request_wakes_claude_and_mails_the_report(tmp_path) -> None:
     wake = Wake(tmp_path)
     wake.request.write_text(

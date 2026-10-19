@@ -82,8 +82,12 @@ if [ -n "$bot_cid" ]; then
         if [ "$fin" -gt 0 ] && [ "$by_us" = 0 ] && ! awk -v f="$fin" '$1 == f {found=1} END {exit !found}' "$exits"; then
             reason=$(docker logs --tail 1 "$bot_cid" 2>&1 | tr -d '\r' | cut -c1-200)
             # Rebuilt and renamed, never appended in place: a cut-short write cannot merge two records.
-            { cat "$exits"; echo "$fin $b_code $reason"; } > "$exits.tmp" && mv -f "$exits.tmp" "$exits" \
-                || log "ERROR cannot record the bot exit in $exits"
+            if ! { { cat "$exits"; echo "$fin $b_code $reason"; } > "$exits.tmp" && mv -f "$exits.tmp" "$exits"; }; then
+                # An exit that is not counted could keep a crash loop below the give-up threshold.
+                log "ERROR cannot record the bot exit in $exits; not starting the bot this run"
+                problem gave-up "crash ledger could not be written"; wake_update
+                exit 1
+            fi
         fi
     fi
     # Deliberate: one healthy observation clears the exit history. Giving up targets crash loops that

@@ -113,6 +113,13 @@ def test_a_give_up_that_cannot_be_written_never_restarts_the_bot() -> None:
     assert "exit 1" in block and "dcb-up" not in block
 
 
+def test_an_exit_that_cannot_be_recorded_never_restarts_the_bot() -> None:
+    text = GUARD.read_text()
+    block = text[text.index('if ! { { cat "$exits"') :]
+    block = block[: block.index("\n            fi\n")]
+    assert "exit 1" in block and "dcb-up" not in block
+
+
 def test_the_firewall_caches_the_wan_address_whole_then_renamed() -> None:
     fw = (GUARD.parent / "dcb-firewall").read_text()
     assert '> "$DCB_STATEDIR/wan-ip.tmp"' in fw and 'mv -f "$DCB_STATEDIR/wan-ip.tmp"' in fw

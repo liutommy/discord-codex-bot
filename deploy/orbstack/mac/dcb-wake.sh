@@ -44,7 +44,10 @@ config=${DCB_WAKE_CONFIG:-$HOME/.config/dcb-wake/config}
 
 STATE="$HOME/.local/state/dcb-wake"
 LOG="$STATE/dcb-wake.log"
+# Reports hold the request and Claude's diagnosis, which can quote member messages: owner only.
+umask 077
 mkdir -p "$STATE/reports"
+chmod go-rwx "$STATE" "$STATE/reports" 2>/dev/null   # tightens only; never adds owner write
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 now=$(date +%s)
 mode=run; [ "${1:-}" = --test-wake ] && mode=test
