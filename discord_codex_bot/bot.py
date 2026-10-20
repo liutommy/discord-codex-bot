@@ -78,6 +78,7 @@ from .backup import backup_forever, export_memory_zip
 from .clock import sleep_for
 from .codex import (
     QUOTE_FENCE,
+    BackendError,
     CodexResult,
     CodexServerOverloaded,
     CodexUnauthorized,
@@ -189,9 +190,17 @@ LOGGER = logging.getLogger(__name__)
 # Closes every recall round; a spare taking over mid-recall gets the round's results without it.
 ANSWER_NOW = "\n\nNow answer the member's question."
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
-FAILURE_MESSAGE = (
-    "Codex 執行失敗。請用 /{prefix}-status 檢查登入狀態，並通知 Bot 管理者查看 container log。"
-)
+
+
+def failure_text(backend: str, error: BaseException, prefix: str) -> str:
+    """What the member reads when a turn fails, naming the backend that failed: its own words
+    when it wrote them for members (BackendError), otherwise who can look into it. Only Codex
+    has a login /status can check."""
+    if isinstance(error, BackendError):
+        return str(error)
+    check = f"用 /{prefix}-status 檢查登入狀態，並" if backend == CODEX else ""
+    label = BACKEND_LABELS.get(backend, backend)
+    return f"{label} 執行失敗。請{check}通知 Bot 管理者查看 container log。"
 
 
 SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in SCOPES.items()]
@@ -1929,9 +1938,10 @@ class DiscordCodexClient(discord.Client):
         except QueueFullError:
             return CodexResult(QUEUE_FULL_MESSAGE)
         except Exception as error:
-            LOGGER.exception("Codex request failed guild=%s", guild_id)
+            LOGGER.exception("Request failed backend=%s guild=%s", target.backend, guild_id)
             await self.alerts.record_failure(target.backend, str(error))
-            return CodexResult(FAILURE_MESSAGE.format(prefix=self.config.command_prefix))
+            prefix = self.config.command_prefix
+            return CodexResult(failure_text(target.backend, error, prefix))
         finally:
             for path in images:
                 remove_request_dir(path)

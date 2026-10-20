@@ -1,6 +1,6 @@
 import pytest
 
-from discord_codex_bot.config import load_config, parse_id_set
+from discord_codex_bot.config import load_config, local_params, parse_id_set
 
 
 def test_parses_ids_without_duplicates() -> None:
@@ -217,3 +217,22 @@ def test_local_llm_url_is_optional_and_must_be_http() -> None:
     ):
         with pytest.raises(ValueError, match="LOCAL_LLM_URL"):
             load_config({**base, "LOCAL_LLM_URL": bad})
+
+
+def test_local_llm_params_must_be_a_json_object_without_request_keys() -> None:
+    base = {
+        "DISCORD_TOKEN": "t",
+        "DISCORD_APPLICATION_ID": "123456789012345678",
+        "ALLOWED_GUILD_IDS": "111111111111111111",
+    }
+    config = load_config(base)
+    assert config.local_llm_max_tokens == 8192 and local_params(config) == {}
+    config = load_config({**base, "LOCAL_LLM_PARAMS": '{"temperature": 1.0, "top_k": 20}'})
+    assert local_params(config) == {"temperature": 1.0, "top_k": 20}
+    for bad, why in (
+        ("{temperature: 1}", "not valid JSON"),
+        ("[1]", "must be a JSON object"),
+        ('{"model": "x", "max_tokens": 9}', "may not set max_tokens, model"),
+    ):
+        with pytest.raises(ValueError, match=why):
+            load_config({**base, "LOCAL_LLM_PARAMS": bad})

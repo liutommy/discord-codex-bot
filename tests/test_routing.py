@@ -731,7 +731,7 @@ async def test_a_broken_agy_on_a_routed_turn_is_reported_not_hidden(
     backends["agy"].error = RuntimeError("agy exited with code 2: settings.json is invalid")
     verdicts(monkeypatch, ok("chat", 1))
     plan, result = await ask(client)
-    assert result.text == bot_module.FAILURE_MESSAGE.format(prefix=client.config.command_prefix)
+    assert result.text == "Antigravity 執行失敗。請通知 Bot 管理者查看 container log。"
     assert backends["grok"].calls == [] and backends["codex"].calls == []
 
 
@@ -741,7 +741,7 @@ async def test_a_plain_agy_failure_still_ends_a_members_own_agy_turn(
     backends["agy"].error = RuntimeError("agy request timed out")
     client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
     result = await client._answer("q", [], GUILD, USER)
-    assert result.text == bot_module.FAILURE_MESSAGE.format(prefix=client.config.command_prefix)
+    assert result.text == "Antigravity 執行失敗。請通知 Bot 管理者查看 container log。"
     assert backends["grok"].calls == [] and backends["codex"].calls == []
 
 

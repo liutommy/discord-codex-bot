@@ -363,7 +363,7 @@ async def test_a_bad_request_is_reported_not_hidden_by_a_fallback(grok_client) -
     bot, _calls, replies, codex, _agy = grok_client
     replies["grok"] = grok.GrokBadRequest("unknown model")
     result = await bot._answer("q", [], GUILD, USER)
-    assert result.text == bot_module.FAILURE_MESSAGE.format(prefix=bot.config.command_prefix)
+    assert result.text == "Grok 執行失敗。請通知 Bot 管理者查看 container log。"
     assert codex.calls == []
 
 

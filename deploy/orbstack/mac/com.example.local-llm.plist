@@ -23,6 +23,8 @@
         <string>2</string>
         <string>--prompt-concurrency</string>
         <string>2</string>
+        <string>--max-tokens</string>
+        <string>8192</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>

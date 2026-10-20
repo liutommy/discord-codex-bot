@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import re
 from collections.abc import Mapping
@@ -190,6 +191,8 @@ class Config:
     orcarouter_api_key: str
     local_llm_url: str
     local_llm_api_key: str
+    local_llm_max_tokens: int
+    local_llm_params: str  # a JSON object, validated at load (`local_params`)
     alert_user_id: int
     alert_after_failures: int
     alert_cooldown_minutes: int
@@ -378,6 +381,12 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # base URL ending in /v1; empty = not offered. The key is optional (sent only when set).
         local_llm_url=values.get("LOCAL_LLM_URL", "").strip(),
         local_llm_api_key=values.get("LOCAL_LLM_API_KEY", "").strip(),
+        # Output cap sent with every local request: a reasoning model's thinking counts toward
+        # it, and mlx_lm.server's own default (512) ends most long-prompt turns mid-thought.
+        local_llm_max_tokens=_positive_int(values, "LOCAL_LLM_MAX_TOKENS", 8192),
+        # Sampling for the local model, merged into every request: a model's recommended values
+        # live in its card, and mlx_lm.server ignores the model's generation_config.json.
+        local_llm_params=values.get("LOCAL_LLM_PARAMS", "").strip(),
         # Operator alerts by DM: repeated failures / lost login. Empty id = the application owner.
         alert_user_id=int(values.get("ALERT_USER_ID", "").strip() or 0),
         alert_after_failures=_positive_int(values, "ALERT_AFTER_FAILURES", 3),
@@ -577,4 +586,22 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             "LOCAL_LLM_URL must be an http:// or https:// URL with a host and no credentials, "
             "query or fragment"
         )
+    local_params(config)  # a malformed value stops the start, not each local request
     return config
+
+
+def local_params(config: Config) -> dict:
+    """LOCAL_LLM_PARAMS as a dict (empty when unset). Keys the Bot sets itself (model, messages,
+    stream, max_tokens) are refused: the value tunes sampling, not the request."""
+    if not config.local_llm_params:
+        return {}
+    try:
+        params = json.loads(config.local_llm_params)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"LOCAL_LLM_PARAMS is not valid JSON: {error}") from None
+    if not isinstance(params, dict):
+        raise ValueError("LOCAL_LLM_PARAMS must be a JSON object")
+    reserved = sorted(set(params) & {"model", "messages", "stream", "max_tokens"})
+    if reserved:
+        raise ValueError(f"LOCAL_LLM_PARAMS may not set {', '.join(reserved)}")
+    return params

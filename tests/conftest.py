@@ -50,6 +50,8 @@ def config() -> Config:
         orcarouter_api_key="test-orca",
         local_llm_url="",
         local_llm_api_key="",
+        local_llm_max_tokens=8192,
+        local_llm_params="",
         alert_user_id=0,
         alert_after_failures=3,
         alert_cooldown_minutes=30,

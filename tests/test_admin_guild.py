@@ -12,7 +12,7 @@ from discord_codex_bot import admin, admin_guild, instructions, summary
 from discord_codex_bot import bot as bot_module
 from discord_codex_bot.admin_server import AdminServer
 from discord_codex_bot.backends import Resolved
-from discord_codex_bot.bot import FAILURE_MESSAGE, DiscordCodexClient, Fallback
+from discord_codex_bot.bot import DiscordCodexClient, Fallback
 from discord_codex_bot.codex import CodexResult, CodexUsageLimit
 from discord_codex_bot.routing import load_table
 from discord_codex_bot.summary import DEFAULT_MESSAGES
@@ -24,6 +24,10 @@ CHANNEL = 222222222222222222  # the conftest allowlisted channel
 HIDDEN = 777  # in the guild but not allowlisted
 MEMBER, STRANGER = 444444444444444444, 555555555555555555
 MODEL = "codex:gpt-5.6-luna"  # what a member with no /model choice runs on here
+
+CODEX_FAILED = (
+    "Codex 執行失敗。請用 /codex-status 檢查登入狀態，並通知 Bot 管理者查看 container log。"
+)
 
 
 def _http(kind, status: int):
@@ -330,7 +334,7 @@ async def test_summary_refusals_and_failures(client, run, codex) -> None:
     assert failed(await run("summary", **where)) == "讀不到這個頻道的訊息紀錄。"
     client.fake_channel.broken = False
     codex.replies = [RuntimeError("codex down")]
-    assert failed(await run("summary", **where)) == FAILURE_MESSAGE.format(prefix="codex")
+    assert failed(await run("summary", **where)) == CODEX_FAILED
 
 
 async def test_summary_is_refused_in_a_channel_the_member_cannot_see(client, run, codex) -> None:
@@ -388,7 +392,7 @@ async def test_ask_refusals_and_failures(client, run, codex) -> None:
     assert codex.calls == []
 
     codex.replies = [RuntimeError("codex down")]
-    assert failed(await run("ask", **where, prompt="q")) == FAILURE_MESSAGE.format(prefix="codex")
+    assert failed(await run("ask", **where, prompt="q")) == CODEX_FAILED
 
 
 async def test_ask_is_refused_in_a_channel_the_member_cannot_see(client, run, codex) -> None:
