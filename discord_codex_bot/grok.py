@@ -26,6 +26,7 @@ from pathlib import Path
 
 import aiohttp
 
+from . import imagegen
 from .backends import BackendUnavailable
 from .codex import CodexResult, _prompt, output_style
 from .config import Config
@@ -249,6 +250,7 @@ async def run_grok(
             parts["files"],
             speaker,
             history=parts["history"],
+            image_gen=imagegen.prompt_note(config),
         )
 
     earlier = load_transcript(config, resume) if resume else []

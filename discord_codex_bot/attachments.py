@@ -192,7 +192,12 @@ def sweep_stale(
 async def sweep_forever(config: Config) -> None:
     interval = config.attachment_sweep_minutes * 60
     # Anything older than one request timeout plus one sweep interval cannot belong to a live job.
-    max_age = max(config.codex_timeout_seconds, config.local_llm_timeout_seconds) + interval
+    longest = max(
+        config.codex_timeout_seconds,
+        config.local_llm_timeout_seconds,
+        config.image_gen_timeout_seconds,
+    )
+    max_age = longest + interval
     while True:
         removed = sweep_stale(config.attachment_dir, max_age, prefix=REQUEST_DIR_PREFIX, keep=LIVE)
         removed += sweep_stale(generated_images_root(config), max_age)

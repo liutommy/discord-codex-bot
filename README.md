@@ -137,7 +137,7 @@ Guild-scoped slash commands normally appear quickly. Run:
 ```
 
 Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>`,
-`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`. This README uses the
+`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`, `-image`. This README uses the
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
 
 ### Social tracking: YouTube, Twitch, X, Ruten stores and web pages
@@ -658,6 +658,30 @@ newest 100 samples are kept per emoji, and a deleted message takes its samples w
 `:name:（description）`, or just `:name:` while there is none and for animated emoji. MEMORY
 lists the server's 50 most used emoji in a `[伺服器表情]` section. No emoji picture is ever sent
 along: that would make the message an image turn, which skips the router.
+
+### Image generation (optional, `IMAGE_GEN_URL`)
+
+Pictures come from a separate image service on the Docker host, reached through the same relay
+path as the local model. Its HTTP contract is in [`docs/image-service.md`](docs/image-service.md).
+The service owns the model catalog, the prompt pipeline and the GPU queue. The Bot owns who may
+generate, how many, and delivery. With `IMAGE_GEN_URL` empty the feature is off: `/<prefix>-image`
+says so, and the model is not offered the tool.
+
+- `/<prefix>-image` takes a prompt and, optionally, a model (autocompleted from the catalog), an
+  aspect, a count, a seed, a negative prompt, hires, upscale, detailer and cloud_enhance. An option
+  left unset is the model's default; one the model does not list is refused before anything is
+  queued. The placeholder shows the queue position and the steps, ❌ cancels the job on the
+  service too, and a job that outlives the 15-minute interaction is posted in the channel.
+- In conversation the model can append `<image_gen prompt="…"/>` (with `model`, `aspect`,
+  `count`, `seed`, `negative`). The tag is checked against the same catalog and limits when the
+  answer arrives. The answer gets a short note, and the picture is posted in the channel when it
+  is ready, after the channel is checked against the allowlist again, without pinging anyone.
+- Each server has a switch and per-member limits (images per Taiwan day, default 20; jobs at
+  once, default 1), stored in `CODEX_HOME/linkclean.sqlite3` with the daily counts, so the
+  nightly backup covers them. The operator changes them with `image get` / `image set`
+  ([`docs/admin-cli.md`](docs/admin-cli.md)). Image jobs never wait in the Codex queue.
+- `IMAGE_GEN_API_KEY` is optional, sent only to the service as a Bearer token.
+  `IMAGE_GEN_TIMEOUT_SECONDS` (default 1200) bounds one job, queue wait included.
 
 ### X lookup and X accounts (optional, Grok subscription)
 

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import aiohttp
 
+from . import imagegen
 from .codex import BackendError, CodexResult, _prompt, output_style
 from .config import Config, local_params
 
@@ -376,6 +377,7 @@ async def run_router(
             files,
             speaker,
             history=history,
+            image_gen=imagegen.prompt_note(config),
         )
     )
     history = load_transcript(config, resume) if resume else []

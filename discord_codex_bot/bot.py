@@ -28,6 +28,7 @@ from . import (
     gemini,
     grok,
     health,
+    imagegen,
     instructions,
     quota,
     routing,
@@ -95,6 +96,17 @@ from .emoji import CUSTOM as CUSTOM_EMOJI
 from .emoji import EmojiStore, backfill_channel, describe_pending
 from .harvest import _quota_ok, harvest_forever, transcript_turns
 from .help import render_guide, render_sheet
+from .imagegen import (
+    IMAGE_TAG,
+    MAX_IMAGE_TAGS,
+    ImageGenError,
+    ImageRequest,
+    ImageService,
+    ImageSettings,
+    Reservation,
+    extract_image_tags,
+    request_from_tag,
+)
 from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, is_link_only, plan, spoilered
 from .links import (
     FETCH_TAG,
@@ -265,6 +277,10 @@ PERSONA_CHOICES = [
     app_commands.Choice(name=label, value=value)
     for value, label in (("keep", "保留人設"), ("off", "關閉人設"))
 ]
+IMAGE_ASPECT_CHOICES = [app_commands.Choice(name=a, value=a) for a in imagegen.ASPECTS]
+IMAGE_UPSCALE_CHOICES = [app_commands.Choice(name=u, value=u) for u in imagegen.UPSCALES]
+IMAGE_OFF = "圖片生成尚未啟用；管理者需設定 IMAGE_GEN_URL。"
+IMAGE_STARTED = "🎨 圖片生成中，完成後會貼在這個頻道。"
 EMBEDFIX_CHOICES = [
     app_commands.Choice(name=label, value=value)
     for value, label in (("status", "查詢"), ("on", "開啟"), ("off", "關閉"))
@@ -495,7 +511,10 @@ INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{
 # not take (an unquoted value, a body instead of text=), so nothing was done for it. A quoted value
 # is skipped whole: who="<@id>" is the documented form and holds both < and >; so is a mention
 # written without quotes (who=<@id>).
-_OWN = r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory)(?![a-z_])"
+_OWN = (
+    r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory|image_gen)"
+    r"(?![a-z_])"
+)
 _MENTION = r"<[@#][!&]?[0-9]{1,25}>"
 OWN_NAME = re.compile(_OWN)
 NO_WATCH = (
@@ -521,6 +540,7 @@ ACTION_TAGS = (
     TRACK_EVERY_TAG,
     TRACK_AT_TAG,
     CANCEL_TRACK_TAG,
+    IMAGE_TAG,
 )
 # One more turn for the operations the Bot could not read, with the reason, so the model can send
 # them again instead of the member being told it was done when it was not.
@@ -589,7 +609,9 @@ def action_tags(text: str) -> list[str]:
 # The attributes the Bot's own tags take. An own name with none of them is HTML or C++ in the
 # answer's prose (<track kind="captions">, #include <memory>), not an order that failed.
 _KEYS = re.compile(
-    r"\b(?:when|text|who|source|interest|every|at|id|minutes|times|scope|name)\s*=", re.I
+    r"\b(?:when|text|who|source|interest|every|at|id|minutes|times|scope|name"
+    r"|prompt|model|aspect|count|seed|negative)\s*=",
+    re.I,
 )
 
 
@@ -646,6 +668,10 @@ def _few(ids: list[int], shown: int = 3) -> str:
     """A reminder's people for a listing: a group of ninety would not fit a message."""
     head = " ".join(f"<@{t}>" for t in ids[:shown])
     return head if len(ids) <= shown else f"{head} 等 {len(ids)} 人"
+
+
+def _image_quota_note(daily: int, used: int, images: int) -> str:
+    return f"今天的圖片額度不夠：每人每天 {daily} 張，你已用 {used} 張，這次要 {images} 張。"
 
 
 def _with_notes(clean: str, notes: list[str], notes_out: list[str] | None) -> str:
@@ -715,6 +741,15 @@ async def _model_autocomplete(
 ) -> list[app_commands.Choice[str]]:
     provider = getattr(interaction.namespace, "provider", None) or "codex"
     return await interaction.client.model_options(provider, current)
+
+
+async def _image_model_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    client = interaction.client
+    if client._access(interaction.guild_id, interaction.channel, interaction.channel_id):
+        return []  # no request to the image service for a place the Bot does not serve
+    return await client.image_model_options(current)
 
 
 async def _memory_autocomplete(
@@ -816,6 +851,12 @@ class DiscordCodexClient(discord.Client):
         }
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
         self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
+        # Image generation (imagegen.py): the service client, each guild's switch and limits in
+        # linkclean's database, and the jobs running now per (guild, member).
+        self.images = ImageService(config)
+        self.image_settings = ImageSettings(self.linkclean)
+        self._image_in_flight: dict[tuple[int, int], int] = {}
+        self._image_tasks: set[asyncio.Task] = set()  # <image_gen/> deliveries, kept referenced
         self.agy_quota = quota.AgyQuota(float(config.agy_reserve_percent))
         quota.shared = self.agy_quota  # for background jobs' agy fallback (backends.run_batch)
         # Persona uploads and resets run one at a time: backup, save and the rebuild interleaved
@@ -945,6 +986,13 @@ class DiscordCodexClient(discord.Client):
                 name=f"{prefix}-linkclean",
                 description="本伺服器的連結洗參數開關（只有伺服器的管理層）",
                 callback=self.linkclean_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-image",
+                description="生成圖片：描述要畫什麼，可選模型、比例、張數",
+                callback=self.image_command,
             )
         )
         self.tree.add_command(
@@ -1492,6 +1540,7 @@ class DiscordCodexClient(discord.Client):
             image_order=self._image_order(),
             emoji=self.emoji is not None,
             emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
+            image=self.images.enabled,
         )
         doc = apis.render_doc(self.apis)
         return f"{sheet}\n{doc}" if doc else sheet
@@ -1505,6 +1554,7 @@ class DiscordCodexClient(discord.Client):
             image_order=self._image_order(),
             emoji=self.emoji is not None,
             emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
+            image=self.images.enabled,
         )
 
     def _image_order(self) -> str:
@@ -2597,7 +2647,11 @@ class DiscordCodexClient(discord.Client):
         """Run one answer as a task the member can cancel (❌ on the placeholder, or -stop).
         `show(text, view)` paints the placeholder; `start(on_video_slow)` returns the answer
         coroutine. Returns the CodexResult, or None when the request was cancelled."""
-        longest = max(self.config.codex_timeout_seconds, self.config.local_llm_timeout_seconds)
+        longest = max(
+            self.config.codex_timeout_seconds,
+            self.config.local_llm_timeout_seconds,
+            self.config.image_gen_timeout_seconds,
+        )
         view = CancelView(owner_id, timeout=longest + 300)  # queueing and setup on top
         await show(THINKING, view)
 
@@ -2880,9 +2934,9 @@ class DiscordCodexClient(discord.Client):
     async def _apply_action_tags(
         self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
     ) -> tuple[str, list[str], list[str]]:
-        """Carry out the memory, reminder and tracking tags in `text`: (the text without them,
-        confirmations appended; each tag that could not be read, with the reason; each one read
-        but refused for a reason the model can fix — a time, an id, a missing value)."""
+        """Carry out the memory, reminder, tracking and image tags in `text`: (the text without
+        them, confirmations appended; each tag that could not be read, with the reason; each one
+        read but refused for a reason the model can fix — a time, an id, a missing value)."""
         text, facts = extract_memory_tags(text)
         for scope, name, fact in facts:
             self.memory.add(scope, guild_id, user_id, name, fact)
@@ -2893,6 +2947,7 @@ class DiscordCodexClient(discord.Client):
         refused: list[str] = []
         text = self._apply_reminder_tags(text, guild_id, channel_id, user_id, notes, refused)
         text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id, notes, refused)
+        text = await self._apply_image_tags(text, guild_id, channel_id, user_id, notes, refused)
         text, invented = strip_invented_tags(text)
         text, broken = strip_broken_tags(text)
         problems = [
@@ -3464,6 +3519,343 @@ class DiscordCodexClient(discord.Client):
             else "（連結洗參數為全關時不會投遞）"
         )
         await interaction.response.send_message(f"預覽修正：{state}{note}", ephemeral=True)
+
+    # ----- image generation ------------------------------------------------------------------
+
+    async def image_model_options(self, current: str) -> list[app_commands.Choice[str]]:
+        """The image service's models for the slash command's autocomplete; none while the
+        service is off or cannot be reached."""
+        if not self.images.enabled:
+            return []
+        try:
+            catalog = await self.images.catalog()
+        except ImageGenError:
+            return []
+        needle = current.strip().lower()
+        choices = []
+        for found in catalog.models:
+            if needle in found.id.lower() or needle in found.name.lower():
+                label = found.id if found.name == found.id else f"{found.name}（{found.id}）"
+                choices.append(app_commands.Choice(name=label[:100], value=found.id))
+        return choices[:25]  # Discord shows at most 25
+
+    def _image_reserve(
+        self, guild_id: int | None, user_id: int, request: ImageRequest
+    ) -> Reservation | str:
+        """Admit one job for the member, or say why not: the service is off, the guild turned it
+        off, the member already runs as many jobs as the guild allows, or its images would pass
+        the member's daily limit. An admitted job holds an in-flight slot and has its images
+        counted until its Reservation is settled (`_run_image`). Shared by the slash command and
+        the <image_gen/> tag, so both obey the same limits. The images are counted from the
+        cached catalog, which a slash command may not have yet; `_image_recount` corrects the
+        count once the job reads it."""
+        if not self.images.enabled:
+            return IMAGE_OFF
+        if guild_id is None:
+            return "只能在伺服器中使用。"
+        settings = self.image_settings
+        if not settings.enabled(guild_id):
+            return "這個伺服器沒有開放圖片生成。"
+        key = (guild_id, user_id)
+        running, most = self._image_in_flight.get(key, 0), settings.in_flight_limit(guild_id)
+        if running >= most:
+            return f"你已經有 {running} 個圖片工作在跑（每人同時最多 {most} 個），等它完成再來。"
+        images = imagegen.image_count(self.images.cached(), request)
+        used, daily = settings.used(guild_id, user_id), settings.daily_limit(guild_id)
+        if used + images > daily:
+            return _image_quota_note(daily, used, images)
+        self._image_in_flight[key] = running + 1
+        day = settings.charge(guild_id, user_id, images)
+        return Reservation(guild_id, user_id, images, day, self._image_release)
+
+    def _image_recount(self, reservation: Reservation, images: int) -> str:
+        """Count `images` for an admitted job in place of the number it was admitted with, or
+        say why the member's daily limit does not allow them; the refused job counts nothing.
+        A slash command admits a job before the catalog is read, at one image when it does not
+        know the model's default count yet."""
+        if images == reservation.images:
+            return ""
+        guild_id, user_id, settings = reservation.guild_id, reservation.user_id, self.image_settings
+        settings.refund(guild_id, user_id, reservation.images, reservation.day)
+        reservation.images = 0
+        used, daily = settings.used(guild_id, user_id), settings.daily_limit(guild_id)
+        if used + images > daily:
+            return _image_quota_note(daily, used, images)
+        reservation.images, reservation.day = images, settings.charge(guild_id, user_id, images)
+        return ""
+
+    def _image_release(self, reservation: Reservation, refund: bool) -> None:
+        key = (reservation.guild_id, reservation.user_id)
+        left = self._image_in_flight.get(key, 1) - 1
+        if left > 0:
+            self._image_in_flight[key] = left
+        else:
+            self._image_in_flight.pop(key, None)
+        if refund:
+            self.image_settings.refund(
+                reservation.guild_id, reservation.user_id, reservation.images, reservation.day
+            )
+
+    async def _run_image(
+        self,
+        reservation: Reservation,
+        request: ImageRequest,
+        into: Path,
+        max_bytes: int,
+        on_progress: Callable[[imagegen.Job], Awaitable[None]] | None = None,
+    ) -> imagegen.Result:
+        """Run an admitted job (imagegen.run_job) and settle its reservation. A job that made no
+        images — refused by the catalog or the service, failed, timed out — gives its images
+        back; one the member cancelled keeps them counted, since the GPU already worked on it."""
+        refund = True
+        try:
+            catalog = await self.images.catalog()
+            if problem := self._image_recount(reservation, imagegen.image_count(catalog, request)):
+                raise ImageGenError(problem, "daily_limit")
+            result = await imagegen.run_job(
+                self.images,
+                request,
+                into,
+                max_bytes,
+                reservation.guild_id,
+                reservation.user_id,
+                on_progress,
+            )
+            refund = False
+            return result
+        except asyncio.CancelledError:
+            refund = False
+            raise
+        finally:
+            reservation.settle(refund)
+
+    @staticmethod
+    def _filesize_limit(guild: discord.Guild | None) -> int:
+        """The largest file the Bot may post in `guild`; the service fits each image to it."""
+        return (
+            guild.filesize_limit
+            if guild is not None
+            else discord.utils.DEFAULT_FILE_SIZE_LIMIT_BYTES
+        )
+
+    @app_commands.describe(
+        prompt="要畫什麼",
+        model="選填：圖片模型（打字篩選；留空＝服務預設）",
+        aspect="選填：長寬比",
+        count="選填：張數",
+        seed="選填：種子（同樣的描述與種子會畫出同樣的圖）",
+        negative="選填：不要出現在圖裡的東西",
+        hires="選填：高解析修正",
+        upscale="選填：放大倍率",
+        detailer="選填：細節修補",
+        cloud_enhance="選填：雲端加強描述",
+    )
+    @app_commands.choices(aspect=IMAGE_ASPECT_CHOICES, upscale=IMAGE_UPSCALE_CHOICES)
+    @app_commands.autocomplete(model=_image_model_autocomplete)
+    async def image_command(
+        self,
+        interaction: discord.Interaction,
+        prompt: str,
+        model: str | None = None,
+        aspect: app_commands.Choice[str] | None = None,
+        count: app_commands.Range[int, 1, imagegen.MAX_COUNT] | None = None,
+        seed: app_commands.Range[int, 0, imagegen.MAX_SEED] | None = None,
+        negative: str | None = None,
+        hires: bool | None = None,
+        upscale: app_commands.Choice[str] | None = None,
+        detailer: bool | None = None,
+        cloud_enhance: bool | None = None,
+    ) -> None:
+        prompt = prompt.strip()
+        request = ImageRequest(
+            prompt,
+            (model or "").strip(),
+            negative=(negative or "").strip() or None,
+            aspect=aspect.value if aspect is not None else None,
+            count=count,
+            seed=seed,
+            hires=hires,
+            upscale=upscale.value if upscale is not None else None,
+            detailer=detailer,
+            cloud_enhance=cloud_enhance,
+        )
+        reserved = self._access(
+            interaction.guild_id, interaction.channel, interaction.channel_id
+        ) or self._validate(prompt, ())
+        if not reserved:
+            reserved = self._image_reserve(interaction.guild_id, interaction.user.id, request)
+        if isinstance(reserved, str):
+            await interaction.response.send_message(reserved, ephemeral=True)
+            return
+        into = None
+        try:
+            into = request_dir(self.config)
+            await self._image_slash(interaction, reserved, request, into)
+        finally:
+            reserved.settle(True)  # a job that never started gives its images back
+            remove_dir(into)
+
+    async def _image_slash(
+        self,
+        interaction: discord.Interaction,
+        reservation: Reservation,
+        request: ImageRequest,
+        into: Path,
+    ) -> None:
+        """The slash command's job, painted into its placeholder: the queue position and steps
+        while it runs, ❌ to cancel it (on the service too), and the images in place of the
+        placeholder — or in the channel once the interaction has closed. Not in the SerialQueue:
+        the image service keeps its own queue, and a picture must not hold up answers."""
+        await interaction.response.defer(thinking=True)
+        placeholder = SlashPlaceholder(interaction)
+        late = asyncio.create_task(placeholder.retire_when_late())
+        view = CancelView(interaction.user.id, timeout=self.config.image_gen_timeout_seconds + 300)
+
+        async def on_progress(job: imagegen.Job) -> None:
+            await placeholder.show(imagegen.progress_text(job), view)
+
+        max_bytes = self._filesize_limit(interaction.guild)
+        task = asyncio.create_task(
+            self._run_image(reservation, request, into, max_bytes, on_progress)
+        )
+        view.task = task
+        try:
+            result = await task
+        except asyncio.CancelledError:
+            await placeholder.show(CANCELLED, None)
+            LOGGER.info(
+                "Cancelled image guild=%s user=%s", interaction.guild_id, interaction.user.id
+            )
+            return
+        except ImageGenError as error:
+            await placeholder.show(f"⚠️ {error}", None)
+            return
+        except Exception:  # a file that could not be written, say: still an answer, not silence
+            LOGGER.exception("Image job failed guild=%s", interaction.guild_id)
+            await placeholder.show(f"⚠️ {imagegen.FAILED}", None)
+            return
+        finally:
+            late.cancel()
+        files = [discord.File(path) for path in result.paths[:10]]
+        try:
+            if interaction_expired(interaction) and interaction.channel is not None:
+                await placeholder.retire()
+                await interaction.channel.send(
+                    imagegen.caption(request.prompt, result, by=interaction.user.id), files=files
+                )
+            else:
+                await interaction.edit_original_response(
+                    content=imagegen.caption(request.prompt, result), attachments=files, view=None
+                )
+        except discord.HTTPException:
+            LOGGER.exception("Image delivery failed guild=%s", interaction.guild_id)
+            with contextlib.suppress(discord.HTTPException):
+                await interaction.followup.send(
+                    "圖片送出失敗（Discord 錯誤），請再試一次。", ephemeral=True
+                )
+        LOGGER.info(
+            "Completed image guild=%s channel=%s user=%s",
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.user.id,
+        )
+
+    async def _apply_image_tags(
+        self,
+        text: str,
+        guild_id: int | None,
+        channel_id: int | None,
+        user_id: int,
+        notes_out: list[str] | None = None,
+        refused: list[str] | None = None,
+    ) -> str:
+        """Start the pictures the model asked for with <image_gen/>. Each is checked now — the
+        channel, the prompt, the catalog, the member's limits — so a refusal reaches the answer
+        and one the model can fix goes to `refused`; the job then runs detached and is posted in
+        the channel when it is done (`_deliver_image`). The answer gets only a note that it
+        started: the picture does not exist yet."""
+        clean, asks = extract_image_tags(text)
+        if not asks:
+            return text
+        fixable = refused if refused is not None else []
+        if not self.images.enabled:  # nothing the model sends again could run either
+            return _with_notes(clean, ["（圖片生成尚未啟用。）"], notes_out)
+        notes: list[str] = []
+        if len(asks) > MAX_IMAGE_TAGS:
+            extra = len(asks) - MAX_IMAGE_TAGS
+            notes.append(f"（一次只能畫 {MAX_IMAGE_TAGS} 組圖，多的 {extra} 個沒有執行）")
+        for attrs in asks[:MAX_IMAGE_TAGS]:
+            label = attrs.get("prompt", "")[:60]
+            request, problem = request_from_tag(attrs)
+            if request is None:
+                notes.append("（畫圖指令格式不對，沒有執行）")
+                fixable.append(f'<image_gen prompt="{label}">: {problem}')
+                continue
+            if channel_id is None:
+                notes.append("（這裡沒辦法生成圖片）")
+                continue
+            channel = self.get_channel(channel_id)
+            reason = self._access(guild_id, channel, channel_id) or self._validate(
+                request.prompt, ()
+            )
+            if reason:
+                notes.append(f"（圖片沒有生成：{reason}）")
+                continue
+            try:
+                imagegen.resolve(await self.images.catalog(), request)
+            except ImageGenError as error:
+                notes.append(f"（圖片沒有生成：{error}）")
+                if error.fixable:
+                    fixable.append(f'<image_gen prompt="{label}">: {error.detail}')
+                continue
+            reserved = self._image_reserve(guild_id, user_id, request)
+            if isinstance(reserved, str):
+                notes.append(f"（圖片沒有生成：{reserved}）")
+                continue
+            task = asyncio.create_task(self._deliver_image(reserved, request, channel_id))
+            self._image_tasks.add(task)
+            task.add_done_callback(self._image_tasks.discard)
+            LOGGER.info(
+                "Image tag started guild=%s channel=%s user=%s", guild_id, channel_id, user_id
+            )
+            notes.append(IMAGE_STARTED)
+        return _with_notes(clean, notes, notes_out)
+
+    async def _deliver_image(
+        self, reservation: Reservation, request: ImageRequest, channel_id: int
+    ) -> None:
+        """Run an <image_gen/> job and post the pictures, or why there are none, in the channel
+        it was asked in. The channel is checked again first, like a reminder: the allowlist may
+        have changed while the job ran. The post pings no one."""
+        guild_id, user_id = reservation.guild_id, reservation.user_id
+        into = None
+        try:
+            into = request_dir(self.config)
+            max_bytes = self._filesize_limit(self.get_guild(guild_id))
+            try:
+                result = await self._run_image(reservation, request, into, max_bytes)
+                text, paths = imagegen.caption(request.prompt, result, by=user_id), result.paths
+            except ImageGenError as error:
+                text, paths = f"<@{user_id}> 的圖片沒有生成：{error}", ()
+            channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+            channel_guild = getattr(getattr(channel, "guild", None), "id", None)
+            if channel_guild != guild_id or self._access(guild_id, channel, channel_id):
+                LOGGER.warning(
+                    "Image for user %s dropped: channel %s is no longer allowed",
+                    user_id,
+                    channel_id,
+                )
+                return
+            await channel.send(
+                text,
+                files=[discord.File(path) for path in paths[:10]],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            LOGGER.exception("Image delivery failed guild=%s channel=%s", guild_id, channel_id)
+        finally:
+            reservation.settle(True)  # a job that never ran gives its images back
+            remove_dir(into)
 
     def _instructions_status(self) -> str:
         persona = instructions.persona_text(self.config)

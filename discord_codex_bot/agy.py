@@ -8,7 +8,7 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import quota
+from . import imagegen, quota
 from .backends import BackendUnavailable
 from .codex import (
     MAX_PROCESS_OUTPUT_BYTES,
@@ -287,6 +287,7 @@ async def run_agy(
             files,
             speaker,
             history=history,
+            image_gen=imagegen.prompt_note(config),
         )
     )
     args = ["--project", project, "--model", model, "--output-format", "stream-json"]

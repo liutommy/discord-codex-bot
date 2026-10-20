@@ -105,7 +105,8 @@ Discord 有關的部分。任何一項不通過，請求就被拒絕，什麼都
 | `--who` | 每一位都必須是 `--guild` 的成員。 |
 
 **已離開伺服器的成員**：只讀取、取消或改時間的指令——`remind list`、`remind cancel`、
-`track list`、`track cancel`、`track every`、`track at`、`track log`——不要求 `--user` 還是成員。
+`track list`、`track cancel`、`track every`、`track at`、`track log`、`image get`——不要求
+`--user` 還是成員。
 成員離開後，他設的提醒和追蹤仍會照常發出，所以必須還能列出來、停掉。這些指令只會碰到
 **`--user` 自己的、在 `--guild` 的**項目（`track list` 不給 `--user` 時列出整個伺服器的追蹤）：打錯編號不會動到同一個人在別的伺服器的東西。
 其他指令（設定新提醒、改模型、提問等）仍要求現任成員。
@@ -136,6 +137,7 @@ Discord 有關的部分。任何一項不通過，請求就被拒絕，什麼都
 | `tracking outbox` | 還沒送出的追蹤通知 | （只有 CLI） |
 | `linkclean get／set` | 伺服器的連結洗參數模式 | `/linkclean` |
 | `embedfix get／set` | 伺服器的預覽修正開關 | `/embedfix` |
+| `image get／set` | 伺服器的圖片生成開關與每人上限 | （只有 CLI；`/image` 與 `<image_gen>` 標籤照它限制） |
 | `persona get／set／clear` | 所有伺服器共用的人設與預設輸出風格 | `/persona` |
 | `summary` | 摘要頻道最近的訊息，只回到 CLI | `/summary` |
 | `ask` | 以成員身分提問，答案只回到 CLI | `/codex` |
@@ -292,6 +294,28 @@ $ docker exec tommy_test python -m discord_codex_bot.admin persona get --kind pe
 $ docker exec -i tommy_test python -m discord_codex_bot.admin persona set --kind persona --text - < persona.md
 $ python -m discord_codex_bot.admin persona clear --kind style
 ```
+
+### image：圖片生成的開關與上限
+
+`IMAGE_GEN_URL` 有設定時，成員可以用 `/image` 或在對話裡請 Bot 畫圖（`<image_gen>` 標籤）；
+兩條路徑都照這裡的設定檢查。沒有設定過的伺服器是預設值：開放、每人每天 20 張、每人同時 1 個工作。
+張數在工作送出時就算進當天（台灣時間），服務拒絕、失敗或逾時的會退回，成員自己取消的照算。
+`image set` 只給要改的選項；上限從下一個請求起生效，進行中的工作不受影響，今天已用的張數也不會歸零。
+`--user` 可以是已經離開伺服器的成員。
+
+```console
+$ python -m discord_codex_bot.admin image get --guild 123456789012345678 --user 345678901234567890
+圖片生成：開
+每人每天：20 張
+每人同時：1 個工作
+成員 345678901234567890 今天已用：3 張
+
+$ python -m discord_codex_bot.admin image set --guild 123456789012345678 --state off
+$ python -m discord_codex_bot.admin image set --guild 123456789012345678 --daily 10 --in-flight 2
+```
+
+`image set` 不會在頻道發訊息，也不會動到服務本身（模型、佇列都由圖片服務管理，見
+[`image-service.md`](image-service.md)）。
 
 ### ask、summary：以成員身分回答
 

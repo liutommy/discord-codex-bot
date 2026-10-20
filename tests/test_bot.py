@@ -54,6 +54,7 @@ def test_registers_only_expected_slash_commands(config: Config, tmp_path) -> Non
         "inmu-king-track",
         "inmu-king-linkclean",
         "inmu-king-embedfix",
+        "inmu-king-image",
     }
     assert client.intents.guilds
     assert client.intents.message_content

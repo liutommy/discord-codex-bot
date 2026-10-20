@@ -1,9 +1,10 @@
 """The Bot's side of the operator CLI (admin.py has the protocol and the CLI): every 2 s the
 inbox is read, each request is claimed, checked and run inside this process, and its result is
 written back. The commands come from the handler modules (admin_members, admin_tracking,
-admin_guild), each exporting HANDLERS and SCHEMAS keyed by "<group>.<action>" (or a single word
-such as "reset"), and GROUPS: one line per group saying what it is for. The CLI builds its
-options and its whole --help from the same SCHEMAS, so the help cannot drift from the code.
+admin_guild, admin_image), each exporting HANDLERS and SCHEMAS keyed by "<group>.<action>" (or a
+single word such as "reset"), and GROUPS: one line per group saying what it is for. The CLI
+builds its options and its whole --help from the same SCHEMAS, so the help cannot drift from the
+code.
 
 Handler: `async def handler(client, args: dict) -> dict`. `client` is the DiscordCodexClient and
 `args` holds the validated arguments, absent options left out. It returns a JSON-able value,
