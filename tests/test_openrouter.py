@@ -688,8 +688,10 @@ async def test_local_requests_get_their_own_timeout(monkeypatch, local_cfg: Conf
     monkeypatch.setattr(openrouter, "_session", fake_session)
     await run_router(LOCAL_ROUTER, "q", local_cfg, "qwen3-8b-q4")
     await run_openrouter("q", local_cfg, "a/text:free")
-    assert timeouts == [local_cfg.local_llm_timeout_seconds, local_cfg.codex_timeout_seconds]
-    assert timeouts == [1200, 600]
+    # A local request that is not streamed cannot tell waiting in the GPU queue from running.
+    local = local_cfg.local_llm_timeout_seconds + local_cfg.local_llm_queue_wait_seconds
+    assert timeouts == [local, local_cfg.codex_timeout_seconds]
+    assert timeouts == [4800, 600]
 
 
 async def test_thinking_that_uses_up_the_cap_is_reported_as_such(
@@ -772,3 +774,128 @@ def test_backends_accept_local_ids() -> None:
     assert choice.label == "地端模型 · mlx-community/Qwen3-4B-4bit"
     target = resolve(choice, "low")
     assert (target.backend, target.model) == (LOCAL, "mlx-community/Qwen3-4B-4bit")
+
+
+# ---------- The host's GPU queue, shared with image jobs (docs/image-service.md) ----------
+import asyncio  # noqa: E402
+
+from discord_codex_bot import imagegen  # noqa: E402
+from discord_codex_bot.openrouter import QueueBusy, queued_text  # noqa: E402
+
+
+class Timed:
+    """An SSE body whose lines arrive on a schedule: (seconds to wait first, line)."""
+
+    def __init__(self, script: list[tuple[float, bytes]]) -> None:
+        self.script = script
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for delay, line in self.script:
+            await asyncio.sleep(delay)
+            yield line
+
+
+def _streamed(script: list[tuple[float, bytes]]) -> Response:
+    class Streaming(Response):
+        content = Timed(script)
+
+    return Streaming({})
+
+
+def _data(content: str) -> bytes:
+    return ("data: " + json.dumps({"choices": [{"delta": {"content": content}}]}) + "\n").encode()
+
+
+async def test_queue_comments_paint_the_position_and_are_never_content(
+    monkeypatch, local_cfg: Config
+) -> None:
+    script = [
+        (0, b": queued position=2\n"),
+        (0, b"\n"),
+        (0, b": keep-alive\n"),  # a comment that is not the queue's: nothing to paint
+        (0, b": queued position=0\n"),
+        (0, b"\n"),
+        (0, _data("你")),
+        (0, b": queued position=9\n"),  # out of the queue: no longer a position to show
+        (0, _data("好")),
+        (0, b"data: [DONE]\n"),
+    ]
+    session = Session([_streamed(script)])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    seen = []
+
+    async def on_delta(text):
+        seen.append(text)
+
+    result = await run_router(LOCAL_ROUTER, "q", local_cfg, "m", on_delta=on_delta)
+    assert seen == [queued_text(2), queued_text(0), "你", "你好"]
+    assert queued_text(2) == "⏳ 地端 GPU 排隊中，前面還有 2 個…"
+    assert result.text == "你好"
+    assert load_transcript(local_cfg, result.thread_id)[1]["content"] == "你好"
+
+
+async def test_the_run_timeout_starts_at_the_first_event_that_is_not_a_comment() -> None:
+    """Negative control for the wait/run split: 0.3 s of queue comments, then a quick answer,
+    passes a 0.2 s run timeout; if a comment started the clock it would time out."""
+    script = [(0, b": queued position=1\n"), (0.15, b": queued position=0\n")]
+    script += [(0.15, _data("答")), (0, _data("案")), (0, b"data: [DONE]\n")]
+    seen = []
+
+    async def on_delta(text):
+        seen.append(text)
+
+    payload = await openrouter._read_sse(_streamed(script), on_delta, wait=5.0, run=0.2)
+    assert payload["choices"][0]["message"]["content"] == "答案"
+    # ...while an answer that stalls past the run timeout once it has started still times out,
+    # as a plain timeout (the request ran), not as a busy queue.
+    stalled = [(0, b": queued position=0\n"), (0, _data("答")), (0.5, _data("案"))]
+    with pytest.raises(TimeoutError):
+        await openrouter._read_sse(_streamed(stalled), on_delta, wait=5.0, run=0.2)
+
+
+async def test_a_request_stuck_in_the_queue_is_given_up() -> None:
+    """Negative control for the wait cap: a service that keeps the request queued forever."""
+    forever = [(0.02, b": queued position=1\n")] * 10_000
+
+    async def on_delta(text):
+        pass
+
+    with pytest.raises(QueueBusy) as caught:
+        await asyncio.wait_for(
+            openrouter._read_sse(_streamed(forever), on_delta, wait=0.2, run=1.0), 3
+        )
+    assert str(caught.value) == imagegen.QUEUE_TIMED_OUT
+
+
+async def test_a_full_gpu_queue_is_a_busy_message_not_a_failure(
+    monkeypatch, local_cfg: Config
+) -> None:
+    """Negative control: the 429 queue_full answer becomes the member message image jobs get,
+    as QueueBusy (not counted as the local model failing), without the 'may not be running'
+    hint; another 429 stays an ordinary error."""
+    full = {
+        "error": {
+            "type": "queue_full",
+            "code": "queue_full",
+            "message": "local queue is full (3 waiting)",
+        }
+    }
+
+    async def on_delta(text):
+        pass
+
+    for streamed in (None, on_delta):
+        session = Session([Response(full, status=429)])
+        monkeypatch.setattr(openrouter, "_session", lambda c, t, router=None, s=session: s)
+        with pytest.raises(QueueBusy) as caught:
+            await run_router(LOCAL_ROUTER, "q", local_cfg, "m", on_delta=streamed)
+        assert str(caught.value) == "地端 GPU 的排隊已滿（已有 3 個在等），請稍後再試。"
+    other = {"error": {"code": 429, "message": "rate limited"}}
+    session = Session([Response(other, status=429)])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    with pytest.raises(BackendError) as caught:
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
+    assert not isinstance(caught.value, QueueBusy) and "HTTP 429" in str(caught.value)

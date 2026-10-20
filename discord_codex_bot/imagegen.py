@@ -12,6 +12,7 @@ switches; the Bot applies it before a job starts.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -44,21 +45,48 @@ UPSCALES = ("off", "2x", "4x")
 MAX_COUNT = 4
 MAX_SEED = 2**32 - 1
 # Request fields a member may set; each must be in the model's `options` when set.
-OPTIONS = ("negative", "aspect", "count", "seed", "hires", "upscale", "detailer", "cloud_enhance")
+OPTIONS = (
+    "negative",
+    "aspect",
+    "count",
+    "seed",
+    "enhance",
+    "init_image",
+    "strength",
+    "mask",
+    "upscale",
+    "detailer",
+)
+# How the prompt is rewritten before generation; a model lists the ones it takes (`enhancers`).
+ENHANCERS = ("local", "cloud", "off")
 TERMINAL = frozenset({"done", "failed", "cancelled"})
 _JOB_ID = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 _SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+# An input image's type, from its first bytes (what the service decodes, whatever the name says).
+_MAGIC = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"))
+# The host's one GPU queue, shared with the local model: one running, at most this many waiting.
+QUEUE_LIMIT = 3
 
 UNAVAILABLE = "圖片生成服務現在不能用，請稍後再試。"
-QUEUE_FULL = "圖片生成排隊已滿，請稍後再試。"
+# Also the local model's answer to the same refusal (openrouter.py): it is one queue.
+QUEUE_FULL = "地端 GPU 的排隊已滿（已有 {waiting} 個在等），請稍後再試。"
+QUEUE_TIMED_OUT = "地端 GPU 排隊太久，已取消，請稍後再試。"
 FAILED = "圖片生成失敗，請換個描述或稍後再試。"
 TIMED_OUT = "圖片生成超過時限，已取消。"
 STOPPED = "圖片生成服務取消了這個工作。"
 
+
+def queue_full(waiting: object = None) -> str:
+    """The member's message for a full GPU queue; `waiting` is the service's count when it gave
+    one."""
+    count = waiting if isinstance(waiting, int) and waiting > 0 else QUEUE_LIMIT
+    return QUEUE_FULL.format(waiting=count)
+
+
 # The model's tool (codex._prompt): one per answer, attributes in any order.
 IMAGE_TAG = re.compile(r'<image_gen((?:\s+[a-z_]{1,10}="[^"]{0,2000}")+)\s*/?>(?:\s*</image_gen>)?')
 _ATTR = re.compile(r'([a-z_]{1,10})="([^"]{0,2000})"')
-TAG_ATTRS = ("prompt", "model", "aspect", "count", "seed", "negative")
+TAG_ATTRS = ("prompt", "model", "aspect", "count", "seed", "negative", "enhance")
 MAX_IMAGE_TAGS = 1
 # The last catalog any ImageService read, for the prompt (`prompt_note`), which the backends
 # build without the client.
@@ -83,6 +111,7 @@ class ImageModel:
     name: str
     options: frozenset[str]
     defaults: dict = field(default_factory=dict)
+    enhancers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,9 +121,24 @@ class Catalog:
     aspects: tuple[str, ...]
     upscale: tuple[str, ...]
     max_count: int
+    max_input_bytes: int = 0  # 0: the service takes no input image
 
     def get(self, model_id: str) -> ImageModel | None:
         return next((m for m in self.models if m.id == model_id), None)
+
+
+@dataclass(frozen=True, slots=True)
+class InputImage:
+    """An image a member gave the job (init_image, mask): its type and size are known from the
+    attachment before it is read, so a request can be checked before anything is downloaded;
+    `data` holds the bytes once read, and `mime` is then what they are (`input_image`)."""
+
+    mime: str
+    size: int
+    data: bytes = b""
+
+    def wire(self) -> dict:
+        return {"mime": self.mime, "data": base64.b64encode(self.data).decode("ascii")}
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,10 +151,12 @@ class ImageRequest:
     aspect: str | None = None
     count: int | None = None
     seed: int | None = None
-    hires: bool | None = None
+    enhance: str | None = None
+    init_image: InputImage | None = None
+    strength: float | None = None
+    mask: InputImage | None = None
     upscale: str | None = None
     detailer: bool | None = None
-    cloud_enhance: bool | None = None
 
     def options(self) -> list[str]:
         return [name for name in OPTIONS if getattr(self, name) is not None]
@@ -128,10 +174,12 @@ class Image:
 class Job:
     job_id: str
     state: str
-    position: int = 0
+    position: int = 0  # items ahead in the shared GPU queue
     step: int = 0
     steps: int = 0
     images: tuple[Image, ...] = ()
+    queued_s: float = 0.0
+    enhance_used: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +187,7 @@ class Result:
     model: str
     paths: tuple[Path, ...]
     seeds: tuple[int | None, ...]
+    enhance_used: str = ""
 
 
 def parse_catalog(payload: object) -> Catalog:
@@ -153,17 +202,32 @@ def parse_catalog(payload: object) -> Catalog:
         defaults = item.get("defaults") or {}
         if not isinstance(options, list) or not isinstance(defaults, dict):
             raise ValueError("catalog model with malformed options or defaults")
+        enhancers = item.get("enhancers") or []
+        if not isinstance(enhancers, list):
+            raise ValueError("catalog model with malformed enhancers")
         name = item.get("name") if isinstance(item.get("name"), str) else item["id"]
-        models.append(ImageModel(item["id"], name, frozenset(map(str, options)), defaults))
+        models.append(
+            ImageModel(
+                item["id"],
+                name,
+                frozenset(map(str, options)),
+                defaults,
+                tuple(map(str, enhancers)),
+            )
+        )
     max_count = payload.get("max_count", 1)
     if not isinstance(max_count, int) or max_count < 1:
         raise ValueError("catalog max_count is not a positive integer")
+    max_input = payload.get("max_input_bytes", 0)
+    if not isinstance(max_input, int) or max_input < 0:
+        raise ValueError("catalog max_input_bytes is not a whole number")
     return Catalog(
         tuple(models),
         str(payload.get("default_model") or (models[0].id if models else "")),
         tuple(map(str, payload.get("aspects") or ())),
         tuple(map(str, payload.get("upscale") or ())),
         max_count,
+        max_input,
     )
 
 
@@ -173,9 +237,52 @@ def _bad(option: str, allowed: str) -> ImageGenError:
     )
 
 
+def _needs_image(option: str) -> ImageGenError:
+    return ImageGenError(
+        f"{option} 要搭配 image（原圖）一起給。",
+        "bad_value",
+        True,
+        f"{option} needs init_image",
+    )
+
+
+def sniff(data: bytes) -> str:
+    """The image type of `data` from its first bytes: png, jpeg or webp, else ""."""
+    for magic, mime in _MAGIC:
+        if data.startswith(magic):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def input_image(data: bytes) -> InputImage:
+    """An input image read in full: its type from its bytes, not from its name."""
+    return InputImage(sniff(data), len(data), data)
+
+
+def _check_input(catalog: Catalog, option: str, image: InputImage) -> None:
+    if image.mime not in _SUFFIXES:
+        raise ImageGenError(
+            f"{option} 只能是 PNG、JPEG 或 WebP 圖片。",
+            "bad_value",
+            True,
+            f"{option} must be png, jpeg or webp",
+        )
+    if image.size > catalog.max_input_bytes:
+        limit = catalog.max_input_bytes / 1_000_000
+        raise ImageGenError(
+            f"{option} 太大：每張最多 {limit:g} MB。",
+            "input_too_large",
+            True,
+            f"{option} is over {catalog.max_input_bytes} bytes",
+        )
+
+
 def resolve(catalog: Catalog, request: ImageRequest) -> ImageModel:
     """The model `request` runs on, after checking every option it sets against the catalog —
-    the checks the service makes too, done here so a refusal costs no queue slot."""
+    the checks the service makes too, done here so a refusal costs no queue slot. Input images
+    are checked by type and size, which an attachment states before it is read."""
     model = catalog.get(request.model or catalog.default_model)
     if model is None:
         ids = ", ".join(m.id for m in catalog.models) or "（沒有）"
@@ -199,6 +306,17 @@ def resolve(catalog: Catalog, request: ImageRequest) -> ImageModel:
         raise _bad("upscale", ", ".join(catalog.upscale))
     if request.count is not None and not 1 <= request.count <= catalog.max_count:
         raise _bad("count", f"1-{catalog.max_count}")
+    if request.enhance is not None and request.enhance not in model.enhancers:
+        raise _bad("enhance", ", ".join(model.enhancers) or "（沒有）")
+    if request.init_image is None:
+        for option in ("mask", "strength"):
+            if getattr(request, option) is not None:
+                raise _needs_image(option)
+    if request.strength is not None and not 0 <= request.strength <= 1:
+        raise _bad("strength", "0-1")
+    for option in ("init_image", "mask"):
+        if (image := getattr(request, option)) is not None:
+            _check_input(catalog, option, image)
     return model
 
 
@@ -235,6 +353,7 @@ def _job(payload: object) -> Job:
         value = payload.get(key)
         return value if isinstance(value, int) else 0
 
+    queued_s = payload.get("queued_s")
     return Job(
         job_id,
         str(payload.get("state") or ""),
@@ -242,6 +361,8 @@ def _job(payload: object) -> Job:
         number("step"),
         number("steps"),
         tuple(images),
+        float(queued_s) if isinstance(queued_s, int | float) else 0.0,
+        str(payload.get("enhance_used") or "")[:20],
     )
 
 
@@ -270,8 +391,12 @@ def _error(status: int, payload: object, model: str) -> ImageGenError:
             True,
             f"bad value for {option or 'an option'}",
         )
+    if status == 413 and code == "input_too_large":
+        limit = body.get("max_input_bytes")
+        shown = f"每張最多 {limit / 1_000_000:g} MB" if isinstance(limit, int) else "超過上限"
+        return ImageGenError(f"附的圖太大：{shown}。", "input_too_large", True, "input too large")
     if status == 429:
-        return ImageGenError(QUEUE_FULL, "queue_full")
+        return ImageGenError(queue_full(body.get("queue")), "queue_full")
     LOGGER.warning("Image service refused: HTTP %s %s", status, str(code)[:40])
     return ImageGenError(UNAVAILABLE, "unavailable")
 
@@ -293,7 +418,13 @@ class ImageService:
 
     @property
     def timeout_seconds(self) -> int:
+        """A job's run time, from the first reading that is not `queued`."""
         return self._config.image_gen_timeout_seconds
+
+    @property
+    def queue_wait_seconds(self) -> int:
+        """How long a job may wait in the GPU queue before it is given up."""
+        return self._config.image_gen_queue_wait_seconds
 
     def _url(self, path: str) -> str:
         return self._config.image_gen_url.rstrip("/") + path
@@ -359,7 +490,10 @@ class ImageService:
         user_id: int,
     ) -> Job:
         body = {name.name: getattr(request, name.name) for name in fields(ImageRequest)}
-        body |= {"model": model, "steps": None, "cfg": None, "split": None}
+        for name in ("init_image", "mask"):
+            if body[name] is not None:
+                body[name] = body[name].wire()
+        body |= {"model": model, "steps": None, "cfg": None}
         body |= {
             "max_bytes": max_bytes,
             "requester": {"guild": str(guild_id), "user": str(user_id)},
@@ -404,11 +538,12 @@ async def run_job(
     clock: Callable[[], float] = time.time,
 ) -> Result:
     """Check `request` against the catalog, submit it, poll until it ends (`on_progress` gets
-    every reading), and download its images into `into`. Raises ImageGenError. A job left
-    unfinished for any reason — the asker cancelled (CancelledError), the deadline passed, a
-    download failed — is cancelled on the service too, so it stops holding the GPU."""
+    every reading), and download its images into `into`. Raises ImageGenError. The run timeout
+    starts at the first reading that is not `queued`: time in the shared GPU queue is not run
+    time, and has its own cap. A job left unfinished for any reason — the asker cancelled
+    (CancelledError), a limit passed, a download failed — is cancelled on the service too, so
+    it stops holding its place or the GPU."""
     model = resolve(await service.catalog(), request)
-    deadline = clock() + service.timeout_seconds
     async with service.session() as session:
         try:
             job = await service.submit(session, request, model.id, max_bytes, guild_id, user_id)
@@ -428,7 +563,6 @@ async def run_job(
                 max_bytes,
                 on_progress,
                 clock,
-                deadline,
             )
         except BaseException as error:
             if not (isinstance(error, ImageGenError) and error.code in ("failed", "stopped")):
@@ -446,10 +580,12 @@ async def _follow(
     max_bytes: int,
     on_progress: Callable[[Job], Awaitable[None]] | None,
     clock: Callable[[], float],
-    deadline: float,
 ) -> Result:
     failures = 0
+    submitted, started = clock(), None
     while True:
+        if started is None and job.state != "queued":
+            started = clock()
         if on_progress is not None:
             await on_progress(job)
         if job.state == "done":
@@ -459,7 +595,10 @@ async def _follow(
             raise ImageGenError(FAILED, "failed")
         if job.state == "cancelled":
             raise ImageGenError(STOPPED, "stopped")
-        if clock() >= deadline:
+        if started is None and clock() - submitted >= service.queue_wait_seconds:
+            LOGGER.warning("Image job %s waited too long in the queue", job.job_id)
+            raise ImageGenError(QUEUE_TIMED_OUT, "queue_timeout")
+        if started is not None and clock() - started >= service.timeout_seconds:
             LOGGER.warning("Image job %s timed out", job.job_id)
             raise ImageGenError(TIMED_OUT, "timeout")
         await sleep_for(POLL_SECONDS, clock=clock)
@@ -473,6 +612,12 @@ async def _follow(
                 raise ImageGenError(UNAVAILABLE, "unavailable") from None
     if not job.images:
         raise ImageGenError(FAILED, "failed")
+    LOGGER.info(
+        "Image job %s done: queued %.0fs, ran %.0fs",
+        job.job_id,
+        job.queued_s,
+        clock() - (started if started is not None else submitted),
+    )
     await asyncio.to_thread(into.mkdir, parents=True, exist_ok=True)
     paths = []
     for image in job.images:
@@ -484,12 +629,13 @@ async def _follow(
         path = into / f"image-{image.index}{_SUFFIXES[mime]}"
         await asyncio.to_thread(path.write_bytes, data)
         paths.append(path)
-    return Result(model, tuple(paths), tuple(image.seed for image in job.images))
+    return Result(model, tuple(paths), tuple(image.seed for image in job.images), job.enhance_used)
 
 
 def progress_text(job: Job) -> str:
     """One reading of a job as the placeholder shows it."""
     if job.state == "queued":
+        # The GPU queue is shared with the local model, so what is ahead may be a chat answer.
         return f"🎨 排隊中，前面還有 {job.position} 個…" if job.position else "🎨 排隊中…"
     if job.state == "generating" and job.steps:
         return f"🎨 生成中 {job.step}/{job.steps}…"
@@ -510,6 +656,8 @@ def caption(prompt: str, result: Result, by: int | None = None) -> str:
     seeds = ", ".join(str(s) for s in result.seeds if s is not None)
     who = f"<@{by}> " if by is not None else ""
     footer = f"-# {result.model}" + (f" · seed {seeds}" if seeds else "")
+    if result.enhance_used:  # `cloud` may have fallen back to `local`: say what ran
+        footer += f" · enhance {result.enhance_used}"
     return f"{who}**畫**：\n{quoted}\n{footer}"
 
 
@@ -542,6 +690,7 @@ def request_from_tag(attrs: dict[str, str]) -> tuple[ImageRequest | None, str]:
             attrs.get("model", "").strip(),
             negative=attrs.get("negative", "").strip() or None,
             aspect=attrs.get("aspect", "").strip() or None,
+            enhance=attrs.get("enhance", "").strip().lower() or None,  # resolve checks it
             **numbers,
         ),
         "",
@@ -563,8 +712,10 @@ def prompt_note(config: Config) -> str:
     return (
         "When the member asks you to draw, paint or generate a picture, append"
         ' <image_gen prompt="what to draw"/> after your answer; add model="…", aspect="3:4",'
-        ' count="2", seed="123" or negative="what to avoid" only when the member asks for'
-        " them." + choices + " The Bot checks the request, runs it on the image service and"
+        ' count="2", seed="123", negative="what to avoid" or enhance="off" (local, cloud or off:'
+        " how the prompt is rewritten first) only when the member asks for them."
+        + choices
+        + " The Bot checks the request, runs it on the image service and"
         " posts the picture in the channel when it is ready, adding its own note to your"
         " answer. Never claim a picture was made, or is being made, without emitting the tag,"
         " and never describe a picture you have not seen. No double quote inside a value."

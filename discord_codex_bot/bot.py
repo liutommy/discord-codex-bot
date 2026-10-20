@@ -9,7 +9,7 @@ import logging
 import logging.handlers
 import re
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, timedelta
 from datetime import datetime as _dt
@@ -133,7 +133,7 @@ from .memory import (
     extract_memory_tags,
     extract_read_requests,
 )
-from .openrouter import ROUTERS, Catalog, run_router, trim_history
+from .openrouter import ROUTERS, Catalog, QueueBusy, run_router, trim_history
 from .output import DISCORD_MESSAGE_LIMIT, format_reply, split_discord_message, tail, truncate
 from .queue import QueueFullError, SerialQueue
 from .reminders import (
@@ -279,6 +279,10 @@ PERSONA_CHOICES = [
 ]
 IMAGE_ASPECT_CHOICES = [app_commands.Choice(name=a, value=a) for a in imagegen.ASPECTS]
 IMAGE_UPSCALE_CHOICES = [app_commands.Choice(name=u, value=u) for u in imagegen.UPSCALES]
+IMAGE_ENHANCE_LABELS = {"local": "地端改寫", "cloud": "雲端改寫", "off": "不改寫"}
+IMAGE_ENHANCE_CHOICES = [
+    app_commands.Choice(name=IMAGE_ENHANCE_LABELS[e], value=e) for e in imagegen.ENHANCERS
+]
 IMAGE_OFF = "圖片生成尚未啟用；管理者需設定 IMAGE_GEN_URL。"
 IMAGE_STARTED = "🎨 圖片生成中，完成後會貼在這個頻道。"
 EMBEDFIX_CHOICES = [
@@ -801,6 +805,9 @@ class DiscordCodexClient(discord.Client):
         prefix = config.command_prefix
         self.tree = app_commands.CommandTree(self)
         self.queue = SerialQueue(config.max_queued_jobs)
+        # Local-model turns run outside the queue (`_answer`); a conversation's lock and how
+        # many turns hold or wait for it.
+        self._thread_turns: dict[str, list] = {}
         self.threads = ThreadStore(
             config.codex_home / "discord_threads.json",
             config.thread_ttl_minutes * 60,
@@ -1714,6 +1721,18 @@ class DiscordCodexClient(discord.Client):
             return None
 
         async def run_on(via, text: str, **kw) -> CodexResult:
+            """One backend call. Every backend but the local model runs in the SerialQueue; a
+            local turn may wait a long time in the host's GPU queue behind image jobs, and
+            holding the SerialQueue meanwhile would stop every member's answer on every model.
+            That GPU queue serializes local turns instead; `_thread_turn` keeps two turns of one
+            conversation apart, as the SerialQueue did, so neither loses the other's exchange
+            from its transcript."""
+            if via.backend == LOCAL:
+                async with self._thread_turn(kw.get("resume") or ""):
+                    return await call_backend(via, text, **kw)
+            return await self.queue.run(lambda: call_backend(via, text, **kw))
+
+        async def call_backend(via, text: str, **kw) -> CodexResult:
             if via.backend == GROK:
                 return await grok.run_grok(text, self.config, via.model, effort=via.effort, **kw)
             if via.backend == AGY:
@@ -1846,20 +1865,18 @@ class DiscordCodexClient(discord.Client):
             video = await self._understand_videos(found, link_dir, on_video_slow)
             links = "\n\n".join(block for block in (links, video) if block)
             replay = {"history": history} if history else {}
-            result = await self.queue.run(
-                lambda: turn(
-                    prompt,
-                    **replay,
-                    images=images,
-                    resume=resume,
-                    memory=memory,
-                    personal_style=style,
-                    plain=persona_off,
-                    links=links,
-                    help=self.help_sheet(),
-                    files=files,
-                    speaker=user_id,  # shared reply threads: who said it (harvest, digest)
-                )
+            result = await turn(
+                prompt,
+                **replay,
+                images=images,
+                resume=resume,
+                memory=memory,
+                personal_style=style,
+                plain=persona_off,
+                links=links,
+                help=self.help_sheet(),
+                files=files,
+                speaker=user_id,  # shared reply threads: who said it (harvest, digest)
             )
             # On-demand reads (search snippets / paged recall): the Bot executes the request and
             # feeds the result back into the same thread. Bounded by MEMORY_RECALL_ROUNDS.
@@ -1924,27 +1941,23 @@ class DiscordCodexClient(discord.Client):
                     extra.extend(shots)
                 recalled = "\n\n".join(blocks)
                 recalled = defang(recalled)  # results are not the member: no USER_MESSAGE in them
-                result = await self.queue.run(
-                    lambda text=recalled, thread=result.thread_id, imgs=tuple(extra): turn(
-                        text + ANSWER_NOW,
-                        images=imgs,
-                        resume=thread,
-                        raw=True,
-                        personal_style=style,
-                        plain=persona_off,
-                    )
+                result = await turn(
+                    recalled + ANSWER_NOW,
+                    images=tuple(extra),
+                    resume=result.thread_id,
+                    raw=True,
+                    personal_style=style,
+                    plain=persona_off,
                 )
             else:
                 if request_only(result.text):
                     LOGGER.warning("Read rounds spent guild=%s user=%s", guild_id, user_id)
-                    result = await self.queue.run(
-                        lambda thread=result.thread_id: turn(
-                            READS_SPENT + ANSWER_NOW,
-                            resume=thread,
-                            raw=True,
-                            personal_style=style,
-                            plain=persona_off,
-                        )
+                    result = await turn(
+                        READS_SPENT + ANSWER_NOW,
+                        resume=result.thread_id,
+                        raw=True,
+                        personal_style=style,
+                        plain=persona_off,
                     )
                     if request_only(result.text):
                         result = replace(result, text=READS_SPENT_MESSAGE)
@@ -1964,15 +1977,13 @@ class DiscordCodexClient(discord.Client):
                     # Straight to the backend that answered, never through `turn`: a spare holds
                     # none of the thread and would be asked the whole question again, and every
                     # action already carried out would come back in its answer.
-                    retry = await self.queue.run(
-                        lambda via=target, thread=result.thread_id: run_on(
-                            via,
-                            TAG_RETRY.format(errors=errors),
-                            resume=thread,
-                            raw=True,
-                            personal_style=style,
-                            plain=persona_off,
-                        )
+                    retry = await run_on(
+                        target,
+                        TAG_RETRY.format(errors=errors),
+                        resume=result.thread_id,
+                        raw=True,
+                        personal_style=style,
+                        plain=persona_off,
                     )
                 except Exception:  # the answer itself is fine; the member is told below
                     LOGGER.exception("Tag retry failed guild=%s", guild_id)
@@ -2031,6 +2042,9 @@ class DiscordCodexClient(discord.Client):
             )
         except QueueFullError:
             return CodexResult(QUEUE_FULL_MESSAGE)
+        except QueueBusy as busy:  # the host's GPU queue: busy, not broken, so no failure alert
+            LOGGER.info("Local queue busy guild=%s: %s", guild_id, busy)
+            return CodexResult(str(busy))
         except Exception as error:
             LOGGER.exception("Request failed backend=%s guild=%s", target.backend, guild_id)
             await self.alerts.record_failure(target.backend, str(error))
@@ -2042,6 +2056,23 @@ class DiscordCodexClient(discord.Client):
             remove_dir(link_dir)
             if not handed_over:  # the sweep skips a live directory, so every path releases it
                 remove_dir(deliver_dir)
+
+    @contextlib.asynccontextmanager
+    async def _thread_turn(self, thread_id: str):
+        """Hold `thread_id` for one turn: a second turn on the same conversation waits until the
+        first has saved its transcript. A new conversation ("") holds nothing."""
+        if not thread_id:
+            yield
+            return
+        entry = self._thread_turns.setdefault(thread_id, [asyncio.Lock(), 0])
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if not entry[1]:
+                self._thread_turns.pop(thread_id, None)
 
     def _emoji_reply(self, guild_id: int | None) -> Callable[[str, bool], str] | None:
         """How an answer's `:name:` becomes the emoji (EMOJI_REPLY), or None: off, a DM, or a
@@ -2647,10 +2678,11 @@ class DiscordCodexClient(discord.Client):
         """Run one answer as a task the member can cancel (❌ on the placeholder, or -stop).
         `show(text, view)` paints the placeholder; `start(on_video_slow)` returns the answer
         coroutine. Returns the CodexResult, or None when the request was cancelled."""
+        config = self.config
         longest = max(
-            self.config.codex_timeout_seconds,
-            self.config.local_llm_timeout_seconds,
-            self.config.image_gen_timeout_seconds,
+            config.codex_timeout_seconds,
+            config.local_llm_timeout_seconds + config.local_llm_queue_wait_seconds,
+            config.image_gen_timeout_seconds + config.image_gen_queue_wait_seconds,
         )
         view = CancelView(owner_id, timeout=longest + 300)  # queueing and setup on top
         await show(THINKING, view)
@@ -3603,15 +3635,22 @@ class DiscordCodexClient(discord.Client):
         into: Path,
         max_bytes: int,
         on_progress: Callable[[imagegen.Job], Awaitable[None]] | None = None,
+        inputs: Mapping[str, discord.Attachment] | None = None,
     ) -> imagegen.Result:
         """Run an admitted job (imagegen.run_job) and settle its reservation. A job that made no
-        images — refused by the catalog or the service, failed, timed out — gives its images
-        back; one the member cancelled keeps them counted, since the GPU already worked on it."""
+        images — refused by the catalog or the service, failed, timed out, refused for a full
+        GPU queue — gives its images back; one the member cancelled keeps them counted, since
+        the GPU already worked on it. `inputs` are the slash command's image and mask, read
+        only once the request, their type and size included, has passed the catalog."""
         refund = True
         try:
             catalog = await self.images.catalog()
+            if inputs:
+                imagegen.resolve(catalog, request)
             if problem := self._image_recount(reservation, imagegen.image_count(catalog, request)):
                 raise ImageGenError(problem, "daily_limit")
+            for option, attachment in (inputs or {}).items():
+                request = replace(request, **{option: await self._image_input(attachment)})
             result = await imagegen.run_job(
                 self.images,
                 request,
@@ -3630,6 +3669,24 @@ class DiscordCodexClient(discord.Client):
             reservation.settle(refund)
 
     @staticmethod
+    def _attached(attachment: discord.Attachment | None) -> imagegen.InputImage | None:
+        """An attachment as an input image before it is read: the type and size Discord
+        reports, which `imagegen.resolve` checks; the bytes are read after it passes."""
+        if attachment is None:
+            return None
+        mime = (attachment.content_type or "").split(";")[0].strip().lower()
+        return imagegen.InputImage(mime, attachment.size)
+
+    @staticmethod
+    async def _image_input(attachment: discord.Attachment) -> imagegen.InputImage:
+        try:
+            data = await attachment.read()
+        except discord.HTTPException:
+            LOGGER.warning("Image input %s could not be read", attachment.id)
+            raise ImageGenError("讀不到附的圖，請重新上傳再試。", "bad_input") from None
+        return imagegen.input_image(data)
+
+    @staticmethod
     def _filesize_limit(guild: discord.Guild | None) -> int:
         """The largest file the Bot may post in `guild`; the service fits each image to it."""
         return (
@@ -3645,12 +3702,16 @@ class DiscordCodexClient(discord.Client):
         count="選填：張數",
         seed="選填：種子（同樣的描述與種子會畫出同樣的圖）",
         negative="選填：不要出現在圖裡的東西",
-        hires="選填：高解析修正",
+        enhance="選填：生成前怎麼改寫描述（留空＝模型預設）",
+        image="選填：原圖（PNG／JPEG／WebP），照著它改",
+        strength="選填：0～1，原圖可以改多少（要附原圖）",
+        mask="選填：遮罩，白色的地方重畫（要附原圖）",
         upscale="選填：放大倍率",
         detailer="選填：細節修補",
-        cloud_enhance="選填：雲端加強描述",
     )
-    @app_commands.choices(aspect=IMAGE_ASPECT_CHOICES, upscale=IMAGE_UPSCALE_CHOICES)
+    @app_commands.choices(
+        aspect=IMAGE_ASPECT_CHOICES, upscale=IMAGE_UPSCALE_CHOICES, enhance=IMAGE_ENHANCE_CHOICES
+    )
     @app_commands.autocomplete(model=_image_model_autocomplete)
     async def image_command(
         self,
@@ -3661,10 +3722,12 @@ class DiscordCodexClient(discord.Client):
         count: app_commands.Range[int, 1, imagegen.MAX_COUNT] | None = None,
         seed: app_commands.Range[int, 0, imagegen.MAX_SEED] | None = None,
         negative: str | None = None,
-        hires: bool | None = None,
+        enhance: app_commands.Choice[str] | None = None,
+        image: discord.Attachment | None = None,
+        strength: app_commands.Range[float, 0.0, 1.0] | None = None,
+        mask: discord.Attachment | None = None,
         upscale: app_commands.Choice[str] | None = None,
         detailer: bool | None = None,
-        cloud_enhance: bool | None = None,
     ) -> None:
         prompt = prompt.strip()
         request = ImageRequest(
@@ -3674,11 +3737,14 @@ class DiscordCodexClient(discord.Client):
             aspect=aspect.value if aspect is not None else None,
             count=count,
             seed=seed,
-            hires=hires,
+            enhance=enhance.value if enhance is not None else None,
+            init_image=self._attached(image),
+            strength=strength,
+            mask=self._attached(mask),
             upscale=upscale.value if upscale is not None else None,
             detailer=detailer,
-            cloud_enhance=cloud_enhance,
         )
+        inputs = {k: v for k, v in (("init_image", image), ("mask", mask)) if v is not None}
         reserved = self._access(
             interaction.guild_id, interaction.channel, interaction.channel_id
         ) or self._validate(prompt, ())
@@ -3690,7 +3756,7 @@ class DiscordCodexClient(discord.Client):
         into = None
         try:
             into = request_dir(self.config)
-            await self._image_slash(interaction, reserved, request, into)
+            await self._image_slash(interaction, reserved, request, into, inputs)
         finally:
             reserved.settle(True)  # a job that never started gives its images back
             remove_dir(into)
@@ -3701,6 +3767,7 @@ class DiscordCodexClient(discord.Client):
         reservation: Reservation,
         request: ImageRequest,
         into: Path,
+        inputs: Mapping[str, discord.Attachment] | None = None,
     ) -> None:
         """The slash command's job, painted into its placeholder: the queue position and steps
         while it runs, ❌ to cancel it (on the service too), and the images in place of the
@@ -3709,14 +3776,16 @@ class DiscordCodexClient(discord.Client):
         await interaction.response.defer(thinking=True)
         placeholder = SlashPlaceholder(interaction)
         late = asyncio.create_task(placeholder.retire_when_late())
-        view = CancelView(interaction.user.id, timeout=self.config.image_gen_timeout_seconds + 300)
+        config = self.config
+        longest = config.image_gen_timeout_seconds + config.image_gen_queue_wait_seconds
+        view = CancelView(interaction.user.id, timeout=longest + 300)
 
         async def on_progress(job: imagegen.Job) -> None:
             await placeholder.show(imagegen.progress_text(job), view)
 
         max_bytes = self._filesize_limit(interaction.guild)
         task = asyncio.create_task(
-            self._run_image(reservation, request, into, max_bytes, on_progress)
+            self._run_image(reservation, request, into, max_bytes, on_progress, inputs)
         )
         view.task = task
         try:

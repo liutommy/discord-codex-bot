@@ -245,7 +245,16 @@ def test_image_gen_url_is_checked_like_the_local_model_and_the_key_stays_out_of_
         "ALLOWED_GUILD_IDS": "111111111111111111",
     }
     config = load_config(base)
-    assert (config.image_gen_url, config.image_gen_timeout_seconds) == ("", 1200)
+    assert (config.image_gen_url, config.image_gen_timeout_seconds) == ("", 1800)
+    # Waiting in the host's GPU queue has its own cap, by default three run times.
+    assert (config.image_gen_queue_wait_seconds, config.local_llm_queue_wait_seconds) == (
+        5400,
+        3600,
+    )
+    config = load_config({**base, "LOCAL_LLM_TIMEOUT_SECONDS": "100"})
+    assert config.local_llm_queue_wait_seconds == 300
+    config = load_config({**base, "IMAGE_GEN_QUEUE_WAIT_SECONDS": "60"})
+    assert (config.image_gen_timeout_seconds, config.image_gen_queue_wait_seconds) == (1800, 60)
     config = load_config(
         {**base, "IMAGE_GEN_URL": " http://172.31.254.1:18082 ", "IMAGE_GEN_API_KEY": "img-key"}
     )
@@ -256,3 +265,5 @@ def test_image_gen_url_is_checked_like_the_local_model_and_the_key_stays_out_of_
             load_config({**base, "IMAGE_GEN_URL": bad})
     with pytest.raises(ValueError, match="IMAGE_GEN_TIMEOUT_SECONDS"):
         load_config({**base, "IMAGE_GEN_TIMEOUT_SECONDS": "0"})
+    with pytest.raises(ValueError, match="LOCAL_LLM_QUEUE_WAIT_SECONDS"):
+        load_config({**base, "LOCAL_LLM_QUEUE_WAIT_SECONDS": "0"})

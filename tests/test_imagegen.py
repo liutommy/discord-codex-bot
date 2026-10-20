@@ -2,6 +2,7 @@
 service speaking the contract in docs/image-service.md over real HTTP."""
 
 import asyncio
+import base64
 import types
 from dataclasses import replace
 from datetime import timedelta
@@ -23,6 +24,7 @@ from discord_codex_bot.ui import CANCELLED
 GUILD, OTHER_GUILD, USER = 111111111111111111, 333333333333333333, 5
 ALLOWED = 222222222222222222  # the conftest allowlisted channel
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+GIF = b"GIF89a" + b"0" * 32
 KEY = "img-SECRET-key"
 CATALOG = {
     "models": [
@@ -30,8 +32,20 @@ CATALOG = {
             "id": "chroma1-flash",
             "name": "Chroma1 Flash",
             "prompt_style": "natural",
-            "options": ["seed", "negative", "aspect", "count", "hires", "upscale", "detailer"],
-            "defaults": {"aspect": "1:1", "count": 1},
+            "options": [
+                "seed",
+                "negative",
+                "aspect",
+                "count",
+                "enhance",
+                "init_image",
+                "strength",
+                "mask",
+                "upscale",
+                "detailer",
+            ],
+            "enhancers": ["local", "off"],
+            "defaults": {"aspect": "1:1", "count": 1, "enhance": "local", "strength": 0.6},
         },
         {
             "id": "plain",
@@ -44,12 +58,16 @@ CATALOG = {
     "aspects": ["1:1", "3:4", "4:3", "9:16", "16:9"],
     "upscale": ["off", "2x", "4x"],
     "max_count": 4,
+    "max_input_bytes": 1000,
 }
 
 
 class FakeImageService:
-    """The image service: records every call; a job reports `queued` for `queued_polls` polls,
-    stays `generating` while `hold` is not set, then ends in `final`."""
+    """The image service (contract v2): records every call. A submitted job waits in the shared
+    GPU queue for `queued_polls` polls, its `position` (items ahead) falling to 0 and its
+    `queued_s` growing; it then stays `generating` while `hold` is not set, and ends in `final`.
+    `submit_reply` replaces the 202 (a 429 queue_full, say); an input over the catalog's
+    max_input_bytes is refused with 413, as the service does."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict | None, str | None]] = []
@@ -58,6 +76,7 @@ class FakeImageService:
         self.queued_polls = 1
         self.hold: asyncio.Event | None = None
         self.final = "done"
+        self.enhance_used = "local"
         self.polls = 0
         self.url = ""
 
@@ -82,6 +101,12 @@ class FakeImageService:
             await record(request)
             if self.submit_reply is not None:
                 return web.json_response(self.submit_reply[1], status=self.submit_reply[0])
+            body = self.calls[-1][2]
+            limit = self.catalog.get("max_input_bytes", 0)
+            for name in ("init_image", "mask"):
+                if body.get(name) and len(base64.b64decode(body[name]["data"])) > limit:
+                    error = {"error": "input_too_large", "max_input_bytes": limit}
+                    return web.json_response(error, status=413)
             return web.json_response(
                 {"job_id": "j-1", "state": "queued", "position": 2}, status=202
             )
@@ -89,9 +114,22 @@ class FakeImageService:
         async def job(request):
             await record(request)
             self.polls += 1
-            state = {"job_id": "j-1", "position": 0, "step": 0, "steps": 8, "images": []}
+            queued_s = float(min(self.polls, self.queued_polls))
+            state = {
+                "job_id": "j-1",
+                "position": 0,
+                "step": 0,
+                "steps": 8,
+                "model": "chroma1-flash",
+                "enhance_used": self.enhance_used,
+                "images": [],
+                "error": None,
+                "queued_s": queued_s,
+                "elapsed_s": 0.0,
+            }
             if self.polls <= self.queued_polls:
-                return web.json_response({**state, "state": "queued", "position": 1})
+                ahead = self.queued_polls - self.polls
+                return web.json_response({**state, "state": "queued", "position": ahead})
             if self.hold is not None and not self.hold.is_set():
                 return web.json_response({**state, "state": "generating", "step": 3})
             images = [{"index": 0, "bytes": len(PNG), "mime": "image/png", "seed": 42}]
@@ -203,6 +241,26 @@ class FakeInteraction:
         )
 
 
+class FakeAttachment:
+    """A discord.Attachment as the slash command sees it: the type and size Discord reports, and
+    the bytes, counting each read (a refused request must not download anything)."""
+
+    def __init__(self, data: bytes, content_type: str = "image/png", size: int | None = None):
+        self.id = 77
+        self.data = data
+        self.content_type = content_type
+        self.size = len(data) if size is None else size
+        self.reads = 0
+
+    async def read(self) -> bytes:
+        self.reads += 1
+        return self.data
+
+
+def _wire(data: bytes, mime: str = "image/png") -> dict:
+    return {"mime": mime, "data": base64.b64encode(data).decode("ascii")}
+
+
 # ----- the client module --------------------------------------------------------------------
 
 
@@ -217,10 +275,14 @@ def test_resolve_checks_every_option_against_the_catalog() -> None:
         (ImageRequest("貓", aspect="2:1"), "bad_value"),
         (ImageRequest("貓", upscale="8x"), "bad_value"),
         (ImageRequest("貓", count=5), "bad_value"),
+        # enhance is checked against the model's own enhancers, not the three names
+        (ImageRequest("貓", enhance="cloud"), "bad_value"),
+        (ImageRequest("貓", "plain", enhance="off"), "unsupported_option"),
     ):
         with pytest.raises(ImageGenError) as caught:
             imagegen.resolve(catalog, request)
         assert caught.value.code == code and caught.value.fixable
+    assert imagegen.resolve(catalog, ImageRequest("貓", enhance="off")).id == "chroma1-flash"
     # A model's default count is what a request without count= costs.
     assert imagegen.image_count(catalog, ImageRequest("貓", "plain")) == 2
     assert imagegen.image_count(None, ImageRequest("貓")) == 1
@@ -267,9 +329,39 @@ async def test_run_job_submits_polls_and_downloads_with_the_key(service, client,
     assert service.deletes() == [], "a finished job is not cancelled"
 
 
+def test_input_images_are_checked_before_anything_is_read() -> None:
+    """Negative controls for image-to-image: each guard alone refuses the request, from the
+    type and size an attachment states, before a byte of it is read."""
+    catalog = imagegen.parse_catalog(CATALOG)
+    small = imagegen.InputImage("image/png", 10)
+    ok = ImageRequest("貓", init_image=small, mask=small, strength=0.5)
+    assert imagegen.resolve(catalog, ok).id == "chroma1-flash"
+    for request, code, said in (
+        (ImageRequest("貓", mask=small), "bad_value", "mask 要搭配 image"),
+        (ImageRequest("貓", strength=0.5), "bad_value", "strength 要搭配 image"),
+        (replace(ok, strength=1.5), "bad_value", "strength 只能是 0-1"),
+        (replace(ok, init_image=imagegen.InputImage("image/png", 1001)), "input_too_large", ""),
+        (replace(ok, mask=imagegen.InputImage("image/png", 1001)), "input_too_large", ""),
+        (replace(ok, init_image=imagegen.InputImage("image/gif", 10)), "bad_value", "PNG"),
+        (ImageRequest("貓", "plain", init_image=small), "unsupported_option", "init_image"),
+    ):
+        with pytest.raises(ImageGenError) as caught:
+            imagegen.resolve(catalog, request)
+        assert caught.value.code == code and said in str(caught.value)
+    # A service that states no max_input_bytes takes no input image.
+    bare = imagegen.parse_catalog({k: v for k, v in CATALOG.items() if k != "max_input_bytes"})
+    with pytest.raises(ImageGenError, match="太大"):
+        imagegen.resolve(bare, ImageRequest("貓", init_image=small))
+    # The type of the bytes, not of the name: a GIF sent as image/png is not a PNG.
+    assert imagegen.input_image(PNG).mime == "image/png"
+    assert imagegen.input_image(b"\xff\xd8\xff\xe0" + b"0" * 8).mime == "image/jpeg"
+    assert imagegen.input_image(b"RIFF\x00\x00\x00\x00WEBPVP8 ").mime == "image/webp"
+    assert imagegen.input_image(GIF).mime == ""
+
+
 async def test_service_refusals_become_member_messages(service, client, tmp_path) -> None:
     for status, payload, code in (
-        (429, {"error": "queue_full", "queue": 5}, "queue_full"),
+        (429, {"error": "queue_full", "queue": 3}, "queue_full"),
         (503, {"error": "unavailable", "detail": "GPU busy"}, "unavailable"),
         (400, {"error": "unsupported_option", "option": "detailer"}, "unsupported_option"),
     ):
@@ -280,10 +372,101 @@ async def test_service_refusals_become_member_messages(service, client, tmp_path
             )
         assert caught.value.code == code
     assert "GPU busy" not in str(caught.value)
+    service.submit_reply = (413, {"error": "input_too_large", "max_input_bytes": 12_000_000})
+    with pytest.raises(ImageGenError, match="每張最多 12 MB"):
+        await imagegen.run_job(client.images, ImageRequest("貓"), tmp_path, 8_000_000, GUILD, USER)
     service.submit_reply = None
     service.final = "failed"
     with pytest.raises(ImageGenError, match="失敗"):
         await imagegen.run_job(client.images, ImageRequest("貓"), tmp_path, 8_000_000, GUILD, USER)
+
+
+@pytest.fixture
+def fake_time(monkeypatch):
+    """A wall clock that moves only between polls, by `step` seconds each: a job queued for N
+    polls has waited N * step seconds, however fast the test runs."""
+    now = {"t": 1_000_000.0, "step": 100.0}
+
+    async def sleep_for(seconds, clock=None):
+        now["t"] += now["step"]
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(imagegen, "sleep_for", sleep_for)
+    return now
+
+
+async def test_the_run_timeout_starts_when_the_job_leaves_the_queue(
+    service, client, tmp_path, fake_time
+) -> None:
+    """Negative control for the wait/run split: 600 s in the queue then 200 s generating is
+    inside a 300 s run timeout; counted from submission it would be 800 s and time out."""
+    client.images._config = replace(
+        client.config, image_gen_timeout_seconds=300, image_gen_queue_wait_seconds=1000
+    )
+    service.queued_polls = 6
+    service.hold = asyncio.Event()
+    seen = []
+
+    async def on_progress(job):
+        seen.append((job.state, job.position))
+        if job.state == "generating" and len([s for s, _ in seen if s == "generating"]) == 2:
+            service.hold.set()
+
+    result = await imagegen.run_job(
+        client.images,
+        ImageRequest("貓"),
+        tmp_path / "out",
+        8_000_000,
+        GUILD,
+        USER,
+        on_progress,
+        clock=lambda: fake_time["t"],
+    )
+    assert result.paths and service.deletes() == []
+    # The progress shows the items ahead while queued, then the steps.
+    assert seen[:3] == [("queued", 2), ("queued", 5), ("queued", 4)]
+    queued = imagegen.Job("j", "queued", position=2)
+    assert imagegen.progress_text(queued) == "🎨 排隊中，前面還有 2 個…"
+    generating = imagegen.Job("j", "generating", step=3, steps=8)
+    assert imagegen.progress_text(generating) == "🎨 生成中 3/8…"
+    # ...and a job that runs past the run timeout once out of the queue still times out.
+    service.polls, service.queued_polls, service.hold = 0, 1, asyncio.Event()
+    with pytest.raises(ImageGenError) as caught:
+        await imagegen.run_job(
+            client.images,
+            ImageRequest("貓"),
+            tmp_path / "out2",
+            8_000_000,
+            GUILD,
+            USER,
+            clock=lambda: fake_time["t"],
+        )
+    assert caught.value.code == "timeout" and service.deletes() == ["/v1/image/jobs/j-1"]
+
+
+async def test_a_job_stuck_in_the_queue_is_given_up_and_cancelled(
+    service, client, tmp_path, fake_time
+) -> None:
+    client.images._config = replace(
+        client.config, image_gen_timeout_seconds=300, image_gen_queue_wait_seconds=1000
+    )
+    service.queued_polls = 10_000  # a service that never starts it
+    with pytest.raises(ImageGenError) as caught:
+        await asyncio.wait_for(
+            imagegen.run_job(
+                client.images,
+                ImageRequest("貓"),
+                tmp_path,
+                8_000_000,
+                GUILD,
+                USER,
+                clock=lambda: fake_time["t"],
+            ),
+            5,
+        )
+    assert caught.value.code == "queue_timeout" and str(caught.value) == imagegen.QUEUE_TIMED_OUT
+    assert service.deletes() == ["/v1/image/jobs/j-1"], "it gives up its place in the queue"
+    assert 10 <= service.polls <= 11
 
 
 def test_settings_default_validate_and_count_per_day(tmp_path) -> None:
@@ -324,10 +507,11 @@ async def test_slash_paints_progress_and_replaces_the_placeholder(service, clien
     interaction = FakeInteraction()
     await client.image_command(interaction, "夕陽下的貓", aspect=None, count=1, seed=9)
     assert interaction.deferred and interaction.messages == []
-    assert any("排隊中" in (e["content"] or "") for e in interaction.edits)
+    assert any("排隊中，前面還有 2 個" in (e["content"] or "") for e in interaction.edits)
     last = interaction.edits[-1]
     assert last["files"] == ["image-0.png"] and last["view"] is None
     assert last["content"].startswith("**畫**：\n> 夕陽下的貓") and "seed 42" in last["content"]
+    assert last["content"].endswith("· enhance local"), "what the service used is shown"
     body = service.posts()[0]
     assert body["max_bytes"] == 9_000_000 and body["count"] == 1 and body["seed"] == 9
     assert client.image_settings.used(GUILD, USER) == 1
@@ -365,11 +549,13 @@ async def test_slash_cancel_deletes_the_job_on_the_service(service, client) -> N
     assert client._image_in_flight == {}
 
 
-async def test_slash_failure_is_shown_and_refunded(service, client) -> None:
-    service.submit_reply = (429, {"error": "queue_full", "queue": 5})
+async def test_slash_queue_full_is_shown_and_not_charged(service, client) -> None:
+    """Negative control: a job the full GPU queue refused gives its images back."""
+    service.submit_reply = (429, {"error": "queue_full", "queue": 3})
     interaction = FakeInteraction()
-    await client.image_command(interaction, "貓")
-    assert interaction.edits[-1]["content"] == f"⚠️ {imagegen.QUEUE_FULL}"
+    await client.image_command(interaction, "貓", count=2)
+    shown = interaction.edits[-1]["content"]
+    assert shown == "⚠️ 地端 GPU 的排隊已滿（已有 3 個在等），請稍後再試。"
     assert client.image_settings.used(GUILD, USER) == 0 and client._image_in_flight == {}
 
 
@@ -403,6 +589,49 @@ async def test_slash_refusals_never_submit_a_job(service, client) -> None:
         assert refused.edits[-1]["content"].startswith("⚠️ ") and refused.edits[-1]["view"] is None
     assert service.posts() == [], "unknown model and unsupported option only read the catalog"
     assert client.image_settings.used(GUILD, USER) == 3, "the refused jobs were given back"
+
+
+async def test_slash_image_to_image_sends_the_inputs_as_base64(service, client) -> None:
+    image, mask = FakeAttachment(PNG), FakeAttachment(PNG, "image/png; charset=binary")
+    enhance = types.SimpleNamespace(value="off")
+    interaction = FakeInteraction()
+    await client.image_command(
+        interaction, "改成雪景", image=image, strength=0.4, mask=mask, enhance=enhance
+    )
+    assert interaction.edits[-1]["files"] == ["image-0.png"]
+    body = service.posts()[0]
+    assert body["init_image"] == _wire(PNG) and body["mask"] == _wire(PNG)
+    assert (body["strength"], body["enhance"]) == (0.4, "off")
+    assert "split" not in body and "cloud_enhance" not in body and "hires" not in body
+    assert image.reads == mask.reads == 1
+
+
+async def test_slash_input_refusals_never_submit_or_download(service, client) -> None:
+    """Negative controls: a mask without an image, an input over the catalog's
+    max_input_bytes, a model that takes no input image, an enhance the model does not list and a
+    type that is not PNG/JPEG/WebP are refused before the job is submitted, and all but the last
+    (which needs the bytes) before the attachment is read; none costs an image."""
+    for kwargs, said in (
+        ({"mask": FakeAttachment(PNG)}, "mask 要搭配 image"),
+        ({"strength": 0.5}, "strength 要搭配 image"),
+        ({"image": FakeAttachment(PNG, size=5000)}, "image 太大"),
+        ({"image": FakeAttachment(PNG), "mask": FakeAttachment(PNG, size=5000)}, "mask 太大"),
+        ({"image": FakeAttachment(PNG), "model": "plain"}, "不支援 init_image"),
+        ({"image": FakeAttachment(GIF, "image/gif")}, "只能是 PNG、JPEG 或 WebP"),
+        ({"enhance": types.SimpleNamespace(value="cloud")}, "enhance 只能是 local, off"),
+    ):
+        refused = FakeInteraction()
+        await client.image_command(refused, "貓", **kwargs)
+        assert said in refused.edits[-1]["content"], kwargs
+        attached = [v for v in kwargs.values() if isinstance(v, FakeAttachment)]
+        assert all(a.reads == 0 for a in attached), f"downloaded for nothing: {kwargs}"
+    # A file named and typed as PNG whose bytes are a GIF: read, then refused, never submitted.
+    disguised = FakeAttachment(GIF, "image/png")
+    refused = FakeInteraction()
+    await client.image_command(refused, "貓", image=disguised)
+    assert "只能是 PNG、JPEG 或 WebP" in refused.edits[-1]["content"] and disguised.reads == 1
+    assert service.posts() == [] and client.image_settings.used(GUILD, USER) == 0
+    assert client._image_in_flight == {}
 
 
 async def test_slash_counts_the_model_default_once_the_catalog_is_read(service, client) -> None:
@@ -500,6 +729,21 @@ async def test_unknown_model_tag_goes_back_to_the_model_and_is_fixed(service, cl
     assert "沒有「dalle」這個圖片模型" in result.text and result.text.endswith(IMAGE_STARTED)
     await _delivered(client)
     assert [body["model"] for body in service.posts()] == ["plain"]
+
+
+async def test_tag_enhance_is_checked_against_the_model_and_sent(service, client, monkeypatch):
+    channel = FakeChannel()
+    monkeypatch.setattr(client, "get_channel", {ALLOWED: channel}.get)
+    prompts = _codex_replies(
+        monkeypatch,
+        '<image_gen prompt="貓" enhance="cloud"/>',
+        '<image_gen prompt="貓" enhance="off"/>',
+    )
+    result = await client._answer("畫貓，不要改寫", [], GUILD, USER, channel_id=ALLOWED)
+    assert "enhance must be one of local, off" in prompts[1]
+    assert result.text.endswith(IMAGE_STARTED)
+    await _delivered(client)
+    assert [body["enhance"] for body in service.posts()] == ["off"]
 
 
 async def test_tag_refusals_never_submit_a_job(service, client, monkeypatch) -> None:
