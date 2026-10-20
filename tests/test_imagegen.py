@@ -1092,3 +1092,16 @@ async def test_admin_image_get_and_set(client, tmp_path) -> None:
     assert status == "rejected"
     status, document = await run("image.set", guild=OTHER_GUILD, state="off")
     assert status == "rejected" and client.image_settings.enabled(OTHER_GUILD)
+
+
+def test_help_explains_both_kinds_of_reference_image() -> None:
+    from discord_codex_bot.help import COMMAND_GUIDE
+
+    text, examples = COMMAND_GUIDE["-image"]
+    assert "目前只有 WAI" not in text
+    assert "編輯模型" in text and "不支援 ref_strength" in text
+    assert any(
+        "model:qwen-image-2.1-turbo" in e and "ref_image:" in e and "ref_strength" not in e
+        for e in examples
+    ), "an edit-model example without ref_strength"
+    assert any("model:wai-illustrious" in e and "ref_strength:" in e for e in examples)

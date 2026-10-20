@@ -3651,8 +3651,8 @@ class DiscordCodexClient(discord.Client):
         image="選填：原圖（PNG／JPEG／WebP），照著它改",
         strength="選填：0～1，原圖可以改多少（要附原圖）",
         mask="選填：遮罩，白色的地方重畫（要附原圖）",
-        ref_image="選填：參考圖，沿用圖中人物的長相與服裝（目前只有 WAI 支援）",
-        ref_strength="選填：0～1，參考圖的影響力（要附參考圖）",
+        ref_image="選填：參考圖；WAI 沿用髮色與整體感覺，編輯模型（qwen、anima）照它改或保留角色",
+        ref_strength="選填：0～1，參考圖的影響力（要附參考圖；只有 WAI，編輯模型不支援）",
         upscale="選填：放大倍率",
         detailer="選填：細節修補",
     )

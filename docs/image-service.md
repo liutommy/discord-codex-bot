@@ -78,12 +78,20 @@ is refused with 400 and `{"error": "unsupported_option", "option": "detailer"}`,
 `null` or a missing field means the model's default. `init_image`, `mask` and `ref_image` are
 `{"mime": "image/png", "data": "<base64>"}` (png, jpeg or webp, at most `max_input_bytes` decoded
 in total). With `init_image` the job is image-to-image and `strength` (0 to 1) is how much it may
-change; `mask` (white = repaint) needs `init_image`. `ref_image` is a reference image (IP-Adapter):
-the output carries over its subject and appearance (face, hair, clothing), while `init_image`
-carries over layout and pose. `ref_strength` (0 to 1, model default when `null`) is how strongly
-the reference applies, and needs `ref_image`. `ref_image` works alone, with a text prompt, or
-together with `init_image`. Only a model whose `options` list them takes `ref_image` and
-`ref_strength`.
+change; `mask` (white = repaint) needs `init_image`. `ref_image` is a reference image; what it
+does depends on the kind of model, and only a model whose `options` list them takes `ref_image`
+and `ref_strength`:
+
+- An IP-Adapter model (for example `wai-illustrious`) lists both. The output carries over the
+  reference's subject and appearance (mainly hair colour and general look), not its layout, while
+  `init_image` carries over layout and pose. `ref_strength` (0 to 1, model default when `null`)
+  is how strongly the reference applies, and needs `ref_image`. `ref_image` works alone, with a
+  text prompt, or together with `init_image`.
+- An edit model (for example `qwen-image-2.1-turbo` or `anima`) lists `ref_image` but not
+  `ref_strength`. The model takes `ref_image` as the image to edit or the character to keep, and
+  the prompt is an instruction or a description of the result ("replace the background with a
+  snowy forest at night; keep the character, pose and clothing"). The service turns prompt
+  enhancement off by default for such a job.
 
 `max_bytes` is the largest file the caller can deliver; the service encodes each image (PNG, then
 WEBP or JPEG at falling quality) to fit. `requester` is for the service log only.
