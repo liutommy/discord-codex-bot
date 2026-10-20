@@ -163,11 +163,12 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "（留空用模型預設）；再附 mask 則只重畫遮罩白色的地方（mask 一定要搭配 image）。"
         "附 ref_image（參考圖）時，用法看模型：wai-illustrious 沿用圖中人物的"
         "長相與服裝（主要是髮色和整體感覺），不沿用構圖，ref_strength 0～1 越大越像參考圖，"
-        "可以單獨用，也可以和 image 一起用；編輯模型 qwen-image-2.1-turbo 與 anima "
-        "把參考圖當成要改的圖或要保留的角色，不支援 ref_strength，prompt 寫成指示或"
+        "可以單獨用，也可以和 image 一起用；編輯模型 qwen-image-edit-2511、qwen-image-2.1-turbo "
+        "與 anima 把參考圖當成要改的圖或要保留的角色，不支援 ref_strength，prompt 寫成指示或"
         "想要的結果（例如「把背景換成夜晚的雪林，角色、姿勢、服裝維持不變」），描述預設不改寫。"
-        "qwen-image-2.1-turbo 最能保留角色原樣，適合換背景這類修改，但姿勢通常不變，"
-        "一張約 9 分鐘；anima（動漫風）會照指示改姿勢與場景，細節略有出入，一張約 23 分鐘。"
+        "qwen-image-edit-2511 最能照指示改姿勢與場景、又保留角色，一定要附參考圖，一張約 10 分鐘；"
+        "qwen-image-2.1-turbo 最能保留角色原樣，適合換背景，但姿勢通常不變，一張約 9 分鐘；"
+        "anima（動漫風）會照指示改姿勢與場景，細節略有出入，一張約 10 分鐘。"
         "地端模型和圖片共用一張顯卡、一條隊伍：一次跑一個，最多 3 個在等，滿了會請你稍後再試。"
         "生成中會顯示前面還有幾個與進度，❌ 取消；圖做好會換掉「生成中」的訊息，"
         "超過 14 分鐘則另外貼在頻道。依伺服器設定，判定為成人內容的圖（或全部的圖）會以暴雷"
@@ -183,6 +184,8 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             " ref_strength:0.8",
             "/{p}-image prompt:把背景換成夜晚的雪林，角色、姿勢、服裝維持不變"
             " model:qwen-image-2.1-turbo ref_image:（附上角色圖）",
+            "/{p}-image prompt:她坐在咖啡廳雙手捧著咖啡微笑 model:qwen-image-edit-2511"
+            " ref_image:（附上角色圖）",
         ],
     ),
     "-export": (
