@@ -70,17 +70,23 @@ is refused with 400 and `{"error": "unsupported_option", "option": "detailer"}`,
 ```json
 {"model": "chroma1-flash", "prompt": "...", "negative": null, "aspect": "3:4", "count": 1,
  "seed": null, "steps": null, "cfg": null, "enhance": null,
- "init_image": null, "strength": null, "mask": null,
+ "init_image": null, "strength": null, "mask": null, "ref_image": null, "ref_strength": null,
  "upscale": null, "detailer": null,
  "max_bytes": 8000000, "requester": {"guild": "123", "user": "456"}}
 ```
 
-`null` or a missing field means the model's default. `init_image` and `mask` are
+`null` or a missing field means the model's default. `init_image`, `mask` and `ref_image` are
 `{"mime": "image/png", "data": "<base64>"}` (png, jpeg or webp, at most `max_input_bytes` decoded
-each). With `init_image` the job is image-to-image and `strength` (0 to 1) is how much it may
-change; `mask` (white = repaint) needs `init_image`. `max_bytes` is the largest file the caller
-can deliver; the service encodes each image (PNG, then WEBP or JPEG at falling quality) to fit.
-`requester` is for the service log only.
+in total). With `init_image` the job is image-to-image and `strength` (0 to 1) is how much it may
+change; `mask` (white = repaint) needs `init_image`. `ref_image` is a reference image (IP-Adapter):
+the output carries over its subject and appearance (face, hair, clothing), while `init_image`
+carries over layout and pose. `ref_strength` (0 to 1, model default when `null`) is how strongly
+the reference applies, and needs `ref_image`. `ref_image` works alone, with a text prompt, or
+together with `init_image`. Only a model whose `options` list them takes `ref_image` and
+`ref_strength`.
+
+`max_bytes` is the largest file the caller can deliver; the service encodes each image (PNG, then
+WEBP or JPEG at falling quality) to fit. `requester` is for the service log only.
 
 - 202 `{"job_id": "j-...", "state": "queued", "position": 2}`
 - 400 `{"error": "unknown_model" | "unsupported_option" | "bad_value", ...}`

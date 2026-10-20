@@ -159,8 +159,10 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "其餘選項（比例、張數、種子、不要出現的東西、描述改寫 enhance、放大、細節修補）"
         "留空就用服務的預設，模型不支援的選項會直接說不支援。"
         "enhance 選生成前怎麼改寫描述：地端改寫、雲端改寫（服務判斷不適合時改用地端）或不改寫。"
-        "附 image（PNG／JPEG／WebP 原圖）就照著它改，strength 0～1 決定能改多少；"
-        "再附 mask 則只重畫遮罩白色的地方（mask 一定要搭配 image）。"
+        "附 image（PNG／JPEG／WebP 原圖）就照著它改，保留構圖與姿勢，strength 0～1 越大改越多"
+        "（留空用模型預設）；再附 mask 則只重畫遮罩白色的地方（mask 一定要搭配 image）。"
+        "附 ref_image（參考圖）則沿用圖中人物的長相與服裝，不沿用構圖，ref_strength 0～1 越大"
+        "越像參考圖；可以單獨用，也可以和 image 一起用（目前只有 WAI 支援）。"
         "地端模型和圖片共用一張顯卡、一條隊伍：一次跑一個，最多 3 個在等，滿了會請你稍後再試。"
         "生成中會顯示前面還有幾個與進度，❌ 取消；圖做好會換掉「生成中」的訊息，"
         "超過 14 分鐘則另外貼在頻道。依伺服器設定，判定為成人內容的圖（或全部的圖）會以暴雷"
@@ -172,6 +174,8 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             "/{p}-image prompt:賽博龐克街景 aspect:16:9 count:2",
             "/{p}-image prompt:海邊的燈塔 seed:1234 negative:人物 enhance:不改寫",
             "/{p}-image prompt:改成雪景 image:（附上原圖） strength:0.5",
+            "/{p}-image prompt:她在海邊散步 model:wai-illustrious ref_image:（附上角色圖）"
+            " ref_strength:0.8",
         ],
     ),
     "-export": (
