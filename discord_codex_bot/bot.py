@@ -3674,7 +3674,7 @@ class DiscordCodexClient(discord.Client):
         reports, which `imagegen.resolve` checks; the bytes are read after it passes."""
         if attachment is None:
             return None
-        mime = (attachment.content_type or "").split(";")[0].strip().lower()
+        mime = imagegen.stated_type(attachment.content_type, attachment.filename)
         return imagegen.InputImage(mime, attachment.size)
 
     @staticmethod

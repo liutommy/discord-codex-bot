@@ -245,10 +245,17 @@ class FakeAttachment:
     """A discord.Attachment as the slash command sees it: the type and size Discord reports, and
     the bytes, counting each read (a refused request must not download anything)."""
 
-    def __init__(self, data: bytes, content_type: str = "image/png", size: int | None = None):
+    def __init__(
+        self,
+        data: bytes,
+        content_type: str | None = "image/png",
+        size: int | None = None,
+        filename: str = "image.png",
+    ):
         self.id = 77
         self.data = data
         self.content_type = content_type
+        self.filename = filename
         self.size = len(data) if size is None else size
         self.reads = 0
 
@@ -632,6 +639,67 @@ async def test_slash_input_refusals_never_submit_or_download(service, client) ->
     assert "只能是 PNG、JPEG 或 WebP" in refused.edits[-1]["content"] and disguised.reads == 1
     assert service.posts() == [] and client.image_settings.used(GUILD, USER) == 0
     assert client._image_in_flight == {}
+
+
+async def test_an_image_without_a_content_type_is_typed_by_its_name_then_its_bytes(
+    service, client
+) -> None:
+    """Discord may omit an attachment's content type: the file name stands in until the bytes
+    are read. Negative control: a nameless .bin of GIF bytes is still refused unread."""
+    interaction = FakeInteraction()
+    untyped = FakeAttachment(PNG, None, filename="photo.PNG")
+    await client.image_command(interaction, "貓", image=untyped)
+    assert interaction.edits[-1]["files"] == ["image-0.png"] and untyped.reads == 1
+    assert service.posts()[0]["init_image"] == _wire(PNG)
+    unknown = FakeAttachment(GIF, None, filename="file.bin")
+    refused = FakeInteraction()
+    await client.image_command(refused, "貓", image=unknown)
+    assert "只能是 PNG、JPEG 或 WebP" in refused.edits[-1]["content"] and unknown.reads == 0
+    assert len(service.posts()) == 1
+
+
+async def test_downloads_share_what_is_left_of_the_run_timeout(
+    service, client, tmp_path, fake_time, monkeypatch
+) -> None:
+    """A job done just before the run timeout cannot spend another full download timeout per
+    image: the download gets the time left, and none left is a timeout that cancels the job."""
+    limits = []
+    real = imagegen.ImageService.download
+
+    async def download(self, session, job_id, image, max_bytes, limit=120):
+        limits.append(limit)
+        return await real(self, session, job_id, image, max_bytes, limit)
+
+    async def run(run_seconds, into):
+        client.images._config = replace(
+            client.config, image_gen_timeout_seconds=run_seconds, image_gen_queue_wait_seconds=1000
+        )
+        # Generating from poll 1 (t+100), done on poll 2 (t+200): 100 s of the run used.
+        service.polls, service.queued_polls, service.hold = 0, 0, asyncio.Event()
+
+        async def on_progress(job):
+            if job.state == "generating":
+                service.hold.set()
+
+        return await imagegen.run_job(
+            client.images,
+            ImageRequest("貓"),
+            tmp_path / into,
+            8_000_000,
+            GUILD,
+            USER,
+            on_progress,
+            clock=lambda: fake_time["t"],
+        )
+
+    monkeypatch.setattr(imagegen.ImageService, "download", download)
+    await run(250, "a")
+    assert limits == [pytest.approx(150.0)] and service.deletes() == []
+    limits.clear()
+    with pytest.raises(ImageGenError) as caught:
+        await run(100, "b")
+    assert caught.value.code == "timeout" and limits == []
+    assert service.deletes() == ["/v1/image/jobs/j-1"]
 
 
 async def test_slash_counts_the_model_default_once_the_catalog_is_read(service, client) -> None:

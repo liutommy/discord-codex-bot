@@ -16,6 +16,7 @@ import base64
 import contextlib
 import json
 import logging
+import mimetypes
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -254,6 +255,16 @@ def sniff(data: bytes) -> str:
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
     return ""
+
+
+def stated_type(content_type: str | None, filename: str) -> str:
+    """The type an attachment states before it is read: Discord's content type, or the one its
+    file name suggests when Discord omits it or sends a generic one. The bytes are checked again
+    once read (`input_image`)."""
+    mime = (content_type or "").split(";")[0].strip().lower()
+    if mime not in ("", "application/octet-stream"):
+        return mime
+    return mimetypes.guess_type(filename)[0] or mime
 
 
 def input_image(data: bytes) -> InputImage:
@@ -504,12 +515,17 @@ class ImageService:
         return _job(await self._call(session, "GET", f"/v1/image/jobs/{job_id}"))
 
     async def download(
-        self, session: aiohttp.ClientSession, job_id: str, image: Image, max_bytes: int
+        self,
+        session: aiohttp.ClientSession,
+        job_id: str,
+        image: Image,
+        max_bytes: int,
+        limit: float = DOWNLOAD_TIMEOUT_SECONDS,
     ) -> tuple[bytes, str]:
-        """One image's bytes and MIME type, refused past `max_bytes` (the service promises to
-        fit it; a larger file would only fail at Discord)."""
+        """One image's bytes and MIME type within `limit` seconds, refused past `max_bytes` (the
+        service promises to fit it; a larger file would only fail at Discord)."""
         url = self._url(f"/v1/image/jobs/{job_id}/images/{image.index}")
-        timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT_SECONDS)
+        timeout = aiohttp.ClientTimeout(total=min(limit, DOWNLOAD_TIMEOUT_SECONDS))
         async with session.get(url, timeout=timeout) as response:
             if response.status != 200:
                 raise _error(response.status, None, "")
@@ -619,12 +635,19 @@ async def _follow(
         clock() - (started if started is not None else submitted),
     )
     await asyncio.to_thread(into.mkdir, parents=True, exist_ok=True)
+    # The run timeout ends after the last download, so the downloads share what is left of it.
+    deadline = (started if started is not None else submitted) + service.timeout_seconds
     paths = []
     for image in job.images:
+        if (left := deadline - clock()) <= 0:
+            LOGGER.warning("Image job %s timed out before its downloads ended", job.job_id)
+            raise ImageGenError(TIMED_OUT, "timeout")
         try:
-            data, mime = await service.download(session, job.job_id, image, max_bytes)
+            data, mime = await service.download(session, job.job_id, image, max_bytes, left)
         except (aiohttp.ClientError, TimeoutError) as error:
             LOGGER.warning("Image job %s download failed: %s", job.job_id, type(error).__name__)
+            if deadline - clock() <= 0:
+                raise ImageGenError(TIMED_OUT, "timeout") from None
             raise ImageGenError(UNAVAILABLE, "unavailable") from None
         path = into / f"image-{image.index}{_SUFFIXES[mime]}"
         await asyncio.to_thread(path.write_bytes, data)
