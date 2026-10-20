@@ -94,12 +94,16 @@ can deliver; the service encodes each image (PNG, then WEBP or JPEG at falling q
 {"job_id": "j-...", "state": "queued|preparing|generating|postprocessing|done|failed|cancelled",
  "position": 0, "step": 3, "steps": 8, "model": "chroma1-flash", "enhance_used": "local",
  "images": [{"index": 0, "bytes": 812345, "mime": "image/webp", "seed": 1234}],
- "error": null, "queued_s": 95.0, "elapsed_s": 41.2}
+ "error": null, "sensitive": false, "queued_s": 95.0, "elapsed_s": 41.2}
 ```
 
 `position` counts items ahead in the shared queue. `queued_s` is the time spent waiting;
 `elapsed_s` counts from when the job left the queue. `images` is filled when `state` is `done`. A
 finished job and its images are kept for at least 30 minutes after it ends, then deleted.
+
+`sensitive` is `true` when the service judges the request sexual from the prompt as asked and as
+rewritten; it is never judged from the image. A missing `sensitive` reads as `false`. The bot
+uses it to decide which images to post behind a spoiler.
 
 ## GET /v1/image/jobs/{job_id}/images/{index}
 

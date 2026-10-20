@@ -3813,7 +3813,8 @@ class DiscordCodexClient(discord.Client):
             return
         finally:
             late.cancel()
-        files = [discord.File(path) for path in result.paths[:10]]
+        hide = imagegen.spoilered(result, self.image_settings.spoiler(interaction.guild_id))
+        files = [discord.File(path, spoiler=hide) for path in result.paths[:10]]
         try:
             if interaction_expired(interaction) and interaction.channel is not None:
                 await placeholder.retire()
@@ -3912,8 +3913,9 @@ class DiscordCodexClient(discord.Client):
             try:
                 result = await self._run_image(reservation, request, into, max_bytes)
                 text, paths = imagegen.caption(request.prompt, result, by=user_id), result.paths
+                hide = imagegen.spoilered(result, self.image_settings.spoiler(guild_id))
             except ImageGenError as error:
-                text, paths = f"<@{user_id}> 的圖片沒有生成：{error}", ()
+                text, paths, hide = f"<@{user_id}> 的圖片沒有生成：{error}", (), False
             channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
             channel_guild = getattr(getattr(channel, "guild", None), "id", None)
             if channel_guild != guild_id or self._access(guild_id, channel, channel_id):
@@ -3925,7 +3927,7 @@ class DiscordCodexClient(discord.Client):
                 return
             await channel.send(
                 text,
-                files=[discord.File(path) for path in paths[:10]],
+                files=[discord.File(path, spoiler=hide) for path in paths[:10]],
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:
