@@ -177,6 +177,7 @@ from .tracking import (
     tracking_loop,
 )
 from .ui import (
+    CANCELLED,
     AnswerButton,
     AnswerView,
     CancelView,
@@ -190,6 +191,50 @@ LOGGER = logging.getLogger(__name__)
 # Closes every recall round; a spare taking over mid-recall gets the round's results without it.
 ANSWER_NOW = "\n\nNow answer the member's question."
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
+# Discord closes an interaction's token 15 minutes after the command or click. A local model may
+# take longer (LOCAL_LLM_TIMEOUT_SECONDS), so past this an answer is posted in the channel.
+INTERACTION_LIFETIME = timedelta(minutes=14)
+
+
+LATE_NOTICE = "回答超過 14 分鐘，完成後會另外發在這個頻道。"
+
+
+def interaction_expired(interaction) -> bool:
+    created = getattr(interaction, "created_at", None)
+    return created is not None and discord.utils.utcnow() - created >= INTERACTION_LIFETIME
+
+
+class SlashPlaceholder:
+    """A slash command's deferred response, painted while the answer runs. At
+    INTERACTION_LIFETIME it is replaced once by LATE_NOTICE, the cancel button kept, and painted
+    no more: the token closes soon after, and the answer then goes to the channel."""
+
+    def __init__(self, interaction) -> None:
+        self.interaction = interaction
+        self.retired = False
+        self.view = None
+
+    async def show(self, text: str, view) -> None:
+        if self.retired and view is not None:  # a cancellation (no view) still gets through
+            return
+        self.view = view
+        with contextlib.suppress(discord.HTTPException):
+            await self.interaction.edit_original_response(content=text, view=view)
+
+    async def retire_when_late(self) -> None:
+        created = getattr(self.interaction, "created_at", None)
+        if created is None:
+            return
+        left = created + INTERACTION_LIFETIME - discord.utils.utcnow()
+        await asyncio.sleep(max(0.0, left.total_seconds()))
+        await self.retire()
+
+    async def retire(self) -> None:
+        if self.retired:
+            return
+        self.retired = True
+        with contextlib.suppress(discord.HTTPException):
+            await self.interaction.edit_original_response(content=LATE_NOTICE, view=self.view)
 
 
 def failure_text(backend: str, error: BaseException, prefix: str) -> str:
@@ -250,7 +295,6 @@ _FALLBACK_LABEL = {
     CodexUnauthorized: "登入失效",
 }
 STREAM_SHOW_CHARS = 1900
-CANCELLED = "⛔ 已取消。"
 PROVIDER_CHOICES = [
     app_commands.Choice(name="Grok（xAI）", value=GROK),
     app_commands.Choice(name="Codex", value="codex"),
@@ -2553,7 +2597,8 @@ class DiscordCodexClient(discord.Client):
         """Run one answer as a task the member can cancel (❌ on the placeholder, or -stop).
         `show(text, view)` paints the placeholder; `start(on_video_slow)` returns the answer
         coroutine. Returns the CodexResult, or None when the request was cancelled."""
-        view = CancelView(owner_id)
+        longest = max(self.config.codex_timeout_seconds, self.config.local_llm_timeout_seconds)
+        view = CancelView(owner_id, timeout=longest + 300)  # queueing and setup on top
         await show(THINKING, view)
 
         async def on_video_slow() -> None:
@@ -2690,21 +2735,34 @@ class DiscordCodexClient(discord.Client):
             bool(resume),
             pointed is not None,
         )
-        result = await self._answer(
-            prompt,
-            [],
-            interaction.guild_id,
-            user_id,
-            resume=resume,
-            channel_id=interaction.channel_id,
-            previews=previews,
-            **self._routed_kw(routed),
-        )
+        # The deferred "thinking" response would hang past the interaction's lifetime.
+        placeholder = SlashPlaceholder(interaction)
+        late_notice = asyncio.create_task(placeholder.retire_when_late())
+        try:
+            result = await self._answer(
+                prompt,
+                [],
+                interaction.guild_id,
+                user_id,
+                resume=resume,
+                channel_id=interaction.channel_id,
+                previews=previews,
+                **self._routed_kw(routed),
+            )
+        finally:
+            late_notice.cancel()
         if routed is not None:
             self._log_route(routed, result)
             result = replace(result, text=self._routed_text(routed, result))
+        late = interaction_expired(interaction) and interaction.channel is not None
+        if late:
+            await placeholder.retire()
         sent = await self.send_answer(
-            interaction.followup, question, result, interaction.guild_id, user_id
+            interaction.channel if late else interaction.followup,
+            question,
+            result,
+            interaction.guild_id,
+            user_id,
         )
         # Link the redo answer too, so replying to *it* continues the same thread.
         self._remember(
@@ -4105,29 +4163,28 @@ class DiscordCodexClient(discord.Client):
         if routed is not None:
             resume = routed.resume
 
-        async def show(text: str, view) -> None:
-            try:
-                await interaction.edit_original_response(content=text, view=view)
-            except discord.HTTPException:
-                pass
-
-        result = await self._run_tracked(
-            key,
-            interaction.user.id,
-            show,
-            lambda on_video_slow, on_delta: self._answer(
-                prompt,
-                attachments,
-                interaction.guild_id,
+        placeholder = SlashPlaceholder(interaction)
+        late = asyncio.create_task(placeholder.retire_when_late())
+        try:
+            result = await self._run_tracked(
+                key,
                 interaction.user.id,
-                effort_value,
-                resume,
-                on_video_slow=on_video_slow,
-                on_delta=on_delta,
-                channel_id=interaction.channel_id,
-                **self._routed_kw(routed),
-            ),
-        )
+                placeholder.show,
+                lambda on_video_slow, on_delta: self._answer(
+                    prompt,
+                    attachments,
+                    interaction.guild_id,
+                    interaction.user.id,
+                    effort_value,
+                    resume,
+                    on_video_slow=on_video_slow,
+                    on_delta=on_delta,
+                    channel_id=interaction.channel_id,
+                    **self._routed_kw(routed),
+                ),
+            )
+        finally:
+            late.cancel()
         if result is None:
             LOGGER.info(
                 "Cancelled slash guild=%s user=%s", interaction.guild_id, interaction.user.id
@@ -4151,15 +4208,22 @@ class DiscordCodexClient(discord.Client):
         )
         chunks = split_discord_message(reply)
         sent_id = None
+        view = self._answer_view(interaction.guild_id, interaction.user.id, prompt, result)
         try:
-            sent = await interaction.edit_original_response(
-                content=chunks[0],
-                attachments=self._files(result),
-                view=self._answer_view(interaction.guild_id, interaction.user.id, prompt, result),
-            )
+            if interaction_expired(interaction) and interaction.channel is not None:
+                await placeholder.retire()
+                sent = await interaction.channel.send(
+                    chunks[0], files=self._files(result), view=view
+                )
+                send_rest = interaction.channel.send
+            else:
+                sent = await interaction.edit_original_response(
+                    content=chunks[0], attachments=self._files(result), view=view
+                )
+                send_rest = interaction.followup.send
             sent_id = sent.id
             for chunk in chunks[1:]:
-                await interaction.followup.send(chunk)
+                await send_rest(chunk)
         except discord.HTTPException:
             LOGGER.exception(
                 "Delivery failed for /%s guild=%s", self.config.command_prefix, interaction.guild_id

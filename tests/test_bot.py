@@ -1610,6 +1610,83 @@ async def test_exchange_of_uses_the_replied_message_or_the_quoted_block(
     assert await client._exchange_of(replied) == ("", "去吃一蘭")
 
 
+async def test_the_slash_placeholder_is_retired_before_the_interaction_closes(monkeypatch) -> None:
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace as NS
+
+    from discord_codex_bot import bot as bot_module
+
+    edits = []
+
+    async def edit_original_response(content=None, view=None):
+        edits.append((content, view))
+
+    asked = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    now = {"t": asked + timedelta(minutes=13, seconds=59)}
+    monkeypatch.setattr(bot_module.discord.utils, "utcnow", lambda: now["t"])
+    interaction = NS(created_at=asked, edit_original_response=edit_original_response)
+    placeholder = bot_module.SlashPlaceholder(interaction)
+    await placeholder.show("思考中", "cancel-view")
+    late = asyncio.create_task(placeholder.retire_when_late())
+    await asyncio.sleep(0)
+    assert not late.done(), "a second before the lifetime it still waits"
+    await asyncio.wait_for(late, 3)
+    assert edits[-1] == (bot_module.LATE_NOTICE, "cancel-view"), "the cancel button stays"
+    await placeholder.show("部分答案 ▌", "cancel-view")
+    assert edits[-1][0] == bot_module.LATE_NOTICE, "nothing paints over the notice"
+    await placeholder.show(bot_module.CANCELLED, None)
+    assert edits[-1] == (bot_module.CANCELLED, None), "a cancellation still gets through"
+
+
+async def test_a_redo_past_the_interaction_lifetime_is_posted_in_the_channel(
+    client, backends, monkeypatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace as NS
+
+    from discord_codex_bot import bot as bot_module
+
+    posted = []
+
+    class Response:
+        async def defer(self, thinking=False):
+            pass
+
+    class Followup:
+        async def send(self, text, files=None, view=None):
+            posted.append(("followup", text))
+            return NS(id=1)
+
+    class Channel:
+        async def send(self, text, files=None, view=None):
+            posted.append(("channel", text))
+            return NS(id=2)
+
+    async def edit_original_response(content=None, view=None):
+        posted.append(("placeholder", content))
+
+    clicked = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    interaction = NS(
+        message=NS(content="**問**：\n> 今天吃什麼\n\n吃咖哩", reference=None, id=4242),
+        guild_id=GUILD,
+        channel_id=ALLOWED,
+        channel=Channel(),
+        response=Response(),
+        followup=Followup(),
+        created_at=clicked,
+        edit_original_response=edit_original_response,
+    )
+    monkeypatch.setattr(bot_module.discord.utils, "utcnow", lambda: clicked + timedelta(minutes=5))
+    await client.handle_answer_button(interaction, "redo", USER)
+    monkeypatch.setattr(bot_module.discord.utils, "utcnow", lambda: clicked + timedelta(minutes=16))
+    await client.handle_answer_button(interaction, "redo", USER)
+    # Past the lifetime the deferred "thinking" response is retired before the channel post.
+    assert [where for where, _ in posted] == ["followup", "placeholder", "channel"]
+    assert posted[1][1] == bot_module.LATE_NOTICE
+    assert posted[2][1].startswith("**問**"), "the 🔁 / 👍 buttons still find the question"
+
+
 async def test_handle_answer_button_remember_and_redo(client, backends, monkeypatch) -> None:
     from types import SimpleNamespace as NS
 

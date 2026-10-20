@@ -192,6 +192,7 @@ class Config:
     local_llm_url: str
     local_llm_api_key: str
     local_llm_max_tokens: int
+    local_llm_timeout_seconds: int
     local_llm_params: str  # a JSON object, validated at load (`local_params`)
     alert_user_id: int
     alert_after_failures: int
@@ -384,6 +385,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Output cap sent with every local request: a reasoning model's thinking counts toward
         # it, and mlx_lm.server's own default (512) ends most long-prompt turns mid-thought.
         local_llm_max_tokens=_positive_int(values, "LOCAL_LLM_MAX_TOKENS", 8192),
+        # A local model reads a long prompt slowly (about a minute for 12k tokens on an M4), so
+        # it gets its own limit instead of CODEX_TIMEOUT_SECONDS.
+        local_llm_timeout_seconds=_positive_int(values, "LOCAL_LLM_TIMEOUT_SECONDS", 1200),
         # Sampling for the local model, merged into every request: a model's recommended values
         # live in its card, and mlx_lm.server ignores the model's generation_config.json.
         local_llm_params=values.get("LOCAL_LLM_PARAMS", "").strip(),

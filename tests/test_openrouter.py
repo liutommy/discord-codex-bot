@@ -678,6 +678,20 @@ async def test_hosted_routers_send_no_output_cap(monkeypatch, cfg: Config) -> No
     assert "max_tokens" not in session.calls[0][2]
 
 
+async def test_local_requests_get_their_own_timeout(monkeypatch, local_cfg: Config) -> None:
+    timeouts = []
+
+    def fake_session(config, timeout, router=None):
+        timeouts.append(timeout)
+        return Session([Response({"choices": [{"message": {"content": "好"}}]})])
+
+    monkeypatch.setattr(openrouter, "_session", fake_session)
+    await run_router(LOCAL_ROUTER, "q", local_cfg, "qwen3-8b-q4")
+    await run_openrouter("q", local_cfg, "a/text:free")
+    assert timeouts == [local_cfg.local_llm_timeout_seconds, local_cfg.codex_timeout_seconds]
+    assert timeouts == [1200, 600]
+
+
 async def test_thinking_that_uses_up_the_cap_is_reported_as_such(
     monkeypatch, local_cfg: Config
 ) -> None:

@@ -51,6 +51,7 @@ def config() -> Config:
         local_llm_url="",
         local_llm_api_key="",
         local_llm_max_tokens=8192,
+        local_llm_timeout_seconds=1200,
         local_llm_params="",
         alert_user_id=0,
         alert_after_failures=3,
