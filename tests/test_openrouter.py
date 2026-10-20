@@ -435,7 +435,8 @@ async def test_local_path_ids_are_shown_by_name_and_sent_in_full(
             {"id": "mlx-community/Qwen3-4B-4bit"},
             {"id": "/srv/a/same.gguf"},
             {"id": "/srv/b/same.gguf"},
-            {"id": "/opt/models/mlx-community/Qwen3-4B-4bit"},
+            {"id": "/opt/m/qwen3"},
+            {"id": "qwen3"},
         ]
     }
     session = Session(
@@ -444,19 +445,45 @@ async def test_local_path_ids_are_shown_by_name_and_sent_in_full(
     monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
     catalog = Catalog(local_cfg, LOCAL_ROUTER)
     models = await catalog.free_models()
+    # A name another model shows gets a tag fixed by the full path (sha256, 4 hex digits).
     assert sorted((m.id, m.name) for m in models) == [
-        ("Qwen3-4B-4bit", "Qwen3-4B-4bit"),
         ("mimo-q4", "mimo-q4"),
         ("mlx-community/Qwen3-4B-4bit", "mlx-community/Qwen3-4B-4bit"),
-        ("same.gguf", "same.gguf"),  # two paths, one name: numbered in path order
-        ("same.gguf~2", "same.gguf~2"),
+        ("qwen3", "qwen3"),  # a server-side id keeps its name; the path beside it is tagged
+        ("qwen3~e736", "qwen3~e736"),
+        ("same.gguf~c5aa", "same.gguf~c5aa"),
+        ("same.gguf~fa0c", "same.gguf~fa0c"),
     ]
     assert not any(m.id.startswith("/") or m.name.startswith("/") for m in models)
     await run_router(LOCAL_ROUTER, "q", local_cfg, "mimo-q4", catalog=catalog)
     assert session.calls[-1][2]["model"] == "/Users/someone/models/mimo-q4"
     session.responses.append(Response({"choices": [{"message": {"content": "好"}}]}))
-    await run_router(LOCAL_ROUTER, "q", local_cfg, "same.gguf~2", catalog=catalog)
+    await run_router(LOCAL_ROUTER, "q", local_cfg, "same.gguf~c5aa", catalog=catalog)
     assert session.calls[-1][2]["model"] == "/srv/b/same.gguf"
+    # Its twin gone, /srv/b is shown as plain same.gguf; the stored alias still finds it.
+    catalog.models = parse_catalog({"data": [{"id": "/srv/b/same.gguf"}]}, LOCAL_ROUTER)
+    assert [m.id for m in catalog.models] == ["same.gguf"]
+    assert catalog.get("same.gguf~c5aa").api_id == "/srv/b/same.gguf"
+    assert catalog.get("same.gguf~fa0c") is None, "an alias never lands on another model"
+    # A path-shaped name is cut like the id, even when it differs from it.
+    named = parse_catalog(
+        {"data": [{"id": "/m/a/x.gguf", "name": "/m/a/x.gguf.q4"}, {"id": "r", "name": "/m/r"}]},
+        LOCAL_ROUTER,
+    )
+    assert sorted(m.name for m in named) == ["r", "x.gguf.q4"]
+
+
+async def test_a_local_error_naming_a_host_path_shows_only_its_last_part(
+    monkeypatch, local_cfg: Config
+) -> None:
+    session = Session(
+        [Response({"error": {"message": "failed to load /Users/op/models/foo: no such file"}})]
+    )
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    with pytest.raises(BackendError) as raised:
+        await run_router(LOCAL_ROUTER, "q", local_cfg, "foo")
+    assert "上游錯誤：failed to load foo: no such file" in str(raised.value)
+    assert "/Users" not in str(raised.value)
     assert openrouter.short_id("C:\\models\\qwen.gguf") == "qwen.gguf"
 
 
