@@ -745,7 +745,11 @@ def prompt_note(config: Config) -> str:
             f" {', '.join(catalog.aspects)}; count 1-{catalog.max_count}."
         )
     return (
-        "When the member asks you to draw, paint or generate a picture, append"
+        "The host's local image service is slow and shares the local model's GPU, so use it only"
+        " when the member explicitly asks for it: says 地端, 本機, 本地 or local, or names one of"
+        " its models. Otherwise draw with your own image tool if you have one, or say you cannot"
+        " draw here and that the member can ask for the local service or use the -image command."
+        " For an explicit request, append"
         ' <image_gen prompt="what to draw"/> after your answer; add model="…", aspect="3:4",'
         ' count="2", seed="123", negative="what to avoid" or enhance="off" (local, cloud or off:'
         " how the prompt is rewritten first) only when the member asks for them."
@@ -755,6 +759,20 @@ def prompt_note(config: Config) -> str:
         " answer. Never claim a picture was made, or is being made, without emitting the tag,"
         " and never describe a picture you have not seen. No double quote inside a value."
     )
+
+
+LOCAL_WORDS = ("地端", "本機", "本地", "local")
+
+
+def asked_for_local(asked: str, catalog: Catalog | None) -> bool:
+    """Whether the member's own words ask for the local image service: one of LOCAL_WORDS or a
+    model's id or name from the catalog. The <image_gen/> tag runs only then, so a model that
+    emits it on a plain "draw this" does not put a slow job on the shared GPU."""
+    text = asked.lower()
+    names = [w.lower() for w in LOCAL_WORDS]
+    if catalog is not None:
+        names += [n.lower() for m in catalog.models for n in (m.id, m.name) if n]
+    return any(name in text for name in names)
 
 
 # ----- per-guild switch and limits --------------------------------------------------------------

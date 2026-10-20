@@ -806,7 +806,7 @@ async def test_tag_starts_a_detached_job_posted_without_pings(service, client, m
     channel = FakeChannel()
     monkeypatch.setattr(client, "get_channel", {ALLOWED: channel}.get)
     _codex_replies(monkeypatch, '好，馬上畫。\n<image_gen prompt="一隻橘貓" aspect="3:4"/>')
-    result = await client._answer("幫我畫一隻橘貓", [], GUILD, USER, channel_id=ALLOWED)
+    result = await client._answer("用地端幫我畫一隻橘貓", [], GUILD, USER, channel_id=ALLOWED)
     assert result.text == f"好，馬上畫。\n\n{IMAGE_STARTED}"
     await _delivered(client)
     sent = channel.sent[0]
@@ -837,7 +837,7 @@ async def test_images_are_spoilered_by_the_guild_mode(service, client, monkeypat
     channel = FakeChannel()
     monkeypatch.setattr(client, "get_channel", {ALLOWED: channel}.get)
     _codex_replies(monkeypatch, '<image_gen prompt="一隻橘貓"/>')
-    await client._answer("畫", [], GUILD, USER, channel_id=ALLOWED)
+    await client._answer("地端畫", [], GUILD, USER, channel_id=ALLOWED)
     await _delivered(client)
     assert channel.sent[0]["files"] == ["SPOILER_image-0.png"]
     with pytest.raises(ValueError):
@@ -849,7 +849,7 @@ async def test_tag_delivery_rechecks_the_channel(service, client, monkeypatch) -
     monkeypatch.setattr(client, "get_channel", {ALLOWED: channel}.get)
     service.hold = asyncio.Event()
     _codex_replies(monkeypatch, '<image_gen prompt="貓"/>')
-    await client._answer("畫貓", [], GUILD, USER, channel_id=ALLOWED)
+    await client._answer("地端畫貓", [], GUILD, USER, channel_id=ALLOWED)
     # The channel leaves the allowlist while the job runs.
     client.config = replace(client.config, allowed_channel_ids=frozenset({999}))
     service.hold.set()
@@ -865,7 +865,7 @@ async def test_unknown_model_tag_goes_back_to_the_model_and_is_fixed(service, cl
         '畫好了。\n<image_gen prompt="貓" model="dalle"/>',
         '<image_gen prompt="貓" model="plain"/>',
     )
-    result = await client._answer("用 dalle 畫貓", [], GUILD, USER, channel_id=ALLOWED)
+    result = await client._answer("用地端 dalle 畫貓", [], GUILD, USER, channel_id=ALLOWED)
     assert "<TAG_ERRORS>" in prompts[1] and "unknown model" in prompts[1] and "plain" in prompts[1]
     assert "沒有「dalle」這個圖片模型" in result.text and result.text.endswith(IMAGE_STARTED)
     await _delivered(client)
@@ -880,7 +880,7 @@ async def test_tag_enhance_is_checked_against_the_model_and_sent(service, client
         '<image_gen prompt="貓" enhance="cloud"/>',
         '<image_gen prompt="貓" enhance="off"/>',
     )
-    result = await client._answer("畫貓，不要改寫", [], GUILD, USER, channel_id=ALLOWED)
+    result = await client._answer("地端畫貓，不要改寫", [], GUILD, USER, channel_id=ALLOWED)
     assert "enhance must be one of local, off" in prompts[1]
     assert result.text.endswith(IMAGE_STARTED)
     await _delivered(client)
@@ -904,20 +904,40 @@ async def test_tag_refusals_never_submit_a_job(service, client, monkeypatch) -> 
     )
     shown = await client._answer("怎麼請你畫圖", [], GUILD, USER, channel_id=ALLOWED)
     assert '<image_gen prompt="貓"/>' in shown.text and service.calls == []
-    unknown = await client._answer("畫", [], GUILD, USER, channel_id=ALLOWED)
-    unsupported = await client._answer("畫", [], GUILD, USER, channel_id=ALLOWED)
+    unknown = await client._answer("地端畫", [], GUILD, USER, channel_id=ALLOWED)
+    unsupported = await client._answer("地端畫", [], GUILD, USER, channel_id=ALLOWED)
     assert "圖片沒有生成" in unknown.text and "不支援 negative" in unsupported.text
     client.image_settings.update(GUILD, enabled=False)
-    off = await client._answer("畫", [], GUILD, USER, channel_id=ALLOWED)
+    off = await client._answer("地端畫", [], GUILD, USER, channel_id=ALLOWED)
     assert "這個伺服器沒有開放圖片生成" in off.text
     client.image_settings.update(GUILD, enabled=True, daily=1)
     client.image_settings.charge(GUILD, USER, 1)
-    over = await client._answer("畫", [], GUILD, USER, channel_id=ALLOWED)
+    over = await client._answer("地端畫", [], GUILD, USER, channel_id=ALLOWED)
     assert "額度不夠" in over.text
     client.image_settings.update(GUILD, daily=20)
-    outside = await client._answer("畫", [], OTHER_GUILD, USER, channel_id=ALLOWED)
+    outside = await client._answer("地端畫", [], OTHER_GUILD, USER, channel_id=ALLOWED)
     assert "圖片沒有生成" in outside.text
     assert client._image_tasks == set() and service.posts() == []
+
+
+async def test_tag_runs_only_when_the_member_asks_for_the_local_service(
+    service, client, monkeypatch
+) -> None:
+    """Negative control: a plain "draw a cat" does not put a job on the shared GPU even when the
+    model emits the tag; naming the local service or one of its models does."""
+    _codex_replies(monkeypatch, *['<image_gen prompt="貓"/>'] * 3)
+    plain = await client._answer("畫一隻貓", [], GUILD, USER, channel_id=ALLOWED)
+    assert "沒有用地端生圖" in plain.text and "/codex-image" in plain.text
+    assert service.posts() == [] and client.image_settings.used(GUILD, USER) == 0
+    named = await client._answer("用 Chroma1 Flash 畫貓", [], GUILD, USER, channel_id=ALLOWED)
+    assert named.text.endswith(IMAGE_STARTED)
+    await _delivered(client)
+    local = await client._answer("本機畫一隻貓", [], GUILD, USER, channel_id=ALLOWED)
+    assert local.text.endswith(IMAGE_STARTED)
+    await _delivered(client)
+    assert len(service.posts()) == 2
+    note = imagegen.prompt_note(client.config)
+    assert "only when the member explicitly asks" in note
 
 
 async def test_tag_without_the_service_is_not_run(client, monkeypatch) -> None:

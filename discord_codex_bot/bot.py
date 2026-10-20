@@ -285,6 +285,7 @@ IMAGE_ENHANCE_CHOICES = [
 ]
 IMAGE_OFF = "圖片生成尚未啟用；管理者需設定 IMAGE_GEN_URL。"
 IMAGE_STARTED = "🎨 圖片生成中，完成後會貼在這個頻道。"
+IMAGE_NOT_ASKED = "（沒有用地端生圖：要用的話請明講「地端」或模型名稱，或用 /{prefix}-image）"
 EMBEDFIX_CHOICES = [
     app_commands.Choice(name=label, value=value)
     for value, label in (("status", "查詢"), ("on", "開啟"), ("off", "關閉"))
@@ -1962,7 +1963,7 @@ class DiscordCodexClient(discord.Client):
                     if request_only(result.text):
                         result = replace(result, text=READS_SPENT_MESSAGE)
             text, unread, refused = await self._apply_action_tags(
-                result.text, guild_id, channel_id, user_id
+                result.text, guild_id, channel_id, user_id, prompt
             )
             if unread or refused:
                 LOGGER.warning(
@@ -2005,7 +2006,7 @@ class DiscordCodexClient(discord.Client):
                             seen.add(_spaced(tag))
                             resent.append(tag)
                     done, _, _ = await self._apply_action_tags(
-                        "\n".join(resent), guild_id, channel_id, user_id
+                        "\n".join(resent), guild_id, channel_id, user_id, prompt
                     )
                     if done:
                         text = f"{text}\n\n{done}"
@@ -2964,7 +2965,12 @@ class DiscordCodexClient(discord.Client):
         return target
 
     async def _apply_action_tags(
-        self, text: str, guild_id: int | None, channel_id: int | None, user_id: int
+        self,
+        text: str,
+        guild_id: int | None,
+        channel_id: int | None,
+        user_id: int,
+        asked: str = "",
     ) -> tuple[str, list[str], list[str]]:
         """Carry out the memory, reminder, tracking and image tags in `text`: (the text without
         them, confirmations appended; each tag that could not be read, with the reason; each one
@@ -2979,7 +2985,9 @@ class DiscordCodexClient(discord.Client):
         refused: list[str] = []
         text = self._apply_reminder_tags(text, guild_id, channel_id, user_id, notes, refused)
         text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id, notes, refused)
-        text = await self._apply_image_tags(text, guild_id, channel_id, user_id, notes, refused)
+        text = await self._apply_image_tags(
+            text, guild_id, channel_id, user_id, notes, refused, asked
+        )
         text, invented = strip_invented_tags(text)
         text, broken = strip_broken_tags(text)
         problems = [
@@ -3846,18 +3854,28 @@ class DiscordCodexClient(discord.Client):
         user_id: int,
         notes_out: list[str] | None = None,
         refused: list[str] | None = None,
+        asked: str = "",
     ) -> str:
-        """Start the pictures the model asked for with <image_gen/>. Each is checked now — the
-        channel, the prompt, the catalog, the member's limits — so a refusal reaches the answer
-        and one the model can fix goes to `refused`; the job then runs detached and is posted in
-        the channel when it is done (`_deliver_image`). The answer gets only a note that it
-        started: the picture does not exist yet."""
+        """Start the pictures the model asked for with <image_gen/>, only when the member's own
+        words (`asked`) ask for the local service (imagegen.asked_for_local). Each is checked
+        now — the channel, the prompt, the catalog, the member's limits — so a refusal reaches
+        the answer and one the model can fix goes to `refused`; the job then runs detached and is
+        posted in the channel when it is done (`_deliver_image`). The answer gets only a note that
+        it started: the picture does not exist yet."""
         clean, asks = extract_image_tags(text)
         if not asks:
             return text
         fixable = refused if refused is not None else []
         if not self.images.enabled:  # nothing the model sends again could run either
             return _with_notes(clean, ["（圖片生成尚未啟用。）"], notes_out)
+        try:  # model names count as asking only when the catalog can be read
+            catalog = await self.images.catalog()
+        except ImageGenError:
+            catalog = None
+        if not imagegen.asked_for_local(asked, catalog):
+            LOGGER.info("Image tag without an explicit local request guild=%s", guild_id)
+            prefix = self.config.command_prefix
+            return _with_notes(clean, [IMAGE_NOT_ASKED.format(prefix=prefix)], notes_out)
         notes: list[str] = []
         if len(asks) > MAX_IMAGE_TAGS:
             extra = len(asks) - MAX_IMAGE_TAGS
