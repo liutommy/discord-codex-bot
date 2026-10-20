@@ -747,7 +747,8 @@ def prompt_note(config: Config) -> str:
     return (
         "The host's local image service is slow and shares the local model's GPU, so use it only"
         " when the member explicitly asks for it: says 地端, 本機, 本地 or local, or names one of"
-        " its models. Otherwise draw with your own image tool if you have one, or say you cannot"
+        " its models, in this message or earlier in this conversation. Otherwise draw with your"
+        " own image tool if you have one, or say you cannot"
         " draw here and that the member can ask for the local service or use the -image command."
         " For an explicit request, append"
         ' <image_gen prompt="what to draw"/> after your answer; add model="…", aspect="3:4",'

@@ -924,27 +924,33 @@ async def test_tag_runs_only_when_the_member_asks_for_the_local_service(
     service, client, monkeypatch
 ) -> None:
     """Negative control: a plain "draw a cat" does not put a job on the shared GPU even when the
-    model emits the tag; naming the local service or one of its models does."""
-    _codex_replies(monkeypatch, *['<image_gen prompt="貓"/>'] * 4)
+    model emits the tag; naming the local service or one of its models does, and so does a
+    follow-up in a conversation where the member already asked for it."""
+    _codex_replies(monkeypatch, *['<image_gen prompt="貓"/>'] * 5)
     plain = await client._answer("畫一隻貓", [], GUILD, USER, channel_id=ALLOWED)
     assert "沒有用地端生圖" in plain.text and "/codex-image" in plain.text
     assert service.posts() == [] and client.image_settings.used(GUILD, USER) == 0
     named = await client._answer("用 Chroma1 Flash 畫貓", [], GUILD, USER, channel_id=ALLOWED)
     assert named.text.endswith(IMAGE_STARTED)
     await _delivered(client)
+    # The fake model answers in one conversation ("t"): the follow-up needs no repeat.
+    again = await client._answer("改成 16:9 再畫一張", [], GUILD, USER, channel_id=ALLOWED)
+    assert again.text.endswith(IMAGE_STARTED)
+    await _delivered(client)
+    client._local_image_threads.clear()  # a new conversation
     local = await client._answer("本機畫一隻貓", [], GUILD, USER, channel_id=ALLOWED)
     assert local.text.endswith(IMAGE_STARTED)
     await _delivered(client)
-    assert len(service.posts()) == 2
-    note = imagegen.prompt_note(client.config)
-    assert "only when the member explicitly asks" in note
+    assert len(service.posts()) == 3
+    client._local_image_threads.clear()
     # A replied-to message saying 本地 is not the member asking; "explain" is not model "plain".
     quoted = bot_module.with_quoted_message("畫這個", "別人", "今天的本地新聞", 0)
     replied = await client._answer(quoted, [], GUILD, USER, channel_id=ALLOWED)
-    assert "沒有用地端生圖" in replied.text and len(service.posts()) == 2
+    assert "沒有用地端生圖" in replied.text and len(service.posts()) == 3
     catalog = imagegen.parse_catalog(CATALOG)
     assert not imagegen.asked_for_local("explain this drawing", catalog)
     assert imagegen.asked_for_local("用 plain 畫", catalog)
+    assert "earlier in this conversation" in imagegen.prompt_note(client.config)
 
 
 async def test_tag_without_the_service_is_not_run(client, monkeypatch) -> None:
