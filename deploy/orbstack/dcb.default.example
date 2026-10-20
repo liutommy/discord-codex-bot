@@ -59,7 +59,12 @@ DCB_WAKE_AFTER=600
 
 # Local LLM relay (deploy/orbstack/mac/dcb-llm-relay.py): the Mac keeps socat listeners on
 # 172.31.254.1 (the gateway of compose.yaml's llm network, bridge br-dcb-llm) at this port, and
-# dcb-firewall lets that bridge open connections to that address and port only. Must equal the
-# relay's DCB_LLM_RELAY_LISTEN_PORT on the Mac; integer 1024-65535. Empty = no relay: everything on
-# the llm bridge stays rejected.
+# dcb-firewall lets that bridge open connections to that address on this port and
+# DCB_IMG_RELAY_PORT only. Must equal the relay's DCB_LLM_RELAY_LISTEN_PORT on the Mac; integer
+# 1024-65535. Both empty = no relay: everything on the llm bridge stays rejected.
 DCB_LLM_RELAY_PORT=
+# Image service relay: a second instance of dcb-llm-relay.py (its own config, workers and log) keeps
+# listeners on 172.31.254.1 at this port, so image traffic cannot take the LLM relay's workers.
+# Must equal that instance's DCB_LLM_RELAY_LISTEN_PORT and differ from DCB_LLM_RELAY_PORT; integer
+# 1024-65535. Empty = no rule for it.
+DCB_IMG_RELAY_PORT=

@@ -1,6 +1,6 @@
-"""The local LLM relay's machine side: compose.yaml's llm network, the DCB-INPUT rule dcb-firewall
-adds for DCB_LLM_RELAY_PORT, and dcb-probe's subnet check. dcb-firewall and dcb-probe need root,
-iptables and docker, so the pieces are exercised on their own."""
+"""The host relays' machine side: compose.yaml's llm network, the DCB-INPUT rules dcb-firewall adds
+for DCB_LLM_RELAY_PORT and DCB_IMG_RELAY_PORT, and dcb-probe's subnet check. dcb-firewall and
+dcb-probe need root, iptables and docker, so the pieces are exercised on their own."""
 
 from __future__ import annotations
 
@@ -23,13 +23,14 @@ def _function(text: str, name: str) -> str:
     return text[start : text.index("\n}\n", start) + 3]
 
 
-def _firewall_rules(port: str | None) -> subprocess.CompletedProcess:
+def _firewall_rules(port: str | None, img: str | None = None) -> subprocess.CompletedProcess:
     text = FIREWALL.read_text()
-    relay = text[text.index("# --- local LLM relay ---") : text.index("# --- WAN IP ---")]
+    relay = text[text.index("# --- host service relays ---") : text.index("# --- WAN IP ---")]
     script = (
         "set -uo pipefail\n"
         + text[text.index("die() {") : text.index("\n", text.index("die() {")) + 1]
         + (f"DCB_LLM_RELAY_PORT={port}\n" if port is not None else "")
+        + (f"DCB_IMG_RELAY_PORT={img}\n" if img is not None else "")
         + 'BLOCK4="10.0.0.0/8 172.16.0.0/12"\nwan=203.0.113.9\n'
         + "DCB_POOL_NETS=172.30.0.0/16\nDCB_BIP_NET=172.31.255.0/24\n"
         + relay
@@ -78,8 +79,59 @@ def test_a_bad_relay_port_fails_the_firewall(port) -> None:
     assert "*filter" not in out.stdout
 
 
-def test_the_relay_port_is_documented_and_empty_by_default() -> None:
-    assert "\nDCB_LLM_RELAY_PORT=\n" in DEFAULTS.read_text()
+def _allow(port: str) -> str:
+    return (
+        f"-A DCB-INPUT -i {BRIDGE} -d {GATEWAY} -p tcp --dport {port} "
+        "-m conntrack --ctstate NEW -j RETURN"
+    )
+
+
+def test_the_image_relay_port_adds_a_second_rule_before_the_rejects() -> None:
+    out = _firewall_rules("18080", "18082")
+    assert out.returncode == 0, out.stderr
+    rules = _input_chain(out.stdout)
+    i_reject = next(i for i, r in enumerate(rules) if r.startswith("-A DCB-INPUT -i br-+ "))
+    assert rules.index(_allow("18080")) < rules.index(_allow("18082")) < i_reject, rules
+    # The two relay ports are the only rules that let anything through before the rejects.
+    returns = [r for r in rules if r.endswith("-j RETURN")]
+    assert returns == [_allow("18080"), _allow("18082"), "-A DCB-INPUT -j RETURN"], rules
+
+
+def test_the_image_relay_port_works_without_the_llm_relay_port() -> None:
+    out = _firewall_rules("", "18082")
+    assert out.returncode == 0, out.stderr
+    rules = _input_chain(out.stdout)
+    assert [r for r in rules if BRIDGE in r] == [_allow("18082")], rules
+
+
+@pytest.mark.parametrize("img", [None, ""])
+def test_without_an_image_relay_port_only_the_llm_rule_is_added(img) -> None:
+    out = _firewall_rules("18080", img)
+    assert out.returncode == 0, out.stderr
+    rules = _input_chain(out.stdout)
+    assert [r for r in rules if BRIDGE in r] == [_allow("18080")], rules
+    assert not [r for r in rules if "18082" in r], rules
+
+
+@pytest.mark.parametrize("port", ["80", "1023", "65536", "08082", "18082x", "1 2", "-1"])
+def test_a_bad_image_relay_port_fails_the_firewall(port) -> None:
+    out = _firewall_rules("18080", f"'{port}'")
+    assert out.returncode == 1, out.stdout
+    assert "DCB_IMG_RELAY_PORT must be an integer 1024-65535" in out.stderr, out.stderr
+    assert "*filter" not in out.stdout
+
+
+def test_the_image_relay_port_must_differ_from_the_llm_relay_port() -> None:
+    out = _firewall_rules("18080", "18080")
+    assert out.returncode == 1, out.stdout
+    assert "DCB_IMG_RELAY_PORT must differ from DCB_LLM_RELAY_PORT" in out.stderr, out.stderr
+    assert "*filter" not in out.stdout
+
+
+def test_the_relay_ports_are_documented_and_empty_by_default() -> None:
+    defaults = DEFAULTS.read_text()
+    assert "\nDCB_LLM_RELAY_PORT=\n" in defaults
+    assert "\nDCB_IMG_RELAY_PORT=\n" in defaults
 
 
 def _top_level(compose: str, section: str) -> dict[str, list[str]]:

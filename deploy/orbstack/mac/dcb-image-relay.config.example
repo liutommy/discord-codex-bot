@@ -1,0 +1,28 @@
+# Settings for the image service's instance of dcb-llm-relay.py. Install as
+# ~/.config/dcb-llm-relay/image.config; com.example.dcb-image-relay.plist passes that path as the
+# relay's argument. Same keys as dcb-llm-relay.config.example (the script is the same); every key
+# except the two ports is optional. An environment variable of the same name overrides the file
+# for every instance, so set these here, not in the launchd environment.
+
+DCB_LLM_RELAY_MACHINE=dcb
+DCB_LLM_RELAY_USER=
+
+# The machine's DCB_IMG_RELAY_PORT (/etc/default/dcb there); it must differ from the LLM relay's
+# listen port. Required: the port.
+DCB_LLM_RELAY_LISTEN_ADDR=172.31.254.1
+DCB_LLM_RELAY_LISTEN_PORT=<DCB_IMG_RELAY_PORT>
+
+# The Mac's image service, bound to 127.0.0.1 only: only the relay on this Mac reaches it.
+# Required: the port.
+DCB_LLM_RELAY_UPSTREAM_HOST=127.0.0.1
+DCB_LLM_RELAY_UPSTREAM_PORT=<IMAGE_PORT>
+
+# Connections served at once. The Bot submits, polls, downloads and cancels jobs with short
+# requests, so a few workers cover several jobs; with all busy a new connection is refused and the
+# Bot retries. No request holds a connection for a whole generation, so the idle timeout is short:
+# a connection the client keeps open without traffic gives its worker back after that many seconds.
+DCB_LLM_RELAY_WORKERS=4
+DCB_LLM_RELAY_IDLE=120
+
+# One line per served connection (bytes each way, duration), never any content.
+DCB_LLM_RELAY_LOG=~/Library/Logs/dcb-image-relay.log

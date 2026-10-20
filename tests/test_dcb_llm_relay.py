@@ -148,7 +148,10 @@ def echo(conn: socket.socket, _index: int) -> None:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, upstream_port: int, workers: int = 2, **env) -> None:
+    def __init__(
+        self, tmp_path: Path, upstream_port: int, workers: int = 2, args=(), **env
+    ) -> None:
+        tmp_path.mkdir(exist_ok=True)
         self.tmp = tmp_path
         self.port = _free_port()
         self.calls = tmp_path / "calls"
@@ -172,8 +175,12 @@ class Harness:
             "DCB_LLM_RELAY_LOG": str(self.log),
             **env,
         }
+        self.env = {k: v for k, v in self.env.items() if v is not None}
         self.proc = subprocess.Popen(
-            [PYTHON, str(RELAY)], env=self.env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            [PYTHON, str(RELAY), *args],
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
 
     def connect(self, deadline: float = 5.0) -> socket.socket:
@@ -221,7 +228,7 @@ def make(tmp_path):
     def _make(handler=echo, **kw) -> tuple[Harness, Upstream]:
         up = Upstream(handler)
         ups.append(up)
-        h = Harness(tmp_path, up.port, **kw)
+        h = Harness(tmp_path / f"relay{len(made)}", up.port, **kw)
         made.append(h)
         return h, up
 
@@ -452,6 +459,125 @@ def test_the_config_file_is_read_and_the_environment_overrides_it(tmp_path) -> N
     assert got["DCB_LLM_RELAY_LISTEN_PORT"] == "18080"
     assert got["DCB_LLM_RELAY_WORKERS"] == "4"
     assert got["DCB_LLM_RELAY_UPSTREAM_HOST"] == "127.0.0.1"
+
+
+def test_a_second_instance_serves_while_the_first_has_every_worker_busy(make) -> None:
+    """The image relay is its own instance: a first instance with all its workers held (a slow
+    LLM answer) leaves a second one, on its own port, upstream and log, serving."""
+    release = threading.Event()
+
+    def held(conn, _index):
+        with conn:
+            data = _read_framed(conn)
+            release.wait(10)
+            conn.sendall(_framed(data))
+
+    llm, llm_up = make(held, workers=1)
+    img, img_up = make(workers=1)
+    assert llm.port != img.port and llm.log != img.log
+    busy = llm.connect()
+    busy.sendall(_framed(b"slow"))
+    assert _wait(lambda: llm_up.accepted == 1)
+    try:
+        for n in range(3):  # more connections than the second instance has workers
+            with img.connect() as c:
+                c.sendall(_framed(b"poll %d" % n))
+                assert _read_framed(c) == b"poll %d" % n
+        assert img_up.accepted == 3 and llm_up.accepted == 1
+    finally:
+        release.set()
+    assert _read_framed(busy) == b"slow"
+    busy.close()
+    assert _wait(lambda: img.log_text().count("served ok") == 3), img.log_text()
+    assert f":{img.port} ->" in img.log_text() and f":{img.port} ->" not in llm.log_text()
+    # Each instance removes stale listeners on its own port only.
+    for h, other in ((llm, img), (img, llm)):
+        pkills = [line for line in h.calls.read_text().splitlines() if " pkill " in line]
+        assert pkills and all(f"TCP-LISTEN:{h.port}," in line for line in pkills), pkills
+        assert not [line for line in pkills if f"TCP-LISTEN:{other.port}," in line], pkills
+
+
+def test_the_config_argument_starts_an_instance_from_its_own_file(tmp_path) -> None:
+    up = Upstream(echo)
+    listen, log = _free_port(), tmp_path / "image.log"
+    cfg = tmp_path / "image.config"
+    cfg.write_text(
+        f"DCB_LLM_RELAY_LISTEN_PORT={listen}\nDCB_LLM_RELAY_UPSTREAM_PORT={up.port}\n"
+        f"DCB_LLM_RELAY_WORKERS=3\nDCB_LLM_RELAY_IDLE=120\nDCB_LLM_RELAY_LOG={log}\n"
+    )
+    # $DCB_LLM_RELAY_CONFIG names another instance's file; the argument wins.
+    other = tmp_path / "llm.config"
+    other.write_text("DCB_LLM_RELAY_LISTEN_PORT=18080\nDCB_LLM_RELAY_UPSTREAM_PORT=8080\n")
+    from_file = ("LISTEN_PORT", "UPSTREAM_PORT", "WORKERS", "IDLE", "LOG")
+    unset = {f"DCB_LLM_RELAY_{k}": None for k in from_file}  # the Harness's env, dropped
+    try:
+        h = Harness(
+            tmp_path / "relay", up.port, args=[str(cfg)], DCB_LLM_RELAY_CONFIG=str(other), **unset
+        )
+        h.port, h.log = listen, log
+        try:
+            with h.connect() as c:
+                c.sendall(_framed(b"job"))
+                assert _read_framed(c) == b"job"
+            assert _wait(lambda: len(h.socat_calls()) >= 3), h.socat_calls()
+            args = h.socat_calls()[0][1]
+            assert f"socat -T120 -t120 TCP-LISTEN:{listen},bind=127.0.0.1," in args, args
+            assert f"start: 3 worker(s), dcb 127.0.0.1:{listen} -> 127.0.0.1:{up.port}" in (
+                log.read_text()
+            )
+        finally:
+            h.stop()
+    finally:
+        up.close()
+
+
+def test_a_missing_config_argument_or_extra_arguments_refuse_to_start(tmp_path) -> None:
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "DCB_LLM_RELAY_LISTEN_PORT": "18082",
+        "DCB_LLM_RELAY_UPSTREAM_PORT": "8082",
+    }
+    missing = tmp_path / "image.config"
+    out = subprocess.run(
+        [PYTHON, str(RELAY), str(missing)], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert out.returncode == 2 and f"config file {missing} not found" in out.stderr, out.stderr
+    missing.write_text("")
+    out = subprocess.run(
+        [PYTHON, str(RELAY), str(missing), "x"], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert out.returncode == 2 and "usage: dcb-llm-relay.py [CONFIG]" in out.stderr, out.stderr
+
+
+def test_the_image_relay_plist_runs_the_same_script_with_its_own_config_and_log() -> None:
+    import plistlib
+
+    llm = plistlib.loads((RELAY.parent / "com.example.dcb-llm-relay.plist").read_bytes())
+    img = plistlib.loads((RELAY.parent / "com.example.dcb-image-relay.plist").read_bytes())
+    assert img["ProgramArguments"][:2] == llm["ProgramArguments"]
+    assert img["ProgramArguments"][2:] == ["__HOME__/.config/dcb-llm-relay/image.config"]
+    assert img["Label"] != llm["Label"]
+    assert img["StandardErrorPath"] != llm["StandardErrorPath"]
+    own = ("Label", "ProgramArguments", "StandardOutPath", "StandardErrorPath")
+    assert {k: v for k, v in img.items() if k not in own} == {
+        k: v for k, v in llm.items() if k not in own
+    }  # the same launchd behaviour (RunAtLoad, KeepAlive, ThrottleInterval, ProcessType)
+
+
+def test_the_image_relay_config_example_names_its_own_port_and_log() -> None:
+    text = (RELAY.parent / "dcb-image-relay.config.example").read_text()
+    lines = dict(
+        line.split("=", 1) for line in text.splitlines() if line and not line.startswith("#")
+    )
+    llm = (RELAY.parent / "dcb-llm-relay.config.example").read_text()
+    llm_lines = dict(
+        line.split("=", 1) for line in llm.splitlines() if line and not line.startswith("#")
+    )
+    assert set(lines) == set(llm_lines)  # every key the script reads, nothing else
+    assert lines["DCB_LLM_RELAY_LISTEN_PORT"] == "<DCB_IMG_RELAY_PORT>"
+    assert lines["DCB_LLM_RELAY_UPSTREAM_HOST"] == "127.0.0.1"
+    assert lines["DCB_LLM_RELAY_LOG"] != llm_lines["DCB_LLM_RELAY_LOG"]
 
 
 def test_an_unwritable_log_does_not_stop_serving(make, tmp_path) -> None:
