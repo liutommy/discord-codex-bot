@@ -4,9 +4,9 @@ The service owns the model catalog, the prompt pipeline and the GPU queue; this 
 its HTTP contract and nothing more: read the catalog, check a request against it, submit, poll,
 download, cancel. `run_job` runs one job end to end and is the only way the Bot generates an
 image: the slash command and the model's <image_gen/> tag both go through it, so both are
-checked against the same catalog. Who may generate and how many (the per-guild switch, the daily
-and in-flight limits) is ImageSettings, kept in the guild-settings database next to linkclean's
-switches; the Bot applies it before a job starts.
+checked against the same catalog. ImageSettings keeps the per-guild switch and spoiler setting
+in the guild-settings database next to linkclean's switches; the Bot checks the switch before
+a job starts.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiohttp
@@ -31,7 +30,6 @@ from .clock import sleep_for
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
-TAIPEI = timezone(timedelta(hours=8))
 
 # A model added or removed on the service shows up within this long.
 CATALOG_TTL_SECONDS = 60.0
@@ -84,11 +82,10 @@ def queue_full(waiting: object = None) -> str:
     return QUEUE_FULL.format(waiting=count)
 
 
-# The model's tool (codex._prompt): one per answer, attributes in any order.
+# The model's tool (codex._prompt): attributes in any order.
 IMAGE_TAG = re.compile(r'<image_gen((?:\s+[a-z_]{1,10}="[^"]{0,2000}")+)\s*/?>(?:\s*</image_gen>)?')
 _ATTR = re.compile(r'([a-z_]{1,10})="([^"]{0,2000})"')
 TAG_ATTRS = ("prompt", "model", "aspect", "count", "seed", "negative", "enhance")
-MAX_IMAGE_TAGS = 1
 # The last catalog any ImageService read, for the prompt (`prompt_note`), which the backends
 # build without the client.
 _last_catalog: Catalog | None = None
@@ -337,15 +334,6 @@ def resolve(catalog: Catalog, request: ImageRequest) -> ImageModel:
         if (image := getattr(request, option)) is not None:
             _check_input(catalog, option, image)
     return model
-
-
-def image_count(catalog: Catalog | None, request: ImageRequest) -> int:
-    """How many images `request` makes: its count, else its model's default, else one."""
-    if request.count is not None:
-        return request.count
-    model = catalog.get(request.model or catalog.default_model) if catalog else None
-    default = model.defaults.get("count") if model else None
-    return default if isinstance(default, int) and default > 0 else 1
 
 
 def _job(payload: object) -> Job:
@@ -784,54 +772,22 @@ def asked_for_local(asked: str, catalog: Catalog | None) -> bool:
     )
 
 
-# ----- per-guild switch and limits --------------------------------------------------------------
+# ----- per-guild settings ----------------------------------------------------------------------
 
-DEFAULT_DAILY = 20
-DEFAULT_IN_FLIGHT = 1
 SPOILER_MODES = ("auto", "always", "off")
 DEFAULT_SPOILER = "auto"  # hide what the service marked sensitive
-MAX_DAILY = 1000
-MAX_IN_FLIGHT = 10
-USAGE_KEEP_DAYS = 7
-USAGE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS image_usage (
-    guild_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    day TEXT NOT NULL,
-    images INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, user_id, day)
-);
-"""
-
-
-def taipei_day() -> str:
-    return datetime.now(TAIPEI).date().isoformat()
 
 
 class ImageSettings:
-    """Each guild's image switch and limits, as rows of the guild_settings table that
-    linkclean's SwitchStore keeps (no row = the default: on, DEFAULT_DAILY images per member a
-    day, DEFAULT_IN_FLIGHT job per member at once), and each member's images per day. Days are
-    Taiwan days. The database is the linkclean one, so the nightly backup covers it."""
+    """Each guild's image switch and spoiler setting, as rows of the guild_settings table
+    that linkclean's SwitchStore keeps (no row = on, spoiler auto). The database is the
+    linkclean one, so the nightly backup covers it."""
 
-    def __init__(self, switches, today: Callable[[], str] = taipei_day) -> None:
+    def __init__(self, switches) -> None:
         self.switches = switches
-        self.today = today
-        with switches._connect() as connection:
-            connection.executescript(USAGE_SCHEMA)
-
-    def _number(self, guild_id: int, key: str, default: int) -> int:
-        raw = self.switches._get(guild_id, key)
-        return int(raw) if raw is not None and raw.isdigit() else default
 
     def enabled(self, guild_id: int) -> bool:
         return self.switches._get(guild_id, "image") != "off"
-
-    def daily_limit(self, guild_id: int) -> int:
-        return self._number(guild_id, "image_daily", DEFAULT_DAILY)
-
-    def in_flight_limit(self, guild_id: int) -> int:
-        return self._number(guild_id, "image_in_flight", DEFAULT_IN_FLIGHT)
 
     def spoiler(self, guild_id: int) -> str:
         raw = self.switches._get(guild_id, "image_spoiler")
@@ -841,68 +797,11 @@ class ImageSettings:
         self,
         guild_id: int,
         enabled: bool | None = None,
-        daily: int | None = None,
-        in_flight: int | None = None,
         spoiler: str | None = None,
     ) -> None:
-        if daily is not None and not 1 <= daily <= MAX_DAILY:
-            raise ValueError(f"每日張數要在 1 到 {MAX_DAILY} 之間")
-        if in_flight is not None and not 1 <= in_flight <= MAX_IN_FLIGHT:
-            raise ValueError(f"同時進行的工作數要在 1 到 {MAX_IN_FLIGHT} 之間")
         if spoiler is not None and spoiler not in SPOILER_MODES:
             raise ValueError(f"spoiler 只能是 {', '.join(SPOILER_MODES)}")
         if enabled is not None:
             self.switches._put(guild_id, "image", "on" if enabled else "off")
         if spoiler is not None:
             self.switches._put(guild_id, "image_spoiler", spoiler)
-        if daily is not None:
-            self.switches._put(guild_id, "image_daily", str(daily))
-        if in_flight is not None:
-            self.switches._put(guild_id, "image_in_flight", str(in_flight))
-
-    def used(self, guild_id: int, user_id: int, day: str | None = None) -> int:
-        with self.switches._connect() as connection:
-            row = connection.execute(
-                "SELECT images FROM image_usage WHERE guild_id=? AND user_id=? AND day=?",
-                (guild_id, user_id, day or self.today()),
-            ).fetchone()
-        return 0 if row is None else int(row["images"])
-
-    def charge(self, guild_id: int, user_id: int, images: int) -> str:
-        """Count `images` against today; returns the day, for a refund to find the same row."""
-        day = self.today()
-        cutoff = (datetime.fromisoformat(day) - timedelta(days=USAGE_KEEP_DAYS)).date()
-        with self.switches._connect() as connection:
-            connection.execute(
-                "INSERT INTO image_usage (guild_id, user_id, day, images) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT (guild_id, user_id, day) DO UPDATE SET images=images+excluded.images",
-                (guild_id, user_id, day, images),
-            )
-            connection.execute("DELETE FROM image_usage WHERE day < ?", (cutoff.isoformat(),))
-        return day
-
-    def refund(self, guild_id: int, user_id: int, images: int, day: str) -> None:
-        with self.switches._connect() as connection:
-            connection.execute(
-                "UPDATE image_usage SET images=MAX(images-?, 0) "
-                "WHERE guild_id=? AND user_id=? AND day=?",
-                (images, guild_id, user_id, day),
-            )
-
-
-@dataclass(slots=True)
-class Reservation:
-    """One admitted job: it holds an in-flight slot and its images counted against the day
-    until `settle` (bot.py `_image_reserve`). Settling twice does nothing."""
-
-    guild_id: int
-    user_id: int
-    images: int
-    day: str
-    release: Callable[[Reservation, bool], None]
-    settled: bool = False
-
-    def settle(self, refund: bool) -> None:
-        if not self.settled:
-            self.settled = True
-            self.release(self, refund)
