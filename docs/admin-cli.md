@@ -298,8 +298,10 @@ $ python -m discord_codex_bot.admin persona clear --kind style
 ### image：圖片生成的開關與上限
 
 `IMAGE_GEN_URL` 有設定時，成員可以用 `/image` 或在對話裡請 Bot 畫圖（`<image_gen>` 標籤）；
-兩條路徑都照這裡的設定檢查。沒有設定過的伺服器是預設值：開放、每人每天 20 張、每人同時 1 個工作。
-張數在工作送出時就算進當天（台灣時間），服務拒絕、失敗或逾時的會退回，成員自己取消的照算。
+兩條路徑都照這裡的設定檢查。沒有設定過的伺服器是預設值：開放、每人每天 20 張、每人同時 1 個工作、暴雷隱藏 auto。
+張數在工作送出時就算進當天（台灣時間），服務拒絕、失敗或逾時的會退回；成員自己取消的，還在排隊時退回，開始生成後照算。
+`--spoiler` 決定哪些圖以 Discord 的暴雷（spoiler）方式張貼：`auto` 只隱藏服務判定為成人內容的圖，
+`always` 全部隱藏，`off` 都不隱藏。服務只依提示詞判定、不看圖，提示詞普通但模型畫出露骨內容的圖在 `auto` 下不會隱藏。
 `image set` 只給要改的選項；上限從下一個請求起生效，進行中的工作不受影響，今天已用的張數也不會歸零。
 `--user` 可以是已經離開伺服器的成員。
 
@@ -308,10 +310,12 @@ $ python -m discord_codex_bot.admin image get --guild 123456789012345678 --user 
 圖片生成：開
 每人每天：20 張
 每人同時：1 個工作
+暴雷隱藏：auto（服務依提示詞判定為成人內容的圖才隱藏）
 成員 345678901234567890 今天已用：3 張
 
 $ python -m discord_codex_bot.admin image set --guild 123456789012345678 --state off
 $ python -m discord_codex_bot.admin image set --guild 123456789012345678 --daily 10 --in-flight 2
+$ python -m discord_codex_bot.admin image set --guild 123456789012345678 --spoiler always
 ```
 
 `image set` 不會在頻道發訊息，也不會動到服務本身（模型、佇列都由圖片服務管理，見

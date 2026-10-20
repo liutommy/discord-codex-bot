@@ -181,6 +181,7 @@ class Job:
     images: tuple[Image, ...] = ()
     queued_s: float = 0.0
     enhance_used: str = ""
+    sensitive: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +190,13 @@ class Result:
     paths: tuple[Path, ...]
     seeds: tuple[int | None, ...]
     enhance_used: str = ""
+    sensitive: bool = False  # the service judged the request sexual (from its words)
+
+
+def spoilered(result: Result, mode: str) -> bool:
+    """Whether `result`'s images are posted behind a spoiler under a guild's `mode`: `always`,
+    `off`, or `auto` (only the ones the service marked sensitive)."""
+    return mode == "always" or (mode == "auto" and result.sensitive)
 
 
 def parse_catalog(payload: object) -> Catalog:
@@ -374,6 +382,7 @@ def _job(payload: object) -> Job:
         tuple(images),
         float(queued_s) if isinstance(queued_s, int | float) else 0.0,
         str(payload.get("enhance_used") or "")[:20],
+        payload.get("sensitive") is True,
     )
 
 
@@ -654,7 +663,8 @@ async def _follow(
         path = into / f"image-{image.index}{_SUFFIXES[mime]}"
         await asyncio.to_thread(path.write_bytes, data)
         paths.append(path)
-    return Result(model, tuple(paths), tuple(image.seed for image in job.images), job.enhance_used)
+    seeds = tuple(image.seed for image in job.images)
+    return Result(model, tuple(paths), seeds, job.enhance_used, job.sensitive)
 
 
 def progress_text(job: Job) -> str:
@@ -751,6 +761,8 @@ def prompt_note(config: Config) -> str:
 
 DEFAULT_DAILY = 20
 DEFAULT_IN_FLIGHT = 1
+SPOILER_MODES = ("auto", "always", "off")
+DEFAULT_SPOILER = "auto"  # hide what the service marked sensitive
 MAX_DAILY = 1000
 MAX_IN_FLIGHT = 10
 USAGE_KEEP_DAYS = 7
@@ -794,19 +806,28 @@ class ImageSettings:
     def in_flight_limit(self, guild_id: int) -> int:
         return self._number(guild_id, "image_in_flight", DEFAULT_IN_FLIGHT)
 
+    def spoiler(self, guild_id: int) -> str:
+        raw = self.switches._get(guild_id, "image_spoiler")
+        return raw if raw in SPOILER_MODES else DEFAULT_SPOILER
+
     def update(
         self,
         guild_id: int,
         enabled: bool | None = None,
         daily: int | None = None,
         in_flight: int | None = None,
+        spoiler: str | None = None,
     ) -> None:
         if daily is not None and not 1 <= daily <= MAX_DAILY:
             raise ValueError(f"每日張數要在 1 到 {MAX_DAILY} 之間")
         if in_flight is not None and not 1 <= in_flight <= MAX_IN_FLIGHT:
             raise ValueError(f"同時進行的工作數要在 1 到 {MAX_IN_FLIGHT} 之間")
+        if spoiler is not None and spoiler not in SPOILER_MODES:
+            raise ValueError(f"spoiler 只能是 {', '.join(SPOILER_MODES)}")
         if enabled is not None:
             self.switches._put(guild_id, "image", "on" if enabled else "off")
+        if spoiler is not None:
+            self.switches._put(guild_id, "image_spoiler", spoiler)
         if daily is not None:
             self.switches._put(guild_id, "image_daily", str(daily))
         if in_flight is not None:

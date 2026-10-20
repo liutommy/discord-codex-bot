@@ -80,6 +80,7 @@ class FakeImageService:
         self.hold: asyncio.Event | None = None
         self.final = "done"
         self.enhance_used = "local"
+        self.sensitive = False
         self.polls = 0
         self.url = ""
         self.image = PNG  # sent in IMAGE_CHUNKS writes, as a real server streams a large file
@@ -126,6 +127,7 @@ class FakeImageService:
                 "steps": 8,
                 "model": "chroma1-flash",
                 "enhance_used": self.enhance_used,
+                "sensitive": self.sensitive,
                 "images": [],
                 "error": None,
                 "queued_s": queued_s,
@@ -814,6 +816,34 @@ async def test_tag_starts_a_detached_job_posted_without_pings(service, client, m
     assert client.image_settings.used(GUILD, USER) == 1 and client._image_in_flight == {}
 
 
+async def test_images_are_spoilered_by_the_guild_mode(service, client, monkeypatch) -> None:
+    """auto hides only what the service marked sensitive, always hides everything, off hides
+    nothing; the slash command and the tag both follow it. Negative control: a sensitive job
+    under auto is posted as SPOILER_ (Discord's spoiler), a plain one is not."""
+    for mode, sensitive, name in (
+        ("auto", True, "SPOILER_image-0.png"),
+        ("auto", False, "image-0.png"),
+        ("always", False, "SPOILER_image-0.png"),
+        ("off", True, "image-0.png"),
+    ):
+        client.image_settings.update(GUILD, spoiler=mode)
+        service.sensitive, service.polls = sensitive, 0
+        interaction = FakeInteraction()
+        await client.image_command(interaction, "貓")
+        assert interaction.edits[-1]["files"] == [name], (mode, sensitive)
+    assert client.image_settings.spoiler(GUILD) == "off"
+    client.image_settings.update(GUILD, spoiler="auto")
+    service.sensitive, service.polls = True, 0
+    channel = FakeChannel()
+    monkeypatch.setattr(client, "get_channel", {ALLOWED: channel}.get)
+    _codex_replies(monkeypatch, '<image_gen prompt="一隻橘貓"/>')
+    await client._answer("畫", [], GUILD, USER, channel_id=ALLOWED)
+    await _delivered(client)
+    assert channel.sent[0]["files"] == ["SPOILER_image-0.png"]
+    with pytest.raises(ValueError):
+        client.image_settings.update(GUILD, spoiler="sometimes")
+
+
 async def test_tag_delivery_rechecks_the_channel(service, client, monkeypatch) -> None:
     channel = FakeChannel()
     monkeypatch.setattr(client, "get_channel", {ALLOWED: channel}.get)
@@ -912,14 +942,20 @@ async def test_admin_image_get_and_set(client, tmp_path) -> None:
         return admin.read_result(root, request_id)
 
     status, document = await run("image.get", guild=GUILD)
-    assert document["result"]["text"] == "圖片生成：開\n每人每天：20 張\n每人同時：1 個工作"
-    status, document = await run("image.set", guild=GUILD, state="off", daily=5, in_flight=2)
+    assert document["result"]["text"] == (
+        "圖片生成：開\n每人每天：20 張\n每人同時：1 個工作\n"
+        "暴雷隱藏：auto（服務依提示詞判定為成人內容的圖才隱藏）"
+    )
+    status, document = await run(
+        "image.set", guild=GUILD, state="off", daily=5, in_flight=2, spoiler="always"
+    )
     assert document["result"] | {"text": ""} == {
         "text": "",
         "enabled": False,
         "service": True,
         "daily": 5,
         "in_flight": 2,
+        "spoiler": "always",
     }
     assert not client.image_settings.enabled(GUILD)
     client.image_settings.charge(GUILD, USER, 2)

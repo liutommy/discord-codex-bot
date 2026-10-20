@@ -691,6 +691,10 @@ says so, and the model is not offered the tool.
   once, default 1), stored in `CODEX_HOME/linkclean.sqlite3` with the daily counts, so the
   nightly backup covers them. The operator changes them with `image get` / `image set`
   ([`docs/admin-cli.md`](docs/admin-cli.md)).
+- Images are posted behind a Discord spoiler by each server's `spoiler` setting: `auto` (the
+  default) hides the images of jobs the service marked `sensitive`, `always` hides every image,
+  `off` hides none. The service judges a job from its prompt only, so under `auto` an image the
+  model made explicit from a plain prompt is posted unhidden; `always` covers that case.
 - Neither image jobs nor local-model turns wait in the Bot's serial queue, which serializes every
   other model turn: a local turn waiting for the GPU behind a picture would otherwise stop every
   member's answers. The host's GPU queue serializes them instead, and two turns of one local
