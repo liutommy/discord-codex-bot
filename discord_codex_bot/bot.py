@@ -177,6 +177,7 @@ from .tracking import (
     tracking_loop,
 )
 from .ui import (
+    CANCELLED,
     AnswerButton,
     AnswerView,
     CancelView,
@@ -214,7 +215,7 @@ class SlashPlaceholder:
         self.view = None
 
     async def show(self, text: str, view) -> None:
-        if self.retired:
+        if self.retired and view is not None:  # a cancellation (no view) still gets through
             return
         self.view = view
         with contextlib.suppress(discord.HTTPException):
@@ -226,6 +227,11 @@ class SlashPlaceholder:
             return
         left = created + INTERACTION_LIFETIME - discord.utils.utcnow()
         await asyncio.sleep(max(0.0, left.total_seconds()))
+        await self.retire()
+
+    async def retire(self) -> None:
+        if self.retired:
+            return
         self.retired = True
         with contextlib.suppress(discord.HTTPException):
             await self.interaction.edit_original_response(content=LATE_NOTICE, view=self.view)
@@ -289,7 +295,6 @@ _FALLBACK_LABEL = {
     CodexUnauthorized: "登入失效",
 }
 STREAM_SHOW_CHARS = 1900
-CANCELLED = "⛔ 已取消。"
 PROVIDER_CHOICES = [
     app_commands.Choice(name="Grok（xAI）", value=GROK),
     app_commands.Choice(name="Codex", value="codex"),
@@ -2592,7 +2597,8 @@ class DiscordCodexClient(discord.Client):
         """Run one answer as a task the member can cancel (❌ on the placeholder, or -stop).
         `show(text, view)` paints the placeholder; `start(on_video_slow)` returns the answer
         coroutine. Returns the CodexResult, or None when the request was cancelled."""
-        view = CancelView(owner_id)
+        longest = max(self.config.codex_timeout_seconds, self.config.local_llm_timeout_seconds)
+        view = CancelView(owner_id, timeout=longest + 300)  # queueing and setup on top
         await show(THINKING, view)
 
         async def on_video_slow() -> None:
@@ -2729,20 +2735,28 @@ class DiscordCodexClient(discord.Client):
             bool(resume),
             pointed is not None,
         )
-        result = await self._answer(
-            prompt,
-            [],
-            interaction.guild_id,
-            user_id,
-            resume=resume,
-            channel_id=interaction.channel_id,
-            previews=previews,
-            **self._routed_kw(routed),
-        )
+        # The deferred "thinking" response would hang past the interaction's lifetime.
+        placeholder = SlashPlaceholder(interaction)
+        late_notice = asyncio.create_task(placeholder.retire_when_late())
+        try:
+            result = await self._answer(
+                prompt,
+                [],
+                interaction.guild_id,
+                user_id,
+                resume=resume,
+                channel_id=interaction.channel_id,
+                previews=previews,
+                **self._routed_kw(routed),
+            )
+        finally:
+            late_notice.cancel()
         if routed is not None:
             self._log_route(routed, result)
             result = replace(result, text=self._routed_text(routed, result))
         late = interaction_expired(interaction) and interaction.channel is not None
+        if late:
+            await placeholder.retire()
         sent = await self.send_answer(
             interaction.channel if late else interaction.followup,
             question,
@@ -4197,6 +4211,7 @@ class DiscordCodexClient(discord.Client):
         view = self._answer_view(interaction.guild_id, interaction.user.id, prompt, result)
         try:
             if interaction_expired(interaction) and interaction.channel is not None:
+                await placeholder.retire()
                 sent = await interaction.channel.send(
                     chunks[0], files=self._files(result), view=view
                 )

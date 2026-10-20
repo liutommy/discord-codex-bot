@@ -5,6 +5,7 @@ import re
 from types import SimpleNamespace as NS
 
 from discord_codex_bot.ui import (
+    CANCELLED,
     NOT_YOURS,
     AnswerButton,
     AnswerView,
@@ -19,6 +20,10 @@ class Response:
     def __init__(self) -> None:
         self.sent: list[tuple[str, bool]] = []
         self.deferred = False
+        self.edited: tuple | None = None
+
+    async def edit_message(self, content=None, view=None):
+        self.edited = (content, view)
 
     async def send_message(self, text, ephemeral=False):
         self.sent.append((text, ephemeral))
@@ -41,7 +46,8 @@ async def test_cancel_view_only_the_owner_can_cancel() -> None:
     mine = interaction(1)
     await view.cancel.callback(mine)
     await asyncio.sleep(0)
-    assert task.cancelled() and mine.response.deferred
+    assert task.cancelled() and mine.response.edited == (CANCELLED, None)
+    assert CancelView(owner_id=1, timeout=1500).timeout == 1500
 
 
 async def test_answer_buttons_carry_action_and_owner_in_the_custom_id() -> None:

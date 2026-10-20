@@ -1635,6 +1635,8 @@ async def test_the_slash_placeholder_is_retired_before_the_interaction_closes(mo
     assert edits[-1] == (bot_module.LATE_NOTICE, "cancel-view"), "the cancel button stays"
     await placeholder.show("部分答案 ▌", "cancel-view")
     assert edits[-1][0] == bot_module.LATE_NOTICE, "nothing paints over the notice"
+    await placeholder.show(bot_module.CANCELLED, None)
+    assert edits[-1] == (bot_module.CANCELLED, None), "a cancellation still gets through"
 
 
 async def test_a_redo_past_the_interaction_lifetime_is_posted_in_the_channel(
@@ -1661,6 +1663,9 @@ async def test_a_redo_past_the_interaction_lifetime_is_posted_in_the_channel(
             posted.append(("channel", text))
             return NS(id=2)
 
+    async def edit_original_response(content=None, view=None):
+        posted.append(("placeholder", content))
+
     clicked = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
     interaction = NS(
         message=NS(content="**問**：\n> 今天吃什麼\n\n吃咖哩", reference=None, id=4242),
@@ -1670,13 +1675,16 @@ async def test_a_redo_past_the_interaction_lifetime_is_posted_in_the_channel(
         response=Response(),
         followup=Followup(),
         created_at=clicked,
+        edit_original_response=edit_original_response,
     )
     monkeypatch.setattr(bot_module.discord.utils, "utcnow", lambda: clicked + timedelta(minutes=5))
     await client.handle_answer_button(interaction, "redo", USER)
     monkeypatch.setattr(bot_module.discord.utils, "utcnow", lambda: clicked + timedelta(minutes=16))
     await client.handle_answer_button(interaction, "redo", USER)
-    assert [where for where, _ in posted] == ["followup", "channel"]
-    assert posted[1][1].startswith("**問**"), "the 🔁 / 👍 buttons still find the question"
+    # Past the lifetime the deferred "thinking" response is retired before the channel post.
+    assert [where for where, _ in posted] == ["followup", "placeholder", "channel"]
+    assert posted[1][1] == bot_module.LATE_NOTICE
+    assert posted[2][1].startswith("**問**"), "the 🔁 / 👍 buttons still find the question"
 
 
 async def test_handle_answer_button_remember_and_redo(client, backends, monkeypatch) -> None:

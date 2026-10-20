@@ -17,17 +17,19 @@ from .memory import STYLE_MAX_UPLOAD_BYTES, parse_style_upload
 
 NOT_YOURS = "這不是你的回答，按鈕只有發問的人能用。"
 CANCEL_TIMEOUT_SECONDS = 900
+CANCELLED = "⛔ 已取消。"
 STYLE_MODAL_TIMEOUT = 600
 _ACTIONS = {"redo": ("重答", "🔁"), "remember": ("記住", "👍")}
 
 
 class CancelView(discord.ui.View):
-    """One ❌ on the "thinking" placeholder; cancels the in-flight request's task. The caller
-    edits the placeholder once the task reports cancellation, so the button only acknowledges.
-    Not persistent on purpose: a restart kills the request anyway."""
+    """One ❌ on the "thinking" placeholder; cancels the in-flight request's task. The press
+    answers by showing CANCELLED on the placeholder itself: a slash command's own interaction
+    may be closed by then, and its placeholder retired (`SlashPlaceholder`). `timeout` must
+    outlast the longest request. Not persistent on purpose: a restart kills the request anyway."""
 
-    def __init__(self, owner_id: int) -> None:
-        super().__init__(timeout=CANCEL_TIMEOUT_SECONDS)
+    def __init__(self, owner_id: int, timeout: float = CANCEL_TIMEOUT_SECONDS) -> None:
+        super().__init__(timeout=timeout)
         self.owner_id = owner_id
         self.task: asyncio.Task[Any] | None = None
 
@@ -40,7 +42,7 @@ class CancelView(discord.ui.View):
             self.task.cancel()
         button.disabled = True
         self.stop()
-        await interaction.response.defer()
+        await interaction.response.edit_message(content=CANCELLED, view=None)
 
 
 class AnswerButton(
