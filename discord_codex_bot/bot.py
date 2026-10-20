@@ -190,6 +190,14 @@ LOGGER = logging.getLogger(__name__)
 # Closes every recall round; a spare taking over mid-recall gets the round's results without it.
 ANSWER_NOW = "\n\nNow answer the member's question."
 QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
+# Discord closes an interaction's token 15 minutes after the command or click. A local model may
+# take longer (LOCAL_LLM_TIMEOUT_SECONDS), so past this an answer is posted in the channel.
+INTERACTION_LIFETIME = timedelta(minutes=14)
+
+
+def interaction_expired(interaction) -> bool:
+    created = getattr(interaction, "created_at", None)
+    return created is not None and discord.utils.utcnow() - created >= INTERACTION_LIFETIME
 
 
 def failure_text(backend: str, error: BaseException, prefix: str) -> str:
@@ -2703,8 +2711,13 @@ class DiscordCodexClient(discord.Client):
         if routed is not None:
             self._log_route(routed, result)
             result = replace(result, text=self._routed_text(routed, result))
+        late = interaction_expired(interaction) and interaction.channel is not None
         sent = await self.send_answer(
-            interaction.followup, question, result, interaction.guild_id, user_id
+            interaction.channel if late else interaction.followup,
+            question,
+            result,
+            interaction.guild_id,
+            user_id,
         )
         # Link the redo answer too, so replying to *it* continues the same thread.
         self._remember(
@@ -4151,15 +4164,21 @@ class DiscordCodexClient(discord.Client):
         )
         chunks = split_discord_message(reply)
         sent_id = None
+        view = self._answer_view(interaction.guild_id, interaction.user.id, prompt, result)
         try:
-            sent = await interaction.edit_original_response(
-                content=chunks[0],
-                attachments=self._files(result),
-                view=self._answer_view(interaction.guild_id, interaction.user.id, prompt, result),
-            )
+            if interaction_expired(interaction) and interaction.channel is not None:
+                sent = await interaction.channel.send(
+                    chunks[0], files=self._files(result), view=view
+                )
+                send_rest = interaction.channel.send
+            else:
+                sent = await interaction.edit_original_response(
+                    content=chunks[0], attachments=self._files(result), view=view
+                )
+                send_rest = interaction.followup.send
             sent_id = sent.id
             for chunk in chunks[1:]:
-                await interaction.followup.send(chunk)
+                await send_rest(chunk)
         except discord.HTTPException:
             LOGGER.exception(
                 "Delivery failed for /%s guild=%s", self.config.command_prefix, interaction.guild_id

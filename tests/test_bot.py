@@ -1610,6 +1610,48 @@ async def test_exchange_of_uses_the_replied_message_or_the_quoted_block(
     assert await client._exchange_of(replied) == ("", "去吃一蘭")
 
 
+async def test_a_redo_past_the_interaction_lifetime_is_posted_in_the_channel(
+    client, backends, monkeypatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace as NS
+
+    from discord_codex_bot import bot as bot_module
+
+    posted = []
+
+    class Response:
+        async def defer(self, thinking=False):
+            pass
+
+    class Followup:
+        async def send(self, text, files=None, view=None):
+            posted.append(("followup", text))
+            return NS(id=1)
+
+    class Channel:
+        async def send(self, text, files=None, view=None):
+            posted.append(("channel", text))
+            return NS(id=2)
+
+    clicked = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    interaction = NS(
+        message=NS(content="**問**：\n> 今天吃什麼\n\n吃咖哩", reference=None, id=4242),
+        guild_id=GUILD,
+        channel_id=ALLOWED,
+        channel=Channel(),
+        response=Response(),
+        followup=Followup(),
+        created_at=clicked,
+    )
+    monkeypatch.setattr(bot_module.discord.utils, "utcnow", lambda: clicked + timedelta(minutes=5))
+    await client.handle_answer_button(interaction, "redo", USER)
+    monkeypatch.setattr(bot_module.discord.utils, "utcnow", lambda: clicked + timedelta(minutes=16))
+    await client.handle_answer_button(interaction, "redo", USER)
+    assert [where for where, _ in posted] == ["followup", "channel"]
+    assert posted[1][1].startswith("**問**"), "the 🔁 / 👍 buttons still find the question"
+
+
 async def test_handle_answer_button_remember_and_redo(client, backends, monkeypatch) -> None:
     from types import SimpleNamespace as NS
 
