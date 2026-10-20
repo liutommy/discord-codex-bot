@@ -765,14 +765,16 @@ LOCAL_WORDS = ("地端", "本機", "本地", "local")
 
 
 def asked_for_local(asked: str, catalog: Catalog | None) -> bool:
-    """Whether the member's own words ask for the local image service: one of LOCAL_WORDS or a
-    model's id or name from the catalog. The <image_gen/> tag runs only then, so a model that
-    emits it on a plain "draw this" does not put a slow job on the shared GPU."""
+    """Whether the member's own words (without a replied-to message) ask for the local image
+    service: one of LOCAL_WORDS or a model's id or name from the catalog, as a whole word. The
+    <image_gen/> tag runs only then, so a model that emits it on a plain "draw this" does not put
+    a slow job on the shared GPU."""
     text = asked.lower()
     names = [w.lower() for w in LOCAL_WORDS]
     if catalog is not None:
         names += [n.lower() for m in catalog.models for n in (m.id, m.name) if n]
-    return any(name in text for name in names)
+    # Whole words, so "plain" does not match "explain"; CJK has no word gaps to need it.
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text) for name in names)
 
 
 # ----- per-guild switch and limits --------------------------------------------------------------

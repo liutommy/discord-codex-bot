@@ -925,7 +925,7 @@ async def test_tag_runs_only_when_the_member_asks_for_the_local_service(
 ) -> None:
     """Negative control: a plain "draw a cat" does not put a job on the shared GPU even when the
     model emits the tag; naming the local service or one of its models does."""
-    _codex_replies(monkeypatch, *['<image_gen prompt="貓"/>'] * 3)
+    _codex_replies(monkeypatch, *['<image_gen prompt="貓"/>'] * 4)
     plain = await client._answer("畫一隻貓", [], GUILD, USER, channel_id=ALLOWED)
     assert "沒有用地端生圖" in plain.text and "/codex-image" in plain.text
     assert service.posts() == [] and client.image_settings.used(GUILD, USER) == 0
@@ -938,6 +938,13 @@ async def test_tag_runs_only_when_the_member_asks_for_the_local_service(
     assert len(service.posts()) == 2
     note = imagegen.prompt_note(client.config)
     assert "only when the member explicitly asks" in note
+    # A replied-to message saying 本地 is not the member asking; "explain" is not model "plain".
+    quoted = bot_module.with_quoted_message("畫這個", "別人", "今天的本地新聞", 0)
+    replied = await client._answer(quoted, [], GUILD, USER, channel_id=ALLOWED)
+    assert "沒有用地端生圖" in replied.text and len(service.posts()) == 2
+    catalog = imagegen.parse_catalog(CATALOG)
+    assert not imagegen.asked_for_local("explain this drawing", catalog)
+    assert imagegen.asked_for_local("用 plain 畫", catalog)
 
 
 async def test_tag_without_the_service_is_not_run(client, monkeypatch) -> None:

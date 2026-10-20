@@ -1962,8 +1962,9 @@ class DiscordCodexClient(discord.Client):
                     )
                     if request_only(result.text):
                         result = replace(result, text=READS_SPENT_MESSAGE)
+            own = split_quoted(prompt)[1]  # a replied-to message is not the member asking
             text, unread, refused = await self._apply_action_tags(
-                result.text, guild_id, channel_id, user_id, prompt
+                result.text, guild_id, channel_id, user_id, own
             )
             if unread or refused:
                 LOGGER.warning(
@@ -2006,7 +2007,7 @@ class DiscordCodexClient(discord.Client):
                             seen.add(_spaced(tag))
                             resent.append(tag)
                     done, _, _ = await self._apply_action_tags(
-                        "\n".join(resent), guild_id, channel_id, user_id, prompt
+                        "\n".join(resent), guild_id, channel_id, user_id, own
                     )
                     if done:
                         text = f"{text}\n\n{done}"
