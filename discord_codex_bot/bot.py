@@ -284,6 +284,9 @@ IMAGE_ENHANCE_CHOICES = [
 IMAGE_OFF = "圖片生成尚未啟用；管理者需設定 IMAGE_GEN_URL。"
 IMAGE_STARTED = "🎨 圖片生成中，完成後會貼在這個頻道。"
 LOCAL_THREADS_KEPT = 1000
+# The host's GPU queue holds one running and three waiting items; a tag past that would only be
+# refused by the service and post one more failure message each, so an answer runs at most these.
+IMAGE_TAGS_RUN = 4
 IMAGE_NOT_ASKED = "（沒有用地端生圖：要用的話請明講「地端」或模型名稱，或用 /{prefix}-image）"
 EMBEDFIX_CHOICES = [
     app_commands.Choice(name=label, value=value)
@@ -3821,7 +3824,10 @@ class DiscordCodexClient(discord.Client):
             prefix = self.config.command_prefix
             return _with_notes(clean, [IMAGE_NOT_ASKED.format(prefix=prefix)], notes_out)
         notes: list[str] = []
-        for attrs in asks:
+        if len(asks) > IMAGE_TAGS_RUN:
+            extra = len(asks) - IMAGE_TAGS_RUN
+            notes.append(f"（地端佇列一次最多 {IMAGE_TAGS_RUN} 張，多的 {extra} 個沒有執行）")
+        for attrs in asks[:IMAGE_TAGS_RUN]:
             label = attrs.get("prompt", "")[:60]
             request, problem = request_from_tag(attrs)
             if request is None:

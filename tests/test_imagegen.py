@@ -818,6 +818,20 @@ async def test_two_image_tags_start_two_jobs(service, client, monkeypatch) -> No
     assert all(sent["files"] == ["image-0.png"] for sent in channel.sent)
 
 
+async def test_tags_past_the_gpu_queue_are_not_run(service, client, monkeypatch) -> None:
+    """Negative control: an answer with more tags than the GPU queue holds starts that many
+    jobs and says how many were left out, instead of one refused request and failure post each."""
+    channel = FakeChannel()
+    monkeypatch.setattr(client, "get_channel", {ALLOWED: channel}.get)
+    tags = "\n".join(f'<image_gen prompt="貓{i}"/>' for i in range(6))
+    _codex_replies(monkeypatch, tags)
+    result = await client._answer("用地端畫六隻貓", [], GUILD, USER, channel_id=ALLOWED)
+    assert result.text.count(IMAGE_STARTED) == bot_module.IMAGE_TAGS_RUN == 4
+    assert "多的 2 個沒有執行" in result.text
+    await _delivered(client)
+    assert len(service.posts()) == 4
+
+
 async def test_images_are_spoilered_by_the_guild_mode(service, client, monkeypatch) -> None:
     """auto hides only what the service marked sensitive, always hides everything, off hides
     nothing; the slash command and the tag both follow it. Negative control: a sensitive job
