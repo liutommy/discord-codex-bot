@@ -79,6 +79,19 @@ def parse_allow_nets(value: str | None, name: str) -> tuple[IPNetwork, ...]:
     return tuple(nets)
 
 
+# The host's GPU queue holds one running item and at most 3 waiting (docs/image-service.md), so
+# an item waits behind at most 3 others; by default its wait is capped at that many run times.
+QUEUE_WAIT_FACTOR = 3
+
+
+def _queue_wait(env: Mapping[str, str], prefix: str, run_default: int) -> int:
+    """<prefix>_QUEUE_WAIT_SECONDS: how long an item may wait in the host's GPU queue before the
+    Bot gives up on it, so a stuck service cannot hold a request forever. Default:
+    QUEUE_WAIT_FACTOR times <prefix>_TIMEOUT_SECONDS."""
+    run = _positive_int(env, f"{prefix}_TIMEOUT_SECONDS", run_default)
+    return _positive_int(env, f"{prefix}_QUEUE_WAIT_SECONDS", QUEUE_WAIT_FACTOR * run)
+
+
 def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
     raw = env.get(name, "").strip()
     if not raw:
@@ -193,7 +206,14 @@ class Config:
     local_llm_api_key: str
     local_llm_max_tokens: int
     local_llm_timeout_seconds: int
+    local_llm_queue_wait_seconds: int
     local_llm_params: str  # a JSON object, validated at load (`local_params`)
+    image_gen_url: str
+    # Sent only to the image service, as a Bearer token; never in a log line, a prompt or a
+    # message.
+    image_gen_api_key: str = field(repr=False)
+    image_gen_timeout_seconds: int
+    image_gen_queue_wait_seconds: int
     alert_user_id: int
     alert_after_failures: int
     alert_cooldown_minutes: int
@@ -387,10 +407,23 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         local_llm_max_tokens=_positive_int(values, "LOCAL_LLM_MAX_TOKENS", 8192),
         # A local model reads a long prompt slowly (about a minute for 12k tokens on an M4), so
         # it gets its own limit instead of CODEX_TIMEOUT_SECONDS.
+        # It starts at the first streamed event that is not the host's queue notice: the local
+        # model shares one GPU queue with image jobs (docs/image-service.md), and time spent
+        # waiting there is not run time. Waiting has its own, generous cap.
         local_llm_timeout_seconds=_positive_int(values, "LOCAL_LLM_TIMEOUT_SECONDS", 1200),
+        local_llm_queue_wait_seconds=_queue_wait(values, "LOCAL_LLM", 1200),
         # Sampling for the local model, merged into every request: a model's recommended values
         # live in its card, and mlx_lm.server ignores the model's generation_config.json.
         local_llm_params=values.get("LOCAL_LLM_PARAMS", "").strip(),
+        # The image service on the host (docs/image-service.md), reached like the local model;
+        # empty = no image generation. It owns the models and the prompt pipeline; the Bot owns
+        # who may generate, how many, and delivery.
+        image_gen_url=values.get("IMAGE_GEN_URL", "").strip(),
+        image_gen_api_key=values.get("IMAGE_GEN_API_KEY", "").strip(),
+        # One job from leaving the GPU queue to the last image downloaded; the wait before has
+        # its own cap.
+        image_gen_timeout_seconds=_positive_int(values, "IMAGE_GEN_TIMEOUT_SECONDS", 1800),
+        image_gen_queue_wait_seconds=_queue_wait(values, "IMAGE_GEN", 1800),
         # Operator alerts by DM: repeated failures / lost login. Empty id = the application owner.
         alert_user_id=int(values.get("ALERT_USER_ID", "").strip() or 0),
         alert_after_failures=_positive_int(values, "ALERT_AFTER_FAILURES", 3),
@@ -588,6 +621,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     if config.local_llm_url and not _plain_http_url(config.local_llm_url):
         raise ValueError(
             "LOCAL_LLM_URL must be an http:// or https:// URL with a host and no credentials, "
+            "query or fragment"
+        )
+    if config.image_gen_url and not _plain_http_url(config.image_gen_url):
+        raise ValueError(
+            "IMAGE_GEN_URL must be an http:// or https:// URL with a host and no credentials, "
             "query or fragment"
         )
     local_params(config)  # a malformed value stops the start, not each local request

@@ -54,6 +54,7 @@ def test_registers_only_expected_slash_commands(config: Config, tmp_path) -> Non
         "inmu-king-track",
         "inmu-king-linkclean",
         "inmu-king-embedfix",
+        "inmu-king-image",
     }
     assert client.intents.guilds
     assert client.intents.message_content
@@ -342,6 +343,7 @@ from discord_codex_bot.codex import (  # noqa: E402
     CodexUsageLimit,
 )
 from discord_codex_bot.links import Preview  # noqa: E402
+from discord_codex_bot.openrouter import QueueBusy  # noqa: E402
 from discord_codex_bot.queue import SerialQueue  # noqa: E402
 from discord_codex_bot.tracking import (  # noqa: E402
     ContentItem,
@@ -739,6 +741,94 @@ async def test_answer_truncates_and_reports_failures(client, backends, monkeypat
     assert agy.calls == []  # arbitrary RuntimeError must not be hidden by the spare backend
     client.queue = SerialQueue(0)
     assert (await client._answer("q", [], GUILD, USER)).text == QUEUE_FULL_MESSAGE
+
+
+# ----- the local model and the host's GPU queue ---------------------------------------------
+
+
+@pytest.fixture
+def local(client, monkeypatch):
+    """The member answers on the local model; `run_router` is replaced by the returned fake,
+    whose `gate` (when set) holds each call until it is set, and whose `log` records
+    ("in"/"out", resume) as calls start and end."""
+    client.config = replace(client.config, local_llm_url="http://127.0.0.1:9/v1")
+    client.memory.set_model(GUILD, USER, "local:m")
+
+    async def no_catalog():
+        return []
+
+    monkeypatch.setattr(client.catalogs[bot_module.LOCAL], "free_models", no_catalog)
+    fake = types.SimpleNamespace(gate=None, log=[], error=None)
+
+    async def run_router(router, text, config, model, **kw):
+        fake.log.append(("in", kw.get("resume", "")))
+        if fake.gate is not None:
+            await fake.gate.wait()
+        fake.log.append(("out", kw.get("resume", "")))
+        if fake.error is not None:
+            raise fake.error
+        return CodexResult("地端答案", thread_id="lo-new")
+
+    monkeypatch.setattr(bot_module, "run_router", run_router)
+    return fake
+
+
+async def test_a_local_turn_does_not_wait_in_the_serial_queue(client, backends, local) -> None:
+    """Negative control: with the SerialQueue held by another member's turn (an answer stuck
+    behind a picture on the GPU looks the same), a local-model turn still runs; a Codex turn
+    waits its turn."""
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def blocker():
+        held.set()
+        await release.wait()
+
+    holder = asyncio.create_task(client.queue.run(blocker))
+    await held.wait()
+    result = await asyncio.wait_for(client._answer("q", [], GUILD, USER), 2)
+    assert result.text == "地端答案" and result.via.backend == bot_module.LOCAL
+    client.memory.set_model(GUILD, USER, "")
+    codex_turn = asyncio.create_task(client._answer("q", [], GUILD, 6))
+    await asyncio.sleep(0.05)
+    assert not codex_turn.done(), "every other backend still waits in the SerialQueue"
+    release.set()
+    await holder
+    assert (await asyncio.wait_for(codex_turn, 2)).text == "答案"
+
+
+async def test_two_turns_of_one_local_conversation_run_one_after_the_other(client, local) -> None:
+    """Negative control: a second message in the same local conversation waits for the first
+    to save its transcript; a new conversation does not wait for anyone."""
+    local.gate = asyncio.Event()
+    first = asyncio.create_task(client._answer("一", [], GUILD, USER, resume="lo-1"))
+    second = asyncio.create_task(client._answer("二", [], GUILD, USER, resume="lo-1"))
+    fresh = asyncio.create_task(client._answer("新", [], GUILD, USER))
+    await asyncio.sleep(0.05)
+    assert sorted(local.log) == [("in", ""), ("in", "lo-1")], "the same thread waits"
+    local.gate.set()
+    await asyncio.wait_for(asyncio.gather(first, second, fresh), 2)
+    thread = [step for step, resume in local.log if resume == "lo-1"]
+    assert thread == ["in", "out", "in", "out"] and client._thread_turns == {}
+
+
+async def test_a_full_gpu_queue_is_told_and_not_counted_as_a_failure(
+    client, local, monkeypatch
+) -> None:
+    """Negative control: QueueBusy reaches the member in its own words and never feeds the
+    operator's failure alert, which a broken local model does."""
+    failures = []
+
+    async def record_failure(backend, error):
+        failures.append(backend)
+
+    monkeypatch.setattr(client.alerts, "record_failure", record_failure)
+    local.error = QueueBusy("地端 GPU 的排隊已滿（已有 3 個在等），請稍後再試。")
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "地端 GPU 的排隊已滿（已有 3 個在等），請稍後再試。"
+    assert failures == []
+    local.error = BackendError("地端模型 連線失敗：ClientConnectorError")
+    assert "連線失敗" in (await client._answer("q", [], GUILD, USER)).text
+    assert failures == [bot_module.LOCAL]
 
 
 def test_read_routes_permanent_and_member_scopes(client, tmp_path) -> None:

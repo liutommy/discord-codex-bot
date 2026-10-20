@@ -459,9 +459,9 @@ def merge_exports(kind: str, modules) -> dict:
 
 def handler_modules() -> tuple:
     # Imported on use: the handler modules import admin_server, which bot.py imports.
-    from . import admin_guild, admin_members, admin_tracking
+    from . import admin_guild, admin_image, admin_members, admin_tracking
 
-    return admin_members, admin_tracking, admin_guild
+    return admin_members, admin_tracking, admin_guild, admin_image
 
 
 def load_groups() -> dict[str, str]:

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import instructions
+from . import imagegen, instructions
 from .backends import BackendUnavailable, Resolved
 from .config import Config
 
@@ -280,7 +280,10 @@ def _prompt(
     files: str = "",
     speaker: int | None = None,
     history: str = "",
+    image_gen: str = "",
 ) -> str:
+    """`image_gen` is the <image_gen/> instruction (imagegen.prompt_note), "" while the Bot has
+    no image service."""
     quoted, user_prompt = split_quoted(user_prompt)
     memory, files, help, links, style, personal_style, quoted, user_prompt, history = map(
         defang, (memory, files, help, links, style, personal_style, quoted, user_prompt, history)
@@ -395,6 +398,7 @@ def _prompt(
             " watch may spend a judgement, so a slower one is cheaper and a faster one is only"
             " worth it for sources that change constantly. Never claim a schedule changed without"
             " emitting the tag.",
+            *((image_gen,) if image_gen else ()),
             "If the member states a durable fact or preference about themselves, or the server"
             " agrees on something everyone should remember, append"
             ' <memory scope="user" name="short title">one sentence</memory> or'
@@ -590,6 +594,7 @@ async def run_codex(
             files,
             speaker,
             history=history,
+            image_gen=imagegen.prompt_note(config),
         )
     )
     plain = isolated or plain

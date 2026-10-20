@@ -137,7 +137,7 @@ Guild-scoped slash commands normally appear quickly. Run:
 ```
 
 Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>`,
-`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`. This README uses the
+`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`, `-image`. This README uses the
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
 
 ### Social tracking: YouTube, Twitch, X, Ruten stores and web pages
@@ -658,6 +658,51 @@ newest 100 samples are kept per emoji, and a deleted message takes its samples w
 `:name:（description）`, or just `:name:` while there is none and for animated emoji. MEMORY
 lists the server's 50 most used emoji in a `[伺服器表情]` section. No emoji picture is ever sent
 along: that would make the message an image turn, which skips the router.
+
+### Image generation (optional, `IMAGE_GEN_URL`)
+
+Pictures come from a separate image service on the Docker host, reached through the same relay
+path as the local model. Its HTTP contract is in [`docs/image-service.md`](docs/image-service.md).
+The service owns the model catalog, the prompt pipeline and the GPU queue. The Bot owns who may
+generate, how many, and delivery. With `IMAGE_GEN_URL` empty the feature is off: `/<prefix>-image`
+says so, and the model is not offered the tool.
+
+- `/<prefix>-image` takes a prompt and, optionally, a model (autocompleted from the catalog), an
+  aspect, a count, a seed, a negative prompt, `enhance` (`local`, `cloud` or `off`: how the
+  service rewrites the prompt; unset is the model's default), upscale and detailer. For
+  image-to-image it also takes `image` (PNG, JPEG or WebP, at most the catalog's
+  `max_input_bytes`), `strength` (0 to 1) and `mask` (white = repaint), sent to the service as
+  base64; `mask` or `strength` without `image` is refused. An option left unset is the model's
+  default; one the model does not list, an `enhance` value outside the model's `enhancers`, and
+  an input of the wrong type or size are refused before anything is downloaded or queued. The
+  placeholder shows the queue position and then the steps, ❌ cancels the job on the service too,
+  and a job that outlives the 15-minute interaction is posted in the channel.
+- In conversation the model can append `<image_gen prompt="…"/>` (with `model`, `aspect`,
+  `count`, `seed`, `negative`, `enhance`; no input image). The tag is checked against the same
+  catalog and limits when the answer arrives. The answer gets a short note, and the picture is
+  posted in the channel when it is ready, after the channel is checked against the allowlist
+  again, without pinging anyone.
+- The local model and image jobs share one GPU queue on the host: one item runs, at most 3 wait,
+  and a further request is refused at once (429 `queue_full`). The member is told the local
+  queue is full and to try later; a refused image job is not counted against the daily limit,
+  and a refused chat turn does not count as the local model failing. While a streamed local
+  answer waits, the placeholder shows how many items are ahead.
+- Each server has a switch and per-member limits (images per Taiwan day, default 20; jobs at
+  once, default 1), stored in `CODEX_HOME/linkclean.sqlite3` with the daily counts, so the
+  nightly backup covers them. The operator changes them with `image get` / `image set`
+  ([`docs/admin-cli.md`](docs/admin-cli.md)).
+- Neither image jobs nor local-model turns wait in the Bot's serial queue, which serializes every
+  other model turn: a local turn waiting for the GPU behind a picture would otherwise stop every
+  member's answers. The host's GPU queue serializes them instead, and two turns of one local
+  conversation still run one after the other, so neither drops the other's exchange from the
+  transcript.
+- `IMAGE_GEN_API_KEY` is optional, sent only to the service as a Bearer token.
+  `IMAGE_GEN_TIMEOUT_SECONDS` (default 1800) bounds one job from the first poll that is no longer
+  `queued` to the last download; `LOCAL_LLM_TIMEOUT_SECONDS` bounds a streamed local answer from
+  its first event that is not the queue's SSE comment. Waiting in the GPU queue has its own caps,
+  `IMAGE_GEN_QUEUE_WAIT_SECONDS` and `LOCAL_LLM_QUEUE_WAIT_SECONDS` (default three times the
+  matching timeout), so a stuck service cannot hold a request forever. A local request that is
+  not streamed cannot tell waiting from running and gets both.
 
 ### X lookup and X accounts (optional, Grok subscription)
 

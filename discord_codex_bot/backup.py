@@ -36,7 +36,9 @@ BACKUP_MEMBERS = (
 )
 TRACKING_DB = "tracking.sqlite3"
 EMOJI_DB = "emoji.sqlite3"  # emoji.py's samples and descriptions
-LINKCLEAN_DB = "linkclean.sqlite3"  # each server's link-cleaning mode (always in CODEX_HOME)
+# Each server's link-cleaning mode, its image-generation switch and limits, and each member's
+# images per day (imagegen.ImageSettings); always in CODEX_HOME.
+LINKCLEAN_DB = "linkclean.sqlite3"
 ARCHIVE_PREFIX = "discord-codex-bot-"
 # A file that vanished while the archive was written means the tree was moving under it (memory
 # rewrite moves MEMORY.md and topics/ into .backup/): list it again and start over, a few times.

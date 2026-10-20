@@ -15,6 +15,7 @@ from pathlib import Path
 
 import aiohttp
 
+from . import imagegen
 from .codex import BackendError, CodexResult, _prompt, output_style
 from .config import Config, local_params
 
@@ -25,6 +26,19 @@ UNSTABLE = "（免費模型可能暫時不可用，換一個試試）"
 # The routers' reasoning.effort vocabulary; the shared option's "max" is their "xhigh".
 _EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
 _THINK_OPEN, _THINK_CLOSE = "<think>", "</think>"
+# The host's GPU queue notice, an SSE comment sent every 10 s while a streamed request waits
+# (docs/image-service.md): `: queued position=2` is two items ahead.
+_QUEUED = re.compile(r"^:\s*queued position=(\d{1,4})\b")
+
+
+class QueueBusy(BackendError):
+    """The host's GPU queue is full, or the request waited past its cap: the server is busy,
+    not broken, so this is not counted as the backend failing."""
+
+
+def queued_text(ahead: int) -> str:
+    """The placeholder while a request waits in the host's GPU queue."""
+    return f"⏳ 地端 GPU 排隊中，前面還有 {ahead} 個…" if ahead else "⏳ 地端 GPU 排隊中…"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +72,10 @@ class Router:
     short_ids: bool = False
     # Seconds one request may take, prompt reading and the whole answer included.
     timeout: Callable[[Config], int] = lambda config: config.codex_timeout_seconds
+    # Seconds a request may wait in the host's GPU queue before `timeout` starts; None for a
+    # server without one. A streamed request starts its timeout at the first event that is not
+    # the queue's SSE comment; one that is not streamed cannot tell, and gets both.
+    queue_wait: Callable[[Config], int] | None = None
 
     @property
     def models_word(self) -> str:
@@ -118,6 +136,7 @@ ROUTERS: dict[str, Router] = {
         params=local_params,
         short_ids=True,
         timeout=lambda config: config.local_llm_timeout_seconds,
+        queue_wait=lambda config: config.local_llm_queue_wait_seconds,
     ),
 }
 OPENROUTER_ROUTER = ROUTERS["openrouter"]
@@ -376,6 +395,7 @@ async def run_router(
             files,
             speaker,
             history=history,
+            image_gen=imagegen.prompt_note(config),
         )
     )
     history = load_transcript(config, resume) if resume else []
@@ -425,6 +445,11 @@ async def run_router(
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
         raise BackendError(f"{label} 連線失敗：{type(error).__name__}{unstable}") from error
     error = payload.get("error") if isinstance(payload, dict) else None
+    # Only a router in front of the shared GPU queue (queue_wait) can mean that queue.
+    queued = router.queue_wait is not None
+    if queued and isinstance(error, dict) and error.get("code") == "queue_full":
+        LOGGER.info("%s queue full", router.label)
+        raise QueueBusy(imagegen.queue_full())  # the GPU queue image jobs share
     if status != 200 or error:
         detail = (error or {}).get("message") if isinstance(error, dict) else str(error or "")
         where = f"HTTP {status}" if status != 200 else "上游錯誤"
@@ -479,43 +504,74 @@ def strip_think(text: str, streaming: bool = False) -> str:
 
 
 async def _post(router: Router, config: Config, body: dict, on_delta) -> tuple[int, dict]:
-    async with _session(config, router.timeout(config), router) as session:
+    run = router.timeout(config)
+    wait = router.queue_wait(config) if router.queue_wait is not None else None
+    async with _session(config, run + (wait or 0), router) as session:
         url = f"{router.api(config)}/chat/completions"
         async with session.post(url, json=body) as response:
             if on_delta is not None and response.status == 200:
-                return response.status, await _read_sse(response, on_delta, router.drops_think)
+                payload = await _read_sse(response, on_delta, router.drops_think, wait, run)
+                return response.status, payload
             return response.status, await response.json(content_type=None)
 
 
-async def _read_sse(response, on_delta, drops_think: bool = False) -> dict:
+async def _read_sse(
+    response,
+    on_delta,
+    drops_think: bool = False,
+    wait: float | None = None,
+    run: float | None = None,
+) -> dict:
     """Consume an OpenAI-style SSE stream, reporting the accumulated answer text after each
     content delta (reasoning deltas and a leading <think> block are not shown), and return a
-    completion-shaped payload."""
+    completion-shaped payload. SSE comments are never content; while the host's GPU queue holds
+    the request, its `: queued position=N` comments paint `queued_text` instead. With `wait`
+    (a server behind that queue), the stream waits at most that long for its first event that
+    is not a comment, which raises QueueBusy, and has `run` seconds from that event on."""
     accumulated = reasoning = ""
     finish_reason = None
-    async for raw in response.content:
-        line = raw.decode("utf-8", errors="replace").strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            chunk = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(chunk, dict) and chunk.get("error"):
-            return chunk  # surfaced by the caller like a non-streaming error payload
-        choices = chunk.get("choices") or []
-        delta = (choices[0].get("delta") or {}) if choices else {}
-        finish_reason = (choices[0].get("finish_reason") if choices else None) or finish_reason
-        reasoning += str(delta.get("reasoning") or delta.get("reasoning_content") or "")
-        piece = delta.get("content")
-        if piece:
-            accumulated += str(piece)
-            shown = strip_think(accumulated, streaming=True) if drops_think else accumulated
-            if shown:
-                await on_delta(shown)
+    started = wait is None  # no queue: the session's own timeout is the only limit
+    try:
+        async with asyncio.timeout(wait) as limit:
+            async for raw in response.content:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue  # the blank line that ends an event
+                if line.startswith(":"):
+                    queued = _QUEUED.match(line)
+                    if queued and not started:
+                        await on_delta(queued_text(int(queued.group(1))))
+                    continue
+                if not started:  # out of the queue: from here on it is run time
+                    started = True
+                    limit.reschedule(asyncio.get_running_loop().time() + run if run else None)
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(chunk, dict) and chunk.get("error"):
+                    return chunk  # surfaced by the caller like a non-streaming error payload
+                choices = chunk.get("choices") or []
+                delta = (choices[0].get("delta") or {}) if choices else {}
+                finish = choices[0].get("finish_reason") if choices else None
+                finish_reason = finish or finish_reason
+                reasoning += str(delta.get("reasoning") or delta.get("reasoning_content") or "")
+                piece = delta.get("content")
+                if piece:
+                    accumulated += str(piece)
+                    shown = strip_think(accumulated, streaming=True) if drops_think else accumulated
+                    if shown:
+                        await on_delta(shown)
+    except TimeoutError:
+        if not started:
+            LOGGER.warning("Request waited %ss in the GPU queue; given up", wait)
+            raise QueueBusy(imagegen.QUEUE_TIMED_OUT) from None
+        raise
     message = {"content": accumulated, "reasoning": reasoning}
     return {"choices": [{"message": message, "finish_reason": finish_reason}]}
 

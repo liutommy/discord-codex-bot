@@ -154,6 +154,24 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "只有伺服器主人、管理員或被特別列出的人能用。",
         ["/{p}-embedfix 查詢", "/{p}-embedfix 關閉", "/{p}-embedfix 開啟"],
     ),
+    "-image": (
+        "生成圖片（管理者有接上圖片服務才能用）：prompt 寫要畫什麼；model 打字篩選圖片模型，"
+        "其餘選項（比例、張數、種子、不要出現的東西、描述改寫 enhance、放大、細節修補）"
+        "留空就用服務的預設，模型不支援的選項會直接說不支援。"
+        "enhance 選生成前怎麼改寫描述：地端改寫、雲端改寫（服務判斷不適合時改用地端）或不改寫。"
+        "附 image（PNG／JPEG／WebP 原圖）就照著它改，strength 0～1 決定能改多少；"
+        "再附 mask 則只重畫遮罩白色的地方（mask 一定要搭配 image）。"
+        "地端模型和圖片共用一張顯卡、一條隊伍：一次跑一個，最多 3 個在等，滿了會請你稍後再試，"
+        "這時不扣額度。生成中會顯示前面還有幾個與進度，❌ 取消；圖做好會換掉「生成中」的訊息，"
+        "超過 14 分鐘則另外貼在頻道。每人每天的張數與同時進行的數量有上限，由伺服器設定。"
+        "直接跟 Bot 說「幫我畫…」也可以，圖做好會貼在頻道。",
+        [
+            "/{p}-image prompt:夕陽下的貓咪，水彩風",
+            "/{p}-image prompt:賽博龐克街景 aspect:16:9 count:2",
+            "/{p}-image prompt:海邊的燈塔 seed:1234 negative:人物 enhance:不改寫",
+            "/{p}-image prompt:改成雪景 image:（附上原圖） strength:0.5",
+        ],
+    ),
     "-export": (
         "把你在這個伺服器的個人記憶（索引、archive、每一則內容）打包成 zip 私下給你，"
         "當作自己的備份或搬家用。伺服器記憶不在裡面。",
@@ -183,7 +201,8 @@ FEATURES: list[str] = [
     "Reddit、Streamable 等會抓下來看；長片會先回「🎬 處理中」再改成正式答案。",
     "**模型來源**：Grok（會自己用 X 搜尋查貼文與帳號；看得到 PNG／JPEG 圖，"
     "GIF／WebP 改由 Codex 回答）、Codex、Antigravity（Gemini／Claude）、"
-    "OpenRouter 與 OrcaRouter 的免費模型、伺服器自己跑的地端模型（有開才會列出）；"
+    "OpenRouter 與 OrcaRouter 的免費模型、伺服器自己跑的地端模型（有開才會列出；"
+    "和畫圖共用一張顯卡，要排隊時會顯示前面還有幾個，隊伍滿了請稍後再試）；"
     "伺服器預設用 {default}。免費模型可能不穩或下架，回錯就換一個。",
     "**記憶**分個人與伺服器兩層，另有管理者維護的永久記憶；Bot 會在需要時自己查閱。"
     "每週還會從你最近幾段對話推測出「（推測）」開頭的個人記憶，從多位成員都提到的事整理出"
@@ -214,6 +233,13 @@ ROUTING_FEATURE = (
 )
 
 
+# Shown only while IMAGE_GEN_URL is set (imagegen.py).
+IMAGE_FEATURE = (
+    "**會畫圖**：跟 Bot 說「幫我畫…」，它會交給圖片服務生成，做好後貼在頻道；"
+    "要指定模型、比例、張數等選項請用 `/{p}-image`。"
+)
+
+
 # Shown only while EMOJI_ENABLED is on (emoji.py).
 EMOJI_FEATURE = (
     "**看得懂伺服器表情**：訊息裡（含你回覆的那則）的本伺服器自訂表情，Bot 會照大家平常的用法"
@@ -227,13 +253,18 @@ EMOJI_REPLY_FEATURE = (
 )
 
 
-def _features(image_order: str, emoji: bool = False, emoji_reply: bool = False) -> list[str]:
+def _features(
+    image_order: str, emoji: bool = False, emoji_reply: bool = False, image: bool = False
+) -> list[str]:
     """The ability list; with routing on (`image_order` names the image list, from
     config/routing.json) it also explains automatic model choice, with emoji on how the
-    server's own emoji are read, and with `emoji_reply` too that answers use them."""
+    server's own emoji are read, with `emoji_reply` too that answers use them, and with the
+    image service (`image`) that the Bot draws."""
     features = list(FEATURES)
     if image_order:
         features.append(ROUTING_FEATURE.replace("{image}", image_order))
+    if image:
+        features.append(IMAGE_FEATURE)
     if emoji:
         features.append(EMOJI_FEATURE)
         if emoji_reply:
@@ -252,6 +283,7 @@ def render_guide(
     image_order: str = "",
     emoji: bool = False,
     emoji_reply: bool = False,
+    image: bool = False,
 ) -> str:
     """The member-facing guide for /<prefix>-help, in registered-command order. `default`
     is DEFAULT_MODEL as members read it; it is configuration, so never written in the text."""
@@ -265,7 +297,9 @@ def render_guide(
         blocks.append("\n".join(lines))
     blocks.append(
         "**不用指令也能做的事**\n"
-        + "\n".join(f"・{_fill(f, p, default)}" for f in _features(image_order, emoji, emoji_reply))
+        + "\n".join(
+            f"・{_fill(f, p, default)}" for f in _features(image_order, emoji, emoji_reply, image)
+        )
     )
     return "\n\n".join(blocks)
 
@@ -277,6 +311,7 @@ def render_sheet(
     image_order: str = "",
     emoji: bool = False,
     emoji_reply: bool = False,
+    image: bool = False,
 ) -> str:
     """The compact sheet injected into the model's prompt: one line per command plus the
     feature list, Markdown stripped so it reads as facts rather than formatting."""
@@ -288,7 +323,7 @@ def render_sheet(
         "其他用法："
         + " ".join(
             _fill(f, prefix, default).replace("**", "")
-            for f in _features(image_order, emoji, emoji_reply)
+            for f in _features(image_order, emoji, emoji_reply, image)
         )
     )
     return "\n".join(lines)
