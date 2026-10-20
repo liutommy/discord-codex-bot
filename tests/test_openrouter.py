@@ -435,6 +435,7 @@ async def test_local_path_ids_are_shown_by_name_and_sent_in_full(
             {"id": "mlx-community/Qwen3-4B-4bit"},
             {"id": "/srv/a/same.gguf"},
             {"id": "/srv/b/same.gguf"},
+            {"id": "/opt/models/mlx-community/Qwen3-4B-4bit"},
         ]
     }
     session = Session(
@@ -444,13 +445,18 @@ async def test_local_path_ids_are_shown_by_name_and_sent_in_full(
     catalog = Catalog(local_cfg, LOCAL_ROUTER)
     models = await catalog.free_models()
     assert sorted((m.id, m.name) for m in models) == [
-        ("/srv/a/same.gguf", "/srv/a/same.gguf"),  # two paths, one name: kept in full
-        ("/srv/b/same.gguf", "/srv/b/same.gguf"),
+        ("Qwen3-4B-4bit", "Qwen3-4B-4bit"),
         ("mimo-q4", "mimo-q4"),
         ("mlx-community/Qwen3-4B-4bit", "mlx-community/Qwen3-4B-4bit"),
+        ("same.gguf", "same.gguf"),  # two paths, one name: numbered in path order
+        ("same.gguf~2", "same.gguf~2"),
     ]
+    assert not any(m.id.startswith("/") or m.name.startswith("/") for m in models)
     await run_router(LOCAL_ROUTER, "q", local_cfg, "mimo-q4", catalog=catalog)
     assert session.calls[-1][2]["model"] == "/Users/someone/models/mimo-q4"
+    session.responses.append(Response({"choices": [{"message": {"content": "好"}}]}))
+    await run_router(LOCAL_ROUTER, "q", local_cfg, "same.gguf~2", catalog=catalog)
+    assert session.calls[-1][2]["model"] == "/srv/b/same.gguf"
     assert openrouter.short_id("C:\\models\\qwen.gguf") == "qwen.gguf"
 
 

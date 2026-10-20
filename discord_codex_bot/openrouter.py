@@ -169,14 +169,26 @@ def short_id(model_id: str) -> str:
 
 
 def _shorten(models: list[Model]) -> list[Model]:
-    """Each model under its short id, keeping the full one for requests. Two paths ending in the
-    same name keep their full ids: neither short id would say which model it is."""
+    """Each path-shaped model under its short id, keeping the full one for requests. A short id
+    another model already shows (two paths ending in the same name, or a repo id) gets "~2",
+    "~3", … in the order of the full paths, so no member ever sees a host path."""
     short = [short_id(m.id) for m in models]
+    shown_ids = {m.id for m, name in zip(models, short, strict=True) if name == m.id}
+    alias: dict[str, str] = {}
+    for model, name in sorted(zip(models, short, strict=True), key=lambda pair: pair[0].id):
+        if name == model.id:
+            continue
+        candidate, n = name, 2
+        while candidate in shown_ids:
+            candidate, n = f"{name}~{n}", n + 1
+        shown_ids.add(candidate)
+        alias[model.id] = candidate
     out = []
-    for model, name in zip(models, short, strict=True):
-        if name == model.id or short.count(name) > 1:
+    for model in models:
+        if model.id not in alias:
             out.append(model)
             continue
+        name = alias[model.id]
         shown = name if model.name == model.id else model.name
         out.append(replace(model, id=name, name=shown, api_id=model.id))
     return out
