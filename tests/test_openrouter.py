@@ -899,3 +899,16 @@ async def test_a_full_gpu_queue_is_a_busy_message_not_a_failure(
     with pytest.raises(BackendError) as caught:
         await run_router(LOCAL_ROUTER, "q", local_cfg, "m")
     assert not isinstance(caught.value, QueueBusy) and "HTTP 429" in str(caught.value)
+
+
+async def test_queue_full_from_a_hosted_router_is_an_ordinary_error(
+    monkeypatch, cfg: Config
+) -> None:
+    """Negative control: only the local router fronts the shared GPU queue, so the same
+    queue_full body from a hosted router stays a BackendError and keeps its fallback."""
+    full = {"error": {"code": "queue_full", "message": "busy"}}
+    session = Session([Response(full, status=429)])
+    monkeypatch.setattr(openrouter, "_session", lambda config, timeout, router=None: session)
+    with pytest.raises(BackendError) as caught:
+        await run_router(ORCA, "q", cfg, "tencent/hy3-free")
+    assert not isinstance(caught.value, QueueBusy) and "HTTP 429" in str(caught.value)

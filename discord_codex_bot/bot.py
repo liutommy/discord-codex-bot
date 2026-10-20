@@ -3640,9 +3640,17 @@ class DiscordCodexClient(discord.Client):
         """Run an admitted job (imagegen.run_job) and settle its reservation. A job that made no
         images — refused by the catalog or the service, failed, timed out, refused for a full
         GPU queue — gives its images back; one the member cancelled keeps them counted, since
-        the GPU already worked on it. `inputs` are the slash command's image and mask, read
-        only once the request, their type and size included, has passed the catalog."""
-        refund = True
+        the GPU already worked on it, but only once the job has left the queue. `inputs` are the
+        slash command's image and mask, read only once the request, their type and size
+        included, has passed the catalog."""
+        refund, ran = True, False
+
+        async def progress(job: imagegen.Job) -> None:
+            nonlocal ran
+            ran = ran or job.state != "queued"
+            if on_progress is not None:
+                await on_progress(job)
+
         try:
             catalog = await self.images.catalog()
             if inputs:
@@ -3658,12 +3666,12 @@ class DiscordCodexClient(discord.Client):
                 max_bytes,
                 reservation.guild_id,
                 reservation.user_id,
-                on_progress,
+                progress,
             )
             refund = False
             return result
         except asyncio.CancelledError:
-            refund = False
+            refund = not ran
             raise
         finally:
             reservation.settle(refund)

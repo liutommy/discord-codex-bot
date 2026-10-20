@@ -445,7 +445,9 @@ async def run_router(
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
         raise BackendError(f"{label} 連線失敗：{type(error).__name__}{unstable}") from error
     error = payload.get("error") if isinstance(payload, dict) else None
-    if isinstance(error, dict) and error.get("code") == "queue_full":
+    # Only a router in front of the shared GPU queue (queue_wait) can mean that queue.
+    queued = router.queue_wait is not None
+    if queued and isinstance(error, dict) and error.get("code") == "queue_full":
         LOGGER.info("%s queue full", router.label)
         raise QueueBusy(imagegen.queue_full())  # the GPU queue image jobs share
     if status != 200 or error:

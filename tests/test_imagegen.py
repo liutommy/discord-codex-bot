@@ -556,6 +556,23 @@ async def test_slash_cancel_deletes_the_job_on_the_service(service, client) -> N
     assert client._image_in_flight == {}
 
 
+async def test_slash_cancel_while_queued_gives_the_images_back(service, client) -> None:
+    """Negative control for the cancel charge: a job cancelled before it left the GPU queue
+    made the GPU do nothing, so it is cancelled on the service and not counted."""
+    service.queued_polls = 10_000
+    interaction = FakeInteraction()
+    command = asyncio.create_task(client.image_command(interaction, "慢慢畫"))
+    for _ in range(500):
+        if any("排隊中" in (e["content"] or "") for e in interaction.edits):
+            break
+        await asyncio.sleep(0.01)
+    interaction.edits[-1]["view"].task.cancel()
+    await asyncio.wait_for(command, 5)
+    assert service.deletes() == ["/v1/image/jobs/j-1"]
+    assert interaction.edits[-1] == {"content": CANCELLED, "view": None, "files": []}
+    assert client.image_settings.used(GUILD, USER) == 0 and client._image_in_flight == {}
+
+
 async def test_slash_queue_full_is_shown_and_not_charged(service, client) -> None:
     """Negative control: a job the full GPU queue refused gives its images back."""
     service.submit_reply = (429, {"error": "queue_full", "queue": 3})
