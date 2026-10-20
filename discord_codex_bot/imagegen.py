@@ -53,9 +53,13 @@ OPTIONS = (
     "init_image",
     "strength",
     "mask",
+    "ref_image",
+    "ref_strength",
     "upscale",
     "detailer",
 )
+# The request fields that carry an image; each is checked by type and size and sent as base64.
+INPUT_IMAGES = ("init_image", "mask", "ref_image")
 # How the prompt is rewritten before generation; a model lists the ones it takes (`enhancers`).
 ENHANCERS = ("local", "cloud", "off")
 TERMINAL = frozenset({"done", "failed", "cancelled"})
@@ -127,9 +131,10 @@ class Catalog:
 
 @dataclass(frozen=True, slots=True)
 class InputImage:
-    """An image a member gave the job (init_image, mask): its type and size are known from the
-    attachment before it is read, so a request can be checked before anything is downloaded;
-    `data` holds the bytes once read, and `mime` is then what they are (`input_image`)."""
+    """An image a member gave the job (init_image, mask, ref_image): its type and size are known
+    from the attachment before it is read, so a request can be checked before anything is
+    downloaded; `data` holds the bytes once read, and `mime` is then what they are
+    (`input_image`)."""
 
     mime: str
     size: int
@@ -153,6 +158,8 @@ class ImageRequest:
     init_image: InputImage | None = None
     strength: float | None = None
     mask: InputImage | None = None
+    ref_image: InputImage | None = None
+    ref_strength: float | None = None
     upscale: str | None = None
     detailer: bool | None = None
 
@@ -243,12 +250,13 @@ def _bad(option: str, allowed: str) -> ImageGenError:
     )
 
 
-def _needs_image(option: str) -> ImageGenError:
+def _needs_image(option: str, image: str = "init_image") -> ImageGenError:
+    shown = "ref_image（參考圖）" if image == "ref_image" else "image（原圖）"
     return ImageGenError(
-        f"{option} 要搭配 image（原圖）一起給。",
+        f"{option} 要搭配 {shown}一起給。",
         "bad_value",
         True,
-        f"{option} needs init_image",
+        f"{option} needs {image}",
     )
 
 
@@ -288,7 +296,7 @@ def _check_input(catalog: Catalog, option: str, image: InputImage) -> None:
     if image.size > catalog.max_input_bytes:
         limit = catalog.max_input_bytes / 1_000_000
         raise ImageGenError(
-            f"{option} 太大：每張最多 {limit:g} MB。",
+            f"{option} 太大：最多 {limit:g} MB。",
             "input_too_large",
             True,
             f"{option} is over {catalog.max_input_bytes} bytes",
@@ -328,11 +336,27 @@ def resolve(catalog: Catalog, request: ImageRequest) -> ImageModel:
         for option in ("mask", "strength"):
             if getattr(request, option) is not None:
                 raise _needs_image(option)
-    if request.strength is not None and not 0 <= request.strength <= 1:
-        raise _bad("strength", "0-1")
-    for option in ("init_image", "mask"):
-        if (image := getattr(request, option)) is not None:
-            _check_input(catalog, option, image)
+    if request.ref_image is None and request.ref_strength is not None:
+        raise _needs_image("ref_strength", "ref_image")
+    for option in ("strength", "ref_strength"):
+        value = getattr(request, option)
+        if value is not None and not 0 <= value <= 1:
+            raise _bad(option, "0-1")
+    images = [
+        (option, image)
+        for option in INPUT_IMAGES
+        if (image := getattr(request, option)) is not None
+    ]
+    for option, image in images:
+        _check_input(catalog, option, image)
+    if (total := sum(image.size for _, image in images)) > catalog.max_input_bytes:
+        limit = catalog.max_input_bytes / 1_000_000
+        raise ImageGenError(
+            f"附圖合計太大：最多 {limit:g} MB。",
+            "input_too_large",
+            True,
+            f"the input images total {total} bytes, over {catalog.max_input_bytes}",
+        )
     return model
 
 
@@ -401,7 +425,7 @@ def _error(status: int, payload: object, model: str) -> ImageGenError:
         )
     if status == 413 and code == "input_too_large":
         limit = body.get("max_input_bytes")
-        shown = f"每張最多 {limit / 1_000_000:g} MB" if isinstance(limit, int) else "超過上限"
+        shown = f"附圖合計最多 {limit / 1_000_000:g} MB" if isinstance(limit, int) else "超過上限"
         return ImageGenError(f"附的圖太大：{shown}。", "input_too_large", True, "input too large")
     if status == 429:
         return ImageGenError(queue_full(body.get("queue")), "queue_full")
@@ -498,7 +522,7 @@ class ImageService:
         user_id: int,
     ) -> Job:
         body = {name.name: getattr(request, name.name) for name in fields(ImageRequest)}
-        for name in ("init_image", "mask"):
+        for name in INPUT_IMAGES:
             if body[name] is not None:
                 body[name] = body[name].wire()
         body |= {"model": model, "steps": None, "cfg": None}

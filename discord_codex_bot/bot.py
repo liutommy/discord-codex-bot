@@ -3601,8 +3601,9 @@ class DiscordCodexClient(discord.Client):
         on_progress: Callable[[imagegen.Job], Awaitable[None]] | None = None,
         inputs: Mapping[str, discord.Attachment] | None = None,
     ) -> imagegen.Result:
-        """Run an admitted job (imagegen.run_job). `inputs` are the slash command's image and
-        mask, read only once the request, their type and size included, has passed the catalog.
+        """Run an admitted job (imagegen.run_job). `inputs` are the slash command's image, mask
+        and reference image, read only once the request, their type and size included, has
+        passed the catalog.
         """
         if inputs:
             imagegen.resolve(await self.images.catalog(), request)
@@ -3650,6 +3651,8 @@ class DiscordCodexClient(discord.Client):
         image="選填：原圖（PNG／JPEG／WebP），照著它改",
         strength="選填：0～1，原圖可以改多少（要附原圖）",
         mask="選填：遮罩，白色的地方重畫（要附原圖）",
+        ref_image="選填：參考圖，沿用圖中人物的長相與服裝（目前只有 WAI 支援）",
+        ref_strength="選填：0～1，參考圖的影響力（要附參考圖）",
         upscale="選填：放大倍率",
         detailer="選填：細節修補",
     )
@@ -3670,6 +3673,8 @@ class DiscordCodexClient(discord.Client):
         image: discord.Attachment | None = None,
         strength: app_commands.Range[float, 0.0, 1.0] | None = None,
         mask: discord.Attachment | None = None,
+        ref_image: discord.Attachment | None = None,
+        ref_strength: app_commands.Range[float, 0.0, 1.0] | None = None,
         upscale: app_commands.Choice[str] | None = None,
         detailer: bool | None = None,
     ) -> None:
@@ -3685,10 +3690,13 @@ class DiscordCodexClient(discord.Client):
             init_image=self._attached(image),
             strength=strength,
             mask=self._attached(mask),
+            ref_image=self._attached(ref_image),
+            ref_strength=ref_strength,
             upscale=upscale.value if upscale is not None else None,
             detailer=detailer,
         )
-        inputs = {k: v for k, v in (("init_image", image), ("mask", mask)) if v is not None}
+        attached = (("init_image", image), ("mask", mask), ("ref_image", ref_image))
+        inputs = {k: v for k, v in attached if v is not None}
         reason = (
             self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
             or self._validate(prompt, ())

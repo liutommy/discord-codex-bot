@@ -53,6 +53,12 @@ CATALOG = {
             "options": ["seed", "aspect"],
             "defaults": {"count": 2},
         },
+        {
+            "id": "wai-illustrious",
+            "name": "WAI Illustrious",
+            "options": ["seed", "init_image", "strength", "ref_image", "ref_strength"],
+            "defaults": {"strength": 0.75, "ref_strength": 0.7},
+        },
     ],
     "default_model": "chroma1-flash",
     "aspects": ["1:1", "3:4", "4:3", "9:16", "16:9"],
@@ -110,7 +116,7 @@ class FakeImageService:
                 return web.json_response(self.submit_reply[1], status=self.submit_reply[0])
             body = self.calls[-1][2]
             limit = self.catalog.get("max_input_bytes", 0)
-            for name in ("init_image", "mask"):
+            for name in ("init_image", "mask", "ref_image"):
                 if body.get(name) and len(base64.b64decode(body[name]["data"])) > limit:
                     error = {"error": "input_too_large", "max_input_bytes": limit}
                     return web.json_response(error, status=413)
@@ -342,6 +348,7 @@ async def test_run_job_submits_polls_and_downloads_with_the_key(service, client,
     assert seen[0] == "queued" and seen[-1] == "done"
     body = service.posts()[0]
     assert body["model"] == "chroma1-flash" and body["aspect"] == "3:4" and body["seed"] is None
+    assert body["ref_image"] is None and body["ref_strength"] is None, "unset is sent as null"
     assert body["max_bytes"] == 8_000_000
     assert body["requester"] == {"guild": str(GUILD), "user": str(USER)}
     assert {auth for *_, auth in service.calls} == {f"Bearer {KEY}"}
@@ -367,6 +374,33 @@ def test_input_images_are_checked_before_anything_is_read() -> None:
         with pytest.raises(ImageGenError) as caught:
             imagegen.resolve(catalog, request)
         assert caught.value.code == code and said in str(caught.value)
+    # A reference image: alone or with init_image, on a model that lists it.
+    ref = ImageRequest("貓", "wai-illustrious", ref_image=small, ref_strength=0.5)
+    assert imagegen.resolve(catalog, ref).id == "wai-illustrious"
+    both = replace(ref, init_image=small, strength=0.5)
+    assert imagegen.resolve(catalog, both).id == "wai-illustrious"
+    for request, code, said in (
+        (replace(ref, ref_image=None), "bad_value", "ref_strength 要搭配 ref_image"),
+        (replace(ref, ref_strength=1.5), "bad_value", "ref_strength 只能是 0-1"),
+        (replace(ref, ref_strength=-0.1), "bad_value", "ref_strength 只能是 0-1"),
+        (replace(ref, ref_image=imagegen.InputImage("image/png", 1001)), "input_too_large", ""),
+        (replace(ref, ref_image=imagegen.InputImage("image/gif", 10)), "bad_value", "PNG"),
+        (replace(ok, ref_image=small), "unsupported_option", "ref_image"),
+        (ImageRequest("貓", ref_strength=0.5), "unsupported_option", "ref_strength"),
+        # Each image fits, their sum does not: the service caps the total.
+        (
+            replace(
+                both,
+                init_image=imagegen.InputImage("image/png", 600),
+                ref_image=imagegen.InputImage("image/png", 600),
+            ),
+            "input_too_large",
+            "合計",
+        ),
+    ):
+        with pytest.raises(ImageGenError) as caught:
+            imagegen.resolve(catalog, request)
+        assert caught.value.code == code and said in str(caught.value), request
     # A service that states no max_input_bytes takes no input image.
     bare = imagegen.parse_catalog({k: v for k, v in CATALOG.items() if k != "max_input_bytes"})
     with pytest.raises(ImageGenError, match="太大"):
@@ -392,7 +426,7 @@ async def test_service_refusals_become_member_messages(service, client, tmp_path
         assert caught.value.code == code
     assert "GPU busy" not in str(caught.value)
     service.submit_reply = (413, {"error": "input_too_large", "max_input_bytes": 12_000_000})
-    with pytest.raises(ImageGenError, match="每張最多 12 MB"):
+    with pytest.raises(ImageGenError, match="附圖合計最多 12 MB"):
         await imagegen.run_job(client.images, ImageRequest("貓"), tmp_path, 8_000_000, GUILD, USER)
     service.submit_reply = None
     service.final = "failed"
@@ -648,6 +682,31 @@ async def test_slash_image_to_image_sends_the_inputs_as_base64(service, client) 
     assert (body["strength"], body["enhance"]) == (0.4, "off")
     assert "split" not in body and "cloud_enhance" not in body and "hires" not in body
     assert image.reads == mask.reads == 1
+    assert body["ref_image"] is None and body["ref_strength"] is None
+
+
+async def test_slash_reference_image_is_sent_alone_or_with_the_image(service, client) -> None:
+    ref = FakeAttachment(PNG)
+    alone = FakeInteraction()
+    await client.image_command(
+        alone, "她在海邊散步", model="wai-illustrious", ref_image=ref, ref_strength=0.8
+    )
+    assert alone.edits[-1]["files"] == ["image-0.png"]
+    body = service.posts()[0]
+    assert body["ref_image"] == _wire(PNG) and body["ref_strength"] == 0.8
+    assert body["init_image"] is None and body["strength"] is None
+    assert ref.reads == 1
+
+    image, ref = FakeAttachment(PNG), FakeAttachment(PNG)
+    both = FakeInteraction()
+    await client.image_command(
+        both, "改成雪景", model="wai-illustrious", image=image, strength=0.4, ref_image=ref
+    )
+    assert both.edits[-1]["files"] == ["image-0.png"]
+    body = service.posts()[1]
+    assert body["init_image"] == _wire(PNG) and body["ref_image"] == _wire(PNG)
+    assert (body["strength"], body["ref_strength"]) == (0.4, None)
+    assert image.reads == ref.reads == 1
 
 
 async def test_slash_input_refusals_never_submit_or_download(service, client) -> None:
@@ -663,6 +722,20 @@ async def test_slash_input_refusals_never_submit_or_download(service, client) ->
         ({"image": FakeAttachment(PNG), "model": "plain"}, "不支援 init_image"),
         ({"image": FakeAttachment(GIF, "image/gif")}, "只能是 PNG、JPEG 或 WebP"),
         ({"enhance": types.SimpleNamespace(value="cloud")}, "enhance 只能是 local, off"),
+        ({"ref_image": FakeAttachment(PNG)}, "不支援 ref_image"),
+        ({"model": "wai-illustrious", "ref_strength": 0.5}, "ref_strength 要搭配 ref_image"),
+        (
+            {"model": "wai-illustrious", "ref_image": FakeAttachment(PNG, size=5000)},
+            "ref_image 太大",
+        ),
+        (
+            {
+                "model": "wai-illustrious",
+                "image": FakeAttachment(PNG),
+                "ref_image": FakeAttachment(PNG, size=5000),
+            },
+            "ref_image 太大",
+        ),
     ):
         refused = FakeInteraction()
         await client.image_command(refused, "貓", **kwargs)
