@@ -684,7 +684,8 @@ says so, and the model is not offered the tool.
   again, without pinging anyone.
 - The tag runs only when the member's own message asks for the local service: it contains 地端,
   本機, 本地 or `local`, or a model id or name from the catalog (whole words), or the member did
-  so earlier in the same conversation, so a follow-up such as "now 16:9" needs no repeat. The
+  so earlier in the same conversation (remembered in memory for up to 1000 conversations and
+  lost on restart), so a follow-up such as "now 16:9" needs no repeat. The
   local service is slow and shares the local model's GPU, and Codex has its own image tool, so a
   plain "draw a cat" is not sent there: the model is told to use its own tool or explain how to
   ask for the local one, and a tag emitted anyway is not run (the answer says how to ask for it).

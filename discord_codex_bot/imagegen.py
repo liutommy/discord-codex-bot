@@ -774,8 +774,14 @@ def asked_for_local(asked: str, catalog: Catalog | None) -> bool:
     names = [w.lower() for w in LOCAL_WORDS]
     if catalog is not None:
         names += [n.lower() for m in catalog.models for n in (m.id, m.name) if n]
-    # Whole words, so "plain" does not match "explain"; CJK has no word gaps to need it.
-    return any(re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text) for name in names)
+    # Latin names as whole words, so "plain" does not match "explain"; CJK ones as substrings,
+    # since CJK has no word gaps ("用地端sdxl畫" counts).
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text)
+        if name.isascii()
+        else name in text
+        for name in names
+    )
 
 
 # ----- per-guild switch and limits --------------------------------------------------------------

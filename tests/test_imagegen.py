@@ -926,7 +926,7 @@ async def test_tag_runs_only_when_the_member_asks_for_the_local_service(
     """Negative control: a plain "draw a cat" does not put a job on the shared GPU even when the
     model emits the tag; naming the local service or one of its models does, and so does a
     follow-up in a conversation where the member already asked for it."""
-    _codex_replies(monkeypatch, *['<image_gen prompt="貓"/>'] * 5)
+    _codex_replies(monkeypatch, *['<image_gen prompt="貓"/>'] * 6)
     plain = await client._answer("畫一隻貓", [], GUILD, USER, channel_id=ALLOWED)
     assert "沒有用地端生圖" in plain.text and "/codex-image" in plain.text
     assert service.posts() == [] and client.image_settings.used(GUILD, USER) == 0
@@ -950,7 +950,12 @@ async def test_tag_runs_only_when_the_member_asks_for_the_local_service(
     catalog = imagegen.parse_catalog(CATALOG)
     assert not imagegen.asked_for_local("explain this drawing", catalog)
     assert imagegen.asked_for_local("用 plain 畫", catalog)
+    assert imagegen.asked_for_local("用地端sdxl畫", catalog), "CJK words need no word gap"
     assert "earlier in this conversation" in imagegen.prompt_note(client.config)
+    # A server with images off still says so, rather than asking for 地端 first.
+    client.image_settings.update(GUILD, enabled=False)
+    closed = await client._answer("畫一隻貓", [], GUILD, USER, channel_id=ALLOWED)
+    assert "這個伺服器沒有開放圖片生成" in closed.text
 
 
 async def test_tag_without_the_service_is_not_run(client, monkeypatch) -> None:

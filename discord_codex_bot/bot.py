@@ -1967,12 +1967,9 @@ class DiscordCodexClient(discord.Client):
                     if request_only(result.text):
                         result = replace(result, text=READS_SPENT_MESSAGE)
             own = split_quoted(prompt)[1]  # a replied-to message is not the member asking
-            local_thread = result.thread_id in self._local_image_threads
             text, unread, refused = await self._apply_action_tags(
-                result.text, guild_id, channel_id, user_id, own, local_thread
+                result.text, guild_id, channel_id, user_id, own, result.thread_id
             )
-            if IMAGE_STARTED in text and result.thread_id:
-                self._remember_local_thread(result.thread_id)
             if unread or refused:
                 LOGGER.warning(
                     "Unread or refused tags guild=%s channel=%s user=%s tags=%s",
@@ -2014,7 +2011,7 @@ class DiscordCodexClient(discord.Client):
                             seen.add(_spaced(tag))
                             resent.append(tag)
                     done, _, _ = await self._apply_action_tags(
-                        "\n".join(resent), guild_id, channel_id, user_id, own, local_thread
+                        "\n".join(resent), guild_id, channel_id, user_id, own, result.thread_id
                     )
                     if done:
                         text = f"{text}\n\n{done}"
@@ -2979,7 +2976,7 @@ class DiscordCodexClient(discord.Client):
         channel_id: int | None,
         user_id: int,
         asked: str = "",
-        local_thread: bool = False,
+        thread_id: str = "",
     ) -> tuple[str, list[str], list[str]]:
         """Carry out the memory, reminder, tracking and image tags in `text`: (the text without
         them, confirmations appended; each tag that could not be read, with the reason; each one
@@ -2995,7 +2992,7 @@ class DiscordCodexClient(discord.Client):
         text = self._apply_reminder_tags(text, guild_id, channel_id, user_id, notes, refused)
         text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id, notes, refused)
         text = await self._apply_image_tags(
-            text, guild_id, channel_id, user_id, notes, refused, asked, local_thread
+            text, guild_id, channel_id, user_id, notes, refused, asked, thread_id
         )
         text, invented = strip_invented_tags(text)
         text, broken = strip_broken_tags(text)
@@ -3870,11 +3867,11 @@ class DiscordCodexClient(discord.Client):
         notes_out: list[str] | None = None,
         refused: list[str] | None = None,
         asked: str = "",
-        local_thread: bool = False,
+        thread_id: str = "",
     ) -> str:
         """Start the pictures the model asked for with <image_gen/>, only when the member's own
         words (`asked`) ask for the local service (imagegen.asked_for_local), or they did earlier
-        in this conversation (`local_thread`). Each is checked
+        in this conversation (`thread_id`, remembered in memory). Each is checked
         now — the channel, the prompt, the catalog, the member's limits — so a refusal reaches
         the answer and one the model can fix goes to `refused`; the job then runs detached and is
         posted in the channel when it is done (`_deliver_image`). The answer gets only a note that
@@ -3889,7 +3886,12 @@ class DiscordCodexClient(discord.Client):
             catalog = await self.images.catalog()
         except ImageGenError:
             catalog = None
-        if not local_thread and not imagegen.asked_for_local(asked, catalog):
+        if imagegen.asked_for_local(asked, catalog):
+            if thread_id:
+                self._remember_local_thread(thread_id)
+        elif thread_id not in self._local_image_threads and (
+            guild_id is None or self.image_settings.enabled(guild_id)  # else: "not open" below
+        ):
             LOGGER.info("Image tag without an explicit local request guild=%s", guild_id)
             prefix = self.config.command_prefix
             return _with_notes(clean, [IMAGE_NOT_ASKED.format(prefix=prefix)], notes_out)
