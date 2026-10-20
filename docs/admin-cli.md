@@ -137,7 +137,7 @@ Discord 有關的部分。任何一項不通過，請求就被拒絕，什麼都
 | `tracking outbox` | 還沒送出的追蹤通知 | （只有 CLI） |
 | `linkclean get／set` | 伺服器的連結洗參數模式 | `/linkclean` |
 | `embedfix get／set` | 伺服器的預覽修正開關 | `/embedfix` |
-| `image get／set` | 伺服器的圖片生成開關與每人上限 | （只有 CLI；`/image` 與 `<image_gen>` 標籤照它限制） |
+| `image get／set` | 伺服器的圖片生成開關與暴雷隱藏設定 | （只有 CLI；`/image` 與 `<image_gen>` 標籤照它限制） |
 | `persona get／set／clear` | 所有伺服器共用的人設與預設輸出風格 | `/persona` |
 | `summary` | 摘要頻道最近的訊息，只回到 CLI | `/summary` |
 | `ask` | 以成員身分提問，答案只回到 CLI | `/codex` |
@@ -295,26 +295,20 @@ $ docker exec -i tommy_test python -m discord_codex_bot.admin persona set --kind
 $ python -m discord_codex_bot.admin persona clear --kind style
 ```
 
-### image：圖片生成的開關與上限
+### image：圖片生成的開關與暴雷隱藏
 
 `IMAGE_GEN_URL` 有設定時，成員可以用 `/image` 或在對話裡請 Bot 畫圖（`<image_gen>` 標籤，成員的訊息須提到「地端」「本機」「本地」、`local`，或目錄中的模型 id 或名稱才會執行；同一個對話裡提過一次，後續追問也算；這份記錄只存在記憶體，Bot 重啟後要重新提）；
-兩條路徑都照這裡的設定檢查。沒有設定過的伺服器是預設值：開放、每人每天 20 張、每人同時 1 個工作、暴雷隱藏 auto。
-張數在工作送出時就算進當天（台灣時間），服務拒絕、失敗或逾時的會退回；成員自己取消的，還在排隊時退回，開始生成後照算。
+兩條路徑都照這裡的設定檢查。沒有設定過的伺服器是預設值：開放、暴雷隱藏 auto。
 `--spoiler` 決定哪些圖以 Discord 的暴雷（spoiler）方式張貼：`auto` 只隱藏服務判定為成人內容的圖，
 `always` 全部隱藏，`off` 都不隱藏。服務只依提示詞判定、不看圖，提示詞普通但模型畫出露骨內容的圖在 `auto` 下不會隱藏。
-`image set` 只給要改的選項；上限從下一個請求起生效，進行中的工作不受影響，今天已用的張數也不會歸零。
-`--user` 可以是已經離開伺服器的成員。
+`image set` 只給要改的選項；開關從下一個請求起生效，進行中的工作不受影響。
 
 ```console
-$ python -m discord_codex_bot.admin image get --guild 123456789012345678 --user 345678901234567890
+$ python -m discord_codex_bot.admin image get --guild 123456789012345678
 圖片生成：開
-每人每天：20 張
-每人同時：1 個工作
 暴雷隱藏：auto（服務依提示詞判定為成人內容的圖才隱藏）
-成員 345678901234567890 今天已用：3 張
 
 $ python -m discord_codex_bot.admin image set --guild 123456789012345678 --state off
-$ python -m discord_codex_bot.admin image set --guild 123456789012345678 --daily 10 --in-flight 2
 $ python -m discord_codex_bot.admin image set --guild 123456789012345678 --spoiler always
 ```
 

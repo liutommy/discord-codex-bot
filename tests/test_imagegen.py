@@ -75,6 +75,7 @@ class FakeImageService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict | None, str | None]] = []
         self.catalog = CATALOG
+        self.submitted: asyncio.Queue[dict] = asyncio.Queue()
         self.submit_reply: tuple[int, dict] | None = None
         self.queued_polls = 1
         self.hold: asyncio.Event | None = None
@@ -104,6 +105,7 @@ class FakeImageService:
 
         async def submit(request):
             await record(request)
+            self.submitted.put_nowait(self.calls[-1][2])
             if self.submit_reply is not None:
                 return web.json_response(self.submit_reply[1], status=self.submit_reply[0])
             body = self.calls[-1][2]
@@ -303,9 +305,6 @@ def test_resolve_checks_every_option_against_the_catalog() -> None:
             imagegen.resolve(catalog, request)
         assert caught.value.code == code and caught.value.fixable
     assert imagegen.resolve(catalog, ImageRequest("貓", enhance="off")).id == "chroma1-flash"
-    # A model's default count is what a request without count= costs.
-    assert imagegen.image_count(catalog, ImageRequest("貓", "plain")) == 2
-    assert imagegen.image_count(None, ImageRequest("貓")) == 1
 
 
 def test_tags_in_code_or_quotes_are_not_read_and_attributes_are_checked() -> None:
@@ -320,7 +319,7 @@ def test_tags_in_code_or_quotes_are_not_read_and_attributes_are_checked() -> Non
     # Characters str.isdigit() accepts but int() rejects are refused, not raised.
     for name, raw in (("count", "³"), ("seed", "²"), ("seed", "١٢")):
         assert "whole number" in imagegen.request_from_tag({"prompt": "貓", name: raw})[1]
-    # The seed range the slash command allows; past it the service would refuse a charged job.
+    # The seed range the slash command allows; values past it are refused before submission.
     top = str(imagegen.MAX_SEED)
     assert imagegen.request_from_tag({"prompt": "貓", "seed": top})[0].seed == imagegen.MAX_SEED
     assert "seed must be" in imagegen.request_from_tag({"prompt": "貓", "seed": top + "0"})[1]
@@ -504,21 +503,16 @@ async def test_a_job_stuck_in_the_queue_is_given_up_and_cancelled(
     assert 10 <= service.polls <= 11
 
 
-def test_settings_default_validate_and_count_per_day(tmp_path) -> None:
-    days = iter(["2026-10-20", "2026-10-20", "2026-10-21", "2026-10-30"])
-    settings = ImageSettings(SwitchStore(tmp_path / "s.sqlite3"), today=lambda: next(days))
-    assert settings.enabled(GUILD) and settings.daily_limit(GUILD) == 20
-    assert settings.in_flight_limit(GUILD) == 1
-    settings.update(GUILD, enabled=False, daily=5, in_flight=2)
-    assert (settings.enabled(GUILD), settings.daily_limit(GUILD)) == (False, 5)
+def test_settings_defaults_validate_and_persist(tmp_path) -> None:
+    path = tmp_path / "s.sqlite3"
+    settings = ImageSettings(SwitchStore(path))
+    assert settings.enabled(GUILD) and settings.spoiler(GUILD) == "auto"
+    settings.update(GUILD, enabled=False, spoiler="always")
+    restored = ImageSettings(SwitchStore(path))
+    assert not restored.enabled(GUILD) and restored.spoiler(GUILD) == "always"
+    assert restored.enabled(OTHER_GUILD) and restored.spoiler(OTHER_GUILD) == "auto"
     with pytest.raises(ValueError):
-        settings.update(GUILD, daily=0)
-    day = settings.charge(GUILD, USER, 3)
-    settings.refund(GUILD, USER, 1, day)
-    assert settings.used(GUILD, USER) == 2
-    assert settings.used(GUILD, USER) == 0, "a new day starts from zero"
-    settings.charge(GUILD, USER, 1)  # 10-30: the 10-20 row is past USAGE_KEEP_DAYS
-    assert settings.used(GUILD, USER, "2026-10-20") == 0
+        settings.update(GUILD, spoiler="sometimes")
 
 
 def test_prompt_offers_the_tag_only_with_the_service(config) -> None:
@@ -549,9 +543,25 @@ async def test_slash_paints_progress_and_replaces_the_placeholder(service, clien
     assert last["content"].endswith("· enhance local"), "what the service used is shown"
     body = service.posts()[0]
     assert body["max_bytes"] == 9_000_000 and body["count"] == 1 and body["seed"] == 9
-    assert client.image_settings.used(GUILD, USER) == 1
-    assert client._image_in_flight == {}
     assert not list((client.config.attachment_dir).glob("req-*")), "delivery dir removed"
+
+
+async def test_one_member_can_run_two_slash_jobs(service, client) -> None:
+    service.hold = asyncio.Event()
+    first, second = FakeInteraction(), FakeInteraction()
+    commands = [asyncio.create_task(client.image_command(first, "貓"))]
+    try:
+        await asyncio.wait_for(service.submitted.get(), 5)
+        commands.append(asyncio.create_task(client.image_command(second, "狗")))
+        await asyncio.wait_for(service.submitted.get(), 5)
+        assert all(not task.done() for task in commands)
+        assert [body["prompt"] for body in service.posts()] == ["貓", "狗"]
+        assert first.deferred and second.deferred
+        assert first.messages == second.messages == []
+    finally:
+        service.hold.set()
+        await asyncio.wait_for(asyncio.gather(*commands), 5)
+    assert first.edits[-1]["files"] == second.edits[-1]["files"] == ["image-0.png"]
 
 
 async def test_slash_past_the_interaction_lifetime_posts_in_the_channel(
@@ -580,13 +590,10 @@ async def test_slash_cancel_deletes_the_job_on_the_service(service, client) -> N
     await asyncio.wait_for(command, 5)
     assert service.deletes() == ["/v1/image/jobs/j-1"]
     assert interaction.edits[-1] == {"content": CANCELLED, "view": None, "files": []}
-    assert client.image_settings.used(GUILD, USER) == 1, "a cancelled job still counts"
-    assert client._image_in_flight == {}
 
 
-async def test_slash_cancel_while_queued_gives_the_images_back(service, client) -> None:
-    """Negative control for the cancel charge: a job cancelled before it left the GPU queue
-    made the GPU do nothing, so it is cancelled on the service and not counted."""
+async def test_slash_cancel_while_queued_deletes_the_job(service, client) -> None:
+    """A job cancelled while waiting is cancelled on the service too."""
     service.queued_polls = 10_000
     interaction = FakeInteraction()
     command = asyncio.create_task(client.image_command(interaction, "慢慢畫"))
@@ -598,17 +605,15 @@ async def test_slash_cancel_while_queued_gives_the_images_back(service, client) 
     await asyncio.wait_for(command, 5)
     assert service.deletes() == ["/v1/image/jobs/j-1"]
     assert interaction.edits[-1] == {"content": CANCELLED, "view": None, "files": []}
-    assert client.image_settings.used(GUILD, USER) == 0 and client._image_in_flight == {}
 
 
-async def test_slash_queue_full_is_shown_and_not_charged(service, client) -> None:
-    """Negative control: a job the full GPU queue refused gives its images back."""
+async def test_slash_queue_full_is_shown(service, client) -> None:
+    """A full GPU queue refuses the job with its queue count."""
     service.submit_reply = (429, {"error": "queue_full", "queue": 3})
     interaction = FakeInteraction()
     await client.image_command(interaction, "貓", count=2)
     shown = interaction.edits[-1]["content"]
     assert shown == "⚠️ 地端 GPU 的排隊已滿（已有 3 個在等），請稍後再試。"
-    assert client.image_settings.used(GUILD, USER) == 0 and client._image_in_flight == {}
 
 
 async def test_slash_refusals_never_submit_a_job(service, client) -> None:
@@ -621,26 +626,13 @@ async def test_slash_refusals_never_submit_a_job(service, client) -> None:
     off = FakeInteraction()
     await client.image_command(off, "貓")
     assert off.messages == [("這個伺服器沒有開放圖片生成。", True)] and service.calls == []
-    client.image_settings.update(GUILD, enabled=True, daily=3)
-
-    client.image_settings.charge(GUILD, USER, 3)
-    over = FakeInteraction()
-    await client.image_command(over, "貓")
-    assert "額度不夠" in over.messages[0][0] and not over.deferred and service.calls == []
-    client.image_settings.update(GUILD, daily=20)
-
-    client._image_in_flight[(GUILD, USER)] = 1
-    busy = FakeInteraction()
-    await client.image_command(busy, "貓")
-    assert "同時最多 1 個" in busy.messages[0][0] and service.calls == []
-    client._image_in_flight.clear()
+    client.image_settings.update(GUILD, enabled=True)
 
     for kwargs in ({"model": "nope"}, {"model": "plain", "detailer": True}):
         refused = FakeInteraction()
         await client.image_command(refused, "貓", **kwargs)
         assert refused.edits[-1]["content"].startswith("⚠️ ") and refused.edits[-1]["view"] is None
     assert service.posts() == [], "unknown model and unsupported option only read the catalog"
-    assert client.image_settings.used(GUILD, USER) == 3, "the refused jobs were given back"
 
 
 async def test_slash_image_to_image_sends_the_inputs_as_base64(service, client) -> None:
@@ -662,7 +654,7 @@ async def test_slash_input_refusals_never_submit_or_download(service, client) ->
     """Negative controls: a mask without an image, an input over the catalog's
     max_input_bytes, a model that takes no input image, an enhance the model does not list and a
     type that is not PNG/JPEG/WebP are refused before the job is submitted, and all but the last
-    (which needs the bytes) before the attachment is read; none costs an image."""
+    (which needs the bytes) before the attachment is read."""
     for kwargs, said in (
         ({"mask": FakeAttachment(PNG)}, "mask 要搭配 image"),
         ({"strength": 0.5}, "strength 要搭配 image"),
@@ -682,8 +674,7 @@ async def test_slash_input_refusals_never_submit_or_download(service, client) ->
     refused = FakeInteraction()
     await client.image_command(refused, "貓", image=disguised)
     assert "只能是 PNG、JPEG 或 WebP" in refused.edits[-1]["content"] and disguised.reads == 1
-    assert service.posts() == [] and client.image_settings.used(GUILD, USER) == 0
-    assert client._image_in_flight == {}
+    assert service.posts() == []
 
 
 async def test_an_image_without_a_content_type_is_typed_by_its_name_then_its_bytes(
@@ -747,20 +738,14 @@ async def test_downloads_share_what_is_left_of_the_run_timeout(
     assert service.deletes() == ["/v1/image/jobs/j-1"]
 
 
-async def test_slash_counts_the_model_default_once_the_catalog_is_read(service, client) -> None:
-    """A slash command admits its job before anything has read the catalog, at one image; the
-    job counts the default model's own count once it reads it, and keeps to the daily limit."""
-    service.catalog = {**CATALOG, "default_model": "plain"}  # plain makes 2 by default
+async def test_slash_uses_the_service_default_model(service, client) -> None:
+    service.catalog = {**CATALOG, "default_model": "plain"}
     assert client.images.cached() is None
-    await client.image_command(FakeInteraction(), "貓")
-    assert client.image_settings.used(GUILD, USER) == 2 and len(service.posts()) == 1
-
-    client.image_settings.update(GUILD, daily=3)
-    over = FakeInteraction()
-    client.images._catalog = None  # a restart: admitted at one image again (2 + 1 <= 3)
-    await client.image_command(over, "貓")
-    assert "額度不夠" in over.edits[-1]["content"] and len(service.posts()) == 1
-    assert client.image_settings.used(GUILD, USER) == 2 and client._image_in_flight == {}
+    interaction = FakeInteraction()
+    await client.image_command(interaction, "貓")
+    assert service.posts()[0]["model"] == "plain"
+    assert service.posts()[0]["count"] is None, "the service supplies the model's default count"
+    assert interaction.edits[-1]["files"] == ["image-0.png"]
 
 
 async def test_slash_without_the_service_says_it_is_off(client) -> None:
@@ -813,7 +798,24 @@ async def test_tag_starts_a_detached_job_posted_without_pings(service, client, m
     assert sent["files"] == ["image-0.png"] and sent["text"].startswith(f"<@{USER}> **畫**")
     assert sent["mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
     assert service.posts()[0]["aspect"] == "3:4"
-    assert client.image_settings.used(GUILD, USER) == 1 and client._image_in_flight == {}
+
+
+async def test_two_image_tags_start_two_jobs(service, client, monkeypatch) -> None:
+    channel = FakeChannel()
+    monkeypatch.setattr(client, "get_channel", {ALLOWED: channel}.get)
+    service.hold = asyncio.Event()
+    _codex_replies(monkeypatch, '<image_gen prompt="貓"/>\n<image_gen prompt="狗"/>')
+    try:
+        result = await client._answer("用地端畫貓和狗", [], GUILD, USER, channel_id=ALLOWED)
+        await asyncio.wait_for(asyncio.gather(service.submitted.get(), service.submitted.get()), 5)
+        assert result.text.count(IMAGE_STARTED) == 2
+        assert sorted(body["prompt"] for body in service.posts()) == ["狗", "貓"]
+        assert len(client._image_tasks) == 2 and channel.sent == []
+    finally:
+        service.hold.set()
+        await _delivered(client)
+    assert len(channel.sent) == 2
+    assert all(sent["files"] == ["image-0.png"] for sent in channel.sent)
 
 
 async def test_images_are_spoilered_by_the_guild_mode(service, client, monkeypatch) -> None:
@@ -889,7 +891,7 @@ async def test_tag_enhance_is_checked_against_the_model_and_sent(service, client
 
 async def test_tag_refusals_never_submit_a_job(service, client, monkeypatch) -> None:
     """Negative controls for the tag: shown (code/quote) tags, an unknown model, an unsupported
-    option, a disabled guild, a member over the limit and a place the Bot does not serve."""
+    option, a disabled guild and a place the Bot does not serve."""
     monkeypatch.setattr(client, "get_channel", {ALLOWED: FakeChannel()}.get)
     _codex_replies(
         monkeypatch,
@@ -898,7 +900,6 @@ async def test_tag_refusals_never_submit_a_job(service, client, monkeypatch) -> 
         "",  # the retry gives up
         '<image_gen prompt="貓" model="plain" negative="人"/>',
         "",
-        '<image_gen prompt="貓"/>',
         '<image_gen prompt="貓"/>',
         '<image_gen prompt="貓"/>',
     )
@@ -910,11 +911,7 @@ async def test_tag_refusals_never_submit_a_job(service, client, monkeypatch) -> 
     client.image_settings.update(GUILD, enabled=False)
     off = await client._answer("地端畫", [], GUILD, USER, channel_id=ALLOWED)
     assert "這個伺服器沒有開放圖片生成" in off.text
-    client.image_settings.update(GUILD, enabled=True, daily=1)
-    client.image_settings.charge(GUILD, USER, 1)
-    over = await client._answer("地端畫", [], GUILD, USER, channel_id=ALLOWED)
-    assert "額度不夠" in over.text
-    client.image_settings.update(GUILD, daily=20)
+    client.image_settings.update(GUILD, enabled=True)
     outside = await client._answer("地端畫", [], OTHER_GUILD, USER, channel_id=ALLOWED)
     assert "圖片沒有生成" in outside.text
     assert client._image_tasks == set() and service.posts() == []
@@ -929,7 +926,7 @@ async def test_tag_runs_only_when_the_member_asks_for_the_local_service(
     _codex_replies(monkeypatch, *['<image_gen prompt="貓"/>'] * 6)
     plain = await client._answer("畫一隻貓", [], GUILD, USER, channel_id=ALLOWED)
     assert "沒有用地端生圖" in plain.text and "/codex-image" in plain.text
-    assert service.posts() == [] and client.image_settings.used(GUILD, USER) == 0
+    assert service.posts() == []
     named = await client._answer("用 Chroma1 Flash 畫貓", [], GUILD, USER, channel_id=ALLOWED)
     assert named.text.endswith(IMAGE_STARTED)
     await _delivered(client)
@@ -980,25 +977,30 @@ async def test_admin_image_get_and_set(client, tmp_path) -> None:
         return admin.read_result(root, request_id)
 
     status, document = await run("image.get", guild=GUILD)
+    assert document["result"] | {"text": ""} == {
+        "text": "",
+        "enabled": True,
+        "service": True,
+        "spoiler": "auto",
+    }
     assert document["result"]["text"] == (
-        "圖片生成：開\n每人每天：20 張\n每人同時：1 個工作\n"
-        "暴雷隱藏：auto（服務依提示詞判定為成人內容的圖才隱藏）"
+        "圖片生成：開\n暴雷隱藏：auto（服務依提示詞判定為成人內容的圖才隱藏）"
     )
-    status, document = await run(
-        "image.set", guild=GUILD, state="off", daily=5, in_flight=2, spoiler="always"
-    )
+    status, document = await run("image.set", guild=GUILD, state="off", spoiler="always")
     assert document["result"] | {"text": ""} == {
         "text": "",
         "enabled": False,
         "service": True,
-        "daily": 5,
-        "in_flight": 2,
         "spoiler": "always",
     }
     assert not client.image_settings.enabled(GUILD)
-    client.image_settings.charge(GUILD, USER, 2)
-    status, document = await run("image.get", guild=GUILD, user=USER)
-    assert document["result"]["used"] == 2
+    status, document = await run("image.get", guild=GUILD)
+    assert document["result"] | {"text": ""} == {
+        "text": "",
+        "enabled": False,
+        "service": True,
+        "spoiler": "always",
+    }
     status, document = await run("image.set", guild=GUILD)
     assert status == "rejected"
     status, document = await run("image.set", guild=OTHER_GUILD, state="off")

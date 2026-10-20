@@ -678,10 +678,10 @@ says so, and the model is not offered the tool.
   placeholder shows the queue position and then the steps, ❌ cancels the job on the service too,
   and a job that outlives the 15-minute interaction is posted in the channel.
 - In conversation the model can append `<image_gen prompt="…"/>` (with `model`, `aspect`,
-  `count`, `seed`, `negative`, `enhance`; no input image). The tag is checked against the same
-  catalog and limits when the answer arrives. The answer gets a short note, and the picture is
-  posted in the channel when it is ready, after the channel is checked against the allowlist
-  again, without pinging anyone.
+  `count`, `seed`, `negative`, `enhance`; no input image). Each tag is checked against the same
+  catalog when the answer arrives and starts its own job when admitted. The answer gets a
+  short note, and the picture is posted in the channel when it is ready, after the channel is
+  checked against the allowlist again, without pinging anyone.
 - The tag runs only when the member's own message asks for the local service: it contains 地端,
   本機, 本地 or `local`, or a model id or name from the catalog (whole words), or the member did
   so earlier in the same conversation (remembered in memory for up to 1000 conversations and
@@ -691,13 +691,11 @@ says so, and the model is not offered the tool.
   ask for the local one, and a tag emitted anyway is not run (the answer says how to ask for it).
 - The local model and image jobs share one GPU queue on the host: one item runs, at most 3 wait,
   and a further request is refused at once (429 `queue_full`). The member is told the local
-  queue is full and to try later; a refused image job is not counted against the daily limit,
-  and a refused chat turn does not count as the local model failing. While a streamed local
-  answer waits, the placeholder shows how many items are ahead.
-- Each server has a switch and per-member limits (images per Taiwan day, default 20; jobs at
-  once, default 1), stored in `CODEX_HOME/linkclean.sqlite3` with the daily counts, so the
-  nightly backup covers them. The operator changes them with `image get` / `image set`
-  ([`docs/admin-cli.md`](docs/admin-cli.md)).
+  queue is full and to try later; a refused chat turn does not count as the local model failing.
+  While a streamed local answer waits, the placeholder shows how many items are ahead.
+- Each server has an on/off switch and a spoiler setting, stored in
+  `CODEX_HOME/linkclean.sqlite3`, so the nightly backup covers them. The operator changes them
+  with `image get` / `image set` ([`docs/admin-cli.md`](docs/admin-cli.md)).
 - Images are posted behind a Discord spoiler by each server's `spoiler` setting: `auto` (the
   default) hides the images of jobs the service marked `sensitive`, `always` hides every image,
   `off` hides none. The service judges a job from its prompt only, so under `auto` an image the
