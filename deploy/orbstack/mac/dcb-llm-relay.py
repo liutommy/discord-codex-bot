@@ -27,8 +27,15 @@ The log has one line per served connection (bytes each way, duration) and never 
 response content. SIGTERM / SIGINT stop the workers and kill their processes; listeners a killed
 orb may leave behind in the machine are removed with pkill at start and stop.
 
-Config: ~/.config/dcb-llm-relay/config (KEY=value, see dcb-llm-relay.config.example); an
-environment variable of the same name overrides the file. Runs on the system python3 (3.9).
+Config: the file named by the one optional argument, else $DCB_LLM_RELAY_CONFIG, else
+~/.config/dcb-llm-relay/config (KEY=value, see dcb-llm-relay.config.example); an environment
+variable of the same name overrides the file. A file named by the argument must exist. Runs on the
+system python3 (3.9).
+
+Several instances can run side by side, one per host service (the image relay runs with
+dcb-image-relay.config.example as its argument): each has its own listen and upstream ports,
+workers, idle timeout and log, so a busy instance does not take another's workers. Stale-listener
+cleanup matches the instance's own listen port and address only.
 """
 
 from __future__ import annotations
@@ -64,11 +71,18 @@ class ConfigError(Exception):
     pass
 
 
-def load_config() -> dict[str, str]:
+def load_config(path: str | None = None) -> dict[str, str]:
+    """Defaults, then the config file, then the environment. `path` (the command-line argument)
+    must name an existing file; the fallback paths may be absent."""
     cfg = dict(DEFAULTS)
-    path = os.environ.get(
-        "DCB_LLM_RELAY_CONFIG", os.path.expanduser("~/.config/dcb-llm-relay/config")
-    )
+    if path is not None:
+        path = os.path.expanduser(path)
+        if not os.path.isfile(path):
+            raise ConfigError(f"config file {path} not found")
+    else:
+        path = os.environ.get(
+            "DCB_LLM_RELAY_CONFIG", os.path.expanduser("~/.config/dcb-llm-relay/config")
+        )
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             for n, raw in enumerate(f, 1):
@@ -327,11 +341,14 @@ class Relay:
         return 1 if failed else 0
 
 
-def main() -> int:
+def main(argv: list[str]) -> int:
+    if len(argv) > 1:
+        print("usage: dcb-llm-relay.py [CONFIG]", file=sys.stderr)
+        return 2
     extra = [os.path.expanduser("~/.orbstack/bin"), "/opt/homebrew/bin", "/usr/local/bin"]
     os.environ["PATH"] = os.pathsep.join([os.environ.get("PATH", "/usr/bin:/bin"), *extra])
     try:
-        relay = Relay(load_config())
+        relay = Relay(load_config(argv[0] if argv else None))
     except ConfigError as e:
         print(f"dcb-llm-relay: {e}", file=sys.stderr)
         return 2
@@ -340,4 +357,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

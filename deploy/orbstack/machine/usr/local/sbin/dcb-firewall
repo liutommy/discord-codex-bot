@@ -14,10 +14,12 @@
 # none of the addresses the stack must reach (MUST_PASS hosts, the daemon.json resolvers, what
 # DNS_MUST_PASS resolves to). Otherwise the last accepted one is kept and /run/dcb/wan-status says
 # "stale <ip>" or "none"; dcb-probe treats both as inconclusive.
-# Local LLM relay (optional, DCB_LLM_RELAY_PORT): the bridge br-dcb-llm (compose.yaml's llm
-# network, the Bot only) may open TCP connections to its gateway address on that one port, where
-# the Mac's relay keeps socat listeners. Every other port on that bridge and every other bridge
-# stays rejected; unset or empty = nothing allowed. Not in IPv6 (the network has no IPv6).
+# Host service relays (optional, DCB_LLM_RELAY_PORT for the local LLM, DCB_IMG_RELAY_PORT for the
+# image service): the bridge br-dcb-llm (compose.yaml's llm network, the Bot only) may open TCP
+# connections to its gateway address on those ports, where the Mac's relay instances keep socat
+# listeners. Each port is its own relay instance, so image traffic cannot take the LLM relay's
+# workers. Every other port on that bridge and every other bridge stays rejected; a port unset or
+# empty = no rule for it. The two ports must differ. Not in IPv6 (the network has no IPv6).
 # Serialised by its own lock (boot unit, systemctl reload, dcb-up and dcb-guard may overlap).
 # Exit 0 = rules in force (prints applied|unchanged); 1 = failed.
 set -uo pipefail
@@ -28,13 +30,21 @@ die() { echo "dcb-firewall: FAILED: $*" >&2; exit 1; }
 exec 8>/run/dcb/firewall.lock
 flock -w 60 8 || die "firewall lock busy for 60s"
 
-# --- local LLM relay ---
+# --- host service relays ---
 relay_addr=172.31.254.1   # the llm network's gateway in compose.yaml
-relay_port=${DCB_LLM_RELAY_PORT:-}
-if [ -n "$relay_port" ]; then
-    [[ $relay_port =~ ^[1-9][0-9]{3,4}$ ]] && [ "$relay_port" -ge 1024 ] && [ "$relay_port" -le 65535 ] \
-        || die "DCB_LLM_RELAY_PORT must be an integer 1024-65535 (got '$relay_port')"
-fi
+relay_port() {  # relay_port <variable>: prints its value; empty, or an integer 1024-65535
+    local v=${!1:-}
+    if [ -n "$v" ]; then
+        [[ $v =~ ^[1-9][0-9]{3,4}$ ]] && [ "$v" -ge 1024 ] && [ "$v" -le 65535 ] \
+            || die "$1 must be an integer 1024-65535 (got '$v')"
+    fi
+    echo "$v"
+}
+llm_port=$(relay_port DCB_LLM_RELAY_PORT) || exit 1
+img_port=$(relay_port DCB_IMG_RELAY_PORT) || exit 1
+[ -n "$img_port" ] && [ "$img_port" = "$llm_port" ] \
+    && die "DCB_IMG_RELAY_PORT must differ from DCB_LLM_RELAY_PORT (both '$img_port')"
+relay_ports="$llm_port $img_port"
 
 BLOCK4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4"
 BLOCK6="::1/128 ::ffff:0:0/96 64:ff9b::/96 fc00::/7 fe80::/10 ff00::/8"   # fc00::/7: Tailscale fd7a:115c:a1e0::/48, OrbStack fd07:...
@@ -85,7 +95,7 @@ fi
 
 # --- rule sets (chain names are parameters so the same text can be loaded into scratch chains) ---
 rules4() {  # rules4 <user-chain> <input-chain>
-    local U=$1 I=$2
+    local U=$1 I=$2 p
     echo "*filter"; echo ":$U - [0:0]"; echo ":$I - [0:0]"
     echo "-F $U"
     echo "-A $U -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
@@ -101,7 +111,9 @@ rules4() {  # rules4 <user-chain> <input-chain>
     # own netns and forwards to the daemon.json resolvers through FORWARD.
     echo "-F $I"
     echo "-A $I -i docker0 -m conntrack --ctstate NEW -j REJECT --reject-with icmp-port-unreachable"
-    [ -n "$relay_port" ] && echo "-A $I -i br-dcb-llm -d $relay_addr -p tcp --dport $relay_port -m conntrack --ctstate NEW -j RETURN"
+    for p in $relay_ports; do
+        echo "-A $I -i br-dcb-llm -d $relay_addr -p tcp --dport $p -m conntrack --ctstate NEW -j RETURN"
+    done
     echo "-A $I -i br-+ -m conntrack --ctstate NEW -j REJECT --reject-with icmp-port-unreachable"
     echo "-A $I -j RETURN"
     echo "COMMIT"

@@ -14,7 +14,7 @@ Mac side.
 
 | File | Purpose |
 |---|---|
-| `machine/usr/local/sbin/dcb-firewall` | Owns `DOCKER-USER` and `DCB-INPUT` (IPv4 and IPv6): containers reach the internet but no private or special address (the Mac, the LAN, the router's WAN address, OrbStack's networks, the machine's own services). Loads atomically and verifies the live chains. With `DCB_LLM_RELAY_PORT` set, the one exception is the llm bridge's gateway on that port (local LLM relay, below). |
+| `machine/usr/local/sbin/dcb-firewall` | Owns `DOCKER-USER` and `DCB-INPUT` (IPv4 and IPv6): containers reach the internet but no private or special address (the Mac, the LAN, the router's WAN address, OrbStack's networks, the machine's own services). Loads atomically and verifies the live chains. The only exceptions are the llm bridge's gateway on `DCB_LLM_RELAY_PORT` (local LLM relay) and on `DCB_IMG_RELAY_PORT` (image service relay), each only when set (below). |
 | `machine/usr/local/sbin/dcb-probe` | Positive control for the firewall, run from each network it is given: blocked targets must be unreachable, public ones reachable, and every subnet must lie in the Docker pool, except compose.yaml's llm network (`172.31.254.0/24`), accepted only on its bridge `br-dcb-llm`. |
 | `machine/usr/local/sbin/dcb-up` | The only path to "up": firewall, compose config check (every service `restart: "no"`), probe from every project network, `compose up -d`, then the containers' restart policies. Also refuses external and non-bridge networks, and any service that sets `network_mode`. A gate whose tool fails (`jq`, `docker inspect`) counts as failed, never as "nothing found": a running stack is stopped. Stops a running stack when the firewall fails or the probe finds a leak. |
 | `machine/usr/local/sbin/dcb-guard` | Every 2 minutes: re-applies the firewall, starts missing services and restarts a bot unhealthy for too long (both through `dcb-up`), gives up after repeated crashes, flags gateway anomalies, and writes the wake request (below). |
@@ -29,9 +29,11 @@ Mac side.
 | `mac/dcb-wake.sh` | Run by launchd every 2 minutes; turns the machine's wake request into a rate-limited `claude -p` and mails the report. |
 | `mac/com.example.dcb-wake.plist` | launchd template for `dcb-wake.sh`. |
 | `mac/dcb-wake.config.example` | Settings for `dcb-wake.sh`, installed as `~/.config/dcb-wake/config`. |
-| `mac/dcb-llm-relay.py` | Local LLM relay (launchd, always running): keeps socat listeners open inside the machine through `orb` and splices each connection to the Mac's LLM server. |
+| `mac/dcb-llm-relay.py` | Host service relay (launchd, always running): keeps socat listeners open inside the machine through `orb` and splices each connection to a Mac service. One instance for the LLM server, a second one, with its own config, for the image service. |
 | `mac/dcb-llm-relay.config.example` | Settings for `dcb-llm-relay.py`, installed as `~/.config/dcb-llm-relay/config`. |
 | `mac/com.example.dcb-llm-relay.plist` | launchd template for `dcb-llm-relay.py`. |
+| `mac/dcb-image-relay.config.example` | Settings for the image service's relay instance, installed as `~/.config/dcb-llm-relay/image.config`. |
+| `mac/com.example.dcb-image-relay.plist` | launchd template for the image service's relay instance (`dcb-llm-relay.py` with that config as its argument). |
 | `mac/com.example.local-llm.plist` | launchd template for the LLM server (`mlx_lm.server` on `127.0.0.1`). |
 
 The checkout also needs a host-local `compose.override.yaml` (gitignored) that sets
@@ -121,9 +123,9 @@ Mac: dcb-llm-relay.py runs `orb -m dcb -u <user> socat ... STDIO` and pipes it t
   has only the `bot` service on it. The subnet lies outside the address pool so that the firewall
   and the probe can name it.
 - `dcb-firewall` lets `br-dcb-llm` open TCP connections to `172.31.254.1` on `DCB_LLM_RELAY_PORT`
-  only. Every other port there, and every other bridge, stays rejected, so the probe's checks from
-  every network still hold. Empty `DCB_LLM_RELAY_PORT`: nothing on the llm bridge reaches the
-  machine.
+  and `DCB_IMG_RELAY_PORT` (image service relay, below) only. Every other port there, and every
+  other bridge, stays rejected, so the probe's checks from every network still hold. Both ports
+  empty: nothing on the llm bridge reaches the machine.
 - Each relay worker runs `orb -m <machine> -u <user> socat -T<idle> -t<idle>
   TCP-LISTEN:<port>,bind=172.31.254.1,reuseaddr,reuseport STDIO,shut-close` as the machine's
   unprivileged user. `reuseport` lets the workers listen at the same time; socat without `fork`
@@ -140,6 +142,28 @@ Mac: dcb-llm-relay.py runs `orb -m dcb -u <user> socat ... STDIO` and pipes it t
   failed request.
 
 The Bot's `.env` points at the relay: `LOCAL_LLM_URL=http://172.31.254.1:<DCB_LLM_RELAY_PORT>/v1`.
+
+### Image service relay
+
+The Bot reaches an image-generation service on the Mac, bound to `127.0.0.1` only, through a
+second instance of the same relay on its own port:
+
+```
+bot --(llm network)--> 172.31.254.1:<DCB_IMG_RELAY_PORT>   socat listeners of the second instance
+Mac: dcb-llm-relay.py ~/.config/dcb-llm-relay/image.config  pipes them to 127.0.0.1:<image port>
+```
+
+- The instance has its own listen and upstream ports, workers, idle timeout and log
+  (`~/Library/Logs/dcb-image-relay.log`). Image requests never take a worker of the LLM relay, so a
+  burst of polls and downloads cannot make LLM connections wait or be refused, and the reverse.
+- `dcb-firewall` adds a second rule: `br-dcb-llm` may open TCP connections to `172.31.254.1` on
+  `DCB_IMG_RELAY_PORT` too. Each port's rule exists only when that port is set; the two must
+  differ, and `dcb-firewall` refuses an invalid or duplicate port before loading any rule.
+- Image jobs are asynchronous (submit, poll, download, cancel), so no request holds a connection
+  for a whole generation; the example config gives the instance 4 workers and a 120 s idle
+  timeout.
+
+The Bot's `.env` points at it: `IMAGE_GEN_URL=http://172.31.254.1:<DCB_IMG_RELAY_PORT>`.
 
 ## Install on the machine
 
@@ -173,10 +197,14 @@ For the local LLM relay, also as root in the machine:
 
 ```sh
 apt-get install -y socat
-# /etc/default/dcb: DCB_LLM_RELAY_PORT=<port>, an integer 1024-65535
+# /etc/default/dcb: DCB_LLM_RELAY_PORT=<port>, an integer 1024-65535, and for the image service
+# relay DCB_IMG_RELAY_PORT=<another port> (empty = no rule for it)
 systemctl reload dcb-firewall
-iptables -S DCB-INPUT | grep br-dcb-llm    # the one rule for 172.31.254.1 on that port
+iptables -S DCB-INPUT | grep br-dcb-llm    # one rule for 172.31.254.1 per port that is set
 ```
+
+With both ports set the check lists exactly two rules, one per port. `dcb-firewall` exits 1 and
+loads nothing when either port is not an integer 1024-65535 or both are the same.
 
 The listeners run as the machine's default (unprivileged) user and are started by the Mac's relay;
 nothing new runs from systemd.
@@ -244,3 +272,24 @@ tail ~/Library/Logs/dcb-llm-relay.log
 Then set `LOCAL_LLM_URL=http://172.31.254.1:<DCB_LLM_RELAY_PORT>/v1` in the checkout's `.env` and
 deploy. After changing the relay script, install it again and `launchctl kickstart -k
 gui/$(id -u)/com.$USER.dcb-llm-relay`.
+
+### Image service relay
+
+Run the image service on the Mac bound to `127.0.0.1` only (`<IMAGE_PORT>`), never to `0.0.0.0` or
+a LAN address: only the relay on this Mac reaches it. Then start the second relay instance with
+the machine's `DCB_IMG_RELAY_PORT`:
+
+```sh
+curl -s http://127.0.0.1:<IMAGE_PORT>/v1/health     # the service answers
+cp deploy/orbstack/mac/dcb-image-relay.config.example ~/.config/dcb-llm-relay/image.config   # set both ports
+sed -e "s#__HOME__#$HOME#g" -e "s#com\.example#com.$USER#g" \
+    deploy/orbstack/mac/com.example.dcb-image-relay.plist > ~/Library/LaunchAgents/com.$USER.dcb-image-relay.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.dcb-image-relay.plist
+tail ~/Library/Logs/dcb-image-relay.log
+```
+
+The instance's settings come from `image.config` only: an environment variable such as
+`DCB_LLM_RELAY_LISTEN_PORT` overrides the file of every instance, so do not set one in the launchd
+environment. Then set `IMAGE_GEN_URL=http://172.31.254.1:<DCB_IMG_RELAY_PORT>` in the checkout's
+`.env` and deploy. After installing a new relay script, `launchctl kickstart -k` both instances
+(`com.$USER.dcb-llm-relay` and `com.$USER.dcb-image-relay`).
