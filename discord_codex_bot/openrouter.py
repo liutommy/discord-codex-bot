@@ -55,6 +55,8 @@ class Router:
     # Path-shaped ids shown by their last part: mlx_lm.server and llama-server list a model by
     # its file path on the host, which members must not see.
     short_ids: bool = False
+    # Seconds one request may take, prompt reading and the whole answer included.
+    timeout: Callable[[Config], int] = lambda config: config.codex_timeout_seconds
 
     @property
     def models_word(self) -> str:
@@ -114,6 +116,7 @@ ROUTERS: dict[str, Router] = {
         max_tokens=lambda config: config.local_llm_max_tokens,
         params=local_params,
         short_ids=True,
+        timeout=lambda config: config.local_llm_timeout_seconds,
     ),
 }
 OPENROUTER_ROUTER = ROUTERS["openrouter"]
@@ -445,7 +448,7 @@ def strip_think(text: str, streaming: bool = False) -> str:
 
 
 async def _post(router: Router, config: Config, body: dict, on_delta) -> tuple[int, dict]:
-    async with _session(config, config.codex_timeout_seconds, router) as session:
+    async with _session(config, router.timeout(config), router) as session:
         url = f"{router.api(config)}/chat/completions"
         async with session.post(url, json=body) as response:
             if on_delta is not None and response.status == 200:
