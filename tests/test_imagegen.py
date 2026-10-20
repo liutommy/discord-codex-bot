@@ -62,6 +62,9 @@ CATALOG = {
 }
 
 
+IMAGE_CHUNKS = 4
+
+
 class FakeImageService:
     """The image service (contract v2): records every call. A submitted job waits in the shared
     GPU queue for `queued_polls` polls, its `position` (items ahead) falling to 0 and its
@@ -79,6 +82,7 @@ class FakeImageService:
         self.enhance_used = "local"
         self.polls = 0
         self.url = ""
+        self.image = PNG  # sent in IMAGE_CHUNKS writes, as a real server streams a large file
 
     def posts(self) -> list[dict]:
         return [body for method, _, body, _ in self.calls if method == "POST"]
@@ -139,7 +143,14 @@ class FakeImageService:
 
         async def image(request):
             await record(request)
-            return web.Response(body=PNG, content_type="image/png")
+            response = web.StreamResponse(headers={"Content-Type": "image/png"})
+            await response.prepare(request)
+            step = -(-len(self.image) // IMAGE_CHUNKS)
+            for start in range(0, len(self.image), step):
+                await response.write(self.image[start : start + step])
+                await asyncio.sleep(0.01)
+            await response.write_eof()
+            return response
 
         async def cancel(request):
             await record(request)
@@ -400,6 +411,21 @@ def fake_time(monkeypatch):
 
     monkeypatch.setattr(imagegen, "sleep_for", sleep_for)
     return now
+
+
+async def test_a_large_image_arriving_in_parts_is_saved_whole(service, client, tmp_path) -> None:
+    """Negative control for the download read: a 1.2 MB image streamed in several writes is
+    saved byte for byte; one read() returned only the first part and posted a broken file."""
+    service.image = PNG + bytes(1_200_000)
+    result = await imagegen.run_job(
+        client.images, ImageRequest("貓"), tmp_path / "big", 8_000_000, GUILD, USER
+    )
+    assert result.paths[0].read_bytes() == service.image
+    service.polls = 0
+    with pytest.raises(ImageGenError, match="失敗"):  # still refused past max_bytes
+        await imagegen.run_job(
+            client.images, ImageRequest("貓"), tmp_path / "over", 1_000_000, GUILD, USER
+        )
 
 
 async def test_the_run_timeout_starts_when_the_job_leaves_the_queue(

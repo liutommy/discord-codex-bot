@@ -530,13 +530,15 @@ class ImageService:
             if response.status != 200:
                 raise _error(response.status, None, "")
             mime = response.content_type
-            data = await response.content.read(max_bytes + 1)
+            data = bytearray()  # read(n) returns what has arrived so far, not n bytes
+            while chunk := await response.content.read(max_bytes + 1 - len(data)):
+                data.extend(chunk)
         if len(data) > max_bytes or mime not in _SUFFIXES:
             LOGGER.warning(
                 "Image %s/%d unusable: %s, %d bytes", job_id, image.index, mime, len(data)
             )
             raise ImageGenError(FAILED, "failed")
-        return data, mime
+        return bytes(data), mime
 
     async def cancel(self, job_id: str) -> None:
         async with self.session() as session:
