@@ -1610,6 +1610,33 @@ async def test_exchange_of_uses_the_replied_message_or_the_quoted_block(
     assert await client._exchange_of(replied) == ("", "去吃一蘭")
 
 
+async def test_the_slash_placeholder_is_retired_before_the_interaction_closes(monkeypatch) -> None:
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace as NS
+
+    from discord_codex_bot import bot as bot_module
+
+    edits = []
+
+    async def edit_original_response(content=None, view=None):
+        edits.append((content, view))
+
+    asked = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    now = {"t": asked + timedelta(minutes=13, seconds=59)}
+    monkeypatch.setattr(bot_module.discord.utils, "utcnow", lambda: now["t"])
+    interaction = NS(created_at=asked, edit_original_response=edit_original_response)
+    placeholder = bot_module.SlashPlaceholder(interaction)
+    await placeholder.show("思考中", "cancel-view")
+    late = asyncio.create_task(placeholder.retire_when_late())
+    await asyncio.sleep(0)
+    assert not late.done(), "a second before the lifetime it still waits"
+    await asyncio.wait_for(late, 3)
+    assert edits[-1] == (bot_module.LATE_NOTICE, "cancel-view"), "the cancel button stays"
+    await placeholder.show("部分答案 ▌", "cancel-view")
+    assert edits[-1][0] == bot_module.LATE_NOTICE, "nothing paints over the notice"
+
+
 async def test_a_redo_past_the_interaction_lifetime_is_posted_in_the_channel(
     client, backends, monkeypatch
 ) -> None:

@@ -195,9 +195,40 @@ QUEUE_FULL_MESSAGE = "目前排隊已滿，請稍後再試。"
 INTERACTION_LIFETIME = timedelta(minutes=14)
 
 
+LATE_NOTICE = "回答超過 14 分鐘，完成後會另外發在這個頻道。"
+
+
 def interaction_expired(interaction) -> bool:
     created = getattr(interaction, "created_at", None)
     return created is not None and discord.utils.utcnow() - created >= INTERACTION_LIFETIME
+
+
+class SlashPlaceholder:
+    """A slash command's deferred response, painted while the answer runs. At
+    INTERACTION_LIFETIME it is replaced once by LATE_NOTICE, the cancel button kept, and painted
+    no more: the token closes soon after, and the answer then goes to the channel."""
+
+    def __init__(self, interaction) -> None:
+        self.interaction = interaction
+        self.retired = False
+        self.view = None
+
+    async def show(self, text: str, view) -> None:
+        if self.retired:
+            return
+        self.view = view
+        with contextlib.suppress(discord.HTTPException):
+            await self.interaction.edit_original_response(content=text, view=view)
+
+    async def retire_when_late(self) -> None:
+        created = getattr(self.interaction, "created_at", None)
+        if created is None:
+            return
+        left = created + INTERACTION_LIFETIME - discord.utils.utcnow()
+        await asyncio.sleep(max(0.0, left.total_seconds()))
+        self.retired = True
+        with contextlib.suppress(discord.HTTPException):
+            await self.interaction.edit_original_response(content=LATE_NOTICE, view=self.view)
 
 
 def failure_text(backend: str, error: BaseException, prefix: str) -> str:
@@ -4118,29 +4149,28 @@ class DiscordCodexClient(discord.Client):
         if routed is not None:
             resume = routed.resume
 
-        async def show(text: str, view) -> None:
-            try:
-                await interaction.edit_original_response(content=text, view=view)
-            except discord.HTTPException:
-                pass
-
-        result = await self._run_tracked(
-            key,
-            interaction.user.id,
-            show,
-            lambda on_video_slow, on_delta: self._answer(
-                prompt,
-                attachments,
-                interaction.guild_id,
+        placeholder = SlashPlaceholder(interaction)
+        late = asyncio.create_task(placeholder.retire_when_late())
+        try:
+            result = await self._run_tracked(
+                key,
                 interaction.user.id,
-                effort_value,
-                resume,
-                on_video_slow=on_video_slow,
-                on_delta=on_delta,
-                channel_id=interaction.channel_id,
-                **self._routed_kw(routed),
-            ),
-        )
+                placeholder.show,
+                lambda on_video_slow, on_delta: self._answer(
+                    prompt,
+                    attachments,
+                    interaction.guild_id,
+                    interaction.user.id,
+                    effort_value,
+                    resume,
+                    on_video_slow=on_video_slow,
+                    on_delta=on_delta,
+                    channel_id=interaction.channel_id,
+                    **self._routed_kw(routed),
+                ),
+            )
+        finally:
+            late.cancel()
         if result is None:
             LOGGER.info(
                 "Cancelled slash guild=%s user=%s", interaction.guild_id, interaction.user.id
