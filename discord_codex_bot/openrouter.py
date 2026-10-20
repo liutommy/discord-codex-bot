@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import mimetypes
@@ -163,36 +164,44 @@ def parse_catalog(payload: dict, router: Router = OPENROUTER_ROUTER) -> list[Mod
     return out
 
 
+_PATH_ID = re.compile(r"^(/|~|[A-Za-z]:[\\/])")
+# A directory part of a host path inside free text: every component but the last.
+_PATH_DIRS = re.compile(r"(?<![\w.:/\\-])(?:~|[A-Za-z]:)?[\\/](?:[^\s'\"`\\/]+[\\/])+")
+
+
 def short_id(model_id: str) -> str:
     """A path-shaped id (`/Users/x/models/qwen`, `C:\\models\\qwen.gguf`) as its last part;
     anything else (a repo id like `mlx-community/qwen`) unchanged."""
-    if not re.match(r"^(/|~|[A-Za-z]:[\\/])", model_id):
+    if not _PATH_ID.match(model_id):
         return model_id
     return re.split(r"[\\/]", model_id.rstrip("/\\"))[-1] or model_id
 
 
+def scrub_paths(text: str) -> str:
+    """`text` with each host path cut to its last part: a local server's error names the model
+    by its path, which members must not see."""
+    return _PATH_DIRS.sub("", text)
+
+
+def _tag(full_id: str) -> str:
+    """Four hex digits fixed by the full path, so an alias names the same model on every refresh."""
+    return hashlib.sha256(full_id.encode()).hexdigest()[:4]
+
+
 def _shorten(models: list[Model]) -> list[Model]:
     """Each path-shaped model under its short id, keeping the full one for requests. A short id
-    another model already shows (two paths ending in the same name, or a repo id) gets "~2",
-    "~3", … in the order of the full paths, so no member ever sees a host path."""
+    another model also shows (two paths ending in the same name, or a repo id) becomes
+    "<name>~<tag>", the tag fixed by the full path. A path-shaped name is cut the same way."""
     short = [short_id(m.id) for m in models]
-    shown_ids = {m.id for m, name in zip(models, short, strict=True) if name == m.id}
-    alias: dict[str, str] = {}
-    for model, name in sorted(zip(models, short, strict=True), key=lambda pair: pair[0].id):
-        if name == model.id:
-            continue
-        candidate, n = name, 2
-        while candidate in shown_ids:
-            candidate, n = f"{name}~{n}", n + 1
-        shown_ids.add(candidate)
-        alias[model.id] = candidate
+    taken = [s for m, s in zip(models, short, strict=True) if s == m.id]
     out = []
-    for model in models:
-        if model.id not in alias:
-            out.append(model)
+    for model, name in zip(models, short, strict=True):
+        if name != model.id and (short.count(name) > 1 or name in taken):
+            name = f"{name}~{_tag(model.id)}"
+        if name == model.id:
+            out.append(replace(model, name=short_id(model.name)))
             continue
-        name = alias[model.id]
-        shown = name if model.name == model.id else model.name
+        shown = name if model.name == model.id else short_id(model.name)
         out.append(replace(model, id=name, name=shown, api_id=model.id))
     return out
 
@@ -253,7 +262,15 @@ class Catalog:
         return self.models
 
     def get(self, model_id: str) -> Model | None:
-        return next((m for m in self.models if m.id == model_id), None)
+        """The model shown as `model_id`; for a stored "<name>~<tag>" whose twin has since gone,
+        the model that alias was made for, now shown as plain <name>."""
+        found = next((m for m in self.models if m.id == model_id), None)
+        if found is not None or not self.router.short_ids or "~" not in model_id:
+            return found
+        name, tag = model_id.rsplit("~", 1)
+        return next(
+            (m for m in self.models if m.id == name and m.api_id and _tag(m.api_id) == tag), None
+        )
 
 
 def transcript_path(config: Config, thread_id: str) -> Path:
@@ -411,7 +428,9 @@ async def run_router(
     if status != 200 or error:
         detail = (error or {}).get("message") if isinstance(error, dict) else str(error or "")
         where = f"HTTP {status}" if status != 200 else "上游錯誤"
-        raise BackendError(f"{label} {where}：{detail or '無說明'}{unstable}")
+        LOGGER.warning("%s %s: %s", router.label, where, detail)
+        shown = scrub_paths(detail) if router.short_ids else detail
+        raise BackendError(f"{label} {where}：{shown or '無說明'}{unstable}")
     choices = payload.get("choices") or []
     choice = choices[0] if choices else {}
     message = choice.get("message") or {}
