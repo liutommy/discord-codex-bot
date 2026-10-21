@@ -295,7 +295,9 @@ CHARACTER_CONFIRM_SECONDS = 300
 CHARACTER_TOO_LATE = "確認角色的時間已到，請重新下一次指令。"
 CHARACTER_LOOKING = "🔎 查角色中…"
 CHARACTER_ASKING = "🔎 請在只有你看得到的訊息裡確認角色…"
-CHARACTER_WITH_REF = "character 和「照這個角色」只能擇一：要用自己的角色圖就不用填 character。"
+CHARACTER_WITH_REF = (
+    f"character 和{imagegen.shown('ref_image')}只能擇一：要用自己的角色圖就不用填 character。"
+)
 
 
 class CharacterDeclined(Exception):
@@ -1549,7 +1551,8 @@ class DiscordCodexClient(discord.Client):
 
     def _command_rows(self) -> list[tuple[str, str, list[str]]]:
         return [
-            (c.name, c.description, [p.name for p in c.parameters])
+            # display_name: what Discord shows (app_commands.rename), which HELP must match
+            (c.name, c.description, [p.display_name for p in c.parameters])
             for c in sorted(self.tree.get_commands(), key=lambda c: c.name)
         ]
 

@@ -63,10 +63,12 @@ LORA_CANDIDATES = 4
 _SAFE_LEVELS = (1, "None")  # Civitai's nsfwLevel for a general-audience image (new and old API)
 CHARACTER_MAX = 100  # the member's character text
 
-NOT_FOUND = "找不到「{name}」這個角色。可以改把角色圖附在「照這個角色」。"
-JUDGE_DOWN = "現在沒辦法辨識角色，請稍後再試，或改把角色圖附在「照這個角色」。"
+NOT_FOUND = "找不到「{name}」這個角色。可以改把角色圖附在" + imagegen.shown("ref_image") + "。"
+JUDGE_DOWN = "現在沒辦法辨識角色，請稍後再試，或改把角色圖附在" + imagegen.shown("ref_image") + "。"
 DANBOORU_DOWN = "查不到角色資料（Danbooru 連不上），請稍後再試。"
-NO_WAY = "「{model}」畫不了指定的角色；不選 model，或改把角色圖附在「照這個角色」。"
+NO_WAY = (
+    "「{model}」畫不了指定的角色；不選 model，或改把角色圖附在" + imagegen.shown("ref_image") + "。"
+)
 # The judge waits in the Codex queue behind members' answers; past this the slash command's
 # interaction (15 minutes) could expire before the member is asked to confirm.
 JUDGE_SECONDS = 300

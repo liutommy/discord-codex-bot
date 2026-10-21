@@ -1149,6 +1149,15 @@ async def test_admin_image_get_and_set(client, tmp_path) -> None:
     assert status == "rejected" and client.image_settings.enabled(OTHER_GUILD)
 
 
+def test_help_sheet_lists_the_options_by_their_discord_names(client) -> None:
+    """HELP for the model names the attachment options as Discord shows them (rename)."""
+    line = next(
+        row for row in client.help_sheet().splitlines() if "-image" in row and "參數" in row
+    )
+    assert "照這個角色" in line and "改這張圖" in line and "角色相似度" in line
+    assert "ref_image" not in line and "ref_strength" not in line
+
+
 def test_help_explains_both_kinds_of_reference_image() -> None:
     from discord_codex_bot.help import COMMAND_GUIDE
 
