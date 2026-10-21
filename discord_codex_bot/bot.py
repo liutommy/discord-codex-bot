@@ -3870,6 +3870,14 @@ class DiscordCodexClient(discord.Client):
             LOGGER.warning("Character judge took over %ss", characters.JUDGE_SECONDS)
             raise ImageGenError(characters.JUDGE_BUSY, "judge_busy") from None
 
+    async def _character_search(self, name: str) -> str:
+        """characters.Search: the web results for a character's name (never the member's scene),
+        through the same search providers as <web/>; "" without a provider or a hit."""
+        if not search.available(self.config):
+            return ""
+        provider, hits = await search.search_web(name, self.config)
+        return search.render_results(name, provider, hits) if hits else ""
+
     async def _character_jobs(
         self,
         interaction: discord.Interaction,
@@ -3888,7 +3896,9 @@ class DiscordCodexClient(discord.Client):
         if request.model and catalog.get(request.model) is None:
             imagegen.resolve(catalog, request)
         web, judge = self.character_web, self._character_judge
-        found = await characters.identify(name, judge, web, self.config.character_schema_path)
+        found = await characters.identify(
+            name, judge, web, self.config.character_schema_path, self._character_search
+        )
         if found:
             await placeholder.show(CHARACTER_ASKING, view)
         tag, picture = await self._confirm_character(interaction, name, found)

@@ -6,10 +6,17 @@
       "items": {
         "type": "string"
       }
+    },
+    "names": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
   },
   "required": [
-    "tags"
+    "tags",
+    "names"
   ],
   "additionalProperties": false
 }
