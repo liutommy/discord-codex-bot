@@ -2742,6 +2742,20 @@ class DiscordCodexClient(discord.Client):
             self._harvest_wakeup.set()
 
     @staticmethod
+    async def _echo_upload(attachments: Sequence[discord.Attachment]) -> list[discord.File]:
+        """Discord does not show a slash command's uploaded image either; on the answer it shows
+        the channel what was asked about, and <earlier/> reads it back from there."""
+        files = []
+        for attachment in attachments:
+            if not (attachment.content_type or "").startswith("image/"):
+                continue
+            try:
+                files.append(await attachment.to_file(spoiler=attachment.is_spoiler()))
+            except (discord.HTTPException, aiohttp.ClientError, TimeoutError):
+                LOGGER.info("Slash upload not re-attached: %s", attachment.filename)
+        return files
+
+    @staticmethod
     def _files(result: CodexResult) -> list[discord.File]:
         # Discord caps a message at 10 attachments; generated images are deleted after sending.
         return [discord.File(path) for path in result.images[:10]]
@@ -4945,16 +4959,16 @@ class DiscordCodexClient(discord.Client):
         chunks = split_discord_message(reply)
         sent_id = None
         view = self._answer_view(interaction.guild_id, interaction.user.id, prompt, result)
+        echoed = await self._echo_upload(attachments)
+        files = echoed + self._files(result)[: 10 - len(echoed)]
         try:
             if interaction_expired(interaction) and interaction.channel is not None:
                 await placeholder.retire()
-                sent = await interaction.channel.send(
-                    chunks[0], files=self._files(result), view=view
-                )
+                sent = await interaction.channel.send(chunks[0], files=files, view=view)
                 send_rest = interaction.channel.send
             else:
                 sent = await interaction.edit_original_response(
-                    content=chunks[0], attachments=self._files(result), view=view
+                    content=chunks[0], attachments=files, view=view
                 )
                 send_rest = interaction.followup.send
             sent_id = sent.id

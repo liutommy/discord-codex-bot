@@ -3752,6 +3752,31 @@ async def test_earlier_reads_a_slash_answer_without_a_reference(
     assert "斜線指令的回答" in replay and "別處的回答" not in replay
 
 
+async def test_slash_upload_is_re_attached_to_the_answer() -> None:
+    """A slash command's upload has no message of its own; only images ride on the answer."""
+
+    class Upload:
+        def __init__(self, filename, content_type, fail=False):
+            self.filename, self.content_type, self.fail = filename, content_type, fail
+
+        def is_spoiler(self):
+            return self.filename.startswith("SPOILER_")
+
+        async def to_file(self, spoiler=False):
+            if self.fail:
+                raise discord.HTTPException(types.SimpleNamespace(status=404, reason=""), "gone")
+            return (self.filename, spoiler)
+
+    files = await DiscordCodexClient._echo_upload(
+        [
+            Upload("SPOILER_cat.png", "image/png"),
+            Upload("notes.pdf", "application/pdf"),
+            Upload("gone.png", "image/png", fail=True),
+        ]
+    )
+    assert files == [("SPOILER_cat.png", True)]
+
+
 async def test_earlier_gives_the_newest_images_and_the_bots_own(
     client, backends, earlier_conversation
 ) -> None:
