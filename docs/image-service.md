@@ -102,6 +102,9 @@ and `ref_strength`:
   `init_image` or `ref_strength` on an edit model). The bot applies the same rule before
   submitting, and treats a missing `default_ref_model` as `default_model`. A value that asks for
   nothing (`"upscale": "off"`, `"detailer": false`, `"negative": ""`) does not count as set.
+- A service with no reference model reports `default_model` as `default_ref_model`, as in the
+  example above. A `ref_image` request without a model then goes to `default_model`, and is
+  refused with `unsupported_option` when that model does not list `ref_image`.
 
 `max_bytes` is the largest file the caller can deliver; the service encodes each image (PNG, then
 WEBP or JPEG at falling quality) to fit. `requester` is for the service log only.
