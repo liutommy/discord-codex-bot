@@ -13,7 +13,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from discord_codex_bot import admin, admin_image, imagegen
+from discord_codex_bot import admin, admin_image, characters, imagegen
 from discord_codex_bot import bot as bot_module
 from discord_codex_bot import help as help_module
 from discord_codex_bot.admin_server import AdminServer
@@ -1315,8 +1315,10 @@ async def test_character_known_by_the_default_model_is_sent_with_its_traits(
     # Only the name went to the cloud judge, isolated, Codex first and then Argon.
     (judge,) = calls
     assert "兔田佩克拉" in judge["prompt"] and "海邊" not in judge["prompt"]
-    assert judge["spare"] == "gemini-4-argon-medium" and judge["isolated"] is True
+    assert judge["spare"] == characters.JUDGE_SPARE and judge["isolated"] is True
+    assert judge["spare"][0] == "gemini-4-argon-medium"
     assert judge["schema"] == client.config.character_schema_path
+    assert judge["web_search"] is True, "the name judge may search the web for the name"
     question = "是這個角色嗎？`usada_pekora`（Danbooru 上 1000 張圖）"
     assert interaction.questions == [(question, "character.png")]
     assert interaction.private[-1] == {
@@ -1402,6 +1404,7 @@ async def test_character_unknown_everywhere_takes_a_lora_then_the_reference_mode
     assert interaction.edits[-1]["files"] == ["image-0.png"]
     lora_turn = calls[1]
     assert lora_turn["schema"] == client.config.lora_schema_path
+    assert not lora_turn.get("web_search"), "comparing pictures needs no web search"
     assert [p.name for p in lora_turn["images"]] == ["reference.png", "lora-2.png"]
     assert "海邊" not in lora_turn["prompt"]
 
@@ -1418,6 +1421,9 @@ async def test_character_refusals_never_ask_the_judge(service, client, monkeypat
         refused = CharacterInteraction()
         await client.image_command(refused, "貓", **{"character": "佩克拉", **kwargs})
         assert refused.messages == [(message, True)]
+    alone = CharacterInteraction()  # the switch without a character
+    await client.image_command(alone, "貓", force_lora=True)
+    assert alone.messages == [(bot_module.FORCE_LORA_ALONE, True)]
     unknown = CharacterInteraction()
     await client.image_command(unknown, "貓", character="佩克拉", model="nope")
     assert unknown.edits[-1]["content"].startswith("⚠️ 沒有「nope」這個圖片模型")

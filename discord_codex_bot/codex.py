@@ -444,6 +444,7 @@ def _arguments(
     schema: Path | None = None,
     plain: bool = False,
     isolated: bool = False,
+    web_search: bool = False,
 ) -> tuple[str, ...]:
     # Sandbox, tool feature flags and web search live in CODEX_HOME/config.toml (refreshed from
     # config/codex-config.toml at container start); only per-request values are passed here.
@@ -468,8 +469,7 @@ def _arguments(
             "memories.generate_memories=false",
             "-c",
             'history.persistence="none"',
-            "-c",
-            'web_search="disabled"',
+            *(() if web_search else ("-c", 'web_search="disabled"')),
             "-c",
             "features.image_generation=false",
             "-c",
@@ -538,10 +538,11 @@ async def _exec(
     schema: Path | None = None,
     plain: bool = False,
     isolated: bool = False,
+    web_search: bool = False,
 ) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         "codex",
-        *_arguments(config, images, effort, resume, schema, plain, isolated),
+        *_arguments(config, images, effort, resume, schema, plain, isolated, web_search),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -576,6 +577,7 @@ async def run_codex(
     isolated: bool = False,
     speaker: int | None = None,
     history: str = "",
+    web_search: bool = False,
 ) -> CodexResult:
     """Run one turn. `raw` sends `user_prompt` verbatim (used to feed recalled notes back);
     `speaker` is the Discord id of the member whose turn this is (codex._prompt).
@@ -599,7 +601,7 @@ async def run_codex(
     )
     plain = isolated or plain
     code, output, stderr = await _exec(
-        prompt, config, images, effort, resume, schema, plain, isolated
+        prompt, config, images, effort, resume, schema, plain, isolated, web_search
     )
     if unavailable := parse_fallback_error(output, config.codex_home, resume, code):
         raise unavailable  # before the resume retry: a fresh thread cannot fix a remote outage
@@ -608,7 +610,7 @@ async def run_codex(
         LOGGER.warning("Resume of thread %s failed (%s); starting a new thread", resume, code)
         resume = ""
         code, output, stderr = await _exec(
-            prompt, config, images, effort, resume, schema, plain, isolated
+            prompt, config, images, effort, resume, schema, plain, isolated, web_search
         )
         if unavailable := parse_fallback_error(output, config.codex_home, resume, code):
             raise unavailable

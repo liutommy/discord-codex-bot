@@ -38,7 +38,16 @@ class FakeExec:
         self.calls: list[dict] = []
 
     async def __call__(
-        self, prompt, config, images, effort, resume, schema=None, plain=False, isolated=False
+        self,
+        prompt,
+        config,
+        images,
+        effort,
+        resume,
+        schema=None,
+        plain=False,
+        isolated=False,
+        web_search=False,
     ):
         self.calls.append(
             dict(
@@ -47,6 +56,7 @@ class FakeExec:
                 effort=effort,
                 resume=resume,
                 schema=schema,
+                web_search=web_search,
                 plain=plain,
                 isolated=isolated,
             )
@@ -330,6 +340,10 @@ def test_isolated_arguments_disable_memory_history_and_tools(config: Config) -> 
         "features.multi_agent=false",
     ):
         assert value in args
+    # A character-name judge keeps Codex's own web search; everything else stays isolated.
+    searching = _arguments(config, isolated=True, web_search=True)
+    assert 'web_search="disabled"' not in searching
+    assert "features.memories=false" in searching and "features.apps=false" in searching
 
 
 async def test_isolated_run_uses_plain_workspace(config: Config, monkeypatch) -> None:
