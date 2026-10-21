@@ -133,9 +133,10 @@ when its `options` list it, and both are `null` when unused:
   to 1.5 (`null`: 0.8), and `trigger` is at most 300 characters without `<` or `>`. The version's
   `baseModel` must equal the model's `lora_base`.
 - A value out of range is refused with 400 `{"error": "bad_value", "option": "character"}` (or
-  `"lora"`). A job whose LoRA cannot be had (not found, wrong base model, too large, download
-  failed) ends `failed` with `"error": "lora_unavailable"`; the bot then runs the character the
-  next way it chose, without the LoRA.
+  `"lora"`). A job whose requested LoRA is unavailable (not found, wrong base model, too large,
+  download failed) ends `failed` with an `error` that starts with `lora_unavailable` (for example
+  `"lora_unavailable: not found"`). When the bot selected a fallback request, it runs that request
+  without the LoRA; otherwise it reports the failure.
 
 `max_bytes` is the largest file the caller can deliver; the service encodes each image (PNG, then
 WEBP or JPEG at falling quality) to fit. `requester` is for the service log only.

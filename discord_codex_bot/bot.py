@@ -292,6 +292,7 @@ IMAGE_TAGS_RUN = 4
 IMAGE_NOT_ASKED = "（沒有用地端生圖：要用的話請明講「地端」或模型名稱，或用 /{prefix}-image）"
 # `/image character:` (characters.py): the member's private yes/next/cancel, unanswered = cancel.
 CHARACTER_CONFIRM_SECONDS = 300
+CHARACTER_TOO_LATE = "確認角色的時間已到，請重新下一次指令。"
 CHARACTER_LOOKING = "🔎 查角色中…"
 CHARACTER_ASKING = "🔎 請在只有你看得到的訊息裡確認角色…"
 CHARACTER_WITH_REF = "character 和 ref_image 只能擇一：要用自己的角色圖就不用填 character。"
@@ -3872,7 +3873,9 @@ class DiscordCodexClient(discord.Client):
         member how: the chosen way, then (after a LoRA) the way to take when the service cannot
         get the LoRA. The member confirms the character first (`_confirm_character`)."""
         catalog = await self.images.catalog()
-        if request.model:  # an unknown model is refused before anything leaves the host
+        # An unknown model is refused before anything leaves the host; the options are checked
+        # once the sample, the character or the LoRA is in the request.
+        if request.model and catalog.get(request.model) is None:
             imagegen.resolve(catalog, request)
         web, judge = self.character_web, self._character_judge
         found = await characters.identify(name, judge, web, self.config.character_schema_path)
@@ -3881,7 +3884,7 @@ class DiscordCodexClient(discord.Client):
         tag, picture = await self._confirm_character(interaction, name, found)
         character = imagegen.Character(tag, await characters.traits(tag, web))
         choice = characters.choose(
-            catalog, request.model, await characters.counts(tag, catalog, web)
+            catalog, request.model, await characters.counts(tag, catalog, web), request.options()
         )
         no_way = ImageGenError(
             characters.NO_WAY.format(model=request.model or catalog.default_model),
@@ -3933,7 +3936,14 @@ class DiscordCodexClient(discord.Client):
                 )
                 if picture is None:
                     continue
-                choice = CharacterView(interaction.user.id, CHARACTER_CONFIRM_SECONDS)
+                # The question lives on the slash command's token: every round must end before
+                # INTERACTION_LIFETIME, not only the first.
+                left = INTERACTION_LIFETIME - (discord.utils.utcnow() - interaction.created_at)
+                if left.total_seconds() < 30:
+                    outcome = CHARACTER_TOO_LATE
+                    raise ImageGenError(CHARACTER_TOO_LATE, "character_too_late")
+                wait = min(CHARACTER_CONFIRM_SECONDS, left.total_seconds())
+                choice = CharacterView(interaction.user.id, wait)
                 text = f"是這個角色嗎？`{candidate.tag}`（Danbooru 上 {candidate.posts} 張圖）"
                 suffix = imagegen.SUFFIXES[imagegen.sniff(picture)]
                 file = discord.File(io.BytesIO(picture), filename=f"character{suffix}")
@@ -3954,7 +3964,8 @@ class DiscordCodexClient(discord.Client):
             LOGGER.exception("Character question failed guild=%s", interaction.guild_id)
             raise ImageGenError(imagegen.FAILED, "failed") from None
         except ImageGenError as error:  # Danbooru unreachable mid-way: say so, not "no one left"
-            outcome = f"⚠️ {error}"
+            if outcome != CHARACTER_TOO_LATE:
+                outcome = f"⚠️ {error}"
             raise
         except asyncio.CancelledError:
             outcome = CANCELLED

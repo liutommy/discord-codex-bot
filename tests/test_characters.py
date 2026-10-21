@@ -333,6 +333,35 @@ KNOWN_BY_ANIMA = {"2024-03-01": 433, "2025-09-01": 433}
 UNKNOWN = {"2024-03-01": 0, "2025-09-01": 0}
 
 
+def test_choose_keeps_the_options_the_member_set() -> None:
+    """Every chosen model, the reference one included, takes the options the request sets."""
+    models = [
+        {"id": "z-image", "options": ["seed"]},
+        {
+            "id": "wai-illustrious",
+            "options": ["seed", "character", "lora", "ref_image", "init_image"],
+            "knowledge": {"cutoff": "2024-03-01", "min_posts": 500},
+            "lora_base": "Illustrious",
+        },
+        {
+            "id": "anima",
+            "options": ["seed", "character", "ref_image"],
+            "knowledge": {"cutoff": "2025-09-01", "min_posts": 150},
+        },
+        {"id": "qwen-image-edit-2511", "options": ["ref_image"]},
+    ]
+    found = catalog(models=models)
+    # anima knows the character but takes no init_image, and the edit model takes no init_image:
+    # a LoRA on wai-illustrious, then the reference on it.
+    by_ref = Choice("wai-illustrious", "ref", ref=True)
+    want = Choice("wai-illustrious", "lora", character=True, lora=True, fallback=by_ref)
+    assert choose(found, "", KNOWN_BY_ANIMA, ["init_image", "character"]) == want
+    # Negative control: without init_image, anima draws it.
+    assert choose(found, "", KNOWN_BY_ANIMA, ["character"]) == Choice(
+        "anima", "known", character=True
+    )
+
+
 def test_choose_the_members_model() -> None:
     found = catalog()
     assert choose(found, "anima", UNKNOWN) == Choice("anima", "member", character=True)

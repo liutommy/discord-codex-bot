@@ -325,19 +325,37 @@ def knows(model: ImageModel, posts_before: dict[str, int]) -> bool:
     return known is not None and posts_before.get(known.cutoff, 0) >= known.min_posts
 
 
-def choose(catalog: Catalog, member_model: str, posts_before: dict[str, int]) -> Choice | None:
-    """How to draw a confirmed character; None when nothing in the catalog can.
+def choose(
+    catalog: Catalog,
+    member_model: str,
+    posts_before: dict[str, int],
+    options: Sequence[str] = (),
+) -> Choice | None:
+    """How to draw a confirmed character; None when nothing in the catalog can. `options` are
+    the ones the member's request sets (ImageRequest.options()); a model chosen here takes them all.
 
     - The member's model: as it is, with the character when it takes one, a LoRA first when it
       takes LoRAs and does not know the character; a model that takes neither but takes a
       reference image gets the sample.
     - Otherwise the first model, default_model first, that takes `character` and knows it.
     - Otherwise the first model that takes LoRAs: a LoRA, falling back to the next rule.
-    - Otherwise default_ref_model with the sample as ref_image."""
-    ref_id = catalog.default_ref_model or catalog.default_model
-    ref_model = catalog.get(ref_id)
-    by_ref = (
-        Choice(ref_id, "ref", ref=True) if ref_model and "ref_image" in ref_model.options else None
+    - Otherwise the first model, default_ref_model first, that takes a reference image, with the
+      sample as ref_image."""
+    asked = [o for o in options if o not in ("character", "lora", "ref_image")]
+
+    def fits(model: ImageModel, *needed: str) -> bool:
+        return all(o in model.options for o in (*asked, *needed))
+
+    first = catalog.get(catalog.default_model)
+    ordered = ([first] if first else []) + [m for m in catalog.models if m is not first]
+    ref_first = catalog.get(catalog.default_ref_model)
+    by_ref = next(
+        (
+            Choice(m.id, "ref", ref=True)
+            for m in ([ref_first] if ref_first else []) + [m for m in ordered if m is not ref_first]
+            if fits(m, "ref_image")
+        ),
+        None,
     )
     if member_model:
         model = catalog.get(member_model)
@@ -350,13 +368,11 @@ def choose(catalog: Catalog, member_model: str, posts_before: dict[str, int]) ->
         if takes:
             return plain
         return Choice(model.id, "member", ref=True) if "ref_image" in model.options else None
-    first = catalog.get(catalog.default_model)
-    ordered = ([first] if first else []) + [m for m in catalog.models if m is not first]
     for model in ordered:
-        if "character" in model.options and knows(model, posts_before):
+        if fits(model, "character") and knows(model, posts_before):
             return Choice(model.id, "known", character=True)
     for model in ordered:
-        if "lora" in model.options and model.lora_base:
+        if fits(model, "lora") and model.lora_base:
             takes = "character" in model.options
             return Choice(model.id, "lora", character=takes, lora=True, fallback=by_ref)
     return by_ref
