@@ -370,13 +370,13 @@ def test_input_images_are_checked_before_anything_is_read() -> None:
     ok = ImageRequest("貓", init_image=small, mask=small, strength=0.5)
     assert imagegen.resolve(catalog, ok).id == "chroma1-flash"
     for request, code, said in (
-        (ImageRequest("貓", mask=small), "bad_value", "mask 要搭配 image"),
-        (ImageRequest("貓", strength=0.5), "bad_value", "strength 要搭配 image"),
-        (replace(ok, strength=1.5), "bad_value", "strength 只能是 0-1"),
+        (ImageRequest("貓", mask=small), "bad_value", "「遮罩」 要搭配 「改這張圖」"),
+        (ImageRequest("貓", strength=0.5), "bad_value", "「改動幅度」 要搭配 「改這張圖」"),
+        (replace(ok, strength=1.5), "bad_value", "「改動幅度」 只能是 0-1"),
         (replace(ok, init_image=imagegen.InputImage("image/png", 1001)), "input_too_large", ""),
         (replace(ok, mask=imagegen.InputImage("image/png", 1001)), "input_too_large", ""),
         (replace(ok, init_image=imagegen.InputImage("image/gif", 10)), "bad_value", "PNG"),
-        (ImageRequest("貓", "plain", init_image=small), "unsupported_option", "init_image"),
+        (ImageRequest("貓", "plain", init_image=small), "unsupported_option", "改這張圖"),
     ):
         with pytest.raises(ImageGenError) as caught:
             imagegen.resolve(catalog, request)
@@ -387,13 +387,13 @@ def test_input_images_are_checked_before_anything_is_read() -> None:
     both = replace(ref, init_image=small, strength=0.5)
     assert imagegen.resolve(catalog, both).id == "wai-illustrious"
     for request, code, said in (
-        (replace(ref, ref_image=None), "bad_value", "ref_strength 要搭配 ref_image"),
-        (replace(ref, ref_strength=1.5), "bad_value", "ref_strength 只能是 0-1"),
-        (replace(ref, ref_strength=-0.1), "bad_value", "ref_strength 只能是 0-1"),
+        (replace(ref, ref_image=None), "bad_value", "「角色相似度」 要搭配 「照這個角色」"),
+        (replace(ref, ref_strength=1.5), "bad_value", "「角色相似度」 只能是 0-1"),
+        (replace(ref, ref_strength=-0.1), "bad_value", "「角色相似度」 只能是 0-1"),
         (replace(ref, ref_image=imagegen.InputImage("image/png", 1001)), "input_too_large", ""),
         (replace(ref, ref_image=imagegen.InputImage("image/gif", 10)), "bad_value", "PNG"),
-        (replace(ok, ref_image=small), "unsupported_option", "ref_image"),
-        (ImageRequest("貓", ref_strength=0.5), "unsupported_option", "ref_strength"),
+        (replace(ok, ref_image=small), "unsupported_option", "照這個角色"),
+        (ImageRequest("貓", ref_strength=0.5), "unsupported_option", "角色相似度"),
         # Each image fits, their sum does not: the service caps the total.
         (
             replace(
@@ -562,7 +562,7 @@ def test_prompt_offers_the_tag_only_with_the_service(config) -> None:
     note = imagegen.prompt_note(replace(config, image_gen_url="http://img:18082"))
     built = _prompt("畫一隻貓", image_gen=note)
     assert '<image_gen prompt="what to draw"/>' in built and KEY not in built
-    assert "text only" in note and "ref_image" in note
+    assert "text only" in note and "照這個角色" in note
     # The member guide for -image is the one source the model explains from.
     assert help_module.COMMAND_GUIDE["-image"][0] in note
 
@@ -737,18 +737,18 @@ async def test_slash_input_refusals_never_submit_or_download(service, client) ->
     type that is not PNG/JPEG/WebP are refused before the job is submitted, and all but the last
     (which needs the bytes) before the attachment is read."""
     for kwargs, said in (
-        ({"mask": FakeAttachment(PNG)}, "mask 要搭配 image"),
-        ({"strength": 0.5}, "strength 要搭配 image"),
-        ({"image": FakeAttachment(PNG, size=5000)}, "image 太大"),
-        ({"image": FakeAttachment(PNG), "mask": FakeAttachment(PNG, size=5000)}, "mask 太大"),
-        ({"image": FakeAttachment(PNG), "model": "plain"}, "不支援 init_image"),
+        ({"mask": FakeAttachment(PNG)}, "「遮罩」 要搭配 「改這張圖」"),
+        ({"strength": 0.5}, "「改動幅度」 要搭配 「改這張圖」"),
+        ({"image": FakeAttachment(PNG, size=5000)}, "「改這張圖」 太大"),
+        ({"image": FakeAttachment(PNG), "mask": FakeAttachment(PNG, size=5000)}, "「遮罩」 太大"),
+        ({"image": FakeAttachment(PNG), "model": "plain"}, "不支援 「改這張圖」"),
         ({"image": FakeAttachment(GIF, "image/gif")}, "只能是 PNG、JPEG 或 WebP"),
         ({"enhance": types.SimpleNamespace(value="cloud")}, "enhance 只能是 local, off"),
-        ({"ref_image": FakeAttachment(PNG)}, "不支援 ref_image"),
-        ({"model": "wai-illustrious", "ref_strength": 0.5}, "ref_strength 要搭配 ref_image"),
+        ({"ref_image": FakeAttachment(PNG)}, "不支援 「照這個角色」"),
+        ({"model": "wai-illustrious", "ref_strength": 0.5}, "「角色相似度」 要搭配 「照這個角色」"),
         (
             {"model": "wai-illustrious", "ref_image": FakeAttachment(PNG, size=5000)},
-            "ref_image 太大",
+            "「照這個角色」 太大",
         ),
         (
             {
@@ -756,7 +756,7 @@ async def test_slash_input_refusals_never_submit_or_download(service, client) ->
                 "image": FakeAttachment(PNG),
                 "ref_image": FakeAttachment(PNG, size=5000),
             },
-            "ref_image 太大",
+            "「照這個角色」 太大",
         ),
     ):
         refused = FakeInteraction()
@@ -1154,12 +1154,12 @@ def test_help_explains_both_kinds_of_reference_image() -> None:
 
     text, examples = COMMAND_GUIDE["-image"]
     assert "目前只有 WAI" not in text
-    assert "編輯模型" in text and "不支援 ref_strength" in text
+    assert "編輯模型" in text and "不支援「角色相似度」" in text
     assert any(
-        "model:qwen-image-2.1-turbo" in e and "ref_image:" in e and "ref_strength" not in e
+        "model:qwen-image-2.1-turbo" in e and "照這個角色:" in e and "角色相似度" not in e
         for e in examples
     ), "an edit-model example without ref_strength"
-    assert any("model:wai-illustrious" in e and "ref_strength:" in e for e in examples)
+    assert any("model:wai-illustrious" in e and "角色相似度:" in e for e in examples)
 
 
 # ----- /image character: (characters.py) -----------------------------------------------------
@@ -1364,7 +1364,7 @@ async def test_character_not_found_suggests_a_reference_image(
     await client.image_command(interaction, "在海邊散步", character="誰")
     assert service.posts() == []
     shown = interaction.edits[-1]["content"]
-    assert shown.startswith("⚠️ 找不到「誰」這個角色") and "ref_image" in shown
+    assert shown.startswith("⚠️ 找不到「誰」這個角色") and "照這個角色" in shown
 
 
 async def test_character_unknown_everywhere_takes_a_lora_then_the_reference_model(
@@ -1438,5 +1438,5 @@ def test_chat_and_help_point_named_characters_to_the_command(config) -> None:
     note = imagegen.prompt_note(replace(config, image_gen_url="http://img:18082"))
     assert "character" in note and "Never put the member's scene into any cloud call" in note
     text, examples = help_module.COMMAND_GUIDE["-image"]
-    assert "character" in text and "ref_image" in text
+    assert "character" in text and "照這個角色" in text
     assert any("character:" in e for e in examples)

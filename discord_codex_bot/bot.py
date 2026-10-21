@@ -295,7 +295,7 @@ CHARACTER_CONFIRM_SECONDS = 300
 CHARACTER_TOO_LATE = "確認角色的時間已到，請重新下一次指令。"
 CHARACTER_LOOKING = "🔎 查角色中…"
 CHARACTER_ASKING = "🔎 請在只有你看得到的訊息裡確認角色…"
-CHARACTER_WITH_REF = "character 和 ref_image 只能擇一：要用自己的角色圖就不用填 character。"
+CHARACTER_WITH_REF = "character 和「照這個角色」只能擇一：要用自己的角色圖就不用填 character。"
 
 
 class CharacterDeclined(Exception):
@@ -3658,19 +3658,26 @@ class DiscordCodexClient(discord.Client):
     @app_commands.describe(
         prompt="要畫什麼",
         character="選填：角色名稱（中英文或暱稱都可以）；先給你確認是哪個角色，再挑畫得出它的模型",
-        ref_image="選填：參考圖；沒選 model 時用編輯模型照指示改，保留角色（只打字就是文字生圖）",
-        image="選填：原圖（PNG／JPEG／WebP），照著它改",
+        ref_image="選填：角色圖；保留圖中的角色，照描述畫新的場景或姿勢",
+        image="選填：要改的圖（PNG／JPEG／WebP）；保留構圖與姿勢，照描述重畫",
         model="選填：圖片模型（打字篩選；留空＝服務預設）",
         aspect="選填：長寬比",
         count="選填：張數",
         seed="選填：種子（同樣的描述與種子會畫出同樣的圖）",
         negative="選填：不要出現在圖裡的東西",
         enhance="選填：生成前怎麼改寫描述（留空＝模型預設）",
-        strength="選填：0～1，原圖可以改多少（要附原圖）",
-        mask="選填：遮罩，白色的地方重畫（要附原圖）",
-        ref_strength="選填：0～1，參考圖的影響力（要附參考圖；只有 WAI，編輯模型不支援）",
+        strength="選填：0～1，「改這張圖」可以改多少",
+        mask="選填：白色的地方重畫（要搭配「改這張圖」）",
+        ref_strength="選填：0～1，多像「照這個角色」的圖（只有 WAI，編輯模型不支援）",
         upscale="選填：放大倍率",
         detailer="選填：細節修補",
+    )
+    @app_commands.rename(
+        image=imagegen.SLASH_NAMES["init_image"],
+        ref_image=imagegen.SLASH_NAMES["ref_image"],
+        mask=imagegen.SLASH_NAMES["mask"],
+        strength=imagegen.SLASH_NAMES["strength"],
+        ref_strength=imagegen.SLASH_NAMES["ref_strength"],
     )
     @app_commands.choices(
         aspect=IMAGE_ASPECT_CHOICES, upscale=IMAGE_UPSCALE_CHOICES, enhance=IMAGE_ENHANCE_CHOICES

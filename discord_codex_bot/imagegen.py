@@ -323,16 +323,36 @@ def _knowledge(raw: object) -> Knowledge | None:
     return Knowledge(raw["cutoff"], min_posts)
 
 
+# The names /image shows for these options (app_commands.rename in bot.py), named by what the
+# picture is for: two attachments that both read "image" were mixed up. Member-facing messages use
+# `shown`; the service and the model keep the field names.
+SLASH_NAMES = {
+    "init_image": "改這張圖",
+    "ref_image": "照這個角色",
+    "mask": "遮罩",
+    "strength": "改動幅度",
+    "ref_strength": "角色相似度",
+}
+
+
+def shown(option: str) -> str:
+    """`option` as a member sees it on /image: 「改這張圖」 for init_image, the name otherwise."""
+    name = SLASH_NAMES.get(option)
+    return f"「{name}」" if name else option
+
+
 def _bad(option: str, allowed: str) -> ImageGenError:
     return ImageGenError(
-        f"{option} 只能是 {allowed}。", "bad_value", True, f"{option} must be one of {allowed}"
+        f"{shown(option)} 只能是 {allowed}。",
+        "bad_value",
+        True,
+        f"{option} must be one of {allowed}",
     )
 
 
 def _needs_image(option: str, image: str = "init_image") -> ImageGenError:
-    shown = "ref_image（參考圖）" if image == "ref_image" else "image（原圖）"
     return ImageGenError(
-        f"{option} 要搭配 {shown}一起給。",
+        f"{shown(option)} 要搭配 {shown(image)} 一起給。",
         "bad_value",
         True,
         f"{option} needs {image}",
@@ -367,7 +387,7 @@ def input_image(data: bytes) -> InputImage:
 def _check_input(catalog: Catalog, option: str, image: InputImage) -> None:
     if image.mime not in SUFFIXES:
         raise ImageGenError(
-            f"{option} 只能是 PNG、JPEG 或 WebP 圖片。",
+            f"{shown(option)} 只能是 PNG、JPEG 或 WebP 圖片。",
             "bad_value",
             True,
             f"{option} must be png, jpeg or webp",
@@ -375,7 +395,7 @@ def _check_input(catalog: Catalog, option: str, image: InputImage) -> None:
     if image.size > catalog.max_input_bytes:
         limit = catalog.max_input_bytes / 1_000_000
         raise ImageGenError(
-            f"{option} 太大：最多 {limit:g} MB。",
+            f"{shown(option)} 太大：最多 {limit:g} MB。",
             "input_too_large",
             True,
             f"{option} is over {catalog.max_input_bytes} bytes",
@@ -428,7 +448,7 @@ def resolve(catalog: Catalog, request: ImageRequest) -> ImageModel:
     for option in request.options():
         if option not in model.options:
             raise ImageGenError(
-                f"「{model.id}」不支援 {option}。",
+                f"「{model.id}」不支援 {shown(option)}。",
                 "unsupported_option",
                 True,
                 f"{model.id} does not take {option}; leave it out",
@@ -522,7 +542,7 @@ def _error(status: int, payload: object, model: str) -> ImageGenError:
     if status == 400 and code == "unsupported_option":
         option = str(body.get("option") or "")[:40]
         return ImageGenError(
-            f"「{model}」不支援 {option}。",
+            f"「{model}」不支援 {shown(option)}。",
             "unsupported_option",
             True,
             f"{model} does not take {option}; leave it out",
@@ -537,8 +557,8 @@ def _error(status: int, payload: object, model: str) -> ImageGenError:
         )
     if status == 413 and code == "input_too_large":
         limit = body.get("max_input_bytes")
-        shown = f"附圖合計最多 {limit / 1_000_000:g} MB" if isinstance(limit, int) else "超過上限"
-        return ImageGenError(f"附的圖太大：{shown}。", "input_too_large", True, "input too large")
+        most = f"附圖合計最多 {limit / 1_000_000:g} MB" if isinstance(limit, int) else "超過上限"
+        return ImageGenError(f"附的圖太大：{most}。", "input_too_large", True, "input too large")
     if status == 429:
         return ImageGenError(queue_full(body.get("queue")), "queue_full")
     LOGGER.warning("Image service refused: HTTP %s %s", status, str(code)[:40])
@@ -884,7 +904,9 @@ def prompt_note(config: Config) -> str:
         ' count="2", seed="123", negative="what to avoid" or enhance="off" (local, cloud or off:'
         " how the prompt is rewritten first) only when the member asks for them. The tag carries"
         " text only: to edit an image, keep a character from a reference picture or redraw a"
-        " picture, tell the member to use the -image command with image or ref_image. For a"
+        " picture, tell the member to use the -image command: attach the picture to 改這張圖 to"
+        " redraw it keeping its layout, or to 照這個角色 to keep its character in a new scene."
+        " For a"
         " specific named character (from an anime, a game or a VTuber, say), point the member to"
         " the -image command with character set to the name: the Bot identifies the character and"
         " picks a model that draws it. Never put the member's scene into any cloud call (a web"
