@@ -1,0 +1,126 @@
+"""Read original Discord turns, independently of the backend holding their transcript."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from pathlib import Path
+
+import aiohttp
+import discord
+
+from . import tags
+from .attachments import download_attachment, remove_request_dir, validate_attachment
+from .config import Config
+from .output import PROMPT_ECHO_CHARS, truncate
+
+LOGGER = logging.getLogger(__name__)
+# Answers examined per read, newest first: each costs a fetch (two with its question), and a
+# deleted answer or one without a readable question is skipped, so the scan has its own bound.
+MAX_SCAN = 16
+FETCH_ERRORS = (discord.HTTPException, aiohttp.ClientError, TimeoutError)
+EARLIER_TAG = re.compile(r'<earlier(?:\s+turns="([0-9]{1,8})")?\s*/>')
+
+
+def requested_turns(text: str) -> int | None:
+    """One read per round; repeated tags share the largest bounded request."""
+    requests = tags.findall(EARLIER_TAG, text)
+    return max(min(8, max(1, int(n or 4))) for n in requests) if requests else None
+
+
+async def read_earlier(
+    channel,
+    message_ids: list[int],
+    user_id: int,
+    bot_id: int,
+    turns: int,
+    config: Config,
+) -> tuple[str, list[Path]]:
+    """Fetch only in this channel; never trust a cached cross-channel reference.
+
+    The answer index selects the conversation, then the original question proves whose turn
+    it was (shared backend threads and legacy index entries can include other members).
+    The caller defangs this result along with the other untrusted read results.
+    """
+
+    async def fetch(message_id):
+        try:
+            message = await channel.fetch_message(message_id)
+        except FETCH_ERRORS:
+            return None
+        return message if message.channel.id == channel.id else None
+
+    async def referenced(message):
+        reference = message.reference
+        if (
+            reference is None
+            or reference.message_id is None
+            or reference.channel_id not in (None, channel.id)
+        ):
+            return None
+        return await fetch(reference.message_id)
+
+    def original(message):
+        # JSON strings keep member-supplied newlines from forging another speaker's record.
+        return {
+            "author": message.author.display_name,
+            "author_id": message.author.id,
+            "text": message.content,
+            "embeds": [
+                {"url": embed.url, "title": embed.title, "description": embed.description}
+                for embed in message.embeds
+            ],
+        }
+
+    found = []
+    if channel is not None:
+        for message_id in list(reversed(message_ids))[:MAX_SCAN]:
+            answer = await fetch(message_id)
+            if answer is None or answer.author.id != bot_id:
+                continue
+            member = await referenced(answer)
+            if member is None or member.author.id != user_id:
+                continue
+            quoted = await referenced(member)
+            found.append((member, quoted, answer))
+            if len(found) >= turns:
+                break
+
+    blocks, images = [], []
+    seen = set()
+    try:
+        for member, quoted, answer in reversed(found):
+            blocks.append(
+                json.dumps(
+                    {
+                        "member": original(member),
+                        "quoted": original(quoted) if quoted is not None else None,
+                        "answer": truncate(answer.content, PROMPT_ECHO_CHARS),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            for message in (member, quoted):
+                for attachment in message.attachments if message is not None else ():
+                    if attachment.id in seen or len(images) >= config.max_attachments:
+                        continue
+                    seen.add(attachment.id)
+                    kind, suffix = validate_attachment(
+                        attachment.content_type, attachment.filename, attachment.size, config
+                    )
+                    if kind != "image":
+                        continue
+                    try:
+                        images.append(await download_attachment(attachment, suffix, config))
+                    except (*FETCH_ERRORS, OSError):
+                        blocks.append("（較早訊息的一張圖片無法下載）")
+    except BaseException:
+        for path in images:
+            remove_request_dir(path)
+        raise
+    body = "\n".join(blocks) or "No earlier turns found in this member's current conversation."
+    if len(body) > config.link_max_chars:
+        LOGGER.info("Earlier Discord result truncated to %d characters", config.link_max_chars)
+    body = truncate(body, config.link_max_chars)
+    return f'<RESULT kind="earlier" untrusted="true">\n{body}\n</RESULT>', images

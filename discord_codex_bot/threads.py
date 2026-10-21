@@ -110,6 +110,31 @@ class ThreadStore:
                 return str(entry["model"]).split(":", 1)[0]
         return ""
 
+    def conversation_messages(
+        self, key: str, message_id: int | None = None, plain: bool = False
+    ) -> list[int]:
+        """The Bot's answer ids for this member in this channel (`key`), oldest first, whatever
+        backend, thread or style answered them: Discord keeps the originals across a model
+        switch, a fallback or a failed resume, which the backends' own transcripts do not.
+
+        Entries written before answers recorded their key are matched through the threads of
+        the conversation `message_id` (or the live one) belongs to, the router's earlier
+        threads included; the reader still checks each original question's author and channel.
+        """
+        keyed = {int(mid) for mid, linked in self._by_message.items() if linked.get("key") == key}
+        entry = self._by_message.get(str(message_id)) if message_id is not None else None
+        if entry is None or entry.get("key", key) != key:
+            entry = self.live_entry(key)
+        threads = (
+            {entry["thread_id"], *entry.get("route", {}).get("earlier", [])} if entry else set()
+        )
+        legacy = {
+            int(mid)
+            for mid, linked in self._by_message.items()
+            if "key" not in linked and linked.get("thread_id") in threads
+        }
+        return sorted(keyed | legacy)
+
     def remember(
         self,
         key: str,
@@ -139,6 +164,7 @@ class ThreadStore:
         }
         if message_id is not None:
             self._by_message[str(message_id)] = {
+                "key": key,
                 "thread_id": thread_id,
                 "version": self._version,
                 "plain": plain,
@@ -150,8 +176,13 @@ class ThreadStore:
         self._save()
 
     def forget(self, key: str) -> bool:
+        # /reset clears the context <earlier/> reads too: its answers lose their key.
+        for linked in self._by_message.values():
+            if linked.get("key") == key:
+                del linked["key"]
         entry = self._by_key.pop(key, None)
         if entry is None:
+            self._save()
             return False
         if not entry.get("harvested"):
             self._pending.append(_retired(key, entry))

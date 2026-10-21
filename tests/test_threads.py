@@ -28,6 +28,30 @@ def test_thread_store_resumes_within_ttl_and_persists(tmp_path: Path) -> None:
     assert store.current(key) == ""
 
 
+def test_discord_conversation_lookup_survives_switch_and_reload(tmp_path: Path) -> None:
+    path = tmp_path / "threads.json"
+    store = ThreadStore(path, ttl_seconds=60)
+    key = ThreadStore.key(1, 2, 3)
+    store.remember(key, "agy-a", 10, model="agy:flash")
+    # Before the next answer is recorded, changing the selected model must still find it.
+    assert store.current(key, model="codex") == ""
+    assert store.conversation_messages(key) == [10]
+    store.remember(key, "codex-b", 20, model="codex", route={"earlier": ["agy-a"]})
+    store.remember(ThreadStore.key(1, 9, 3), "codex-b", 30)
+    store.remember(ThreadStore.key(1, 2, 4), "codex-b", 40)
+    reloaded = ThreadStore(path, ttl_seconds=60)
+    assert reloaded.conversation_messages(key) == [10, 20]
+    # Every answer to this member in this channel counts, whatever thread or style; other
+    # members (40) and channels (30) never do.
+    store.remember(key, "unrelated", 50, plain=True)
+    assert store.conversation_messages(key) == [10, 20, 50]
+    assert store.conversation_messages(key, 20) == [10, 20, 50]
+    # /reset: the answers before it are no longer this member's context.
+    store.forget(key)
+    assert store.conversation_messages(key) == []
+    assert ThreadStore(path, ttl_seconds=60).conversation_messages(key) == []
+
+
 def test_instruction_version_change_stops_resuming_old_threads(tmp_path: Path) -> None:
     path = tmp_path / "threads.json"
     old = ThreadStore(path, ttl_seconds=600, version="v1")
