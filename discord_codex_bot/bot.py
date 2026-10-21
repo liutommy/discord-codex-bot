@@ -2741,6 +2741,16 @@ class DiscordCodexClient(discord.Client):
         if switched and hasattr(self, "_harvest_wakeup"):
             self._harvest_wakeup.set()
 
+    @classmethod
+    async def _slash_files(
+        cls, result: CodexResult, attachments: Sequence[discord.Attachment]
+    ) -> list[discord.File]:
+        """The answer's own files come first; the upload only takes a slot left over."""
+        generated = cls._files(result)
+        room = 10 - len(generated)
+        echoed = (await cls._echo_upload(attachments))[:room] if room > 0 else []
+        return echoed + generated
+
     @staticmethod
     async def _echo_upload(attachments: Sequence[discord.Attachment]) -> list[discord.File]:
         """Discord does not show a slash command's uploaded image either; on the answer it shows
@@ -4959,8 +4969,7 @@ class DiscordCodexClient(discord.Client):
         chunks = split_discord_message(reply)
         sent_id = None
         view = self._answer_view(interaction.guild_id, interaction.user.id, prompt, result)
-        echoed = await self._echo_upload(attachments)
-        files = echoed + self._files(result)[: 10 - len(echoed)]
+        files = await self._slash_files(result, attachments)
         try:
             if interaction_expired(interaction) and interaction.channel is not None:
                 await placeholder.retire()

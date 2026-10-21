@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import io
 import logging
 import logging.handlers
 import time
@@ -3775,6 +3776,30 @@ async def test_slash_upload_is_re_attached_to_the_answer() -> None:
         ]
     )
     assert files == [("SPOILER_cat.png", True)]
+
+
+async def test_slash_upload_never_displaces_a_generated_file(tmp_path) -> None:
+    class Upload:
+        filename, content_type = "cat.png", "image/png"
+
+        def is_spoiler(self):
+            return False
+
+        async def to_file(self, spoiler=False):
+            return discord.File(io.BytesIO(b"x"), filename=self.filename)
+
+    def result(count):
+        paths = []
+        for index in range(count):
+            path = tmp_path / f"out{index}.png"
+            path.write_bytes(b"png")
+            paths.append(path)
+        return types.SimpleNamespace(images=paths)
+
+    names = [f.filename for f in await DiscordCodexClient._slash_files(result(10), [Upload()])]
+    assert names == [f"out{index}.png" for index in range(10)]
+    names = [f.filename for f in await DiscordCodexClient._slash_files(result(2), [Upload()])]
+    assert names == ["cat.png", "out0.png", "out1.png"]
 
 
 async def test_earlier_gives_the_newest_images_and_the_bots_own(
