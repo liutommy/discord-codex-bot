@@ -162,25 +162,30 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "改成 tag）。只打字時可選：wai-illustrious（動漫插畫，一張約 5 分鐘）、z-image-turbo"
         "（寫實與一般畫面，畫質最好，約 3 分鐘）、chroma1-flash（一般畫面，約 7 分鐘）、"
         "anima（動漫，約 10 分鐘）、qwen-image-2.1-turbo（一般畫面）；"
-        "qwen-image-edit-2511 只能編輯，一定要附參考圖。"
+        "qwen-image-edit-2511 只能編輯，一定要附「照這個角色」的圖。"
+        "附圖有兩種用途，選項分開："
+        "「改這張圖」保留這張圖的構圖與姿勢、照描述重畫（例如改成雪景）；"
+        "「照這個角色」保留圖中的角色，照描述畫新的場景或姿勢。"
         "要畫特定角色（動漫、遊戲、VTuber）就在 character 填角色名稱，中英文或暱稱都可以："
         "Bot 只把角色名稱交給雲端模型辨識，描述不會送出去；接著私下貼出角色的範例圖讓你確認"
         "（是這個角色／不是，看下一個／取消，5 分鐘沒按視同取消），確認後再決定用哪個模型："
         "有選 model 就用它；沒選就用認得這個角色的模型（wai-illustrious、anima），"
         "都不認得時找 Civitai 上這個角色的 LoRA 加在 wai-illustrious，"
-        "再找不到就用參考圖模型照範例圖畫；生成中的訊息會說用了哪一種。"
-        "character 不能和 ref_image 一起用；找不到角色時改附角色圖當 ref_image。"
-        "附 ref_image 而沒選 model 時，改用服務另外設定的參考圖預設模型；"
-        "同時用到它不支援的選項（例如 image、ref_strength、negative）時仍用一般的預設模型。"
+        "再找不到就把範例圖當成「照這個角色」來畫；生成中的訊息會說用了哪一種。"
+        "character 不能和「照這個角色」一起用；找不到角色時改附角色圖到「照這個角色」。"
+        "附「照這個角色」而沒選 model 時，改用服務另外設定的編輯模型；"
+        "同時用到它不支援的選項（例如「改這張圖」「角色相似度」、negative）時仍用一般的預設模型。"
         "enhance 選生成前怎麼改寫描述：地端改寫、雲端改寫（服務判斷不適合時改用地端）或不改寫。"
-        "附 image（PNG／JPEG／WebP 原圖）就照著它改，保留構圖與姿勢，strength 0～1 越大改越多"
-        "（留空用模型預設）；再附 mask 則只重畫遮罩白色的地方（mask 一定要搭配 image）。"
-        "附 ref_image（參考圖）時，用法看模型：wai-illustrious 沿用圖中人物的"
-        "長相與服裝（主要是髮色和整體感覺），不沿用構圖，ref_strength 0～1 越大越像參考圖，"
-        "可以單獨用，也可以和 image 一起用；編輯模型 qwen-image-edit-2511、qwen-image-2.1-turbo "
-        "與 anima 把參考圖當成要改的圖或要保留的角色，不支援 ref_strength，prompt 寫成指示或"
+        "「改這張圖」接受 PNG／JPEG／WebP，「改動幅度」0～1 越大改越多"
+        "（留空用模型預設）；再附「遮罩」則只重畫遮罩白色的地方（遮罩一定要搭配「改這張圖」）。"
+        "「照這個角色」的效果看模型：wai-illustrious 沿用圖中人物的"
+        "長相與服裝（主要是髮色和整體感覺），不沿用構圖，「角色相似度」0～1 越大越像，"
+        "可以單獨用，也可以和「改這張圖」一起用；"
+        "編輯模型 qwen-image-edit-2511、qwen-image-2.1-turbo "
+        "與 anima 把這張圖當成要改的圖或要保留的角色，不支援「角色相似度」，prompt 寫成指示或"
         "想要的結果（例如「把背景換成夜晚的雪林，角色、姿勢、服裝維持不變」），描述預設不改寫。"
-        "qwen-image-edit-2511 最能照指示改姿勢與場景、又保留角色，一定要附參考圖，一張約 10 分鐘；"
+        "qwen-image-edit-2511 最能照指示改姿勢與場景、又保留角色，"
+        "一定要附「照這個角色」，一張約 10 分鐘；"
         "qwen-image-2.1-turbo 最能保留角色原樣，適合換背景，但姿勢通常不變，一張約 9 分鐘；"
         "anima（動漫風）會照指示改姿勢與場景，細節略有出入，一張約 10 分鐘。"
         "地端模型和圖片共用一張顯卡、一條隊伍：一次跑一個，最多 3 個在等，滿了會請你稍後再試。"
@@ -193,13 +198,12 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             "/{p}-image prompt:夕陽下的貓咪，水彩風",
             "/{p}-image prompt:賽博龐克街景 aspect:16:9 count:2",
             "/{p}-image prompt:海邊的燈塔 seed:1234 negative:人物 enhance:不改寫",
-            "/{p}-image prompt:改成雪景 image:（附上原圖） strength:0.5",
-            "/{p}-image prompt:她在海邊散步 model:wai-illustrious ref_image:（附上角色圖）"
-            " ref_strength:0.8",
+            "/{p}-image prompt:改成雪景 改這張圖:（附上原圖） 改動幅度:0.5",
+            "/{p}-image prompt:她坐在咖啡廳雙手捧著咖啡微笑 照這個角色:（附上角色圖）",
+            "/{p}-image prompt:她在海邊散步 model:wai-illustrious 照這個角色:（附上角色圖）"
+            " 角色相似度:0.8",
             "/{p}-image prompt:把背景換成夜晚的雪林，角色、姿勢、服裝維持不變"
-            " model:qwen-image-2.1-turbo ref_image:（附上角色圖）",
-            "/{p}-image prompt:她坐在咖啡廳雙手捧著咖啡微笑 model:qwen-image-edit-2511"
-            " ref_image:（附上角色圖）",
+            " model:qwen-image-2.1-turbo 照這個角色:（附上角色圖）",
             "/{p}-image prompt:在海邊散步 character:兔田佩克拉",
         ],
     ),
@@ -268,7 +272,7 @@ ROUTING_FEATURE = (
 IMAGE_FEATURE = (
     "**會畫圖**：跟 Bot 說「用地端畫…」（或講本機、模型名稱），它會交給地端圖片服務生成，做好後"
     "貼在頻道；沒講地端時用 Bot 自己的畫圖能力。地端模型和圖片共用顯卡佇列，滿了會請你稍後再試。"
-    "對話裡只能用文字描述；要附原圖或角色參考圖、指定角色名稱、模型、比例、張數等選項"
+    "對話裡只能用文字描述；要附圖（改這張圖、照這個角色）、指定角色名稱、模型、比例、張數等選項"
     "請用 `/{p}-image`。"
 )
 
