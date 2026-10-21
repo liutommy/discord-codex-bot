@@ -3,6 +3,7 @@ service speaking the contract in docs/image-service.md over real HTTP."""
 
 import asyncio
 import base64
+import json
 import types
 from dataclasses import replace
 from datetime import timedelta
@@ -90,6 +91,8 @@ class FakeImageService:
         self.enhance_used = "local"
         self.sensitive = False
         self.polls = 0
+        self.lora_fails = False  # a job with a LoRA ends failed with lora_unavailable
+        self._failing = False
         self.url = ""
         self.image = PNG  # sent in IMAGE_CHUNKS writes, as a real server streams a large file
 
@@ -113,6 +116,7 @@ class FakeImageService:
         async def submit(request):
             await record(request)
             self.submitted.put_nowait(self.calls[-1][2])
+            self._failing = self.lora_fails and bool(self.calls[-1][2].get("lora"))
             if self.submit_reply is not None:
                 return web.json_response(self.submit_reply[1], status=self.submit_reply[0])
             body = self.calls[-1][2]
@@ -145,6 +149,8 @@ class FakeImageService:
             if self.polls <= self.queued_polls:
                 ahead = self.queued_polls - self.polls
                 return web.json_response({**state, "state": "queued", "position": ahead})
+            if self._failing:
+                return web.json_response({**state, "state": "failed", "error": "lora_unavailable"})
             if self.hold is not None and not self.hold.is_set():
                 return web.json_response({**state, "state": "generating", "step": 3})
             images = [{"index": 0, "bytes": len(PNG), "mime": "image/png", "seed": 42}]
@@ -1154,3 +1160,283 @@ def test_help_explains_both_kinds_of_reference_image() -> None:
         for e in examples
     ), "an edit-model example without ref_strength"
     assert any("model:wai-illustrious" in e and "ref_strength:" in e for e in examples)
+
+
+# ----- /image character: (characters.py) -----------------------------------------------------
+
+CHARACTER_CATALOG = {
+    **CATALOG,
+    "models": [
+        *CATALOG["models"][:2],
+        {
+            "id": "wai-illustrious",
+            "name": "WAI Illustrious",
+            "options": ["seed", "init_image", "ref_image", "ref_strength", "character", "lora"],
+            "knowledge": {"cutoff": "2024-03-01", "min_posts": 500},
+            "lora_base": "Illustrious",
+        },
+        {"id": "qwen-image-edit-2511", "name": "Qwen Edit", "options": ["ref_image"]},
+    ],
+    "default_model": "wai-illustrious",
+    "default_ref_model": "qwen-image-edit-2511",
+}
+PEKORA_LORA = {
+    "id": 1,
+    "name": "Pekora",
+    "modelVersions": [
+        {
+            "id": 10,
+            "baseModel": "Illustrious",
+            "trainedWords": ["usada pekora", "rabbit ears"],
+            "images": [{"url": "https://image.civitai.com/x/1.png", "nsfwLevel": 1}],
+        }
+    ],
+}
+
+
+class CharacterWeb:
+    """Danbooru and Civitai: every tag asked about is a character with a solo sample picture
+    and rabbit ears; `posts_before` is its count before any cutoff."""
+
+    def __init__(self, posts_before: int = 760, loras=()) -> None:
+        self.posts_before = posts_before
+        self.loras = list(loras)
+        self.urls: list[str] = []
+
+    async def json(self, url, params):
+        self.urls.append(url)
+        if url.endswith("/tags.json"):
+            names = params["search[name_comma]"].split(",")
+            return [{"name": n, "category": 4, "post_count": 1000} for n in names]
+        if url.endswith("/counts/posts.json"):
+            return {"counts": {"posts": self.posts_before}}
+        if url.endswith("/posts.json"):
+            tag = params["tags"].split()[0]
+            url = f"https://cdn.donmai.us/{tag}.png"
+            return [{"file_ext": "png", "large_file_url": url, "tag_string_general": "solo"}]
+        if url.endswith("/related_tag.json"):
+            return {"related_tags": [{"tag": {"name": "rabbit_ears"}, "frequency": 0.9}]}
+        if url.endswith("/models"):
+            return {"items": self.loras}
+        raise ValueError(url)
+
+    async def image(self, url, max_bytes):
+        self.urls.append(url)
+        return PNG
+
+
+def _judge(monkeypatch, *answers) -> list[dict]:
+    """The Bot's judge turns (run_batch): each prompt and its arguments, answered in order."""
+    calls: list[dict] = []
+    queue = [json.dumps(a) for a in answers]
+
+    async def batch(prompt, config, **kw):
+        calls.append({"prompt": prompt, **kw})
+        return queue.pop(0)
+
+    monkeypatch.setattr(bot_module, "run_batch", batch)
+    return calls
+
+
+async def _nothing() -> None:
+    return None
+
+
+class CharacterInteraction(FakeInteraction):
+    """A slash interaction whose member answers the private character question with `answers`
+    in order: "yes", "next", "cancel", or None to let it time out."""
+
+    def __init__(self, *answers) -> None:
+        super().__init__()
+        self.answers = list(answers)
+        self.questions: list[tuple[str, str]] = []
+        self.private: list[dict] = []  # edits of the private message
+        self.presses: list[asyncio.Future] = []
+        outer = self
+
+        class Message:
+            async def edit(self, content=None, view=None, attachments=None):
+                files = None if attachments is None else [f.filename for f in attachments]
+                outer.private.append({"content": content, "view": view, "files": files})
+                if view is not None:
+                    outer.ask(content, attachments[0], view)
+
+        class Followup:
+            async def send(self, text, ephemeral=False, file=None, view=None, wait=False):
+                outer.followups.append(text)
+                assert ephemeral and wait, "the question is private and edited later"
+                outer.ask(text, file, view)
+                return Message()
+
+        self.followup = Followup()
+
+    def ask(self, text, file, view) -> None:
+        self.questions.append((text, file.filename))
+        answer = self.answers.pop(0)
+        press = types.SimpleNamespace(user=self.user, response=types.SimpleNamespace())
+        press.response.defer = _nothing
+
+        async def respond() -> None:
+            if answer is None:
+                view.stop()  # what a time-out does
+                return
+            await {"yes": view.yes, "next": view.next, "cancel": view.cancel}[answer].callback(
+                press
+            )
+
+        self.presses.append(asyncio.ensure_future(respond()))
+
+
+def _shown(interaction) -> list[str]:
+    return [e["content"] or "" for e in interaction.edits]
+
+
+async def test_character_known_by_the_default_model_is_sent_with_its_traits(
+    service, client, monkeypatch
+) -> None:
+    service.catalog = CHARACTER_CATALOG
+    calls = _judge(monkeypatch, {"tags": ["usada_pekora"]})
+    client.character_web = CharacterWeb(posts_before=760)
+    interaction = CharacterInteraction("yes")
+    await client.image_command(interaction, "在海邊散步", character="兔田佩克拉")
+    body = service.posts()[0]
+    assert body["model"] == "wai-illustrious" and body["prompt"] == "在海邊散步"
+    assert body["character"] == {"tag": "usada_pekora", "traits": ["rabbit ears"]}
+    assert body["lora"] is None and body["ref_image"] is None
+    # Only the name went to the cloud judge, isolated, Codex first and then Argon.
+    (judge,) = calls
+    assert "兔田佩克拉" in judge["prompt"] and "海邊" not in judge["prompt"]
+    assert judge["spare"] == "gemini-4-argon-medium" and judge["isolated"] is True
+    assert judge["schema"] == client.config.character_schema_path
+    question = "是這個角色嗎？`usada_pekora`（Danbooru 上 1000 張圖）"
+    assert interaction.questions == [(question, "character.png")]
+    assert interaction.private[-1] == {
+        "content": "✅ 角色：`usada_pekora`",
+        "view": None,
+        "files": None,
+    }, "the confirmed picture stays, the buttons go"
+    assert any("用認得這個角色的 wai-illustrious\n🎨 排隊中" in t for t in _shown(interaction))
+    assert interaction.edits[-1]["files"] == ["image-0.png"]
+    assert all(
+        url.split("/")[2] in ("danbooru.donmai.us", "cdn.donmai.us")
+        for url in (client.character_web.urls)
+    )
+
+
+async def test_character_next_shows_the_following_candidate(service, client, monkeypatch):
+    service.catalog = CHARACTER_CATALOG
+    _judge(monkeypatch, {"tags": ["pekora_(cat)", "usada_pekora"]})
+    client.character_web = CharacterWeb()
+    interaction, image = CharacterInteraction("next", "yes"), FakeAttachment(PNG)
+    await client.image_command(interaction, "在海邊散步", character="佩克拉", image=image)
+    assert [q[0].split("`")[1] for q in interaction.questions] == ["pekora_(cat)", "usada_pekora"]
+    body = service.posts()[0]
+    assert body["character"]["tag"] == "usada_pekora"
+    assert body["init_image"] == _wire(PNG) and image.reads == 1, "the member's image goes along"
+
+
+@pytest.mark.parametrize("answers", [("cancel",), (None,), ("next", "cancel")])
+async def test_character_cancelled_or_unanswered_submits_nothing(
+    service, client, monkeypatch, answers
+) -> None:
+    service.catalog = CHARACTER_CATALOG
+    _judge(monkeypatch, {"tags": ["pekora_(cat)", "usada_pekora"]})
+    client.character_web = CharacterWeb()
+    interaction = CharacterInteraction(*answers)
+    await client.image_command(interaction, "在海邊散步", character="佩克拉")
+    assert service.posts() == []
+    assert interaction.edits[-1]["content"] == CANCELLED
+    assert interaction.private[-1]["content"] == CANCELLED
+    assert interaction.private[-1]["files"] == [] and interaction.private[-1]["view"] is None
+
+
+@pytest.mark.parametrize(
+    ("tags", "answers"),
+    [([], ()), (["../not a tag"], ()), (["usada_pekora"], ("next",))],
+)
+async def test_character_not_found_suggests_a_reference_image(
+    service, client, monkeypatch, tags, answers
+) -> None:
+    service.catalog = CHARACTER_CATALOG
+    _judge(monkeypatch, {"tags": tags})
+    client.character_web = CharacterWeb()
+    interaction = CharacterInteraction(*answers)
+    await client.image_command(interaction, "在海邊散步", character="誰")
+    assert service.posts() == []
+    shown = interaction.edits[-1]["content"]
+    assert shown.startswith("⚠️ 找不到「誰」這個角色") and "ref_image" in shown
+
+
+async def test_character_unknown_everywhere_takes_a_lora_then_the_reference_model(
+    service, client, monkeypatch
+) -> None:
+    service.catalog = CHARACTER_CATALOG
+    service.lora_fails = True
+    calls = _judge(monkeypatch, {"tags": ["isaki_riona"]}, {"pick": 2})
+    client.character_web = CharacterWeb(posts_before=0, loras=[PEKORA_LORA])
+    interaction = CharacterInteraction("yes")
+    await client.image_command(interaction, "在海邊散步", character="isaki riona")
+    first, second = service.posts()
+    assert first["model"] == "wai-illustrious" and first["character"]["tag"] == "isaki_riona"
+    assert first["lora"] == {
+        "version_id": 10,
+        "weight": None,
+        "trigger": "usada pekora, rabbit ears",
+    }
+    # The service could not get the LoRA: the next way, the sample as the reference image.
+    assert second["model"] == "qwen-image-edit-2511" and second["ref_image"] == _wire(PNG)
+    assert second["character"] is None and second["lora"] is None
+    assert service.deletes() == [], "the service ended the failed job itself"
+    shown = _shown(interaction)
+    assert any("加上 LoRA「Pekora」" in t for t in shown)
+    assert any("改用 qwen-image-edit-2511 照範例圖畫" in t for t in shown)
+    assert interaction.edits[-1]["files"] == ["image-0.png"]
+    lora_turn = calls[1]
+    assert lora_turn["schema"] == client.config.lora_schema_path
+    assert [p.name for p in lora_turn["images"]] == ["reference.png", "lora-2.png"]
+    assert "海邊" not in lora_turn["prompt"]
+
+
+async def test_character_refusals_never_ask_the_judge(service, client, monkeypatch) -> None:
+    service.catalog = CHARACTER_CATALOG
+    calls = _judge(monkeypatch)
+    client.character_web = CharacterWeb()
+    cases = [
+        ({"ref_image": FakeAttachment(PNG)}, bot_module.CHARACTER_WITH_REF),
+        ({"character": "x" * 101}, "character 最多 100 字。"),
+    ]
+    for kwargs, message in cases:
+        refused = CharacterInteraction()
+        await client.image_command(refused, "貓", **{"character": "佩克拉", **kwargs})
+        assert refused.messages == [(message, True)]
+    unknown = CharacterInteraction()
+    await client.image_command(unknown, "貓", character="佩克拉", model="nope")
+    assert unknown.edits[-1]["content"].startswith("⚠️ 沒有「nope」這個圖片模型")
+    assert calls == [] and service.posts() == [] and client.character_web.urls == []
+
+
+async def test_character_buttons_answer_only_the_requester() -> None:
+    from discord_codex_bot.ui import NOT_YOURS, CharacterView
+
+    view = CharacterView(USER, timeout=5)
+    sent: list[tuple[str, bool]] = []
+
+    async def send_message(text, ephemeral=False):
+        sent.append((text, ephemeral))
+
+    other = types.SimpleNamespace(
+        user=types.SimpleNamespace(id=USER + 1),
+        response=types.SimpleNamespace(send_message=send_message),
+    )
+    assert await view.interaction_check(other) is False
+    assert sent == [(NOT_YOURS, True)] and view.answer is None
+    labels = [item.label for item in view.children]
+    assert labels == ["是這個角色", "不是，看下一個", "取消"]
+
+
+def test_chat_and_help_point_named_characters_to_the_command(config) -> None:
+    note = imagegen.prompt_note(replace(config, image_gen_url="http://img:18082"))
+    assert "character" in note and "Never put the member's scene into any cloud call" in note
+    text, examples = help_module.COMMAND_GUIDE["-image"]
+    assert "character" in text and "ref_image" in text
+    assert any("character:" in e for e in examples)

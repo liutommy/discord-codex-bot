@@ -21,6 +21,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, fields
+from datetime import date
 from pathlib import Path
 
 import aiohttp
@@ -58,17 +59,28 @@ OPTIONS = (
     "ref_strength",
     "upscale",
     "detailer",
+    "character",
+    "lora",
 )
 # A value that asks for nothing; the service takes it on every model and does not count it as set.
 # enhance="off" still counts here: a model without enhancers refuses it by name.
 OFF_VALUES = {"negative": "", "upscale": "off", "detailer": False}
 # The request fields that carry an image; each is checked by type and size and sent as base64.
 INPUT_IMAGES = ("init_image", "mask", "ref_image")
+# The request fields that carry an object of their own (`wire`), sent as JSON objects.
+OBJECTS = ("character", "lora")
+# What the service accepts in `character` and `lora` (docs/image-service.md); it refuses the rest
+# with bad_value, so a request is checked here first.
+CHARACTER_TAG = re.compile(r"[a-z0-9_()'.!?:-]{1,100}")
+TRAIT = re.compile(r"[^,<>:]{1,40}")
+MAX_TRAITS = 20
+MAX_TRIGGER = 300
+LORA_WEIGHT = (0.0, 1.5)
 # How the prompt is rewritten before generation; a model lists the ones it takes (`enhancers`).
 ENHANCERS = ("local", "cloud", "off")
 TERMINAL = frozenset({"done", "failed", "cancelled"})
 _JOB_ID = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
-_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
 # An input image's type, from its first bytes (what the service decodes, whatever the name says).
 _MAGIC = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"))
 # The host's one GPU queue, shared with the local model: one running, at most this many waiting.
@@ -81,6 +93,7 @@ QUEUE_TIMED_OUT = "地端 GPU 排隊太久，已取消，請稍後再試。"
 FAILED = "圖片生成失敗，請換個描述或稍後再試。"
 TIMED_OUT = "圖片生成超過時限，已取消。"
 STOPPED = "圖片生成服務取消了這個工作。"
+LORA_UNAVAILABLE = "圖片生成服務拿不到角色的 LoRA。"
 
 
 def queue_full(waiting: object = None) -> str:
@@ -112,12 +125,23 @@ class ImageGenError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class Knowledge:
+    """Which characters a model draws from its name alone: those whose Danbooru tag had at least
+    `min_posts` posts dated before `cutoff` (an ISO date)."""
+
+    cutoff: str
+    min_posts: int
+
+
+@dataclass(frozen=True, slots=True)
 class ImageModel:
     id: str
     name: str
     options: frozenset[str]
     defaults: dict = field(default_factory=dict)
     enhancers: tuple[str, ...] = ()
+    knowledge: Knowledge | None = None
+    lora_base: str = ""  # the Civitai baseModel this model's LoRAs must have; "" = none
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +174,30 @@ class InputImage:
 
 
 @dataclass(frozen=True, slots=True)
+class Character:
+    """A Danbooru character tag and its look as trait tags (words, not underscores); the service
+    puts both into the prompt it enhances."""
+
+    tag: str
+    traits: tuple[str, ...] = ()
+
+    def wire(self) -> dict:
+        return {"tag": self.tag, "traits": list(self.traits)}
+
+
+@dataclass(frozen=True, slots=True)
+class Lora:
+    """A Civitai LoRA version the service downloads and applies; `weight` None is its default."""
+
+    version_id: int
+    weight: float | None = None
+    trigger: str = ""
+
+    def wire(self) -> dict:
+        return {"version_id": self.version_id, "weight": self.weight, "trigger": self.trigger}
+
+
+@dataclass(frozen=True, slots=True)
 class ImageRequest:
     """What a member asked for. None is the model's default and is sent as null."""
 
@@ -167,6 +215,8 @@ class ImageRequest:
     ref_strength: float | None = None
     upscale: str | None = None
     detailer: bool | None = None
+    character: Character | None = None
+    lora: Lora | None = None
 
     def options(self) -> list[str]:
         """The options this request sets; an OFF_VALUES value sets nothing."""
@@ -196,6 +246,7 @@ class Job:
     queued_s: float = 0.0
     enhance_used: str = ""
     sensitive: bool = False
+    error: str = ""  # a failed job's error code
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +280,9 @@ def parse_catalog(payload: object) -> Catalog:
         if not isinstance(enhancers, list):
             raise ValueError("catalog model with malformed enhancers")
         name = item.get("name") if isinstance(item.get("name"), str) else item["id"]
+        lora_base = item.get("lora_base") or ""
+        if not isinstance(lora_base, str):
+            raise ValueError("catalog model with a malformed lora_base")
         models.append(
             ImageModel(
                 item["id"],
@@ -236,6 +290,8 @@ def parse_catalog(payload: object) -> Catalog:
                 frozenset(map(str, options)),
                 defaults,
                 tuple(map(str, enhancers)),
+                _knowledge(item.get("knowledge")),
+                lora_base,
             )
         )
     max_count = payload.get("max_count", 1)
@@ -253,6 +309,18 @@ def parse_catalog(payload: object) -> Catalog:
         max_input,
         str(payload.get("default_ref_model") or ""),
     )
+
+
+def _knowledge(raw: object) -> Knowledge | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("cutoff"), str):
+        raise ValueError("catalog model with malformed knowledge")
+    min_posts = raw.get("min_posts")
+    if not isinstance(min_posts, int) or min_posts < 0:
+        raise ValueError("catalog knowledge min_posts is not a whole number")
+    date.fromisoformat(raw["cutoff"])  # ValueError when it is not YYYY-MM-DD
+    return Knowledge(raw["cutoff"], min_posts)
 
 
 def _bad(option: str, allowed: str) -> ImageGenError:
@@ -297,7 +365,7 @@ def input_image(data: bytes) -> InputImage:
 
 
 def _check_input(catalog: Catalog, option: str, image: InputImage) -> None:
-    if image.mime not in _SUFFIXES:
+    if image.mime not in SUFFIXES:
         raise ImageGenError(
             f"{option} 只能是 PNG、JPEG 或 WebP 圖片。",
             "bad_value",
@@ -312,6 +380,26 @@ def _check_input(catalog: Catalog, option: str, image: InputImage) -> None:
             True,
             f"{option} is over {catalog.max_input_bytes} bytes",
         )
+
+
+def _check_objects(request: ImageRequest) -> None:
+    """The service's checks on `character` and `lora`; the Bot builds both from Danbooru and
+    Civitai data, so a refusal here is a value those sites returned, not a member's typo."""
+    if (character := request.character) is not None:
+        if not CHARACTER_TAG.fullmatch(character.tag):
+            raise _bad("character", "a Danbooru tag")
+        if len(character.traits) > MAX_TRAITS or not all(
+            TRAIT.fullmatch(t) for t in character.traits
+        ):
+            raise _bad("character", f"at most {MAX_TRAITS} traits of 1-40 characters")
+    if (lora := request.lora) is not None:
+        if isinstance(lora.version_id, bool) or lora.version_id < 1:
+            raise _bad("lora", "a positive version id")
+        low, high = LORA_WEIGHT
+        if lora.weight is not None and not low <= lora.weight <= high:
+            raise _bad("lora", f"weight {low:g}-{high:g}")
+        if len(lora.trigger) > MAX_TRIGGER or "<" in lora.trigger or ">" in lora.trigger:
+            raise _bad("lora", f"a trigger of at most {MAX_TRIGGER} characters without < or >")
 
 
 def _default_model(catalog: Catalog, request: ImageRequest) -> str:
@@ -363,6 +451,7 @@ def resolve(catalog: Catalog, request: ImageRequest) -> ImageModel:
         value = getattr(request, option)
         if value is not None and not 0 <= value <= 1:
             raise _bad(option, "0-1")
+    _check_objects(request)
     images = [
         (option, image)
         for option in INPUT_IMAGES
@@ -406,6 +495,7 @@ def _job(payload: object) -> Job:
         return value if isinstance(value, int) else 0
 
     queued_s = payload.get("queued_s")
+    error = payload.get("error")
     return Job(
         job_id,
         str(payload.get("state") or ""),
@@ -416,6 +506,7 @@ def _job(payload: object) -> Job:
         float(queued_s) if isinstance(queued_s, int | float) else 0.0,
         str(payload.get("enhance_used") or "")[:20],
         payload.get("sensitive") is True,
+        error[:40] if isinstance(error, str) else "",
     )
 
 
@@ -543,7 +634,7 @@ class ImageService:
         user_id: int,
     ) -> Job:
         body = {name.name: getattr(request, name.name) for name in fields(ImageRequest)}
-        for name in INPUT_IMAGES:
+        for name in (*INPUT_IMAGES, *OBJECTS):
             if body[name] is not None:
                 body[name] = body[name].wire()
         body |= {"model": model, "steps": None, "cfg": None}
@@ -575,7 +666,7 @@ class ImageService:
             data = bytearray()  # read(n) returns what has arrived so far, not n bytes
             while chunk := await response.content.read(max_bytes + 1 - len(data)):
                 data.extend(chunk)
-        if len(data) > max_bytes or mime not in _SUFFIXES:
+        if len(data) > max_bytes or mime not in SUFFIXES:
             LOGGER.warning(
                 "Image %s/%d unusable: %s, %d bytes", job_id, image.index, mime, len(data)
             )
@@ -625,7 +716,8 @@ async def run_job(
                 clock,
             )
         except BaseException as error:
-            if not (isinstance(error, ImageGenError) and error.code in ("failed", "stopped")):
+            ended = ("failed", "stopped", "lora_unavailable")  # the service already ended it
+            if not (isinstance(error, ImageGenError) and error.code in ended):
                 with contextlib.suppress(Exception):
                     await service.cancel(job.job_id)
             raise
@@ -651,7 +743,10 @@ async def _follow(
         if job.state == "done":
             break
         if job.state == "failed":
-            LOGGER.warning("Image job %s failed on the service", job.job_id)
+            LOGGER.warning("Image job %s failed on the service: %s", job.job_id, job.error)
+            # The service writes "lora_unavailable: <detail>".
+            if (job.error or "").startswith("lora_unavailable"):
+                raise ImageGenError(LORA_UNAVAILABLE, "lora_unavailable")
             raise ImageGenError(FAILED, "failed")
         if job.state == "cancelled":
             raise ImageGenError(STOPPED, "stopped")
@@ -693,7 +788,7 @@ async def _follow(
             if deadline - clock() <= 0:
                 raise ImageGenError(TIMED_OUT, "timeout") from None
             raise ImageGenError(UNAVAILABLE, "unavailable") from None
-        path = into / f"image-{image.index}{_SUFFIXES[mime]}"
+        path = into / f"image-{image.index}{SUFFIXES[mime]}"
         await asyncio.to_thread(path.write_bytes, data)
         paths.append(path)
     seeds = tuple(image.seed for image in job.images)
@@ -789,7 +884,11 @@ def prompt_note(config: Config) -> str:
         ' count="2", seed="123", negative="what to avoid" or enhance="off" (local, cloud or off:'
         " how the prompt is rewritten first) only when the member asks for them. The tag carries"
         " text only: to edit an image, keep a character from a reference picture or redraw a"
-        " picture, tell the member to use the -image command with image or ref_image. When the"
+        " picture, tell the member to use the -image command with image or ref_image. For a"
+        " specific named character (from an anime, a game or a VTuber, say), point the member to"
+        " the -image command with character set to the name: the Bot identifies the character and"
+        " picks a model that draws it. Never put the member's scene into any cloud call (a web"
+        " search, say), not even to look the character up. When the"
         " member asks how to draw or how -image works, explain from its member guide: "
         + COMMAND_GUIDE["-image"][0]
         + choices

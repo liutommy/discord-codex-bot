@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "pick": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "pick"
+  ],
+  "additionalProperties": false
+}

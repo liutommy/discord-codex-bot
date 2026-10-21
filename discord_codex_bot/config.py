@@ -214,6 +214,8 @@ class Config:
     image_gen_api_key: str = field(repr=False)
     image_gen_timeout_seconds: int
     image_gen_queue_wait_seconds: int
+    character_schema_path: Path
+    lora_schema_path: Path
     alert_user_id: int
     alert_after_failures: int
     alert_cooldown_minutes: int
@@ -424,6 +426,13 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # its own cap.
         image_gen_timeout_seconds=_positive_int(values, "IMAGE_GEN_TIMEOUT_SECONDS", 1800),
         image_gen_queue_wait_seconds=_queue_wait(values, "IMAGE_GEN", 1800),
+        # `/image character:` (characters.py): the judge's answers, candidate tags and a LoRA pick.
+        character_schema_path=Path(
+            values.get("CHARACTER_SCHEMA_FILE", "/opt/discord-codex/character-schema.json")
+        ),
+        lora_schema_path=Path(
+            values.get("LORA_SCHEMA_FILE", "/opt/discord-codex/lora-schema.json")
+        ),
         # Operator alerts by DM: repeated failures / lost login. Empty id = the application owner.
         alert_user_id=int(values.get("ALERT_USER_ID", "").strip() or 0),
         alert_after_failures=_positive_int(values, "ALERT_AFTER_FAILURES", 3),

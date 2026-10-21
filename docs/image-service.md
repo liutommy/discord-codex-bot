@@ -47,6 +47,8 @@ A request that is not streamed waits without any bytes on the wire.
    "options": ["seed", "steps", "cfg", "negative", "aspect", "count", "enhance", "init_image", "strength", "mask", "upscale", "detailer"],
    "requires_ref_image": false,
    "enhancers": ["local", "off"],
+   "knowledge": null,
+   "lora_base": null,
    "defaults": {"steps": 8, "cfg": 1.0, "aspect": "1:1", "count": 1, "enhance": "local", "strength": 0.6, "upscale": "off", "detailer": false}}
 ],
  "default_model": "chroma1-flash",
@@ -59,6 +61,14 @@ A request that is not streamed waits without any bytes on the wire.
 
 `options` lists what the model supports. A request that sets an option the model does not list
 is refused with 400 and `{"error": "unsupported_option", "option": "detailer"}`, never ignored.
+
+Two keys describe how a model draws a named character (see `character` and `lora` below):
+
+- `knowledge`: `{"cutoff": "2024-03-01", "min_posts": 500}` or `null`. The bot treats a character
+  as known by the model when its Danbooru tag had at least `min_posts` posts dated before
+  `cutoff` (`YYYY-MM-DD`). `null`: the model knows no characters by name.
+- `lora_base`: the Civitai `baseModel` that this model's LoRAs must have (for example
+  `"Illustrious"`), or `null`.
 
 `enhance` chooses how the prompt is rewritten before generation:
 
@@ -73,7 +83,7 @@ is refused with 400 and `{"error": "unsupported_option", "option": "detailer"}`,
 {"model": "chroma1-flash", "prompt": "...", "negative": null, "aspect": "3:4", "count": 1,
  "seed": null, "steps": null, "cfg": null, "enhance": null,
  "init_image": null, "strength": null, "mask": null, "ref_image": null, "ref_strength": null,
- "upscale": null, "detailer": null,
+ "upscale": null, "detailer": null, "character": null, "lora": null,
  "max_bytes": 8000000, "requester": {"guild": "123", "user": "456"}}
 ```
 
@@ -106,6 +116,28 @@ and `ref_strength`:
   example above. A `ref_image` request without a model then goes to `default_model`, and is
   refused with `unsupported_option` when that model does not list `ref_image`.
 
+`character` and `lora` draw a named character. Like the other options, a model takes each only
+when its `options` list it, and both are `null` when unused:
+
+```json
+"character": {"tag": "isaki_riona", "traits": ["grey hair", "long hair", "red eyes"]},
+"lora": {"version_id": 1872102, "weight": 0.8, "trigger": "pekora usada cosplay"}
+```
+
+- `character` is a Danbooru character tag and the character's look as trait tags. The service
+  puts the tag (as words) and the traits ahead of the prompt it enhances, and keeps the tag in
+  the final prompt. `tag` is 1-100 characters of `[a-z0-9_()'.!?:-]`; `traits` holds at most 20
+  strings of 1-40 characters without `,`, `<`, `>` or `:`.
+- `lora` is a Civitai LoRA version that the service downloads (or reuses from its cache) and
+  applies, with `trigger` added to the prompt. `version_id` is a positive integer, `weight` is 0
+  to 1.5 (`null`: 0.8), and `trigger` is at most 300 characters without `<` or `>`. The version's
+  `baseModel` must equal the model's `lora_base`.
+- A value out of range is refused with 400 `{"error": "bad_value", "option": "character"}` (or
+  `"lora"`). A job whose requested LoRA is unavailable (not found, wrong base model, too large,
+  download failed) ends `failed` with an `error` that starts with `lora_unavailable` (for example
+  `"lora_unavailable: not found"`). When the bot selected a fallback request, it runs that request
+  without the LoRA; otherwise it reports the failure.
+
 `max_bytes` is the largest file the caller can deliver; the service encodes each image (PNG, then
 WEBP or JPEG at falling quality) to fit. `requester` is for the service log only.
 
@@ -123,6 +155,8 @@ WEBP or JPEG at falling quality) to fit. `requester` is for the service log only
  "images": [{"index": 0, "bytes": 812345, "mime": "image/webp", "seed": 1234}],
  "error": null, "sensitive": false, "queued_s": 95.0, "elapsed_s": 41.2}
 ```
+
+`error` is `null` until a job fails, then a short code such as `"lora_unavailable"`.
 
 `position` counts items ahead in the shared queue. `queued_s` is the time spent waiting;
 `elapsed_s` counts from when the job left the queue. `images` is filled when `state` is `done`. A
