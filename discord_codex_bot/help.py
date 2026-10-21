@@ -163,6 +163,13 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "（寫實與一般畫面，畫質最好，約 3 分鐘）、chroma1-flash（一般畫面，約 7 分鐘）、"
         "anima（動漫，約 10 分鐘）、qwen-image-2.1-turbo（一般畫面）；"
         "qwen-image-edit-2511 只能編輯，一定要附參考圖。"
+        "要畫特定角色（動漫、遊戲、VTuber）就在 character 填角色名稱，中英文或暱稱都可以："
+        "Bot 只把角色名稱交給雲端模型辨識，描述不會送出去；接著私下貼出角色的範例圖讓你確認"
+        "（是這個角色／不是，看下一個／取消，5 分鐘沒按視同取消），確認後再決定用哪個模型："
+        "有選 model 就用它；沒選就用認得這個角色的模型（wai-illustrious、anima），"
+        "都不認得時找 Civitai 上這個角色的 LoRA 加在 wai-illustrious，"
+        "再找不到就用參考圖模型照範例圖畫；生成中的訊息會說用了哪一種。"
+        "character 不能和 ref_image 一起用；找不到角色時改附角色圖當 ref_image。"
         "附 ref_image 而沒選 model 時，改用服務另外設定的參考圖預設模型；"
         "同時用到它不支援的選項（例如 image、ref_strength、negative）時仍用一般的預設模型。"
         "enhance 選生成前怎麼改寫描述：地端改寫、雲端改寫（服務判斷不適合時改用地端）或不改寫。"
@@ -193,6 +200,7 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             " model:qwen-image-2.1-turbo ref_image:（附上角色圖）",
             "/{p}-image prompt:她坐在咖啡廳雙手捧著咖啡微笑 model:qwen-image-edit-2511"
             " ref_image:（附上角色圖）",
+            "/{p}-image prompt:在海邊散步 character:兔田佩克拉",
         ],
     ),
     "-export": (
@@ -260,7 +268,8 @@ ROUTING_FEATURE = (
 IMAGE_FEATURE = (
     "**會畫圖**：跟 Bot 說「用地端畫…」（或講本機、模型名稱），它會交給地端圖片服務生成，做好後"
     "貼在頻道；沒講地端時用 Bot 自己的畫圖能力。地端模型和圖片共用顯卡佇列，滿了會請你稍後再試。"
-    "對話裡只能用文字描述；要附原圖或角色參考圖、指定模型、比例、張數等選項請用 `/{p}-image`。"
+    "對話裡只能用文字描述；要附原圖或角色參考圖、指定角色名稱、模型、比例、張數等選項"
+    "請用 `/{p}-image`。"
 )
 
 

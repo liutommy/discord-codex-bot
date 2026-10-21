@@ -45,6 +45,41 @@ class CancelView(discord.ui.View):
         await interaction.response.edit_message(content=CANCELLED, view=None)
 
 
+class CharacterView(discord.ui.View):
+    """`/image character:`'s question on its private message: is this the character? `answer`
+    is "yes", "next" or "cancel" once pressed, and stays None when the view times out, which the
+    caller treats as cancel. Only the requester can press; the press is acknowledged here and
+    the caller then edits the message."""
+
+    def __init__(self, owner_id: int, timeout: float) -> None:
+        super().__init__(timeout=timeout)
+        self.owner_id = owner_id
+        self.answer: str | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(NOT_YOURS, ephemeral=True)
+        return False
+
+    async def _press(self, interaction: discord.Interaction, answer: str) -> None:
+        self.answer = answer
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="是這個角色", style=discord.ButtonStyle.success)
+    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._press(interaction, "yes")
+
+    @discord.ui.button(label="不是，看下一個", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._press(interaction, "next")
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._press(interaction, "cancel")
+
+
 class AnswerButton(
     discord.ui.DynamicItem[discord.ui.Button],
     template=r"inmu:(?P<action>redo|remember):(?P<user>[0-9]+)",

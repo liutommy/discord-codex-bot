@@ -24,6 +24,7 @@ from discord import app_commands
 from . import agy as agy_module
 from . import (
     apis,
+    characters,
     embedfix,
     gemini,
     grok,
@@ -191,6 +192,7 @@ from .ui import (
     AnswerButton,
     AnswerView,
     CancelView,
+    CharacterView,
     InstructionsModal,
     StyleModal,
     recover_exchange,
@@ -288,6 +290,17 @@ LOCAL_THREADS_KEPT = 1000
 # refused by the service and post one more failure message each, so an answer runs at most these.
 IMAGE_TAGS_RUN = 4
 IMAGE_NOT_ASKED = "（沒有用地端生圖：要用的話請明講「地端」或模型名稱，或用 /{prefix}-image）"
+# `/image character:` (characters.py): the member's private yes/next/cancel, unanswered = cancel.
+CHARACTER_CONFIRM_SECONDS = 300
+CHARACTER_LOOKING = "🔎 查角色中…"
+CHARACTER_ASKING = "🔎 請在只有你看得到的訊息裡確認角色…"
+CHARACTER_WITH_REF = "character 和 ref_image 只能擇一：要用自己的角色圖就不用填 character。"
+
+
+class CharacterDeclined(Exception):
+    """The member cancelled the character question, or let it time out."""
+
+
 EMBEDFIX_CHOICES = [
     app_commands.Choice(name=label, value=value)
     for value, label in (("status", "查詢"), ("on", "開啟"), ("off", "關閉"))
@@ -861,6 +874,7 @@ class DiscordCodexClient(discord.Client):
         # setting in linkclean's database, and detached delivery tasks.
         self.images = ImageService(config)
         self.image_settings = ImageSettings(self.linkclean)
+        self.character_web: characters.Web = characters.HttpWeb(config)  # Danbooru, Civitai
         self._image_tasks: set[asyncio.Task] = set()  # <image_gen/> deliveries, kept referenced
         # Conversations (thread ids) where the member asked for the local image service: a
         # follow-up there ("now 16:9") counts as asking again. Oldest dropped past the cap.
@@ -3642,6 +3656,7 @@ class DiscordCodexClient(discord.Client):
 
     @app_commands.describe(
         prompt="要畫什麼",
+        character="選填：角色名稱（中英文或暱稱都可以）；先給你確認是哪個角色，再挑畫得出它的模型",
         ref_image="選填：參考圖；沒選 model 時用編輯模型照指示改，保留角色（只打字就是文字生圖）",
         image="選填：原圖（PNG／JPEG／WebP），照著它改",
         model="選填：圖片模型（打字篩選；留空＝服務預設）",
@@ -3664,6 +3679,7 @@ class DiscordCodexClient(discord.Client):
         self,
         interaction: discord.Interaction,
         prompt: str,
+        character: str | None = None,
         ref_image: discord.Attachment | None = None,
         image: discord.Attachment | None = None,
         model: str | None = None,
@@ -3679,6 +3695,7 @@ class DiscordCodexClient(discord.Client):
         detailer: bool | None = None,
     ) -> None:
         prompt = prompt.strip()
+        character = (character or "").strip()
         request = ImageRequest(
             prompt,
             (model or "").strip(),
@@ -3701,6 +3718,7 @@ class DiscordCodexClient(discord.Client):
             self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
             or self._validate(prompt, ())
             or self._image_refusal(interaction.guild_id)
+            or self._character_refusal(character, ref_image)
         )
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
@@ -3708,9 +3726,19 @@ class DiscordCodexClient(discord.Client):
         into = None
         try:
             into = request_dir(self.config)
-            await self._image_slash(interaction, request, into, inputs)
+            await self._image_slash(interaction, request, into, inputs, character)
         finally:
             remove_dir(into)
+
+    @staticmethod
+    def _character_refusal(character: str, ref_image: discord.Attachment | None) -> str:
+        if not character:
+            return ""
+        if ref_image is not None:
+            return CHARACTER_WITH_REF
+        if len(character) > characters.CHARACTER_MAX:
+            return f"character 最多 {characters.CHARACTER_MAX} 字。"
+        return ""
 
     async def _image_slash(
         self,
@@ -3718,37 +3746,60 @@ class DiscordCodexClient(discord.Client):
         request: ImageRequest,
         into: Path,
         inputs: Mapping[str, discord.Attachment] | None = None,
+        character: str = "",
     ) -> None:
         """The slash command's job, painted into its placeholder: the queue position and steps
         while it runs, ❌ to cancel it (on the service too), and the images in place of the
         placeholder — or in the channel once the interaction has closed. Not in the SerialQueue:
-        the image service keeps its own queue, and a picture must not hold up answers."""
+        the image service keeps its own queue, and a picture must not hold up answers. With a
+        `character`, the character is identified and confirmed first (`_character_jobs`), and
+        the way it is drawn stays above the progress."""
         await interaction.response.defer(thinking=True)
         placeholder = SlashPlaceholder(interaction)
         late = asyncio.create_task(placeholder.retire_when_late())
         config = self.config
         longest = config.image_gen_timeout_seconds + config.image_gen_queue_wait_seconds
-        view = CancelView(interaction.user.id, timeout=longest + 300)
+        view = CancelView(interaction.user.id, timeout=longest + CHARACTER_CONFIRM_SECONDS + 300)
+        way = ""
 
         async def on_progress(job: imagegen.Job) -> None:
-            await placeholder.show(imagegen.progress_text(job), view)
+            text = imagegen.progress_text(job)
+            await placeholder.show(f"{way}\n{text}" if way else text, view)
 
         max_bytes = self._filesize_limit(interaction.guild)
-        task = asyncio.create_task(
-            self._run_image(
-                interaction.guild_id,
-                interaction.user.id,
-                request,
-                into,
-                max_bytes,
-                on_progress,
-                inputs,
+        guild_id, user_id = interaction.guild_id, interaction.user.id
+
+        async def run() -> imagegen.Result:
+            nonlocal way
+            if not character:
+                return await self._run_image(
+                    guild_id, user_id, request, into, max_bytes, on_progress, inputs
+                )
+            await placeholder.show(CHARACTER_LOOKING, view)
+            *first, last = await self._character_jobs(
+                interaction, placeholder, view, request, character, into
             )
-        )
+            for job, way in first:
+                await placeholder.show(way, view)
+                try:
+                    return await self._run_image(
+                        guild_id, user_id, job, into, max_bytes, on_progress, inputs
+                    )
+                except ImageGenError as error:
+                    if error.code != "lora_unavailable":
+                        raise
+                    LOGGER.info("Character LoRA unavailable guild=%s; the next way", guild_id)
+            job, way = last
+            await placeholder.show(way, view)
+            return await self._run_image(
+                guild_id, user_id, job, into, max_bytes, on_progress, inputs
+            )
+
+        task = asyncio.create_task(run())
         view.task = task
         try:
             result = await task
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, CharacterDeclined):
             await placeholder.show(CANCELLED, None)
             LOGGER.info(
                 "Cancelled image guild=%s user=%s", interaction.guild_id, interaction.user.id
@@ -3787,6 +3838,133 @@ class DiscordCodexClient(discord.Client):
             interaction.channel_id,
             interaction.user.id,
         )
+
+    async def _character_judge(self, prompt: str, schema: Path, images: Sequence[Path]) -> str:
+        """characters.Judge: one isolated turn in the Codex queue, on agy's Argon while Codex is
+        unavailable. The prompt holds only the character's name or Danbooru and Civitai data.
+        Waiting and answering together get characters.JUDGE_SECONDS."""
+        try:
+            async with asyncio.timeout(characters.JUDGE_SECONDS):
+                return await self.queue.run(
+                    lambda: run_batch(
+                        prompt,
+                        self.config,
+                        schema=schema,
+                        isolated=True,
+                        images=images,
+                        spare=characters.JUDGE_SPARE,
+                    )
+                )
+        except TimeoutError:
+            LOGGER.warning("Character judge took over %ss", characters.JUDGE_SECONDS)
+            raise ImageGenError(characters.JUDGE_BUSY, "judge_busy") from None
+
+    async def _character_jobs(
+        self,
+        interaction: discord.Interaction,
+        placeholder: SlashPlaceholder,
+        view: CancelView,
+        request: ImageRequest,
+        name: str,
+        into: Path,
+    ) -> list[tuple[ImageRequest, str]]:
+        """The jobs that draw the character `name` stands for, each with the line that tells the
+        member how: the chosen way, then (after a LoRA) the way to take when the service cannot
+        get the LoRA. The member confirms the character first (`_confirm_character`)."""
+        catalog = await self.images.catalog()
+        if request.model:  # an unknown model is refused before anything leaves the host
+            imagegen.resolve(catalog, request)
+        web, judge = self.character_web, self._character_judge
+        found = await characters.identify(name, judge, web, self.config.character_schema_path)
+        if found:
+            await placeholder.show(CHARACTER_ASKING, view)
+        tag, picture = await self._confirm_character(interaction, name, found)
+        character = imagegen.Character(tag, await characters.traits(tag, web))
+        choice = characters.choose(
+            catalog, request.model, await characters.counts(tag, catalog, web)
+        )
+        no_way = ImageGenError(
+            characters.NO_WAY.format(model=request.model or catalog.default_model),
+            "unsupported_option",
+            True,
+        )
+        if choice is None:
+            raise no_way
+        jobs: list[tuple[ImageRequest, str]] = []
+        if choice.lora:
+            await placeholder.show("🔎 找角色的 LoRA…", view)
+            model = catalog.get(choice.model)
+            reference = into / f"reference{imagegen.SUFFIXES[imagegen.sniff(picture)]}"
+            await asyncio.to_thread(reference.write_bytes, picture)
+            offer = await characters.find_lora(
+                tag,
+                model.lora_base if model else "",
+                reference,
+                judge,
+                web,
+                self.config.lora_schema_path,
+                into,
+            )
+            if offer is not None:
+                lora = imagegen.Lora(offer.version_id, None, offer.trigger)
+                job = characters.build(request, choice, character, picture, lora)
+                jobs.append((job, characters.way_text(choice, tag, offer.name)))
+            choice = choice.fallback
+        if choice is not None:
+            job = characters.build(request, choice, character, picture)
+            jobs.append((job, characters.way_text(choice, tag)))
+        if not jobs:
+            raise no_way
+        LOGGER.info("Character %s for guild=%s: %s", tag, interaction.guild_id, jobs[0][0].model)
+        return jobs
+
+    async def _confirm_character(
+        self, interaction: discord.Interaction, name: str, found: list[characters.Candidate]
+    ) -> tuple[str, bytes]:
+        """(tag, sample picture) of the candidate the member confirms on a private message,
+        candidates in the judge's order; CharacterDeclined on cancel or time-out, and the
+        not-found message when no candidate is left."""
+        message = None
+        outcome = "沒有其他候選了。"
+        try:
+            for candidate in found:
+                picture = await characters.sample(
+                    candidate.tag, self.character_web, characters.PICTURE_MAX_BYTES
+                )
+                if picture is None:
+                    continue
+                choice = CharacterView(interaction.user.id, CHARACTER_CONFIRM_SECONDS)
+                text = f"是這個角色嗎？`{candidate.tag}`（Danbooru 上 {candidate.posts} 張圖）"
+                suffix = imagegen.SUFFIXES[imagegen.sniff(picture)]
+                file = discord.File(io.BytesIO(picture), filename=f"character{suffix}")
+                if message is None:
+                    message = await interaction.followup.send(
+                        text, file=file, view=choice, ephemeral=True, wait=True
+                    )
+                else:
+                    await message.edit(content=text, attachments=[file], view=choice)
+                await choice.wait()
+                if choice.answer == "yes":
+                    outcome = f"✅ 角色：`{candidate.tag}`"
+                    return candidate.tag, picture
+                if choice.answer != "next":
+                    outcome = CANCELLED
+                    raise CharacterDeclined
+        except discord.HTTPException:
+            LOGGER.exception("Character question failed guild=%s", interaction.guild_id)
+            raise ImageGenError(imagegen.FAILED, "failed") from None
+        except ImageGenError as error:  # Danbooru unreachable mid-way: say so, not "no one left"
+            outcome = f"⚠️ {error}"
+            raise
+        except asyncio.CancelledError:
+            outcome = CANCELLED
+            raise
+        finally:
+            if message is not None:
+                kept = {} if outcome.startswith("✅") else {"attachments": []}
+                with contextlib.suppress(discord.HTTPException):
+                    await message.edit(content=outcome, view=None, **kept)
+        raise ImageGenError(characters.NOT_FOUND.format(name=name), "character_not_found")
 
     def _remember_local_thread(self, thread_id: str) -> None:
         self._local_image_threads.pop(thread_id, None)

@@ -58,6 +58,8 @@ def config() -> Config:
         image_gen_api_key="",
         image_gen_timeout_seconds=1800,
         image_gen_queue_wait_seconds=5400,
+        character_schema_path=Path("config/character-schema.json"),
+        lora_schema_path=Path("config/lora-schema.json"),
         alert_user_id=0,
         alert_after_failures=3,
         alert_cooldown_minutes=30,

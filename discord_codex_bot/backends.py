@@ -137,9 +137,11 @@ async def run_batch(
     effort: str = "",
     isolated: bool = False,
     images: Sequence[Path] = (),
+    spare: str = "",
 ) -> str:
     """One background turn (memory consolidation, social classification, emoji descriptions)
-    as text; `images` go along with it.
+    as text; `images` go along with it. `spare` names the agy model that takes over while Codex
+    is unavailable, in place of CODEX_FALLBACK_MODEL.
 
     Batch jobs have nobody watching to retry them, so a spent subscription or temporarily full
     model must not simply fail: the same CODEX_FALLBACK_MODEL that answers members takes over.
@@ -157,26 +159,30 @@ async def run_batch(
         )
         return result.text
     except CodexFallbackError as unavailable:
-        spare = fallback_target(
-            config.codex_fallback_model, config.codex_model, config.codex_reasoning_effort
+        target = (
+            Resolved(AGY, spare, "")
+            if spare
+            else fallback_target(
+                config.codex_fallback_model, config.codex_model, config.codex_reasoning_effort
+            )
         )
-        if spare is None or spare.backend != AGY:
+        if target is None or target.backend != AGY:
             raise
         LOGGER.warning(
             "Codex unavailable (%s: %s); running this batch on %s",
             type(unavailable).__name__,
             unavailable,
-            spare.model,
+            target.model,
         )
-        agy_module.check_pool(spare.model)  # under its reserve: the Codex failure stands
+        agy_module.check_pool(target.model)  # under its reserve: the Codex failure stands
 
         async def attempt() -> str:
             try:
                 result = await run_agy(
-                    prompt, config, spare.model, raw=True, schema=schema, plain=True, images=images
+                    prompt, config, target.model, raw=True, schema=schema, plain=True, images=images
                 )
             except agy_module.AgyUnavailable as error:
-                agy_module.note_spent(spare.model, error)
+                agy_module.note_spent(target.model, error)
                 raise
             return result.text
 
