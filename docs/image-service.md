@@ -45,6 +45,7 @@ A request that is not streamed waits without any bytes on the wire.
 {"models": [
   {"id": "chroma1-flash", "name": "Chroma1 Flash", "prompt_style": "natural",
    "options": ["seed", "steps", "cfg", "negative", "aspect", "count", "enhance", "init_image", "strength", "mask", "upscale", "detailer"],
+   "requires_ref_image": false,
    "enhancers": ["local", "off"],
    "defaults": {"steps": 8, "cfg": 1.0, "aspect": "1:1", "count": 1, "enhance": "local", "strength": 0.6, "upscale": "off", "detailer": false}}
 ],
@@ -92,6 +93,9 @@ and `ref_strength`:
   the prompt is an instruction or a description of the result ("replace the background with a
   snowy forest at night; keep the character, pose and clothing"). The service turns prompt
   enhancement off by default for such a job.
+- A model with `"requires_ref_image": true` (for example `qwen-image-edit-2511`) is edit-only: a
+  job without `ref_image` is refused with 400 and
+  `{"error": "bad_value", "option": "ref_image"}`. On other edit models `ref_image` is optional.
 
 `max_bytes` is the largest file the caller can deliver; the service encodes each image (PNG, then
 WEBP or JPEG at falling quality) to fit. `requester` is for the service log only.
