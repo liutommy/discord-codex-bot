@@ -13,7 +13,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from discord_codex_bot import admin, admin_image, imagegen
+from discord_codex_bot import admin, admin_image, characters, imagegen
 from discord_codex_bot import bot as bot_module
 from discord_codex_bot import help as help_module
 from discord_codex_bot.admin_server import AdminServer
@@ -1315,7 +1315,8 @@ async def test_character_known_by_the_default_model_is_sent_with_its_traits(
     # Only the name went to the cloud judge, isolated, Codex first and then Argon.
     (judge,) = calls
     assert "兔田佩克拉" in judge["prompt"] and "海邊" not in judge["prompt"]
-    assert judge["spare"] == "gemini-4-argon-medium" and judge["isolated"] is True
+    assert judge["spare"] == characters.JUDGE_SPARE and judge["isolated"] is True
+    assert judge["spare"][0] == "gemini-4-argon-medium"
     assert judge["schema"] == client.config.character_schema_path
     assert judge["web_search"] is True, "the name judge may search the web for the name"
     question = "是這個角色嗎？`usada_pekora`（Danbooru 上 1000 張圖）"

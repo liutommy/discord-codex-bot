@@ -46,8 +46,15 @@ USER_AGENT = "discord-codex-bot (character lookup)"
 TIMEOUT_SECONDS = 10
 CACHE_SECONDS = 6 * 3600
 CACHE_ENTRIES = 512
-# The agy model that judges while Codex is unavailable.
-JUDGE_SPARE = "gemini-4-argon-medium"
+# The agy models that judge while Codex is unavailable, strongest first: any judge beats none
+# (each is skipped while its pool is under its reserve).
+JUDGE_SPARE = (
+    "gemini-4-argon-medium",
+    "claude-opus-5-5-medium",
+    "claude-sonnet-5-5-medium",
+    "gemini-3.8-flash-medium",
+    "gpt-oss-120b-medium",
+)
 MAX_CANDIDATES = 3
 MAX_NAMES = 4  # other names from the judge, each looked up in Danbooru's autocomplete
 SEARCH_CHARS = 4000  # web results given to the judge's second try

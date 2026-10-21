@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Sequence
@@ -137,13 +138,14 @@ async def run_batch(
     effort: str = "",
     isolated: bool = False,
     images: Sequence[Path] = (),
-    spare: str = "",
+    spare: str | Sequence[str] = "",
     web_search: bool = False,
 ) -> str:
     """One background turn (memory consolidation, social classification, emoji descriptions)
-    as text; `images` go along with it. `spare` names the agy model that takes over while Codex
-    is unavailable, in place of CODEX_FALLBACK_MODEL. `web_search` keeps Codex's own web search on
-    in an isolated turn (agy's search is never denied).
+    as text; `images` go along with it. `spare` names the agy model, or the agy models in order,
+    that take over while Codex is unavailable, in place of CODEX_FALLBACK_MODEL; each one whose
+    pool is under its reserve or that fails is skipped for the next. `web_search` keeps Codex's
+    own web search on in an isolated turn (agy's search is never denied).
 
     Batch jobs have nobody watching to retry them, so a spent subscription or temporarily full
     model must not simply fail: the same CODEX_FALLBACK_MODEL that answers members takes over.
@@ -151,8 +153,6 @@ async def run_batch(
     (commands, writes, URL reads and MCP are all refused) and is given a fresh conversation each
     time, which is what `isolated` buys on the Codex side.
     """
-    from . import agy as agy_module
-    from .agy import run_agy
     from .codex import CodexFallbackError, run_codex
 
     try:
@@ -168,48 +168,74 @@ async def run_batch(
         )
         return result.text
     except CodexFallbackError as unavailable:
-        target = (
-            Resolved(AGY, spare, "")
-            if spare
-            else fallback_target(
-                config.codex_fallback_model, config.codex_model, config.codex_reasoning_effort
+        if isinstance(spare, str):
+            target = (
+                Resolved(AGY, spare, "")
+                if spare
+                else fallback_target(
+                    config.codex_fallback_model, config.codex_model, config.codex_reasoning_effort
+                )
             )
-        )
-        if target is None or target.backend != AGY:
+            if target is None or target.backend != AGY:
+                raise
+            models = [target.model]
+        else:
+            models = list(spare)
+        if not models:
             raise
         LOGGER.warning(
             "Codex unavailable (%s: %s); running this batch on %s",
             type(unavailable).__name__,
             unavailable,
-            target.model,
+            " then ".join(models),
         )
-        agy_module.check_pool(target.model)  # under its reserve: the Codex failure stands
-
-        async def attempt() -> str:
+        last = len(models) - 1
+        for index, model in enumerate(models):
             try:
-                result = await run_agy(
-                    prompt, config, target.model, raw=True, schema=schema, plain=True, images=images
-                )
-            except agy_module.AgyUnavailable as error:
-                agy_module.note_spent(target.model, error)
+                return await _agy_batch(prompt, config, model, schema, images)
+            except asyncio.CancelledError:
                 raise
-            return result.text
+            except Exception as error:  # the next spare, if any, stands in
+                if index == last:
+                    raise
+                LOGGER.warning(
+                    "agy batch on %s failed (%s); next %s", model, error, models[index + 1]
+                )
+        raise unavailable  # not reached: the last model raises above
 
+
+async def _agy_batch(prompt: str, config, model: str, schema, images: Sequence[Path]) -> str:
+    """One batch turn on agy `model`; AgyUnavailable when its pool is under its reserve or spent."""
+    from . import agy as agy_module
+    from .agy import run_agy
+
+    agy_module.check_pool(model)  # under its reserve: the Codex failure stands
+
+    async def attempt() -> str:
         try:
-            return await attempt()
-        except agy_module.AgyNetworkError as dropped:
-            # Nobody is there to ask again, and a dropped connection usually holds the next
-            # time: once more, from the start. Resuming the broken conversation is not used —
-            # whether a cut-off --json-schema run can be continued is unverified, and what it
-            # had done so far was mostly web searches, cheap to redo.
-            LOGGER.warning("agy batch connection dropped (%s); trying once more", dropped)
-        try:
-            text = await attempt()
+            result = await run_agy(
+                prompt, config, model, raw=True, schema=schema, plain=True, images=images
+            )
         except agy_module.AgyUnavailable as error:
-            LOGGER.warning("agy batch retry failed too: %s", error)
+            agy_module.note_spent(model, error)
             raise
-        LOGGER.info("agy batch retry succeeded")
-        return text
+        return result.text
+
+    try:
+        return await attempt()
+    except agy_module.AgyNetworkError as dropped:
+        # Nobody is there to ask again, and a dropped connection usually holds the next
+        # time: once more, from the start. Resuming the broken conversation is not used —
+        # whether a cut-off --json-schema run can be continued is unverified, and what it
+        # had done so far was mostly web searches, cheap to redo.
+        LOGGER.warning("agy batch connection dropped (%s); trying once more", dropped)
+    try:
+        text = await attempt()
+    except agy_module.AgyUnavailable as error:
+        LOGGER.warning("agy batch retry failed too: %s", error)
+        raise
+    LOGGER.info("agy batch retry succeeded")
+    return text
 
 
 def fallback_target(stored: str, codex_model: str, default_effort: str) -> Resolved | None:

@@ -66,6 +66,39 @@ async def test_run_batch_moves_to_the_spare_backend_when_codex_is_overloaded(
     assert seen == {"model": "gemini-3.8-flash-medium", "plain": True}
 
 
+async def test_run_batch_tries_the_spares_in_order(config, monkeypatch) -> None:
+    """A list of spares: one under its reserve or failing is skipped for the next."""
+    from discord_codex_bot import agy as agy_module
+    from discord_codex_bot import codex as codex_module
+    from discord_codex_bot.backends import run_batch
+    from discord_codex_bot.codex import CodexResult, CodexUsageLimit
+
+    tried: list[str] = []
+
+    async def spent(*_args, **_kw):
+        raise CodexUsageLimit("You've hit your usage limit.")
+
+    def pool(model, pools=None):
+        if model == "argon":
+            raise agy_module.AgyUnavailable("agy pool argon is under its reserve or spent")
+
+    async def spare(prompt, cfg, model, **kw):
+        tried.append(model)
+        if model == "opus":
+            raise RuntimeError("broken answer")
+        return CodexResult(f"answer from {model}")
+
+    monkeypatch.setattr(codex_module, "run_codex", spent)
+    monkeypatch.setattr(agy_module, "check_pool", pool)
+    monkeypatch.setattr(agy_module, "run_agy", spare)
+    spares = ("argon", "opus", "sonnet", "flash")
+    assert await run_batch("judge", config, spare=spares) == "answer from sonnet"
+    assert tried == ["opus", "sonnet"]
+    # Negative control: when every spare fails, the last failure is reported.
+    with pytest.raises(RuntimeError):
+        await run_batch("judge", config, spare=("argon", "opus"))
+
+
 @pytest.mark.parametrize(
     ("errors", "outcome", "calls"),
     [
