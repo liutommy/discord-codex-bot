@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestServer
 
 from discord_codex_bot import admin, admin_image, imagegen
 from discord_codex_bot import bot as bot_module
+from discord_codex_bot import help as help_module
 from discord_codex_bot.admin_server import AdminServer
 from discord_codex_bot.bot import IMAGE_STARTED, DiscordCodexClient
 from discord_codex_bot.codex import CodexResult, _prompt
@@ -555,6 +556,21 @@ def test_prompt_offers_the_tag_only_with_the_service(config) -> None:
     note = imagegen.prompt_note(replace(config, image_gen_url="http://img:18082"))
     built = _prompt("畫一隻貓", image_gen=note)
     assert '<image_gen prompt="what to draw"/>' in built and KEY not in built
+    assert "text only" in note and "ref_image" in note
+    # The member guide for -image is the one source the model explains from.
+    assert help_module.COMMAND_GUIDE["-image"][0] in note
+
+
+def test_prompt_names_the_reference_default_from_the_catalog(config, monkeypatch) -> None:
+    edit = {"id": "edit", "name": "edit", "options": ["ref_image"], "defaults": {}}
+    on = replace(config, image_gen_url="http://img:18082")
+    catalog = {**CATALOG, "models": [*CATALOG["models"], edit], "default_ref_model": "edit"}
+    monkeypatch.setattr(imagegen, "_last_catalog", imagegen.parse_catalog(catalog))
+    assert "(default chroma1-flash; with a reference image in -image, edit)" in (
+        imagegen.prompt_note(on)
+    )
+    monkeypatch.setattr(imagegen, "_last_catalog", imagegen.parse_catalog(CATALOG))
+    assert "with a reference image in -image, chroma1-flash)" in imagegen.prompt_note(on)
 
 
 def test_help_mentions_drawing_only_with_the_service(client) -> None:
