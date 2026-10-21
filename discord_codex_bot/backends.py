@@ -138,10 +138,12 @@ async def run_batch(
     isolated: bool = False,
     images: Sequence[Path] = (),
     spare: str = "",
+    web_search: bool = False,
 ) -> str:
     """One background turn (memory consolidation, social classification, emoji descriptions)
     as text; `images` go along with it. `spare` names the agy model that takes over while Codex
-    is unavailable, in place of CODEX_FALLBACK_MODEL.
+    is unavailable, in place of CODEX_FALLBACK_MODEL. `web_search` keeps Codex's own web search on
+    in an isolated turn (agy's search is never denied).
 
     Batch jobs have nobody watching to retry them, so a spent subscription or temporarily full
     model must not simply fail: the same CODEX_FALLBACK_MODEL that answers members takes over.
@@ -155,7 +157,14 @@ async def run_batch(
 
     try:
         result = await run_codex(
-            prompt, config, effort=effort, raw=True, schema=schema, isolated=isolated, images=images
+            prompt,
+            config,
+            effort=effort,
+            raw=True,
+            schema=schema,
+            isolated=isolated,
+            images=images,
+            web_search=web_search,
         )
         return result.text
     except CodexFallbackError as unavailable:

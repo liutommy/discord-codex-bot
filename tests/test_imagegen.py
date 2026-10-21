@@ -1317,6 +1317,7 @@ async def test_character_known_by_the_default_model_is_sent_with_its_traits(
     assert "兔田佩克拉" in judge["prompt"] and "海邊" not in judge["prompt"]
     assert judge["spare"] == "gemini-4-argon-medium" and judge["isolated"] is True
     assert judge["schema"] == client.config.character_schema_path
+    assert judge["web_search"] is True, "the name judge may search the web for the name"
     question = "是這個角色嗎？`usada_pekora`（Danbooru 上 1000 張圖）"
     assert interaction.questions == [(question, "character.png")]
     assert interaction.private[-1] == {
@@ -1402,6 +1403,7 @@ async def test_character_unknown_everywhere_takes_a_lora_then_the_reference_mode
     assert interaction.edits[-1]["files"] == ["image-0.png"]
     lora_turn = calls[1]
     assert lora_turn["schema"] == client.config.lora_schema_path
+    assert not lora_turn.get("web_search"), "comparing pictures needs no web search"
     assert [p.name for p in lora_turn["images"]] == ["reference.png", "lora-2.png"]
     assert "海邊" not in lora_turn["prompt"]
 

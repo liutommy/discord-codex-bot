@@ -3850,7 +3850,9 @@ class DiscordCodexClient(discord.Client):
             interaction.user.id,
         )
 
-    async def _character_judge(self, prompt: str, schema: Path, images: Sequence[Path]) -> str:
+    async def _character_judge(
+        self, prompt: str, schema: Path, images: Sequence[Path], web_search: bool = False
+    ) -> str:
         """characters.Judge: one isolated turn in the Codex queue, on agy's Argon while Codex is
         unavailable. The prompt holds only the character's name or Danbooru and Civitai data.
         Waiting and answering together get characters.JUDGE_SECONDS."""
@@ -3864,11 +3866,17 @@ class DiscordCodexClient(discord.Client):
                         isolated=True,
                         images=images,
                         spare=characters.JUDGE_SPARE,
+                        web_search=web_search,
                     )
                 )
         except TimeoutError:
             LOGGER.warning("Character judge took over %ss", characters.JUDGE_SECONDS)
             raise ImageGenError(characters.JUDGE_BUSY, "judge_busy") from None
+
+    async def _character_name_judge(self, prompt: str, schema: Path, images: Sequence[Path]) -> str:
+        """The judge for a character's name, with the model's own web search on: the prompt holds
+        only the name (and web results for it), never the member's scene."""
+        return await self._character_judge(prompt, schema, images, web_search=True)
 
     async def _character_search(self, name: str) -> str:
         """characters.Search: the web results for a character's name (never the member's scene),
@@ -3897,7 +3905,11 @@ class DiscordCodexClient(discord.Client):
             imagegen.resolve(catalog, request)
         web, judge = self.character_web, self._character_judge
         found = await characters.identify(
-            name, judge, web, self.config.character_schema_path, self._character_search
+            name,
+            self._character_name_judge,
+            web,
+            self.config.character_schema_path,
+            self._character_search,
         )
         if found:
             await placeholder.show(CHARACTER_ASKING, view)
