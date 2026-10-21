@@ -1747,15 +1747,15 @@ class DiscordCodexClient(discord.Client):
         result_images: list[Path] = []  # and the screenshots / sandbox images they came with
         # Snapshot before dispatch: even if a spare or a failed resume starts a new backend
         # thread, <earlier/> still refers to the Discord conversation this request continued.
+        earlier_key = ThreadStore.key(guild_id, channel_id, user_id)
         earlier_ids = (
             self.threads.conversation_messages(
-                ThreadStore.key(guild_id, channel_id, user_id),
-                replied_to,
-                plain=self.memory.get_persona_off(guild_id, user_id),
+                earlier_key, replied_to, plain=self.memory.get_persona_off(guild_id, user_id)
             )
             if not fresh and guild_id is not None and channel_id is not None
             else []
         )
+        earlier_trusted = self.threads.keyed_answers(earlier_key) if earlier_ids else set()
 
         async def next_spare():
             nonlocal spares
@@ -2007,6 +2007,7 @@ class DiscordCodexClient(discord.Client):
                             self.config,
                             max_attachments=max(0, self.config.max_attachments - len(extra)),
                         ),
+                        earlier_trusted,
                     )
                     blocks.append(block)
                     earlier_images.extend(downloaded)

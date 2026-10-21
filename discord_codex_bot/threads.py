@@ -121,19 +121,27 @@ class ThreadStore:
         the conversation `message_id` (or the live one) belongs to, the router's earlier
         threads included; the reader still checks each original question's author and channel.
         """
-        keyed = {int(mid) for mid, linked in self._by_message.items() if linked.get("key") == key}
+        keyed = self.keyed_answers(key)
         entry = self._by_message.get(str(message_id)) if message_id is not None else None
-        if entry is None or entry.get("key", key) != key:
+        if entry is None or entry.get("reset") or entry.get("key", key) != key:
             entry = self.live_entry(key)
         threads = (
             {entry["thread_id"], *entry.get("route", {}).get("earlier", [])} if entry else set()
-        )
+        ) - {""}
         legacy = {
             int(mid)
             for mid, linked in self._by_message.items()
             if "key" not in linked and linked.get("thread_id") in threads
         }
         return sorted(keyed | legacy)
+
+    def keyed_answers(self, key: str) -> set[int]:
+        """Answer ids recorded for `key` since its last /reset: this member in this channel."""
+        return {
+            int(mid)
+            for mid, linked in self._by_message.items()
+            if linked.get("key") == key and not linked.get("reset")
+        }
 
     def remember(
         self,
@@ -148,6 +156,11 @@ class ThreadStore:
         resume it); `route` is where the router has this conversation (routing.Route), absent
         for a member's own model."""
         if not thread_id:
+            # A spare's answer has no thread to resume on the member's model, but it is still
+            # this member's turn in Discord (<earlier/> reads it); the conversation is untouched.
+            if message_id is not None:
+                self._link(message_id, {"key": key, "thread_id": "", "version": self._version})
+                self._save()
             return
         previous = self._by_key.get(key)
         if previous and previous["thread_id"] != thread_id and not previous.get("harvested"):
@@ -163,23 +176,30 @@ class ThreadStore:
             **({"route": route} if route else {}),
         }
         if message_id is not None:
-            self._by_message[str(message_id)] = {
-                "key": key,
-                "thread_id": thread_id,
-                "version": self._version,
-                "plain": plain,
-                "model": model,
-                **({"route": route} if route else {}),
-            }
-            while len(self._by_message) > MAX_MESSAGE_LINKS:
-                del self._by_message[next(iter(self._by_message))]
+            self._link(
+                message_id,
+                {
+                    "key": key,
+                    "thread_id": thread_id,
+                    "version": self._version,
+                    "plain": plain,
+                    "model": model,
+                    **({"route": route} if route else {}),
+                },
+            )
         self._save()
 
+    def _link(self, message_id: int, entry: dict) -> None:
+        self._by_message[str(message_id)] = entry
+        while len(self._by_message) > MAX_MESSAGE_LINKS:
+            del self._by_message[next(iter(self._by_message))]
+
     def forget(self, key: str) -> bool:
-        # /reset clears the context <earlier/> reads too: its answers lose their key.
+        # /reset clears the context <earlier/> reads too. The answers keep their key, marked,
+        # so a reply to one of them cannot bring them back as keyless legacy entries.
         for linked in self._by_message.values():
             if linked.get("key") == key:
-                del linked["key"]
+                linked["reset"] = True
         entry = self._by_key.pop(key, None)
         if entry is None:
             self._save()

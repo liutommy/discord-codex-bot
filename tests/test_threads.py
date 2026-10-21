@@ -52,6 +52,25 @@ def test_discord_conversation_lookup_survives_switch_and_reload(tmp_path: Path) 
     assert ThreadStore(path, ttl_seconds=60).conversation_messages(key) == []
 
 
+def test_discord_lookup_keeps_spare_answers_and_honours_reset(tmp_path: Path) -> None:
+    path = tmp_path / "threads.json"
+    store = ThreadStore(path, ttl_seconds=60)
+    key = ThreadStore.key(1, 2, 3)
+    store.remember(key, "codex-a", 10, model="codex")
+    # A spare answered on the member's own model: no thread to resume, still a turn to read.
+    store.remember(key, "", 11)
+    assert store.conversation_messages(key) == [10, 11]
+    assert (
+        store.by_message(11, model="codex") == "" and store.current(key, model="codex") == "codex-a"
+    )
+    # After /reset neither the latest conversation nor a reply to an old answer reads them.
+    store.forget(key)
+    assert store.conversation_messages(key) == []
+    assert store.conversation_messages(key, 10) == []
+    store.remember(key, "codex-b", 12, model="codex")
+    assert ThreadStore(path, ttl_seconds=60).conversation_messages(key, 10) == [12]
+
+
 def test_instruction_version_change_stops_resuming_old_threads(tmp_path: Path) -> None:
     path = tmp_path / "threads.json"
     old = ThreadStore(path, ttl_seconds=600, version="v1")

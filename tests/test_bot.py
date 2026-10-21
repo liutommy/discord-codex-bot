@@ -3736,6 +3736,22 @@ async def test_earlier_uses_the_replied_conversation_and_isolates_member_and_cha
     assert 51 not in scene.fetched and 99 not in scene.fetched
 
 
+async def test_earlier_reads_a_slash_answer_without_a_reference(
+    client, backends, earlier_conversation
+) -> None:
+    """A slash command's answer replies to no message; recorded for this member, it counts."""
+    scene = earlier_conversation
+    scene.message(70, 123, "> 斜線指令的問題\n斜線指令的回答")
+    client.threads.remember(scene.key, "agy-old", 70, model="agy:gemini-3.8-flash")
+    # Negative control: an answer without a reference that was never recorded for this member.
+    scene.message(71, 123, "別處的回答")
+    codex, _ = backends
+    codex.replies = ["<earlier/>", "好"]
+    await client._answer("剛剛問什麼", [], GUILD, USER, channel_id=ALLOWED)
+    replay = codex.calls[1][0]
+    assert "斜線指令的回答" in replay and "別處的回答" not in replay
+
+
 @pytest.mark.parametrize("fresh", [False, True])
 async def test_earlier_reports_empty_or_new_conversation(
     client, backends, earlier_conversation, fresh
@@ -3766,7 +3782,8 @@ async def test_earlier_bounds_images_text_and_handles_missing_messages(
     codex.replies = ['<earlier turns="99"/>', "完成"]
     result = await client._answer("圖呢", [], GUILD, USER, channel_id=ALLOWED)
     replay = codex.calls[1][0]
-    assert result.text == "完成" and "[輸出已截斷]" in replay
+    # Over the budget the oldest turns go first: the newest (第二題) is kept whole.
+    assert result.text == "完成" and "第二題" in replay and "查證這則貼文" not in replay
     body = replay.partition('untrusted="true">\n')[2].partition("\n</RESULT>")[0]
     assert len(body) <= client.config.link_max_chars
     assert len(codex.calls[1][2]["images"]) == 1

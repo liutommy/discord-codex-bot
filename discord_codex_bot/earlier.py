@@ -36,12 +36,15 @@ async def read_earlier(
     bot_id: int,
     turns: int,
     config: Config,
+    trusted: frozenset[int] | set[int] = frozenset(),
 ) -> tuple[str, list[Path]]:
     """Fetch only in this channel; never trust a cached cross-channel reference.
 
     The answer index selects the conversation, then the original question proves whose turn
     it was (shared backend threads and legacy index entries can include other members).
-    The caller defangs this result along with the other untrusted read results.
+    The caller defangs this result along with the other untrusted read results. An answer in
+    `trusted` (recorded for this member and channel) counts without a question to point to: a
+    slash command's answer has none, and carries the question in its own text.
     """
 
     async def fetch(message_id):
@@ -80,27 +83,37 @@ async def read_earlier(
             if answer is None or answer.author.id != bot_id:
                 continue
             member = await referenced(answer)
-            if member is None or member.author.id != user_id:
+            if member is None and message_id in trusted:
+                found.append((None, None, answer))
+            elif member is not None and member.author.id == user_id:
+                found.append((member, await referenced(member), answer))
+            else:
                 continue
-            quoted = await referenced(member)
-            found.append((member, quoted, answer))
             if len(found) >= turns:
                 break
 
+    # Newest first within the budget, so a long old turn cannot push out the latest ones; the
+    # kept turns are then given oldest first, and only their images come along.
+    kept, used = [], 0
+    for member, quoted, answer in found:
+        block = json.dumps(
+            {
+                "member": original(member) if member is not None else None,
+                "quoted": original(quoted) if quoted is not None else None,
+                "answer": truncate(answer.content, PROMPT_ECHO_CHARS),
+            },
+            ensure_ascii=False,
+        )
+        if kept and used + len(block) + 1 > config.link_max_chars:
+            LOGGER.info("Earlier Discord result kept %d of %d turns", len(kept), len(found))
+            break
+        kept.append((member, quoted, block))
+        used += len(block) + 1
     blocks, images = [], []
     seen = set()
     try:
-        for member, quoted, answer in reversed(found):
-            blocks.append(
-                json.dumps(
-                    {
-                        "member": original(member),
-                        "quoted": original(quoted) if quoted is not None else None,
-                        "answer": truncate(answer.content, PROMPT_ECHO_CHARS),
-                    },
-                    ensure_ascii=False,
-                )
-            )
+        for member, quoted, block in reversed(kept):
+            blocks.append(block)
             for message in (member, quoted):
                 for attachment in message.attachments if message is not None else ():
                     if attachment.id in seen or len(images) >= config.max_attachments:
@@ -120,7 +133,7 @@ async def read_earlier(
             remove_request_dir(path)
         raise
     body = "\n".join(blocks) or "No earlier turns found in this member's current conversation."
-    if len(body) > config.link_max_chars:
+    if len(body) > config.link_max_chars:  # one turn alone over the budget
         LOGGER.info("Earlier Discord result truncated to %d characters", config.link_max_chars)
     body = truncate(body, config.link_max_chars)
     return f'<RESULT kind="earlier" untrusted="true">\n{body}\n</RESULT>', images
