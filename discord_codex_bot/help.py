@@ -158,6 +158,8 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "生成圖片（管理者有接上圖片服務才能用）：prompt 寫要畫什麼；model 打字篩選圖片模型，"
         "其餘選項（比例、張數、種子、不要出現的東西、描述改寫 enhance、放大、細節修補）"
         "留空就用服務的預設，模型不支援的選項會直接說不支援。"
+        "附 ref_image 而沒選 model 時，改用服務另外設定的參考圖預設模型；"
+        "同時用到它不支援的選項（例如 image、ref_strength、negative）時仍用一般的預設模型。"
         "enhance 選生成前怎麼改寫描述：地端改寫、雲端改寫（服務判斷不適合時改用地端）或不改寫。"
         "附 image（PNG／JPEG／WebP 原圖）就照著它改，保留構圖與姿勢，strength 0～1 越大改越多"
         "（留空用模型預設）；再附 mask 則只重畫遮罩白色的地方（mask 一定要搭配 image）。"
