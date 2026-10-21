@@ -821,6 +821,39 @@ async def test_slash_uses_the_service_default_model(service, client) -> None:
     assert interaction.edits[-1]["files"] == ["image-0.png"]
 
 
+def test_ref_image_without_model_uses_default_ref_model() -> None:
+    edit = {"id": "edit", "name": "edit", "options": ["seed", "ref_image"], "defaults": {}}
+    catalog = imagegen.parse_catalog(
+        {**CATALOG, "models": [*CATALOG["models"], edit], "default_ref_model": "edit"}
+    )
+    small = imagegen.InputImage("image/png", 10)
+    ref = ImageRequest("貓", ref_image=small)
+    assert imagegen.resolve(catalog, ref).id == "edit"
+    assert imagegen.resolve(catalog, ImageRequest("貓")).id == "chroma1-flash"
+    assert imagegen.resolve(catalog, replace(ref, model="wai-illustrious")).id == "wai-illustrious"
+    # init_image or ref_strength is not an edit option: the request stays on default_model.
+    for request in (replace(ref, init_image=small), replace(ref, ref_strength=0.5)):
+        assert (
+            imagegen.resolve(catalog, replace(request, model="wai-illustrious")).id
+            == "wai-illustrious"
+        )
+        with pytest.raises(ImageGenError) as caught:
+            imagegen.resolve(catalog, request)
+        assert caught.value.code == "unsupported_option" and "chroma1-flash" in str(caught.value)
+    # An off value sets nothing, as the service counts: the request stays on the edit model.
+    for off in (
+        replace(ref, upscale="off"),
+        replace(ref, detailer=False),
+    ):
+        assert off.options() == ["ref_image"] and imagegen.resolve(catalog, off).id == "edit"
+    assert replace(ref, upscale="2x").options() == ["ref_image", "upscale"]
+    # A service without the key: ref_image requests run on default_model.
+    assert imagegen.parse_catalog(CATALOG).default_ref_model == ""
+    with pytest.raises(ImageGenError) as caught:
+        imagegen.resolve(imagegen.parse_catalog(CATALOG), ref)
+    assert caught.value.code == "unsupported_option"
+
+
 async def test_slash_without_the_service_says_it_is_off(client) -> None:
     client.images._config = replace(client.config, image_gen_url="")
     interaction = FakeInteraction()

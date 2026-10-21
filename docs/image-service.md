@@ -49,6 +49,7 @@ A request that is not streamed waits without any bytes on the wire.
    "defaults": {"steps": 8, "cfg": 1.0, "aspect": "1:1", "count": 1, "enhance": "local", "strength": 0.6, "upscale": "off", "detailer": false}}
 ],
  "default_model": "chroma1-flash",
+ "default_ref_model": "chroma1-flash",
  "aspects": ["1:1", "3:4", "4:3", "9:16", "16:9"],
  "upscale": ["off", "2x", "4x"],
  "max_count": 4,
@@ -92,6 +93,11 @@ and `ref_strength`:
   the prompt is an instruction or a description of the result ("replace the background with a
   snowy forest at night; keep the character, pose and clothing"). The service turns prompt
   enhancement off by default for such a job.
+- A request with `ref_image` and `"model": null` runs on `default_ref_model` when that model
+  lists every option the request sets, and on `default_model` otherwise (for example with
+  `init_image` or `ref_strength` on an edit model). The bot applies the same rule before
+  submitting, and treats a missing `default_ref_model` as `default_model`. A value that asks for
+  nothing (`"upscale": "off"`, `"detailer": false`, `"negative": ""`) does not count as set.
 
 `max_bytes` is the largest file the caller can deliver; the service encodes each image (PNG, then
 WEBP or JPEG at falling quality) to fit. `requester` is for the service log only.

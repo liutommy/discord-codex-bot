@@ -58,6 +58,9 @@ OPTIONS = (
     "upscale",
     "detailer",
 )
+# A value that asks for nothing; the service takes it on every model and does not count it as set.
+# enhance="off" still counts here: a model without enhancers refuses it by name.
+OFF_VALUES = {"negative": "", "upscale": "off", "detailer": False}
 # The request fields that carry an image; each is checked by type and size and sent as base64.
 INPUT_IMAGES = ("init_image", "mask", "ref_image")
 # How the prompt is rewritten before generation; a model lists the ones it takes (`enhancers`).
@@ -124,6 +127,7 @@ class Catalog:
     upscale: tuple[str, ...]
     max_count: int
     max_input_bytes: int = 0  # 0: the service takes no input image
+    default_ref_model: str = ""  # a request with ref_image and no model; empty: default_model
 
     def get(self, model_id: str) -> ImageModel | None:
         return next((m for m in self.models if m.id == model_id), None)
@@ -164,7 +168,12 @@ class ImageRequest:
     detailer: bool | None = None
 
     def options(self) -> list[str]:
-        return [name for name in OPTIONS if getattr(self, name) is not None]
+        """The options this request sets; an OFF_VALUES value sets nothing."""
+        return [
+            name
+            for name in OPTIONS
+            if getattr(self, name) is not None and getattr(self, name) != OFF_VALUES.get(name, None)
+        ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +250,7 @@ def parse_catalog(payload: object) -> Catalog:
         tuple(map(str, payload.get("upscale") or ())),
         max_count,
         max_input,
+        str(payload.get("default_ref_model") or ""),
     )
 
 
@@ -303,11 +313,21 @@ def _check_input(catalog: Catalog, option: str, image: InputImage) -> None:
         )
 
 
+def _default_model(catalog: Catalog, request: ImageRequest) -> str:
+    """The service's rule for a request without a model: default_ref_model for a ref_image request
+    it can run (it takes every option set; for example image or ref_strength stay on default_model),
+    otherwise default_model."""
+    ref = catalog.get(catalog.default_ref_model)
+    if request.ref_image is not None and ref and all(o in ref.options for o in request.options()):
+        return ref.id
+    return catalog.default_model
+
+
 def resolve(catalog: Catalog, request: ImageRequest) -> ImageModel:
     """The model `request` runs on, after checking every option it sets against the catalog —
     the checks the service makes too, done here so a refusal costs no queue slot. Input images
     are checked by type and size, which an attachment states before it is read."""
-    model = catalog.get(request.model or catalog.default_model)
+    model = catalog.get(request.model or _default_model(catalog, request))
     if model is None:
         ids = ", ".join(m.id for m in catalog.models) or "（沒有）"
         raise ImageGenError(
