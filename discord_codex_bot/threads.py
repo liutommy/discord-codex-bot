@@ -38,6 +38,9 @@ class ThreadStore:
         self._by_key: dict[str, dict[str, float | str | bool]] = {}
         self._by_message: dict[str, dict[str, str]] = {}
         self._pending: list[dict[str, str | float]] = []  # key, thread_id, at
+        # key -> the newest answer id when that member last ran /reset there: <earlier/> reads
+        # only answers after it (Discord ids grow with time), keyed and legacy entries alike.
+        self._resets: dict[str, int] = {}
         self._load()
 
     @staticmethod
@@ -122,8 +125,9 @@ class ThreadStore:
         threads included; the reader still checks each original question's author and channel.
         """
         keyed = self.keyed_answers(key)
+        cutoff = self._resets.get(key, 0)
         entry = self._by_message.get(str(message_id)) if message_id is not None else None
-        if entry is None or entry.get("reset") or entry.get("key", key) != key:
+        if entry is None or int(message_id or 0) <= cutoff or entry.get("key", key) != key:
             entry = self.live_entry(key)
         threads = (
             {entry["thread_id"], *entry.get("route", {}).get("earlier", [])} if entry else set()
@@ -131,16 +135,17 @@ class ThreadStore:
         legacy = {
             int(mid)
             for mid, linked in self._by_message.items()
-            if "key" not in linked and linked.get("thread_id") in threads
+            if "key" not in linked and linked.get("thread_id") in threads and int(mid) > cutoff
         }
         return sorted(keyed | legacy)
 
     def keyed_answers(self, key: str) -> set[int]:
         """Answer ids recorded for `key` since its last /reset: this member in this channel."""
+        cutoff = self._resets.get(key, 0)
         return {
             int(mid)
             for mid, linked in self._by_message.items()
-            if linked.get("key") == key and not linked.get("reset")
+            if linked.get("key") == key and int(mid) > cutoff
         }
 
     def remember(
@@ -195,11 +200,10 @@ class ThreadStore:
             del self._by_message[next(iter(self._by_message))]
 
     def forget(self, key: str) -> bool:
-        # /reset clears the context <earlier/> reads too. The answers keep their key, marked,
-        # so a reply to one of them cannot bring them back as keyless legacy entries.
-        for linked in self._by_message.values():
-            if linked.get("key") == key:
-                linked["reset"] = True
+        # /reset clears the context <earlier/> reads too: every answer recorded so far, with or
+        # without a key, falls behind the cutoff.
+        known = [int(mid) for mid in self._by_message]
+        self._resets[key] = max([self._resets.get(key, 0), *known])
         entry = self._by_key.pop(key, None)
         if entry is None:
             self._save()
@@ -285,10 +289,18 @@ class ThreadStore:
             for k, v in data.get("by_message", {}).items()
         }
         self._pending = list(data.get("pending", []))
+        self._resets = {
+            str(k): int(v) for k, v in data.get("resets", {}).items() if str(v).isdigit()
+        }
 
     def _save(self) -> None:
         # Expired entries stay until harvested so their transcript can still be distilled.
-        payload = {"by_key": self._by_key, "by_message": self._by_message, "pending": self._pending}
+        payload = {
+            "by_key": self._by_key,
+            "by_message": self._by_message,
+            "pending": self._pending,
+            "resets": self._resets,
+        }
         try:
             self._path.write_text(json.dumps(payload), "utf-8")
         except OSError:

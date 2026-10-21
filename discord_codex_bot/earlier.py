@@ -107,14 +107,16 @@ async def read_earlier(
         if kept and used + len(block) + 1 > config.link_max_chars:
             LOGGER.info("Earlier Discord result kept %d of %d turns", len(kept), len(found))
             break
-        kept.append((member, quoted, block))
+        kept.append((answer, member, quoted, block))
         used += len(block) + 1
-    blocks, images = [], []
-    seen = set()
+    # Images newest turn first, so the cap keeps the latest ones ("剛剛那張圖"); the bot's own
+    # answers count too (a generated picture). The text stays oldest first.
+    kept.reverse()  # oldest first from here on
+    images, notes, seen = [], {}, set()
     try:
-        for member, quoted, block in reversed(kept):
-            blocks.append(block)
-            for message in (member, quoted):
+        for index in range(len(kept) - 1, -1, -1):
+            answer, member, quoted, _ = kept[index]
+            for message in (answer, member, quoted):
                 for attachment in message.attachments if message is not None else ():
                     if attachment.id in seen or len(images) >= config.max_attachments:
                         continue
@@ -127,11 +129,16 @@ async def read_earlier(
                     try:
                         images.append(await download_attachment(attachment, suffix, config))
                     except (*FETCH_ERRORS, OSError):
-                        blocks.append("（較早訊息的一張圖片無法下載）")
+                        notes[index] = "（較早訊息的一張圖片無法下載）"
     except BaseException:
         for path in images:
             remove_request_dir(path)
         raise
+    blocks = []
+    for index, (_, _, _, block) in enumerate(kept):
+        blocks.append(block)
+        if index in notes:
+            blocks.append(notes[index])
     body = "\n".join(blocks) or "No earlier turns found in this member's current conversation."
     if len(body) > config.link_max_chars:  # one turn alone over the budget
         LOGGER.info("Earlier Discord result truncated to %d characters", config.link_max_chars)

@@ -3752,6 +3752,32 @@ async def test_earlier_reads_a_slash_answer_without_a_reference(
     assert "斜線指令的回答" in replay and "別處的回答" not in replay
 
 
+async def test_earlier_gives_the_newest_images_and_the_bots_own(
+    client, backends, earlier_conversation
+) -> None:
+    """With one image allowed, the newest turn's picture wins, and an image the bot attached
+    to its own answer (a generated picture) counts."""
+    scene = earlier_conversation
+    client.config = replace(client.config, max_attachments=1)
+
+    made_saved: list = []
+
+    async def save_made(path):
+        path.write_bytes(b"made picture")
+        made_saved.append(path)
+
+    made = types.SimpleNamespace(**{**vars(scene.image), "id": 950, "save": save_made})
+    scene.message(30, USER, "畫一張")
+    scene.message(31, 123, "畫好了", reply=30, attachments=[made])
+    client.threads.remember(scene.key, "agy-old", 31, model="agy:gemini-3.8-flash")
+    codex, _ = backends
+    codex.replies = ["<earlier/>", "好"]
+    await client._answer("剛剛那張圖", [], GUILD, USER, channel_id=ALLOWED)
+    images = codex.calls[1][2]["images"]
+    assert len(images) == 1 and list(images) == made_saved, "the newest, the bot's own"
+    assert not scene.saved, "the older post's image does not take the one place"
+
+
 @pytest.mark.parametrize("fresh", [False, True])
 async def test_earlier_reports_empty_or_new_conversation(
     client, backends, earlier_conversation, fresh

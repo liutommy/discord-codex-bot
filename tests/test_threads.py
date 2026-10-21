@@ -71,6 +71,21 @@ def test_discord_lookup_keeps_spare_answers_and_honours_reset(tmp_path: Path) ->
     assert ThreadStore(path, ttl_seconds=60).conversation_messages(key, 10) == [12]
 
 
+def test_reset_also_hides_answers_recorded_before_keys(tmp_path: Path) -> None:
+    """An answer written before answers carried their key (legacy) cannot come back through a
+    reply after /reset either: the reset is a cutoff on answer ids."""
+    path = tmp_path / "threads.json"
+    store = ThreadStore(path, ttl_seconds=60)
+    key = ThreadStore.key(1, 2, 3)
+    store.remember(key, "old", 10, model="codex")
+    del store._by_message["10"]["key"]  # as written before this change
+    store.remember(key, "old", 11, model="codex")
+    assert store.conversation_messages(key, 10) == [10, 11]
+    store.forget(key)
+    assert store.conversation_messages(key, 10) == []
+    assert ThreadStore(path, ttl_seconds=60).conversation_messages(key, 10) == []
+
+
 def test_instruction_version_change_stops_resuming_old_threads(tmp_path: Path) -> None:
     path = tmp_path / "threads.json"
     old = ThreadStore(path, ttl_seconds=600, version="v1")
