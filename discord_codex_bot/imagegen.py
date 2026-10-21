@@ -28,6 +28,7 @@ import aiohttp
 from . import tags
 from .clock import sleep_for
 from .config import Config
+from .help import COMMAND_GUIDE
 
 LOGGER = logging.getLogger(__name__)
 
@@ -772,9 +773,10 @@ def prompt_note(config: Config) -> str:
     catalog, choices = _last_catalog, ""
     if catalog is not None:
         models = ", ".join(m.id for m in catalog.models)
+        ref = catalog.default_ref_model or catalog.default_model
         choices = (
-            f" Models: {models} (default {catalog.default_model}); aspects:"
-            f" {', '.join(catalog.aspects)}; count 1-{catalog.max_count}."
+            f" Models: {models} (default {catalog.default_model}; with a reference image in"
+            f" -image, {ref}); aspects: {', '.join(catalog.aspects)}; count 1-{catalog.max_count}."
         )
     return (
         "The host's local image service is slow and shares the local model's GPU, so use it only"
@@ -785,7 +787,11 @@ def prompt_note(config: Config) -> str:
         " For an explicit request, append"
         ' <image_gen prompt="what to draw"/> after your answer; add model="…", aspect="3:4",'
         ' count="2", seed="123", negative="what to avoid" or enhance="off" (local, cloud or off:'
-        " how the prompt is rewritten first) only when the member asks for them."
+        " how the prompt is rewritten first) only when the member asks for them. The tag carries"
+        " text only: to edit an image, keep a character from a reference picture or redraw a"
+        " picture, tell the member to use the -image command with image or ref_image. When the"
+        " member asks how to draw or how -image works, explain from its member guide: "
+        + COMMAND_GUIDE["-image"][0]
         + choices
         + " The Bot checks the request, runs it on the image service and"
         " posts the picture in the channel when it is ready, adding its own note to your"
