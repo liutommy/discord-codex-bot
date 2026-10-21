@@ -25,6 +25,7 @@ from . import agy as agy_module
 from . import (
     apis,
     characters,
+    earlier,
     embedfix,
     gemini,
     grok,
@@ -459,11 +460,19 @@ def with_quoted_message(prompt: str, author: str, content: str, image_count: int
     return "\n".join([QUOTE_FENCE, *parts, QUOTE_FENCE, prompt or "請看這則訊息。"])
 
 
-READ_TAGS = (SEARCH_TAG, RECALL_TAG, FETCH_TAG, search.WEB_TAG, sandbox.RUN_TAG, apis.API_TAG)
+READ_TAGS = (
+    SEARCH_TAG,
+    RECALL_TAG,
+    FETCH_TAG,
+    search.WEB_TAG,
+    sandbox.RUN_TAG,
+    apis.API_TAG,
+    earlier.EARLIER_TAG,
+)
 # A read tag in a shape its parser does not take. Still a request — answered with the reason, so
 # the model can send it again — never an answer to post with the raw tag in it.
 _READ_ATTRS = r'(?:(?:[^<>"]|"[^"]{0,2000}"){0,4000}|[^<>]{0,2500})'  # stray quote: the plain one
-_READ_NAME = r"(?:search|recall|fetch|web|api)(?![a-z_])"
+_READ_NAME = r"(?:search|recall|fetch|web|api|earlier)(?![a-z_])"
 BROKEN_READ = re.compile(
     # A <run> body goes to its </run> but never past the next <run>: an answer full of unclosed
     # ones would otherwise be read to the end again from each of them.
@@ -1659,6 +1668,9 @@ class DiscordCodexClient(discord.Client):
         routed_spares: Sequence[Resolved] = (),
         history: str = "",
         spare_history: str = "",
+        conversation_channel=None,
+        replied_to: int | None = None,
+        fresh: bool = False,
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
         `on_delta` receives the accumulated answer while a backend streams it (agy, routers).
@@ -1667,7 +1679,8 @@ class DiscordCodexClient(discord.Client):
         the router's own stand-ins in `routed_spares`. `history` is the conversation so far,
         replayed to a backend that did not hold it; `spare_history` is what a spare taking over
         from the routed target gets instead of the target's thread. The result's `via` is what
-        answered."""
+        answered. `conversation_channel` and `replied_to` scope Discord history reads even when
+        the chosen backend cannot resume that conversation; `fresh` suppresses those reads."""
         if self.emoji is not None and guild_id is not None:
             # `<:name:id>` as the model can read it; never the emoji's image, which would make
             # this an image turn (emoji.py).
@@ -1732,6 +1745,17 @@ class DiscordCodexClient(discord.Client):
         first: tuple[str, dict] | None = None  # the question as first asked, for a spare
         results: list[str] = []  # every recall round's results so far, oldest first
         result_images: list[Path] = []  # and the screenshots / sandbox images they came with
+        # Snapshot before dispatch: even if a spare or a failed resume starts a new backend
+        # thread, <earlier/> still refers to the Discord conversation this request continued.
+        earlier_key = ThreadStore.key(guild_id, channel_id, user_id)
+        earlier_ids = (
+            self.threads.conversation_messages(
+                earlier_key, replied_to, plain=self.memory.get_persona_off(guild_id, user_id)
+            )
+            if not fresh and guild_id is not None and channel_id is not None
+            else []
+        )
+        earlier_trusted = self.threads.keyed_answers(earlier_key) if earlier_ids else set()
 
         async def next_spare():
             nonlocal spares
@@ -1840,6 +1864,7 @@ class DiscordCodexClient(discord.Client):
                         kw.setdefault("history", spare_history)  # the thread stays behind
 
         images: list[Path] = []
+        earlier_images: list[Path] = []
         self.config.attachment_dir.mkdir(parents=True, exist_ok=True)
         link_dir = request_dir(self.config)
         deliver_dir = request_dir(self.config)
@@ -1914,8 +1939,11 @@ class DiscordCodexClient(discord.Client):
                 queries = search.extract_web_queries(result.text)[:WEB_PER_ROUND]
                 runs = sandbox.extract_runs(result.text) if sandbox.available(self.config) else []
                 api_calls = apis.extract_api_calls(result.text) if self.apis else []
+                earlier_turns = earlier.requested_turns(result.text)
                 unserved = unserved_reads(result.text, self.config, bool(self.apis))
-                if not (wanted or urls or queries or runs or api_calls or unserved):
+                if not (
+                    wanted or urls or queries or runs or api_calls or earlier_turns or unserved
+                ):
                     break
                 blocks = [
                     f'<RESULT kind="{kind}" scope="{scope}" target="{target}">\n'
@@ -1961,6 +1989,29 @@ class DiscordCodexClient(discord.Client):
                     )
                     blocks.append(f'<LINK url="{url}">\n{fetched}\n</LINK>')
                     extra.extend(shots)
+                if earlier_turns is not None:
+                    channel = conversation_channel or self.get_channel(channel_id)
+                    if (
+                        getattr(channel, "id", None) != channel_id
+                        or getattr(getattr(channel, "guild", None), "id", None) != guild_id
+                        or guild_id is None
+                    ):
+                        channel = None
+                    block, downloaded = await earlier.read_earlier(
+                        channel,
+                        earlier_ids,
+                        user_id,
+                        self.user.id if self.user is not None else 0,
+                        earlier_turns,
+                        replace(
+                            self.config,
+                            max_attachments=max(0, self.config.max_attachments - len(extra)),
+                        ),
+                        earlier_trusted,
+                    )
+                    blocks.append(block)
+                    earlier_images.extend(downloaded)
+                    extra.extend(downloaded)
                 recalled = "\n\n".join(blocks)
                 recalled = defang(recalled)  # results are not the member: no USER_MESSAGE in them
                 result = await turn(
@@ -2074,7 +2125,7 @@ class DiscordCodexClient(discord.Client):
             prefix = self.config.command_prefix
             return CodexResult(failure_text(target.backend, error, prefix))
         finally:
-            for path in images:
+            for path in (*images, *earlier_images):
                 remove_request_dir(path)
             remove_dir(link_dir)
             if not handed_over:  # the sweep skips a live directory, so every path releases it
@@ -2690,6 +2741,30 @@ class DiscordCodexClient(discord.Client):
         if switched and hasattr(self, "_harvest_wakeup"):
             self._harvest_wakeup.set()
 
+    @classmethod
+    async def _slash_files(
+        cls, result: CodexResult, attachments: Sequence[discord.Attachment]
+    ) -> list[discord.File]:
+        """The answer's own files come first; the upload only takes a slot left over."""
+        generated = cls._files(result)
+        room = 10 - len(generated)
+        echoed = (await cls._echo_upload(attachments))[:room] if room > 0 else []
+        return echoed + generated
+
+    @staticmethod
+    async def _echo_upload(attachments: Sequence[discord.Attachment]) -> list[discord.File]:
+        """Discord does not show a slash command's uploaded image either; on the answer it shows
+        the channel what was asked about, and <earlier/> reads it back from there."""
+        files = []
+        for attachment in attachments:
+            if not (attachment.content_type or "").startswith("image/"):
+                continue
+            try:
+                files.append(await attachment.to_file(spoiler=attachment.is_spoiler()))
+            except (discord.HTTPException, aiohttp.ClientError, TimeoutError):
+                LOGGER.info("Slash upload not re-attached: %s", attachment.filename)
+        return files
+
     @staticmethod
     def _files(result: CodexResult) -> list[discord.File]:
         # Discord caps a message at 10 attachments; generated images are deleted after sending.
@@ -2855,6 +2930,8 @@ class DiscordCodexClient(discord.Client):
                 user_id,
                 resume=resume,
                 channel_id=interaction.channel_id,
+                conversation_channel=interaction.channel,
+                replied_to=getattr(interaction.message, "id", None),
                 previews=previews,
                 **self._routed_kw(routed),
             )
@@ -4861,6 +4938,8 @@ class DiscordCodexClient(discord.Client):
                     on_video_slow=on_video_slow,
                     on_delta=on_delta,
                     channel_id=interaction.channel_id,
+                    conversation_channel=interaction.channel,
+                    fresh=new,
                     **self._routed_kw(routed),
                 ),
             )
@@ -4890,16 +4969,15 @@ class DiscordCodexClient(discord.Client):
         chunks = split_discord_message(reply)
         sent_id = None
         view = self._answer_view(interaction.guild_id, interaction.user.id, prompt, result)
+        files = await self._slash_files(result, attachments)
         try:
             if interaction_expired(interaction) and interaction.channel is not None:
                 await placeholder.retire()
-                sent = await interaction.channel.send(
-                    chunks[0], files=self._files(result), view=view
-                )
+                sent = await interaction.channel.send(chunks[0], files=files, view=view)
                 send_rest = interaction.channel.send
             else:
                 sent = await interaction.edit_original_response(
-                    content=chunks[0], attachments=self._files(result), view=view
+                    content=chunks[0], attachments=files, view=view
                 )
                 send_rest = interaction.followup.send
             sent_id = sent.id
@@ -5025,6 +5103,8 @@ class DiscordCodexClient(discord.Client):
                     on_video_slow=on_video_slow,
                     on_delta=on_delta,
                     channel_id=message.channel.id,
+                    conversation_channel=message.channel,
+                    replied_to=replied_to,
                     **self._routed_kw(routed),
                 ),
             )

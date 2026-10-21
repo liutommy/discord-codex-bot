@@ -4,6 +4,8 @@ import json
 import time
 from pathlib import Path
 
+from .memory import atomic_write
+
 MAX_MESSAGE_LINKS = 1000
 
 
@@ -38,6 +40,9 @@ class ThreadStore:
         self._by_key: dict[str, dict[str, float | str | bool]] = {}
         self._by_message: dict[str, dict[str, str]] = {}
         self._pending: list[dict[str, str | float]] = []  # key, thread_id, at
+        # key -> the newest answer id when that member last ran /reset there: <earlier/> reads
+        # only answers after it (Discord ids grow with time), keyed and legacy entries alike.
+        self._resets: dict[str, int] = {}
         self._load()
 
     @staticmethod
@@ -110,6 +115,47 @@ class ThreadStore:
                 return str(entry["model"]).split(":", 1)[0]
         return ""
 
+    def conversation_messages(
+        self, key: str, message_id: int | None = None, plain: bool = False
+    ) -> list[int]:
+        """The Bot's answer ids for this member in this channel (`key`), oldest first, whatever
+        backend, thread or style answered them: Discord keeps the originals across a model
+        switch, a fallback or a failed resume, which the backends' own transcripts do not.
+
+        Entries written before answers recorded their key are matched through the threads of
+        the conversation `message_id` (or the live one) belongs to, the router's earlier
+        threads included; the reader still checks each original question's author and channel.
+        """
+        keyed = self.keyed_answers(key)
+        cutoff = self._resets.get(key, 0)
+        entry = self._by_message.get(str(message_id)) if message_id is not None else None
+        # A spare's answer has no thread of its own; its conversation is the live one.
+        if (
+            entry is None
+            or not entry.get("thread_id")
+            or int(message_id or 0) <= cutoff
+            or entry.get("key", key) != key
+        ):
+            entry = self.live_entry(key)
+        threads = (
+            {entry["thread_id"], *entry.get("route", {}).get("earlier", [])} if entry else set()
+        ) - {""}
+        legacy = {
+            int(mid)
+            for mid, linked in self._by_message.items()
+            if "key" not in linked and linked.get("thread_id") in threads and int(mid) > cutoff
+        }
+        return sorted(keyed | legacy)
+
+    def keyed_answers(self, key: str) -> set[int]:
+        """Answer ids recorded for `key` since its last /reset: this member in this channel."""
+        cutoff = self._resets.get(key, 0)
+        return {
+            int(mid)
+            for mid, linked in self._by_message.items()
+            if linked.get("key") == key and int(mid) > cutoff
+        }
+
     def remember(
         self,
         key: str,
@@ -123,6 +169,11 @@ class ThreadStore:
         resume it); `route` is where the router has this conversation (routing.Route), absent
         for a member's own model."""
         if not thread_id:
+            # A spare's answer has no thread to resume on the member's model, but it is still
+            # this member's turn in Discord (<earlier/> reads it); the conversation is untouched.
+            if message_id is not None:
+                self._link(message_id, {"key": key, "thread_id": "", "version": self._version})
+                self._save()
             return
         previous = self._by_key.get(key)
         if previous and previous["thread_id"] != thread_id and not previous.get("harvested"):
@@ -138,20 +189,32 @@ class ThreadStore:
             **({"route": route} if route else {}),
         }
         if message_id is not None:
-            self._by_message[str(message_id)] = {
-                "thread_id": thread_id,
-                "version": self._version,
-                "plain": plain,
-                "model": model,
-                **({"route": route} if route else {}),
-            }
-            while len(self._by_message) > MAX_MESSAGE_LINKS:
-                del self._by_message[next(iter(self._by_message))]
+            self._link(
+                message_id,
+                {
+                    "key": key,
+                    "thread_id": thread_id,
+                    "version": self._version,
+                    "plain": plain,
+                    "model": model,
+                    **({"route": route} if route else {}),
+                },
+            )
         self._save()
 
+    def _link(self, message_id: int, entry: dict) -> None:
+        self._by_message[str(message_id)] = entry
+        while len(self._by_message) > MAX_MESSAGE_LINKS:
+            del self._by_message[next(iter(self._by_message))]
+
     def forget(self, key: str) -> bool:
+        # /reset clears the context <earlier/> reads too: every answer recorded so far, with or
+        # without a key, falls behind the cutoff.
+        known = [int(mid) for mid in self._by_message]
+        self._resets[key] = max([self._resets.get(key, 0), *known])
         entry = self._by_key.pop(key, None)
         if entry is None:
+            self._save()
             return False
         if not entry.get("harvested"):
             self._pending.append(_retired(key, entry))
@@ -234,12 +297,20 @@ class ThreadStore:
             for k, v in data.get("by_message", {}).items()
         }
         self._pending = list(data.get("pending", []))
+        self._resets = {
+            str(k): int(v) for k, v in data.get("resets", {}).items() if str(v).isdigit()
+        }
 
     def _save(self) -> None:
         # Expired entries stay until harvested so their transcript can still be distilled.
-        payload = {"by_key": self._by_key, "by_message": self._by_message, "pending": self._pending}
+        payload = {
+            "by_key": self._by_key,
+            "by_message": self._by_message,
+            "pending": self._pending,
+            "resets": self._resets,
+        }
         try:
-            self._path.write_text(json.dumps(payload), "utf-8")
+            atomic_write(self._path, json.dumps(payload))
         except OSError:
             pass
 

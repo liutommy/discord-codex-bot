@@ -268,6 +268,7 @@ async def ask(client: Any, args: dict) -> dict:
             on_video_slow=on_video_slow,
             on_delta=on_delta,
             channel_id=channel_id,
+            fresh=new,
             **client._routed_kw(routed),
         ),
     )

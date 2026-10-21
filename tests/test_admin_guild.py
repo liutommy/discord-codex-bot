@@ -371,8 +371,17 @@ async def test_ask_answers_as_the_member_and_continues_their_conversation(
     # The member's own next message in the channel goes on from the same thread.
     assert client.threads.current(key, plain=False, model=client._model(GUILD, MEMBER)) == "t2"
 
+    answered = client._answer
+    fresh = []
+
+    async def spy(*args, **kw):
+        fresh.append(kw.get("fresh", False))
+        return await answered(*args, **kw)
+
+    client._answer = spy
     ok(await run("ask", **where, prompt="重來", new=True))
     assert codex.calls[2][1]["resume"] == ""
+    assert fresh == [True]  # <earlier/> does not read the conversation --new left
     assert client.active == {} and client.fake_channel.reads == []
 
 
