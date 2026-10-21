@@ -4,6 +4,8 @@ import json
 import time
 from pathlib import Path
 
+from .memory import atomic_write
+
 MAX_MESSAGE_LINKS = 1000
 
 
@@ -127,7 +129,13 @@ class ThreadStore:
         keyed = self.keyed_answers(key)
         cutoff = self._resets.get(key, 0)
         entry = self._by_message.get(str(message_id)) if message_id is not None else None
-        if entry is None or int(message_id or 0) <= cutoff or entry.get("key", key) != key:
+        # A spare's answer has no thread of its own; its conversation is the live one.
+        if (
+            entry is None
+            or not entry.get("thread_id")
+            or int(message_id or 0) <= cutoff
+            or entry.get("key", key) != key
+        ):
             entry = self.live_entry(key)
         threads = (
             {entry["thread_id"], *entry.get("route", {}).get("earlier", [])} if entry else set()
@@ -302,7 +310,7 @@ class ThreadStore:
             "resets": self._resets,
         }
         try:
-            self._path.write_text(json.dumps(payload), "utf-8")
+            atomic_write(self._path, json.dumps(payload))
         except OSError:
             pass
 

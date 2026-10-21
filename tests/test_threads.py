@@ -60,6 +60,10 @@ def test_discord_lookup_keeps_spare_answers_and_honours_reset(tmp_path: Path) ->
     # A spare answered on the member's own model: no thread to resume, still a turn to read.
     store.remember(key, "", 11)
     assert store.conversation_messages(key) == [10, 11]
+    # A reply to the spare's answer finds the conversation's legacy entries through the live one.
+    store._by_message["9"] = {"thread_id": "codex-a", "version": store._version}
+    assert store.conversation_messages(key, 11) == [9, 10, 11]
+    del store._by_message["9"]
     assert (
         store.by_message(11, model="codex") == "" and store.current(key, model="codex") == "codex-a"
     )
@@ -183,10 +187,28 @@ def test_store_survives_corrupt_or_unwritable_file(tmp_path: Path) -> None:
     path.write_text("{not json", "utf-8")
     store = ThreadStore(path, ttl_seconds=600, version="v1")
     assert store.current("1:2:3") == "" and store.harvest_candidates() == []
-    unwritable = ThreadStore(tmp_path / "missing" / "t.json", ttl_seconds=600, version="v1")
+    (tmp_path / "file").write_text("", "utf-8")
+    unwritable = ThreadStore(tmp_path / "file" / "t.json", ttl_seconds=600, version="v1")
     unwritable.remember("1:2:3", "a", message_id=1)  # OSError swallowed
     assert unwritable.current("1:2:3") == "a"
-    assert not (tmp_path / "missing").exists()
+
+
+def test_store_replaces_its_file_whole(tmp_path: Path, monkeypatch) -> None:
+    """A save that fails midway leaves the previous file and no scratch file behind."""
+    from discord_codex_bot import memory
+
+    path = tmp_path / "t.json"
+    store = ThreadStore(path, ttl_seconds=600, version="v1")
+    store.remember("1:2:3", "a", message_id=1)
+    before = path.read_text("utf-8")
+
+    def interrupted(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(memory.os, "replace", interrupted)
+    store.forget("1:2:3")
+    assert path.read_text("utf-8") == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["t.json"]
 
 
 def test_reset_of_an_expired_thread_is_harvested_once(tmp_path: Path) -> None:
