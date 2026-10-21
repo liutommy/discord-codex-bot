@@ -3,6 +3,7 @@ no network."""
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -448,6 +449,21 @@ def test_choose_keeps_the_members_enhance_value() -> None:
     # Negative control: with an enhance value both take, the first model is chosen.
     want = Choice("wai-illustrious", "known", character=True)
     assert choose(found, "", KNOWN_BY_BOTH, asked, "local") == want
+
+
+def test_force_lora_looks_for_a_lora_even_for_a_known_character() -> None:
+    """The member asks for a LoRA: one is looked for first, and the choice made without the
+    switch is the fallback."""
+    found = catalog()
+    known = Choice("wai-illustrious", "known", character=True)
+    want = Choice("wai-illustrious", "lora", character=True, lora=True, fallback=known)
+    assert choose(found, "", KNOWN_BY_BOTH, force_lora=True) == want
+    member = Choice("wai-illustrious", "member", character=True)
+    assert choose(found, "wai-illustrious", KNOWN_BY_BOTH, force_lora=True) == replace(
+        member, lora=True, fallback=member
+    )
+    # Negative control: without the switch a known character is drawn from its tag.
+    assert choose(found, "", KNOWN_BY_BOTH) == known
 
 
 def test_members_lora_model_without_character_falls_back_to_the_sample() -> None:

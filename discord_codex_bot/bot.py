@@ -295,6 +295,9 @@ CHARACTER_CONFIRM_SECONDS = 300
 CHARACTER_TOO_LATE = "確認角色的時間已到，請重新下一次指令。"
 CHARACTER_LOOKING = "🔎 查角色中…"
 CHARACTER_ASKING = "🔎 請在只有你看得到的訊息裡確認角色…"
+# A bot-only switch (not a service field): /image shows it under this name.
+FORCE_LORA_NAME = "強制lora"
+FORCE_LORA_ALONE = f"「{FORCE_LORA_NAME}」要搭配 character 一起用。"
 CHARACTER_WITH_REF = (
     f"character 和{imagegen.shown('ref_image')}只能擇一：要用自己的角色圖就不用填 character。"
 )
@@ -3661,6 +3664,10 @@ class DiscordCodexClient(discord.Client):
     @app_commands.describe(
         prompt="要畫什麼",
         character="選填：角色名稱（中英文或暱稱都可以）；先給你確認是哪個角色，再挑畫得出它的模型",
+        force_lora=(
+            "選填：搭配 character；不管模型認不認得角色，"
+            "先找 Civitai 上的角色 LoRA（畫得不像時重試用）"
+        ),
         ref_image="選填：角色圖；保留圖中的角色，照描述畫新的場景或姿勢",
         image="選填：要改的圖（PNG／JPEG／WebP）；保留構圖與姿勢，照描述重畫",
         model="選填：圖片模型（打字篩選；留空＝服務預設）",
@@ -3678,6 +3685,7 @@ class DiscordCodexClient(discord.Client):
     @app_commands.rename(
         image=imagegen.SLASH_NAMES["init_image"],
         ref_image=imagegen.SLASH_NAMES["ref_image"],
+        force_lora=FORCE_LORA_NAME,
         mask=imagegen.SLASH_NAMES["mask"],
         strength=imagegen.SLASH_NAMES["strength"],
         ref_strength=imagegen.SLASH_NAMES["ref_strength"],
@@ -3691,6 +3699,7 @@ class DiscordCodexClient(discord.Client):
         interaction: discord.Interaction,
         prompt: str,
         character: str | None = None,
+        force_lora: bool | None = None,
         ref_image: discord.Attachment | None = None,
         image: discord.Attachment | None = None,
         model: str | None = None,
@@ -3729,7 +3738,7 @@ class DiscordCodexClient(discord.Client):
             self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
             or self._validate(prompt, ())
             or self._image_refusal(interaction.guild_id)
-            or self._character_refusal(character, ref_image)
+            or self._character_refusal(character, ref_image, force_lora)
         )
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
@@ -3737,14 +3746,16 @@ class DiscordCodexClient(discord.Client):
         into = None
         try:
             into = request_dir(self.config)
-            await self._image_slash(interaction, request, into, inputs, character)
+            await self._image_slash(interaction, request, into, inputs, character, bool(force_lora))
         finally:
             remove_dir(into)
 
     @staticmethod
-    def _character_refusal(character: str, ref_image: discord.Attachment | None) -> str:
+    def _character_refusal(
+        character: str, ref_image: discord.Attachment | None, force_lora: bool | None = None
+    ) -> str:
         if not character:
-            return ""
+            return FORCE_LORA_ALONE if force_lora else ""
         if ref_image is not None:
             return CHARACTER_WITH_REF
         if len(character) > characters.CHARACTER_MAX:
@@ -3758,6 +3769,7 @@ class DiscordCodexClient(discord.Client):
         into: Path,
         inputs: Mapping[str, discord.Attachment] | None = None,
         character: str = "",
+        force_lora: bool = False,
     ) -> None:
         """The slash command's job, painted into its placeholder: the queue position and steps
         while it runs, ❌ to cancel it (on the service too), and the images in place of the
@@ -3788,7 +3800,7 @@ class DiscordCodexClient(discord.Client):
                 )
             await placeholder.show(CHARACTER_LOOKING, view)
             *first, last = await self._character_jobs(
-                interaction, placeholder, view, request, character, into
+                interaction, placeholder, view, request, character, into, force_lora
             )
             for job, way in first:
                 await placeholder.show(way, view)
@@ -3894,10 +3906,12 @@ class DiscordCodexClient(discord.Client):
         request: ImageRequest,
         name: str,
         into: Path,
+        force_lora: bool = False,
     ) -> list[tuple[ImageRequest, str]]:
         """The jobs that draw the character `name` stands for, each with the line that tells the
         member how: the chosen way, then (after a LoRA) the way to take when the service cannot
-        get the LoRA. The member confirms the character first (`_confirm_character`)."""
+        get the LoRA. The member confirms the character first (`_confirm_character`);
+        `force_lora` looks for a LoRA even when a model is taken to know the character."""
         catalog = await self.images.catalog()
         # An unknown model is refused before anything leaves the host; the options are checked
         # once the sample, the character or the LoRA is in the request.
@@ -3921,6 +3935,7 @@ class DiscordCodexClient(discord.Client):
             await characters.counts(tag, catalog, web),
             request.options(),
             request.enhance,
+            force_lora,
         )
         no_way = ImageGenError(
             characters.NO_WAY.format(model=request.model or catalog.default_model),

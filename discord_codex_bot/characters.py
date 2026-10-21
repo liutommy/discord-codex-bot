@@ -443,10 +443,13 @@ def choose(
     posts_before: dict[str, int],
     options: Sequence[str] = (),
     enhance: str | None = None,
+    force_lora: bool = False,
 ) -> Choice | None:
     """How to draw a confirmed character; None when nothing in the catalog can. `options` are
     the ones the member's request sets (ImageRequest.options()) and `enhance` its value; a model
-    chosen here takes them all.
+    chosen here takes them all. `force_lora` looks for a LoRA first even when a model is taken
+    to know the character (a guess from post counts that can be wrong), falling back to the
+    choice made without it.
 
     - The member's model: as it is, with the character when it takes one, a LoRA first when it
       takes LoRAs and does not know the character; a model that takes neither but takes a
@@ -480,17 +483,29 @@ def choose(
         takes = "character" in model.options
         plain = Choice(model.id, "member", character=takes)
         by_sample = Choice(model.id, "member", ref=True) if "ref_image" in model.options else None
-        if "lora" in model.options and model.lora_base and not knows(model, posts_before):
+        unknown = force_lora or not knows(model, posts_before)
+        if "lora" in model.options and model.lora_base and unknown:
             return replace(plain, lora=True, fallback=plain if takes else by_sample)
         return plain if takes else by_sample
-    for model in ordered:
-        if fits(model, "character") and knows(model, posts_before):
-            return Choice(model.id, "known", character=True)
-    for model in ordered:
-        if fits(model, "lora") and model.lora_base:
-            takes = "character" in model.options
-            return Choice(model.id, "lora", character=takes, lora=True, fallback=by_ref)
-    return by_ref
+    by_lora = next(
+        (
+            Choice(m.id, "lora", character="character" in m.options, lora=True, fallback=by_ref)
+            for m in ordered
+            if fits(m, "lora") and m.lora_base
+        ),
+        None,
+    )
+    by_name = next(
+        (
+            Choice(m.id, "known", character=True)
+            for m in ordered
+            if fits(m, "character") and knows(m, posts_before)
+        ),
+        None,
+    )
+    if force_lora and by_lora is not None and by_name is not None:
+        return replace(by_lora, fallback=by_name)
+    return by_name or by_lora or by_ref
 
 
 def build(

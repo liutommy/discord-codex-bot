@@ -1421,6 +1421,9 @@ async def test_character_refusals_never_ask_the_judge(service, client, monkeypat
         refused = CharacterInteraction()
         await client.image_command(refused, "貓", **{"character": "佩克拉", **kwargs})
         assert refused.messages == [(message, True)]
+    alone = CharacterInteraction()  # the switch without a character
+    await client.image_command(alone, "貓", force_lora=True)
+    assert alone.messages == [(bot_module.FORCE_LORA_ALONE, True)]
     unknown = CharacterInteraction()
     await client.image_command(unknown, "貓", character="佩克拉", model="nope")
     assert unknown.edits[-1]["content"].startswith("⚠️ 沒有「nope」這個圖片模型")

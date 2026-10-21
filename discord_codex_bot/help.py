@@ -173,6 +173,7 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "有選 model 就用它；沒選就用認得這個角色的模型（wai-illustrious、anima），"
         "都不認得時找 Civitai 上這個角色的 LoRA 加在 wai-illustrious，"
         "再找不到就把範例圖當成「照這個角色」來畫；生成中的訊息會說用了哪一種。"
+        "畫出來不像時，可以加上「強制lora」=True 重試：不管模型認不認得，都先找角色的 LoRA。"
         "character 不能和「照這個角色」一起用；找不到角色時改附角色圖到「照這個角色」。"
         "附「照這個角色」而沒選 model 時，改用服務另外設定的編輯模型；"
         "同時用到它不支援的選項（例如「改這張圖」「角色相似度」、negative）時仍用一般的預設模型。"
@@ -206,6 +207,7 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             "/{p}-image prompt:把背景換成夜晚的雪林，角色、姿勢、服裝維持不變"
             " model:qwen-image-2.1-turbo 照這個角色:（附上角色圖）",
             "/{p}-image prompt:在海邊散步 character:兔田佩克拉",
+            "/{p}-image prompt:在海邊散步 character:兔田佩克拉 強制lora:True",
         ],
     ),
     "-export": (
