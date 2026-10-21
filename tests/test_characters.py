@@ -362,6 +362,18 @@ def test_choose_keeps_the_options_the_member_set() -> None:
     )
 
 
+def test_members_lora_model_without_character_falls_back_to_the_sample() -> None:
+    """A chosen model that takes LoRAs and reference images but no character tag draws from the
+    sample when no LoRA is found or the service cannot get it."""
+    models = [
+        {"id": "z-image", "options": ["seed"]},
+        {"id": "lora-only", "options": ["lora", "ref_image"], "lora_base": "Illustrious"},
+    ]
+    got = choose(catalog(models=models), "lora-only", UNKNOWN)
+    by_sample = Choice("lora-only", "member", ref=True)
+    assert got == Choice("lora-only", "member", lora=True, fallback=by_sample)
+
+
 def test_choose_the_members_model() -> None:
     found = catalog()
     assert choose(found, "anima", UNKNOWN) == Choice("anima", "member", character=True)
@@ -500,8 +512,8 @@ async def test_find_lora_lets_the_judge_compare_previews(tmp_path) -> None:
     # At most LORA_CANDIDATES compared: 1, 3, 4 (2 unreadable); image 3 is the second of them.
     assert offer is not None and offer.version_id == 30
     assert judge.images[0][0] == reference and len(judge.images[0]) == 4
-    assert "2: Rei 1" in judge.prompts[0] and "4: Rei 4" in judge.prompts[0]
-    assert "Rei 5" not in judge.prompts[0]
+    # Pictures only: uploader-written names never reach the judge's prompt.
+    assert "Rei" not in judge.prompts[0] and "Images 2 to 4" in judge.prompts[0]
     for answer in ({"pick": 0}, {"pick": 1}, {"pick": 9}, "no", RuntimeError("down")):
         found = await characters.find_lora(
             "rei_(blue_archive)", "Illustrious", reference, FakeJudge(answer), web, schema, tmp_path
