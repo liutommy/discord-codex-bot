@@ -329,9 +329,11 @@ def choose(
     member_model: str,
     posts_before: dict[str, int],
     options: Sequence[str] = (),
+    enhance: str | None = None,
 ) -> Choice | None:
     """How to draw a confirmed character; None when nothing in the catalog can. `options` are
-    the ones the member's request sets (ImageRequest.options()); a model chosen here takes them all.
+    the ones the member's request sets (ImageRequest.options()) and `enhance` its value; a model
+    chosen here takes them all.
 
     - The member's model: as it is, with the character when it takes one, a LoRA first when it
       takes LoRAs and does not know the character; a model that takes neither but takes a
@@ -343,6 +345,8 @@ def choose(
     asked = [o for o in options if o not in ("character", "lora", "ref_image")]
 
     def fits(model: ImageModel, *needed: str) -> bool:
+        if enhance is not None and enhance not in model.enhancers:
+            return False
         return all(o in model.options for o in (*asked, *needed))
 
     first = catalog.get(catalog.default_model)

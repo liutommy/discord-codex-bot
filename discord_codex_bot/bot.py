@@ -3884,7 +3884,11 @@ class DiscordCodexClient(discord.Client):
         tag, picture = await self._confirm_character(interaction, name, found)
         character = imagegen.Character(tag, await characters.traits(tag, web))
         choice = characters.choose(
-            catalog, request.model, await characters.counts(tag, catalog, web), request.options()
+            catalog,
+            request.model,
+            await characters.counts(tag, catalog, web),
+            request.options(),
+            request.enhance,
         )
         no_way = ImageGenError(
             characters.NO_WAY.format(model=request.model or catalog.default_model),

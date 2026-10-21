@@ -362,6 +362,33 @@ def test_choose_keeps_the_options_the_member_set() -> None:
     )
 
 
+def test_choose_keeps_the_members_enhance_value() -> None:
+    """A model that knows the character but not the enhance value asked for is passed over."""
+    models = [
+        {"id": "z-image", "options": ["seed"]},
+        {
+            "id": "wai-illustrious",
+            "options": ["character", "enhance", "ref_image"],
+            "enhancers": ["local", "off"],
+            "knowledge": {"cutoff": "2024-03-01", "min_posts": 500},
+        },
+        {
+            "id": "anima",
+            "options": ["character", "enhance", "ref_image"],
+            "enhancers": ["local", "cloud", "off"],
+            "knowledge": {"cutoff": "2025-09-01", "min_posts": 150},
+        },
+    ]
+    found = catalog(models=models)
+    asked = ["character", "enhance"]
+    assert choose(found, "", KNOWN_BY_BOTH, asked, "cloud") == Choice(
+        "anima", "known", character=True
+    )
+    # Negative control: with an enhance value both take, the first model is chosen.
+    want = Choice("wai-illustrious", "known", character=True)
+    assert choose(found, "", KNOWN_BY_BOTH, asked, "local") == want
+
+
 def test_members_lora_model_without_character_falls_back_to_the_sample() -> None:
     """A chosen model that takes LoRAs and reference images but no character tag draws from the
     sample when no LoRA is found or the service cannot get it."""
