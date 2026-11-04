@@ -316,6 +316,11 @@ async def test_neuron_share_link_redirecting_elsewhere_is_not_followed(
     assert session.gets == [(_SHARE, False)]
 
 
+def _unknown_charset(response):
+    response.charset = "x-no-such-charset"  # bytes.decode raises LookupError for it
+    return response
+
+
 async def test_neuron_deck_page_is_refused_when_cut_off_or_not_a_deck(
     monkeypatch, config: Config
 ) -> None:
@@ -325,6 +330,7 @@ async def test_neuron_deck_page_is_refused_when_cut_off_or_not_a_deck(
         _NeuronResponse(200, html, _neuron_page() + b" " * config.link_max_bytes),  # cut off
         _NeuronResponse(200, html, b"<html><h1>error</h1></html>"),  # no deck tables
         _NeuronResponse(404, html, _neuron_page()),
+        _unknown_charset(_NeuronResponse(200, html, _neuron_page())),
     ):
         session = _NeuronSession({page: response})
         monkeypatch.setattr(links, "_guarded_session", lambda config, s=session: s)

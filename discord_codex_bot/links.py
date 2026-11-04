@@ -782,7 +782,12 @@ async def fetch_neuron_deck(url: str, config: Config) -> str | None:
     if len(raw) >= config.link_max_bytes:
         LOGGER.warning("Neuron deck page %s exceeds LINK_MAX_BYTES", page)
         return None  # a cut-off page would drop the last sections without a trace
-    deck = neuron.parse(raw.decode(charset or "utf-8", errors="replace"))
+    try:
+        text = raw.decode(charset or "utf-8", errors="replace")
+    except LookupError:  # a charset name Python does not know: the page is not one we expect
+        LOGGER.warning("Neuron deck page %s has an unknown charset", page)
+        return None
+    deck = neuron.parse(text)
     if deck is None:
         LOGGER.warning("Neuron deck page %s holds no deck list", page)
         return None
