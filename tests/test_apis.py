@@ -352,6 +352,7 @@ def test_shipped_registry_routes_yugioh_questions_to_their_sources() -> None:
     assert hosts == {"220.134.173.17", "www.db.yugioh-card.com"}
     assert any("ocg_list.asp?call_item=60&call_data=" in url for url in urls)  # by name (Big5)
     assert any("ocg_show.asp?call_no=" in url for url in urls)  # by card number
+    assert any("ocg_list.asp?call_item=13&call_data=" in url for url in urls)  # by passcode
     assert any("faq_search.action?ope=4&cid=<cid>" in url for url in urls)  # the card's Q&A
     assert "cp950" in ygocdb.doc  # how the model gets the Big5 escapes it must send
     assert "絕不自己推理或編造裁定" in ygocdb.doc
