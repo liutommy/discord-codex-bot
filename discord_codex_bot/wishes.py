@@ -222,6 +222,12 @@ class WishStore:
             )
             if not cursor.rowcount:
                 return None
+            # A queued status update about a wish the member took back is not sent.
+            connection.execute(
+                "UPDATE wish_notices SET state='failed', last_error='wish withdrawn' "
+                "WHERE wish_id=? AND state='pending'",
+                (wish_id,),
+            )
             return Wish(
                 **connection.execute("SELECT * FROM wishes WHERE id=?", (wish_id,)).fetchone()
             )
@@ -287,6 +293,14 @@ class WishStore:
                 (_now(), notice_id),
             )
 
+    def drop_notice(self, notice_id: int, reason: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE wish_notices SET state='failed', last_error=? "
+                "WHERE id=? AND state='pending'",
+                (reason[:500], notice_id),
+            )
+
     def mark_failed(self, notice_id: int, error: str) -> None:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -325,6 +339,9 @@ async def deliver_notices(
     held: set[int] = set()
     for notice in store.pending_notices():
         if notice.wish_id in held:
+            continue
+        if notice.wish.status == "withdrawn":  # withdrawn between the read above and now
+            store.drop_notice(notice.id, "wish withdrawn")
             continue
         try:
             await deliver(notice)
