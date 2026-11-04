@@ -54,6 +54,7 @@ def test_registers_only_expected_slash_commands(config: Config, tmp_path) -> Non
         "inmu-king-style",
         "inmu-king-model",
         "inmu-king-track",
+        "inmu-king-wish",
         "inmu-king-wishes",
         "inmu-king-linkclean",
         "inmu-king-embedfix",
@@ -72,9 +73,10 @@ WISH = (
 async def test_wish_tag_stores_and_deduplicates_with_member_message(client, backends):
     codex, _ = backends
     codex.replies = [f"記下了\n{WISH}"]
-    client.wish_settings.set_channel(GUILD, ALLOWED)
     for _ in range(2):
-        result = await client._answer("確認", [], GUILD, USER, channel_id=ALLOWED, message_id=123)
+        result = await client._answer(
+            "確認", [], GUILD, USER, channel_id=ALLOWED, message_id=123, wish=True
+        )
         assert "<wish" not in result.text
     [wish] = client.wishes.list()
     assert wish.original == "想搜尋舊貼文" and wish.need == "搜尋頻道歷史"
@@ -83,16 +85,15 @@ async def test_wish_tag_stores_and_deduplicates_with_member_message(client, back
     assert "這個願望已經記過了：#1" in result.text
 
 
-async def test_wish_tag_outside_channel_is_refused(client):
-    # No retry can move the conversation, so the member is told and the model is not asked again.
-    client.wish_settings.set_channel(GUILD, ALLOWED)
-    text, unread, refused = await client._apply_action_tags(WISH, GUILD, ALLOWED + 1, USER)
+async def test_wish_tag_outside_a_wish_conversation_is_refused(client):
+    # No retry can turn the conversation into a wish one, so the member is told and the model is
+    # not asked again.
+    text, unread, refused = await client._apply_action_tags(WISH, GUILD, ALLOWED, USER)
     assert client.wishes.list() == [] and "<wish" not in text and unread == []
-    assert refused == [] and "這裡不是許願頻道，願望沒有記下" in text
-    text, _, refused = await client._apply_action_tags(
-        WISH, None, ALLOWED, USER, in_wish_channel=True
-    )
-    assert client.wishes.list() == [] and refused == [] and "不是許願頻道" in text
+    assert refused == [] and "這段對話不是許願對話，願望沒有記下" in text
+    assert "請用 /codex-wish 開始許願" in text
+    text, _, refused = await client._apply_action_tags(WISH, None, ALLOWED, USER, wish_mode=True)
+    assert client.wishes.list() == [] and refused == [] and "不是許願對話" in text
 
 
 async def test_a_bare_wish_name_in_prose_is_not_an_order(client):
@@ -100,37 +101,55 @@ async def test_a_bare_wish_name_in_prose_is_not_an_order(client):
     # could record the wish before the member confirms (Claude review on PR #89).
     prose = "確認後我會用 <wish> 幫你記錄，要送出嗎？也可以 <cancel_wish/> 撤回。"
     text, unread, refused = await client._apply_action_tags(
-        prose, GUILD, ALLOWED, USER, in_wish_channel=True
+        prose, GUILD, ALLOWED, USER, wish_mode=True
     )
     assert client.wishes.list() == [] and refused == [] and unread == []
     assert "<wish>" in text and "<cancel_wish/>" in text
 
 
-async def test_wishlist_thread_counts_and_prompt_only_lists_speakers_open_wishes(client, backends):
+async def test_wish_mode_follows_the_conversation_and_lists_only_speakers_open_wishes(
+    client, backends
+):
     codex, _ = backends
-    client.wish_settings.set_channel(GUILD, ALLOWED)
     client.wishes.add(GUILD, ALLOWED, None, USER + 1, "別人的", "另一原話", "需求", "可行")
     closed, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "結案的", "結案原話", "需求", "可行")
     client.wishes.set_status(closed.id, "done")
     client.wishes.add(GUILD + 1, ALLOWED, None, USER, "別服的", "原話", "需求", "可行")
     codex.replies = [WISH, "答案"]
-    thread = types.SimpleNamespace(id=555, parent_id=ALLOWED)
-    result = await client._answer(
-        "確認", [], GUILD, USER, channel_id=555, conversation_channel=thread
+    result = await client._answer("確認", [], GUILD, USER, channel_id=555, wish=True)
+    assert (
+        "已記下願望" in result.text
+        and "這段對話由成員以許願指令開啟" in codex.calls[0][2]["memory"]
     )
-    assert "已記下願望" in result.text
+    assert result.thread_id == "t1" and client.wishes.is_wish_thread("t1")
     [wish] = client.wishes.list(guild_id=GUILD, statuses=("open",), user_id=USER)
     assert wish.channel_id == 555 and wish.message_id is None
-    await client._answer("進度", [], GUILD, USER, channel_id=ALLOWED)
+    # A later turn resuming the marked thread is a wish turn, and the id it ends on (a backend
+    # may hand back a new one) is marked too, so the turn after that still is one.
+    result = await client._answer("進度", [], GUILD, USER, channel_id=ALLOWED, resume="t1")
     section = codex.calls[-1][2]["memory"].split("[許願池]\n")[1]
     assert f"#{wish.id} 「貼文搜尋」（待評估）" in section
     assert all(title not in section for title in ("別人的", "結案的", "別服的"))
-    await client._answer("進度", [], GUILD, USER + 2, channel_id=ALLOWED)
+    assert result.thread_id == "t2" and client.wishes.is_wish_thread("t2")
+    codex.replies = [WISH]
+    result = await client._answer("確認", [], GUILD, USER + 2, channel_id=ALLOWED, resume="t2")
     assert "你目前沒有還沒結案的願望" in codex.calls[-1][2]["memory"]
-    await client._answer("進度", [], GUILD, USER, channel_id=556)
-    assert "[許願池]" not in codex.calls[-1][2]["memory"]
-    client.wish_settings.set_channel(GUILD, None)
-    await client._answer("進度", [], GUILD, USER, channel_id=ALLOWED)
+    assert "已記下願望" in result.text and len(client.wishes.list(user_id=USER + 2)) == 1
+    # A routed conversation moved to another backend resumes nothing; its earlier threads still
+    # make it a wish conversation.
+    await client._answer("進度", [], GUILD, USER, channel_id=ALLOWED, earlier_threads=("t1",))
+    assert "[許願池]" in codex.calls[-1][2]["memory"]
+    # An ordinary conversation is not: no section, and a wish tag is only noted, never retried.
+    calls = len(codex.calls)
+    codex.replies = [WISH]
+    result = await client._answer("確認", [], GUILD, USER, channel_id=ALLOWED, resume="t-plain")
+    assert len(codex.calls) == calls + 1 and "[許願池]" not in codex.calls[-1][2]["memory"]
+    assert "這段對話不是許願對話" in result.text and not client.wishes.is_wish_thread(
+        result.thread_id
+    )
+    assert len(client.wishes.list(guild_id=GUILD, user_id=USER)) == 2  # 貼文搜尋 and 結案的
+    # Outside a guild there is no wish mode, even when asked for.
+    await client._answer("進度", [], None, USER, wish=True)
     assert "[許願池]" not in codex.calls[-1][2]["memory"]
 
 
@@ -139,12 +158,12 @@ async def test_wish_cancel_is_owned_and_guild_scoped(client):
     tag = f'<cancel_wish id="{wish.id}"/>'
     for guild, user in ((GUILD, USER + 1), (GUILD + 1, USER)):
         text, unread, refused = await client._apply_action_tags(
-            tag, guild, ALLOWED, user, in_wish_channel=True
+            tag, guild, ALLOWED, user, wish_mode=True
         )
         assert "找不到你的願望 #1" in text and unread == refused == []
         assert client.wishes.get(wish.id).status == "open"
     text, unread, refused = await client._apply_action_tags(
-        tag, GUILD, ALLOWED, USER, in_wish_channel=True
+        tag, GUILD, ALLOWED, USER, wish_mode=True
     )
     assert "已撤回願望 #1" in text and unread == refused == []
     assert client.wishes.get(wish.id).status == "withdrawn"
@@ -154,7 +173,7 @@ async def test_wish_cancel_is_owned_and_guild_scoped(client):
 @pytest.mark.parametrize("wrapped", [f"```\n{WISH}\n```", f"> {WISH}", f"`{WISH}`"])
 async def test_shown_wishes_are_not_stored(client, wrapped):
     text, unread, refused = await client._apply_action_tags(
-        wrapped, GUILD, ALLOWED, USER, in_wish_channel=True
+        wrapped, GUILD, ALLOWED, USER, wish_mode=True
     )
     assert text == wrapped and unread == refused == [] and client.wishes.list() == []
 
@@ -162,8 +181,9 @@ async def test_shown_wishes_are_not_stored(client, wrapped):
 async def test_wish_attribute_refusal_is_retried_once(client, backends):
     codex, _ = backends
     codex.replies = [WISH.replace('title="貼文搜尋"', 'title=""'), WISH]
-    client.wish_settings.set_channel(GUILD, ALLOWED)
-    result = await client._answer("確認", [], GUILD, USER, channel_id=ALLOWED, message_id=123)
+    result = await client._answer(
+        "確認", [], GUILD, USER, channel_id=ALLOWED, message_id=123, wish=True
+    )
     assert len(codex.calls) == 2 and "<TAG_ERRORS>" in codex.calls[1][0]
     assert "title" in codex.calls[1][0] and "已記下願望 #1" in result.text
     assert client.wishes.list()[0].message_id == 123
@@ -176,7 +196,7 @@ async def test_wish_refusals_are_told_to_the_member_and_sent_back_to_the_model(c
         (WISH.replace("貼文搜尋", "長" * 61), "title", "超出長度限制"),
     ):
         text, unread, refused = await client._apply_action_tags(
-            tag, GUILD, ALLOWED, USER, in_wish_channel=True
+            tag, GUILD, ALLOWED, USER, wish_mode=True
         )
         assert attribute in refused[0] and unread == [] and tag not in text and note in text
     assert client.wishes.list() == []
@@ -187,9 +207,7 @@ async def test_alternatives_may_be_left_out_and_any_number_of_wishes_is_recorded
     four = "\n".join(
         bare.replace("貼文搜尋", f"標題{i}").replace("想搜尋舊貼文", f"原話{i}") for i in range(4)
     )
-    _, _, refused = await client._apply_action_tags(
-        four, GUILD, ALLOWED, USER, in_wish_channel=True
-    )
+    _, _, refused = await client._apply_action_tags(four, GUILD, ALLOWED, USER, wish_mode=True)
     wishes = client.wishes.list()
     assert refused == [] and len(wishes) == 4 and {w.alternatives for w in wishes} == {""}
 
@@ -266,10 +284,7 @@ async def test_wishes_command_filters_and_suppresses_mentions(client):
         response=types.SimpleNamespace(send_message=send),
     )
     await client.wishes_command(interaction)
-    assert sent[-1][0] == "這個伺服器還沒有設定許願頻道。"
-    client.wish_settings.set_channel(GUILD, ALLOWED)
-    await client.wishes_command(interaction)
-    assert sent[-1][0].startswith("目前沒有還沒結案的願望。")
+    assert sent[-1][0] == "目前沒有還沒結案的願望。\n用 /codex-wish 許願。"
     client.wishes.add(GUILD, ALLOWED, None, USER, "**我的**", "原話", "需求", "可行")
     client.wishes.add(GUILD, ALLOWED, None, USER + 1, "別人的", "原話", "需求", "可行")
     closed, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "結案", "不同原話", "需求", "可行")
@@ -281,12 +296,65 @@ async def test_wishes_command_filters_and_suppresses_mentions(client):
     await client.wishes_command(interaction, mine=True)
     text, kw = sent[-1]
     assert f"#1「\\*\\*我的\\*\\*」・待評估・<@{USER}>" in text
-    assert "別人的" not in text and text.endswith(f"許願頻道：<#{ALLOWED}>")
+    assert "別人的" not in text and text.endswith("用 /codex-wish 許願。")
     command = client.tree.get_command("codex-wishes")
     assert command.parameters[0].display_name == "只看我的"
     interaction.guild_id = None
     await client.wishes_command(interaction)
     assert sent[-1][0] == "只能在伺服器中使用。"
+
+
+async def test_wish_command_opens_a_wish_conversation_that_replies_continue(
+    client, backends, monkeypatch
+):
+    codex, _ = backends
+    codex.replies = ["請問要搜尋哪些頻道？" + "長" * 2000]
+    key = client.threads.key(GUILD, ALLOWED, USER)
+    model = client._model(GUILD, USER)
+    client.threads.remember(key, "t-old", 100, plain=False, model=model)
+    edits, followups, refusals, deferred = [], [], [], []
+
+    async def defer(thinking=False):
+        deferred.append(thinking)
+
+    async def send_message(text, ephemeral=False):
+        refusals.append((text, ephemeral))
+
+    async def edit_original_response(content=None, view=None, attachments=None):
+        edits.append(content)
+        return types.SimpleNamespace(id=999)
+
+    async def send(text, **kw):
+        followups.append(text)
+
+    async def run_tracked(key, owner, show, start):
+        return await start(None, None)
+
+    monkeypatch.setattr(client, "_run_tracked", run_tracked)
+    interaction = types.SimpleNamespace(
+        guild_id=GUILD,
+        channel_id=ALLOWED,
+        channel=types.SimpleNamespace(id=ALLOWED),
+        user=types.SimpleNamespace(id=USER),
+        response=types.SimpleNamespace(defer=defer, send_message=send_message),
+        followup=types.SimpleNamespace(send=send),
+        edit_original_response=edit_original_response,
+    )
+    await client.wish_command(interaction, "  想搜尋 @everyone 的舊貼文  ")
+    _, _, kw = codex.calls[0]
+    # A new conversation in wish mode, never the member's ongoing one.
+    assert kw["resume"] == "" and "[許願池]" in kw["memory"] and deferred == [True]
+    assert edits[-1].startswith("**問**（許願") and "\n> 想搜尋 @everyone 的舊貼文\n" in edits[-1]
+    assert followups and all(len(chunk) <= 2000 for chunk in [edits[-1], *followups])
+    # Replying to the answer, or asking again in the channel, continues the marked thread.
+    assert client.threads.by_message(999, plain=False, model=model) == "t1"
+    assert client.threads.current(key, plain=False, model=model) == "t1"
+    assert client.wishes.is_wish_thread("t1") and not client.wishes.is_wish_thread("t-old")
+    command = client.tree.get_command("codex-wish")
+    assert command.parameters[0].display_name == "需求" and command.parameters[0].required
+    interaction.guild_id = None
+    await client.wish_command(interaction, "想要")
+    assert refusals[-1] == ("只能在伺服器中使用。", True) and len(codex.calls) == 1
 
 
 class _FakeChannel:

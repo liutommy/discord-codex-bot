@@ -90,25 +90,12 @@ async def wish_status(client: Any, args: dict) -> dict:
     }
 
 
-async def wish_channel(client: Any, args: dict) -> dict:
-    if args.get("clear") and "channel" in args:
-        raise Rejected("--channel 與 --clear 只能擇一。")
-    settings = client.wish_settings
-    if args.get("clear") or "channel" in args:
-        # The reserved channel argument has already passed check_context.
-        settings.set_channel(args["guild"], None if args.get("clear") else args["channel"])
-    channel = settings.channel(args["guild"])
-    text = f"許願頻道：{channel}" if channel else "這個伺服器還沒有設定許願頻道。"
-    return {"text": text, "guild": args["guild"], "channel": channel}
-
-
 HANDLERS: dict[str, Handler] = {
     "wish.list": wish_list,
     "wish.show": wish_show,
     "wish.status": wish_status,
-    "wish.channel": wish_channel,
 }
-GROUPS = {"wish": "許願池：list、show、status、channel"}
+GROUPS = {"wish": "許願池：list、show、status"}
 SCHEMAS: dict[str, dict] = {
     "wish.list": {
         "help": "列出願望，預設列出允許伺服器中尚未結案的願望",
@@ -141,19 +128,6 @@ SCHEMAS: dict[str, dict] = {
                 "stdin": True,
                 "help": "開發者說明；通知由 Bot 的迴圈投遞",
             },
-        },
-    },
-    "wish.channel": {
-        "help": "查詢、指定或清除伺服器的許願頻道",
-        "examples": [
-            f"wish channel {EG} --channel 234567890123456789",
-            f"wish channel {EG}",
-            f"wish channel {EG} --clear",
-        ],
-        "args": {
-            "guild": {**GUILD, "required": True},
-            "channel": {"type": "id", "help": "屬於該伺服器且通過開放檢查的頻道"},
-            "clear": {"type": "bool", "help": "關閉許願池"},
         },
     },
 }

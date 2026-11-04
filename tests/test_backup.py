@@ -64,6 +64,7 @@ def test_backup_includes_wishes_and_notices_from_wal(tmp_path: Path, config) -> 
     store = WishStore(home / WISH_DB)
     wish, _ = store.add(1, 2, 3, 4, "標題", "原話", "需求", "可行")
     store.set_status(wish.id, "accepted", "說明")
+    store.mark_thread("t1", 1, 4)
     SwitchStore(home / "linkclean.sqlite3")._put(1, "wish_channel", "2")
     cfg = replace(config, codex_home=home, backup_dir=tmp_path / "backups")
     target = make_backup(cfg)
@@ -73,6 +74,7 @@ def test_backup_includes_wishes_and_notices_from_wal(tmp_path: Path, config) -> 
         restored.write_bytes(tar.extractfile(WISH_DB).read())
     restored_store = WishStore(restored)
     assert restored_store.get(wish.id).status == "accepted"
+    assert restored_store.is_wish_thread("t1")
     assert restored_store.pending_notices()[0].note == "說明"
 
 

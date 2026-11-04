@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .linkclean import SwitchStore
-
 LOGGER = logging.getLogger(__name__)
 WISH_DB = "wishes.sqlite3"
 MAX_NOTICE_ATTEMPTS = 5
@@ -66,6 +64,12 @@ CREATE TABLE IF NOT EXISTS wish_notices (
     delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS wish_notices_state_id ON wish_notices(state, id);
+CREATE TABLE IF NOT EXISTS wish_threads (
+    thread_id TEXT PRIMARY KEY,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -260,6 +264,27 @@ class WishStore:
                 **connection.execute("SELECT * FROM wishes WHERE id=?", (wish_id,)).fetchone()
             )
 
+    def mark_thread(self, thread_id: str, guild_id: int, user_id: int) -> None:
+        """Record `thread_id` as part of a wish conversation. The first record of a thread is
+        kept: a member continuing another member's wish conversation does not take it over."""
+        if not thread_id:
+            return
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO wish_threads (thread_id, guild_id, user_id, created_at) "
+                "VALUES (?,?,?,?)",
+                (thread_id, guild_id, user_id, _now()),
+            )
+
+    def is_wish_thread(self, thread_id: str) -> bool:
+        if not thread_id:
+            return False
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM wish_threads WHERE thread_id=?", (thread_id,)
+            ).fetchone()
+            return row is not None
+
     @staticmethod
     def _notice(connection: sqlite3.Connection, row: sqlite3.Row) -> WishNotice:
         wish = Wish(
@@ -316,20 +341,6 @@ class WishStore:
                 LOGGER.warning(
                     "Wish notice %s failed after %s attempts", notice_id, MAX_NOTICE_ATTEMPTS
                 )
-
-
-class WishSettings:
-    """The designated channel, in the existing guild settings database; absent means off."""
-
-    def __init__(self, switches: SwitchStore) -> None:
-        self.switches = switches
-
-    def channel(self, guild_id: int) -> int | None:
-        value = self.switches._get(guild_id, "wish_channel")
-        return int(value) if value else None
-
-    def set_channel(self, guild_id: int, channel_id: int | None) -> None:
-        self.switches._put(guild_id, "wish_channel", str(channel_id) if channel_id else "")
 
 
 async def deliver_notices(
