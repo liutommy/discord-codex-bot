@@ -46,13 +46,21 @@ _TOTALS = {
 }
 
 
+def _no_port(parts) -> bool:
+    """No port written; a malformed one (":abc", ":99999") makes .port raise and is not ours."""
+    try:
+        return parts.port is None
+    except ValueError:
+        return False
+
+
 def share_link(url: str) -> bool:
     """True for a Neuron deck share link."""
     parts = urlsplit(url)
     return (
         parts.scheme in ("http", "https")
         and (parts.hostname or "") == SHARE_HOST
-        and parts.port is None
+        and _no_port(parts)
         and bool(_SHARE_PATH.fullmatch(parts.path))
     )
 
@@ -66,7 +74,7 @@ def deck_page(url: str) -> str:
     if (
         parts.scheme not in ("http", "https")
         or (parts.hostname or "") != DB_HOST
-        or parts.port is not None
+        or not _no_port(parts)
         or parts.path != DECK_PATH
     ):
         return ""

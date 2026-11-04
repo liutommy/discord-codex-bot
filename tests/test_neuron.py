@@ -344,3 +344,15 @@ async def test_fetch_or_render_falls_back_to_the_page_when_the_deck_cannot_be_re
     monkeypatch.setattr(links, "fetch_neuron_deck", no_deck)
     monkeypatch.setattr(links, "fetch_link", fake_fetch)
     assert await fetch_or_render(_SHARE, config, None) == ("generic page", [])
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://neuron.konami.net:abc/link/abcdefgh",
+        "https://neuron.konami.net:99999/link/abcdefgh",
+        "https://www.db.yugioh-card.com:x/yugiohdb/member_deck.action?ope=1&cgid=ab&dno=1",
+    ],
+)
+def test_a_malformed_port_is_not_a_deck_link_and_does_not_raise(url) -> None:
+    assert not neuron.is_deck_link(url)
