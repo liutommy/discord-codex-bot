@@ -17,7 +17,7 @@ import aiohttp
 from aiohttp.resolver import ThreadedResolver
 from yarl import URL
 
-from . import clearurls, gemini, tags, xsearch
+from . import clearurls, gemini, neuron, tags, xsearch
 from .config import Config, IPNetwork
 from .fetchproxy import FilterProxy
 
@@ -748,6 +748,47 @@ async def fetch_x_status(
     return "\n".join(lines), images
 
 
+_REDIRECTS = (301, 302, 303, 307, 308)
+
+
+async def fetch_neuron_deck(url: str, config: Config) -> str | None:
+    """A Yu-Gi-Oh! Neuron share link or deck page as the exact deck list (`neuron.render`).
+
+    A share link is resolved by reading its redirect without following it; only a redirect to
+    the card database's member_deck page is taken, and that one page is fetched (Japanese,
+    no further redirects, bounded by LINK_MAX_BYTES). None when any step fails or the page
+    holds no deck, so the caller falls back to the generic fetch."""
+    page = neuron.deck_page(url)
+    try:
+        async with _guarded_session(config) as session:
+            if not page:
+                async with session.get(url, allow_redirects=False) as response:
+                    location = response.headers.get("Location", "")
+                    if response.status in _REDIRECTS and location:
+                        page = neuron.deck_page(urljoin(url, location))
+                if not page:
+                    LOGGER.warning("Neuron link %s did not redirect to a deck page", url)
+                    return None
+            async with session.get(page, allow_redirects=False) as response:
+                content_type = response.headers.get("Content-Type", "")
+                if response.status != 200 or "html" not in content_type:
+                    LOGGER.warning("Neuron deck page %s: HTTP %s", page, response.status)
+                    return None
+                raw = await _read_bounded(response, config.link_max_bytes)
+                charset = response.charset
+    except (aiohttp.ClientError, TimeoutError) as error:
+        LOGGER.warning("Neuron deck %s failed: %s", url, type(error).__name__)
+        return None
+    if len(raw) >= config.link_max_bytes:
+        LOGGER.warning("Neuron deck page %s exceeds LINK_MAX_BYTES", page)
+        return None  # a cut-off page would drop the last sections without a trace
+    deck = neuron.parse(raw.decode(charset or "utf-8", errors="replace"))
+    if deck is None:
+        LOGGER.warning("Neuron deck page %s holds no deck list", page)
+        return None
+    return neuron.render(deck)
+
+
 async def link_blocks(
     urls: list[str],
     config: Config,
@@ -1008,13 +1049,18 @@ async def fetch_or_render(
     preview: Preview | None = None,
     x_lookup: bool = False,
 ) -> tuple[str, list[Path]]:
-    """(text, images): X posts through the API; otherwise plain fetch first, Chromium when that
-    cannot read the page (or when the model asked for the rendered page), and only when the site
-    itself cannot be read at all, the Discord preview the message carried.
+    """(text, images): Neuron deck links as the deck list, X posts through the API; otherwise
+    plain fetch first, Chromium when that cannot read the page (or when the model asked for the
+    rendered page), and only when the site itself cannot be read at all, the Discord preview the
+    message carried.
 
     `x_lookup`: an X post fxtwitter cannot serve may fall back to the X lookup sidecar — one
     Grok session on the operator's plan — so only for links a member posted, never for page
     tracking or the model's own <fetch> requests."""
+    if neuron.is_deck_link(url):
+        deck = await fetch_neuron_deck(url, config)
+        if deck is not None:
+            return deck, []
     user, post_id = x_status(url)
     if post_id:
         post = await fetch_x_status(url, config, out_dir)
