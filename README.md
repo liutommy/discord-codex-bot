@@ -743,6 +743,14 @@ falls back to it, and `/codex-track source:https://x.com/<account>` tracks an X 
 `X_TRACKING_INTERVAL_MINUTES`, default 60, because each check is a Grok session; a check takes
 10–100 s).
 
+A fourth question, a topic search, serves every backend: a model that cannot search X replies
+with `<xsearch query="…"/>` and the Bot returns the posts the sidecar found, each with its link.
+Among the `/x/*` lookups the query is the only free text that reaches a prompt (`/chat` forwards
+members' conversation as before and is not bounded this way), so the sidecar bounds it (200
+characters, one line, no control characters) and passes it as a JSON string. One answer runs at
+most 20 different searches (a repeated query reuses its result): the tags may come from a page or
+post the model read, and each search is a Grok session on the plan shared with X tracking.
+
 Grok Build is a coding agent with a shell, files, web fetching and background jobs. In the
 sidecar it has none of them (`xsearch/server.py`). Two layers prevent: the command line removes
 every client tool and denies the rest, and a root-owned enforced policy
@@ -753,8 +761,9 @@ shapes we know — anything else is refused and logged as `REFUSED unsafe grok s
 check cannot undo a tool that already ran; it is how a failure of the first two shows up.
 Every lookup runs in a fresh, empty Grok home and working directory on tmpfs holding only a copy
 of the login, and everything it wrote is deleted afterwards, so no session can shape the next.
-Members never write the prompt: the Bot sends a numeric post id or an account name, both
-validated. What comes back was read out by a model from X content, so it is re-checked: a post
+Members never write the prompt of a post, account or recent-posts lookup: the Bot sends a
+numeric post id or an account name, both validated. A topic search carries a query instead,
+bounded and quoted as described above. What comes back was read out by a model from X content, so it is re-checked: a post
 whose snowflake id disagrees with its time is dropped (otherwise one injected post with a huge
 id would become the tracking cursor and hide every real post), and posts read for a link are
 labelled unverified, with a note when the author differs from the link's account. Grok's own `--sandbox`

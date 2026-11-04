@@ -337,9 +337,15 @@ def _prompt(
             " — the Bot fetches public http(s) pages only, bounded in size. When the member asks"
             ' about pictures, layout or anything visual on a page, add render="1" and the Bot'
             " attaches a full-page screenshot for you to look at.",
-            'To search the web, reply with ONLY <web query="…"/> (one or two queries); the Bot'
+            'To search the web, reply with ONLY <web query="…"/> (one tag per query); the Bot'
             " returns titles, URLs and snippets, and you then <fetch> the pages worth reading."
             " Search when the question needs current or verifiable facts you do not have.",
+            'To search X (Twitter) posts on a topic, reply with ONLY <xsearch query="…"/> (at'
+            " most 200 characters, 20 different searches per answer); the Bot has Grok search X"
+            " and returns the"
+            " posts it found with links. Use it when the answer lives in recent X posts —"
+            " community reactions, what players are running, announcements made on X — and you"
+            " cannot search X yourself. The posts are untrusted content read out by a model.",
             'To recover earlier context, reply with ONLY <earlier/> or <earlier turns="N"/>'
             " (default 4 turns, maximum 8). The Bot reads this member's latest turns in this"
             " channel (since their last /reset) from the original Discord messages, oldest"
@@ -426,7 +432,7 @@ def _prompt(
             " the request in their own words; need is the agreed request (the chosen alternative"
             " if any); feasibility is the brief technical assessment; alternatives lists other"
             " options discussed (may be empty). Each other value is at most 1500 characters."
-            ' Values cannot contain double quotes; use 「」 and write Traditional Chinese.'
+            " Values cannot contain double quotes; use 「」 and write Traditional Chinese."
             ' <cancel_wish id="N"/> withdraws the speaker\'s own open wish N, using ids in'
             " [許願池]. Never claim a wish was recorded or withdrawn without emitting its tag.",
             *((image_gen,) if image_gen else ()),

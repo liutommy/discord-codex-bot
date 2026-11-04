@@ -12,11 +12,46 @@ from collections import deque
 
 import aiohttp
 
+from . import tags
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
 POST_ID = re.compile(r"[0-9]{1,19}")  # fullmatch: ASCII digits only, below 2**63
 HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
+
+
+# A model's request for X search, answered by the Bot for every backend (bot.py read loop).
+XSEARCH_TAG = re.compile(r'<xsearch\s+query="([^"]{1,200})"\s*/?>(?:\s*</xsearch>)?')
+
+
+def extract_xsearch_queries(answer: str) -> list[str]:
+    seen: list[str] = []
+    for query in tags.findall(XSEARCH_TAG, answer):
+        query = " ".join(query.split())
+        if query and query not in seen:
+            seen.append(query)
+    return seen
+
+
+def _link_handle(post: dict) -> str:
+    """The author for a post link, or `i` (x.com/i/status/<id> works for any author) when the
+    model read out no handle or one that is not an X username."""
+    handle = str(post.get("author_handle") or "")
+    return handle if HANDLE.fullmatch(handle) else "i"
+
+
+def render_search(query: str, posts: list[dict] | None, error: str = "") -> str:
+    """The RESULT block for one <xsearch>; every post is X content read out by a model."""
+    if posts is None:
+        body = f"（X 搜尋無法使用：{error}）" if error else "（X 搜尋無法使用）"
+    elif not posts:
+        body = "（X 搜尋沒有找到相關貼文）"
+    else:
+        body = "\n\n".join(
+            f"{post_text(post)}\nhttps://x.com/{_link_handle(post)}/status/{post.get('id', '')}"
+            for post in posts
+        )
+    return f'<RESULT kind="xsearch" query="{query}">\n{body}\n</RESULT>'
 
 
 def is_post_id(value: str) -> bool:
@@ -27,6 +62,12 @@ def is_post_id(value: str) -> bool:
 # many per rolling hour from the link path (tracking has its own interval).
 POST_LOOKUPS_PER_HOUR = 30
 _post_lookups: deque[float] = deque()
+MAX_QUERY_CHARS = 200  # the sidecar's own bound (xsearch/server.py)
+# Distinct searches in one answer. Each is a Grok session on the operator's plan, shared with X
+# tracking, and the tags may come from a page or post the model read rather than from the member:
+# without a bound one question could spend hundreds of sessions. The most <web> searches seen in
+# one answer on 2026-11-04 was 8.
+MAX_SEARCHES_PER_ANSWER = 20
 
 
 class XSearchError(RuntimeError):
@@ -129,6 +170,15 @@ async def recent_posts(
     page = Page(post for post in answer.get("posts") or [] if isinstance(post, dict))
     page.full = answer["full"] if isinstance(answer.get("full"), bool) else None
     return page
+
+
+async def search_posts(config: Config, query: str, limit: int = 8) -> list[dict]:
+    """Posts X search finds about `query`, as the model in the sidecar read them out."""
+    query = " ".join(query.split())
+    if not 1 <= len(query) <= MAX_QUERY_CHARS:
+        raise ValueError(f"an X search query is 1-{MAX_QUERY_CHARS} characters")
+    answer = await _ask(config, "search", {"query": query, "limit": limit})
+    return [post for post in answer.get("posts") or [] if isinstance(post, dict)]
 
 
 async def lookup_user(config: Config, handle: str) -> dict | None:

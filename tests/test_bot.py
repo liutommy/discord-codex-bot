@@ -2170,6 +2170,170 @@ async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monke
     assert "1. 士林夜市 — https://s.example" in calls[1]
 
 
+async def test_recall_loop_runs_x_searches_for_a_model_that_cannot_search_x(
+    client, monkeypatch
+) -> None:
+    # 2026-11-04: Jev sends "最近遊戲王上位牌組" to live-web (Codex), which had no way to read X.
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+    from discord_codex_bot.bot import request_only
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+    assert request_only('<xsearch query="遊戲王 上位牌組"/>')
+    replies = iter(
+        [
+            CodexResult('<xsearch query="遊戲王 上位牌組"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls, asked = [], []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    async def fake_search(config, query, limit=8):
+        asked.append(query)
+        return [
+            {
+                "id": "2105070184717262858",
+                "author_handle": "ygo_news",
+                "author_name": "YGO",
+                "created_at": "2026-09-29T23:00:17Z",
+                "text": "冠軍牌組是 <@&1> 某某",
+            }
+        ]
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(xsearch_module, "search_posts", fake_search)
+    result = await client._answer("最近遊戲王上位牌組", [], GUILD, USER)
+    assert result.text == "答案" and asked == ["遊戲王 上位牌組"]
+    assert '<RESULT kind="xsearch" query="遊戲王 上位牌組">' in calls[1]
+    assert "https://x.com/ygo_news/status/2105070184717262858" in calls[1]
+    assert "未經驗證" in calls[1]
+
+
+async def test_a_repeated_x_search_in_one_answer_reuses_the_first_result(
+    client, monkeypatch
+) -> None:
+    # Each search is a Grok session on the operator's plan; a resent query must not start another.
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+    replies = iter(
+        [
+            CodexResult('<xsearch query="q"/>', (), None, "t1", False),
+            CodexResult('<xsearch query="q"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls, asked = [], []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    async def fake_search(config, query, limit=8):
+        asked.append(query)
+        return []
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(xsearch_module, "search_posts", fake_search)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案" and asked == ["q"]
+    assert "沿用當時的結果" in calls[2] and "沿用當時的結果" not in calls[1]
+
+
+async def test_x_searches_in_one_answer_stop_at_the_answer_budget(client, monkeypatch) -> None:
+    # A fetched page can tell the model to send hundreds of searches; each is a Grok session.
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+    monkeypatch.setattr(xsearch_module, "MAX_SEARCHES_PER_ANSWER", 3)
+    many = "\n".join(f'<xsearch query="q{i}"/>' for i in range(5))
+    replies = iter(
+        [
+            CodexResult(many, (), None, "t1", False),
+            CodexResult('<xsearch query="q0"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls, asked = [], []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    async def fake_search(config, query, limit=8):
+        asked.append(query)
+        return []
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(xsearch_module, "search_posts", fake_search)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案" and asked == ["q0", "q1", "q2"]
+    assert calls[1].count("已達 3 次上限") == 2  # q3 and q4 told why, not silently dropped
+    assert "沿用當時的結果" in calls[2]  # a repeat of a served query still costs nothing
+
+
+async def test_x_search_without_a_sidecar_is_answered_with_the_reason(client, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+    from discord_codex_bot.bot import unserved_reads
+
+    client.config = replace(client.config, xsearch_url="")
+    assert unserved_reads('<xsearch query="q"/>', client.config, False) == [
+        "<xsearch>: X search is not available here; use <web> instead"
+    ]
+    on = replace(client.config, xsearch_url="http://xsearch:8080")
+    two = '<xsearch query="a"/>\n<xsearch query="b"/>'
+    assert unserved_reads(two, on, False) == []  # every search asked for is carried out
+
+    async def never(*args, **kw):  # pragma: no cover - must not run without a sidecar
+        raise AssertionError("searched X without a sidecar")
+
+    monkeypatch.setattr(xsearch_module, "search_posts", never)
+    replies = iter(
+        [
+            CodexResult('<xsearch query="q"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls = []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案" and "X search is not available here" in calls[1]
+
+
+async def test_a_failed_x_search_tells_the_model_instead_of_ending_the_answer(
+    client, monkeypatch
+) -> None:
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+
+    async def failing(config, query, limit=8):
+        raise xsearch_module.XSearchError("X lookup search failed: HTTP 402")
+
+    monkeypatch.setattr(xsearch_module, "search_posts", failing)
+    block = await client._x_search("q", GUILD, USER)
+    assert block.startswith('<RESULT kind="xsearch" query="q">')
+    assert "X 搜尋無法使用：X lookup search failed: HTTP 402" in block
+
+
 def test_remember_button_uses_the_guild_custom_emoji_when_present(client, monkeypatch) -> None:
     from types import SimpleNamespace as NS
 
@@ -2419,7 +2583,7 @@ async def test_unserved_reads_go_back_as_results_not_to_the_member(
     assert result.text == "答案"
     second = codex.calls[1][0]
     assert f"{broken}: not in the documented form" in second and "no sandbox here" in second
-    assert queries == ["q0", "q1"] and "only the first 2" in codex.calls[2][0]
+    assert queries == ["q0", "q1", "q2"] and "only the first" not in codex.calls[2][0]
 
 
 async def test_read_requests_past_a_limit_or_written_as_a_body_are_answered(

@@ -482,11 +482,12 @@ READ_TAGS = (
     sandbox.RUN_TAG,
     apis.API_TAG,
     earlier.EARLIER_TAG,
+    xsearch.XSEARCH_TAG,
 )
 # A read tag in a shape its parser does not take. Still a request — answered with the reason, so
 # the model can send it again — never an answer to post with the raw tag in it.
 _READ_ATTRS = r'(?:(?:[^<>"]|"[^"]{0,2000}"){0,4000}|[^<>]{0,2500})'  # stray quote: the plain one
-_READ_NAME = r"(?:search|recall|fetch|web|api|earlier)(?![a-z_])"
+_READ_NAME = r"(?:search|recall|fetch|web|api|earlier|xsearch)(?![a-z_])"
 BROKEN_READ = re.compile(
     # A <run> body goes to its </run> but never past the next <run>: an answer full of unclosed
     # ones would otherwise be read to the end again from each of them.
@@ -498,7 +499,6 @@ BROKEN_READ = re.compile(
     rf"|<{_READ_NAME}\s[^<>\n]{{0,2500}}$",
     re.M,
 )
-WEB_PER_ROUND = 2
 # Every read round spent and the model still asking: what it asked for last is not read.
 READS_SPENT = (
     '<RESULT kind="error">\nThe read limit for this question is used up; nothing more will be'
@@ -529,9 +529,11 @@ def unserved_reads(answer: str, config: Config, has_apis: bool) -> list[str]:
     calls = list(dict.fromkeys(tags.findall(apis.API_TAG, answer)))
     if calls and not has_apis:
         problems.append("<api>: no APIs are registered here")
+    x_queries = xsearch.extract_xsearch_queries(answer)
+    if x_queries and not xsearch.enabled(config):
+        problems.append("<xsearch>: X search is not available here; use <web> instead")
     limits = (
         ("fetch", len(extract_fetch_tags(answer)), config.link_max_urls),
-        ("web", len(search.extract_web_queries(answer)), WEB_PER_ROUND),
         ("api", len(calls) if has_apis else 0, apis.MAX_CALLS_PER_ROUND),
         (
             "run",
@@ -1513,6 +1515,16 @@ class DiscordCodexClient(discord.Client):
             ),
         )
 
+    async def _x_search(self, query: str, guild_id: int | None, user_id: int) -> str:
+        """One <xsearch> for whichever model asked: the sidecar's Grok session searches X."""
+        try:
+            posts = await xsearch.search_posts(self.config, query)
+        except (xsearch.XSearchError, ValueError) as error:
+            LOGGER.warning("X search guild=%s user=%s failed: %s", guild_id, user_id, error)
+            return xsearch.render_search(query, None, str(error))
+        LOGGER.info("X search guild=%s user=%s posts=%s", guild_id, user_id, len(posts))
+        return xsearch.render_search(query, posts)
+
     async def _read_page(self, url: str) -> tuple[str, bool]:
         """(one page as text with its links kept inline, whether it was read at all). No out_dir:
         a background poll has nobody to show a screenshot to, and nothing to clean up afterwards."""
@@ -2009,18 +2021,31 @@ class DiscordCodexClient(discord.Client):
             # query (one sent an identical Leaguepedia query three times) must not spend the
             # source's quota again to be told the same thing.
             api_seen: dict[tuple[str, str], str] = {}
+            x_seen: dict[str, str] = {}  # same for X searches: each one is a Grok session
             for _ in range(self.config.memory_recall_rounds):
                 if not request_only(result.text):
                     break  # an answer that merely quotes a tag (e.g. from a page) is an answer
                 wanted = extract_read_requests(result.text)
                 urls = extract_fetch_tags(result.text)[: self.config.link_max_urls]
-                queries = search.extract_web_queries(result.text)[:WEB_PER_ROUND]
+                queries = search.extract_web_queries(result.text)
+                x_queries = (
+                    xsearch.extract_xsearch_queries(result.text)
+                    if xsearch.enabled(self.config)
+                    else []
+                )
                 runs = sandbox.extract_runs(result.text) if sandbox.available(self.config) else []
                 api_calls = apis.extract_api_calls(result.text) if self.apis else []
                 earlier_turns = earlier.requested_turns(result.text)
                 unserved = unserved_reads(result.text, self.config, bool(self.apis))
                 if not (
-                    wanted or urls or queries or runs or api_calls or earlier_turns or unserved
+                    wanted
+                    or urls
+                    or queries
+                    or x_queries
+                    or runs
+                    or api_calls
+                    or earlier_turns
+                    or unserved
                 ):
                     break
                 blocks = [
@@ -2040,6 +2065,22 @@ class DiscordCodexClient(discord.Client):
                 for query in queries:
                     provider, hits = await search.search_web(query, self.config)
                     blocks.append(search.render_results(query, provider, hits))
+                for query in x_queries:
+                    block = x_seen.get(query)
+                    if block is None and len(x_seen) >= xsearch.MAX_SEARCHES_PER_ANSWER:
+                        blocks.append(
+                            f'<RESULT kind="xsearch" query="{query}">\n'
+                            f"（這則回答的 X 搜尋已達 {xsearch.MAX_SEARCHES_PER_ANSWER} 次上限，"
+                            "這個查詢沒有執行；用已有的結果回答）\n</RESULT>"
+                        )
+                        continue
+                    if block is None:
+                        block = x_seen[query] = await self._x_search(query, guild_id, user_id)
+                    else:
+                        block = block.replace(
+                            ">\n", ">\n（與稍早完全相同的查詢，沿用當時的結果）\n", 1
+                        )
+                    blocks.append(block)
                 for name, path in api_calls:
                     body = api_seen.get((name, path))
                     if body is None:
