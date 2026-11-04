@@ -57,9 +57,6 @@ def is_post_id(value: str) -> bool:
 # many per rolling hour from the link path (tracking has its own interval).
 POST_LOOKUPS_PER_HOUR = 30
 _post_lookups: deque[float] = deque()
-# Topic searches asked for by a model (<xsearch>), one Grok session each.
-SEARCHES_PER_HOUR = 20
-_searches: deque[float] = deque()
 MAX_QUERY_CHARS = 200  # the sidecar's own bound (xsearch/server.py)
 
 
@@ -134,19 +131,15 @@ async def _post(config: Config, kind: str, body: dict, budget: float) -> dict:
         raise XSearchError(f"X lookup {kind} failed: {type(error).__name__}") from error
 
 
-def _take_hourly(spent: deque[float], per_hour: int, what: str) -> None:
-    now = time.monotonic()
-    while spent and now - spent[0] > 3600:
-        spent.popleft()
-    if len(spent) >= per_hour:
-        raise XSearchError(f"{what} are rate limited")
-    spent.append(now)
-
-
 async def fetch_post(config: Config, post_id: str) -> dict | None:
     if not is_post_id(post_id):
         raise ValueError("not an X post id")
-    _take_hourly(_post_lookups, POST_LOOKUPS_PER_HOUR, "X post lookups")
+    now = time.monotonic()
+    while _post_lookups and now - _post_lookups[0] > 3600:
+        _post_lookups.popleft()
+    if len(_post_lookups) >= POST_LOOKUPS_PER_HOUR:
+        raise XSearchError("X post lookups are rate limited")
+    _post_lookups.append(now)
     answer = await _ask(config, "post", {"id": post_id})
     post = answer.get("post")
     return post if answer.get("found") and isinstance(post, dict) else None
@@ -174,7 +167,6 @@ async def search_posts(config: Config, query: str, limit: int = 8) -> list[dict]
     query = " ".join(query.split())
     if not 1 <= len(query) <= MAX_QUERY_CHARS:
         raise ValueError(f"an X search query is 1-{MAX_QUERY_CHARS} characters")
-    _take_hourly(_searches, SEARCHES_PER_HOUR, "X searches")
     answer = await _ask(config, "search", {"query": query, "limit": limit})
     return [post for post in answer.get("posts") or [] if isinstance(post, dict)]
 

@@ -807,19 +807,14 @@ async def test_client_round_trips(sidecar, monkeypatch, config: Config) -> None:
         await xsearch.fetch_post(replace(config, xsearch_url=""), "200")
 
 
-async def test_topic_search_round_trips_and_is_rate_limited(
-    sidecar, monkeypatch, config: Config
-) -> None:
+async def test_topic_search_round_trips(sidecar, config: Config) -> None:
     cfg = replace(config, xsearch_url=f"http://127.0.0.1:{sidecar.port}")
-    monkeypatch.setattr(xsearch, "_searches", xsearch.deque())
-    monkeypatch.setattr(xsearch, "SEARCHES_PER_HOUR", 2)
     posts = await xsearch.search_posts(cfg, "  lol\n patch ")
     assert [p["id"] for p in posts] == ["300"]  # a non-object entry is dropped
     assert sidecar.calls[-1] == ("search", {"query": "lol patch", "limit": 8})
-    await xsearch.search_posts(cfg, "again")
-    with pytest.raises(xsearch.XSearchError):
-        await xsearch.search_posts(cfg, "third")
-    assert len(sidecar.calls) == 2
+    for query in ("again", "third"):  # no hourly cap: every request reaches the sidecar
+        await xsearch.search_posts(cfg, query)
+    assert len(sidecar.calls) == 3
     with pytest.raises(ValueError):
         await xsearch.search_posts(cfg, "x" * 201)
     block = xsearch.render_search("lol patch", posts)
