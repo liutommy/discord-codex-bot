@@ -584,3 +584,11 @@ async def test_an_old_failure_in_the_thread_does_not_fail_a_good_turn(
     assert isinstance(error, CodexServiceError) and error.info == "rate_limit_exceeded"
     # a resume that died before its turn started is not the last turn's failure again
     assert parse_fallback_error("", tmp_path, "t-three", 1) is None
+
+
+def test_the_model_and_help_know_x_search() -> None:
+    from discord_codex_bot.codex import _prompt
+    from discord_codex_bot.help import FEATURES
+
+    assert '<xsearch query="…"/>' in _prompt("q")
+    assert any("請 Grok 搜尋 X" in line for line in FEATURES)

@@ -12,11 +12,41 @@ from collections import deque
 
 import aiohttp
 
+from . import tags
 from .config import Config
 
 LOGGER = logging.getLogger(__name__)
 POST_ID = re.compile(r"[0-9]{1,19}")  # fullmatch: ASCII digits only, below 2**63
 HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
+
+
+# A model's request for X search, answered by the Bot for every backend (bot.py read loop).
+XSEARCH_TAG = re.compile(r'<xsearch\s+query="([^"]{1,300})"\s*/?>(?:\s*</xsearch>)?')
+XSEARCH_PER_ROUND = 1  # each one is a Grok session on the operator's plan
+
+
+def extract_xsearch_queries(answer: str) -> list[str]:
+    seen: list[str] = []
+    for query in tags.findall(XSEARCH_TAG, answer):
+        query = " ".join(query.split())
+        if query and query not in seen:
+            seen.append(query)
+    return seen
+
+
+def render_search(query: str, posts: list[dict] | None, error: str = "") -> str:
+    """The RESULT block for one <xsearch>; every post is X content read out by a model."""
+    if posts is None:
+        body = f"（X 搜尋無法使用：{error}）" if error else "（X 搜尋無法使用）"
+    elif not posts:
+        body = "（X 搜尋沒有找到相關貼文）"
+    else:
+        body = "\n\n".join(
+            f"{post_text(post)}\nhttps://x.com/{post.get('author_handle', 'i')}/status/"
+            f"{post.get('id', '')}"
+            for post in posts
+        )
+    return f'<RESULT kind="xsearch" query="{query}">\n{body}\n</RESULT>'
 
 
 def is_post_id(value: str) -> bool:
@@ -27,6 +57,10 @@ def is_post_id(value: str) -> bool:
 # many per rolling hour from the link path (tracking has its own interval).
 POST_LOOKUPS_PER_HOUR = 30
 _post_lookups: deque[float] = deque()
+# Topic searches asked for by a model (<xsearch>), one Grok session each.
+SEARCHES_PER_HOUR = 20
+_searches: deque[float] = deque()
+MAX_QUERY_CHARS = 200  # the sidecar's own bound (xsearch/server.py)
 
 
 class XSearchError(RuntimeError):
@@ -100,15 +134,19 @@ async def _post(config: Config, kind: str, body: dict, budget: float) -> dict:
         raise XSearchError(f"X lookup {kind} failed: {type(error).__name__}") from error
 
 
+def _take_hourly(spent: deque[float], per_hour: int, what: str) -> None:
+    now = time.monotonic()
+    while spent and now - spent[0] > 3600:
+        spent.popleft()
+    if len(spent) >= per_hour:
+        raise XSearchError(f"{what} are rate limited")
+    spent.append(now)
+
+
 async def fetch_post(config: Config, post_id: str) -> dict | None:
     if not is_post_id(post_id):
         raise ValueError("not an X post id")
-    now = time.monotonic()
-    while _post_lookups and now - _post_lookups[0] > 3600:
-        _post_lookups.popleft()
-    if len(_post_lookups) >= POST_LOOKUPS_PER_HOUR:
-        raise XSearchError("X post lookups are rate limited")
-    _post_lookups.append(now)
+    _take_hourly(_post_lookups, POST_LOOKUPS_PER_HOUR, "X post lookups")
     answer = await _ask(config, "post", {"id": post_id})
     post = answer.get("post")
     return post if answer.get("found") and isinstance(post, dict) else None
@@ -129,6 +167,16 @@ async def recent_posts(
     page = Page(post for post in answer.get("posts") or [] if isinstance(post, dict))
     page.full = answer["full"] if isinstance(answer.get("full"), bool) else None
     return page
+
+
+async def search_posts(config: Config, query: str, limit: int = 8) -> list[dict]:
+    """Posts X search finds about `query`, as the model in the sidecar read them out."""
+    query = " ".join(query.split())
+    if not 1 <= len(query) <= MAX_QUERY_CHARS:
+        raise ValueError(f"an X search query is 1-{MAX_QUERY_CHARS} characters")
+    _take_hourly(_searches, SEARCHES_PER_HOUR, "X searches")
+    answer = await _ask(config, "search", {"query": query, "limit": limit})
+    return [post for post in answer.get("posts") or [] if isinstance(post, dict)]
 
 
 async def lookup_user(config: Config, handle: str) -> dict | None:

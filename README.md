@@ -743,6 +743,12 @@ falls back to it, and `/codex-track source:https://x.com/<account>` tracks an X 
 `X_TRACKING_INTERVAL_MINUTES`, default 60, because each check is a Grok session; a check takes
 10–100 s).
 
+A fourth question, a topic search, serves every backend: a model that cannot search X replies
+with `<xsearch query="…"/>` and the Bot returns the posts the sidecar found, each with its link.
+The query is the only free text that reaches a sidecar prompt, so the sidecar bounds it (200
+characters, one line, no control characters) and passes it as a JSON string. The Bot carries out
+one search per read round and at most 20 per hour.
+
 Grok Build is a coding agent with a shell, files, web fetching and background jobs. In the
 sidecar it has none of them (`xsearch/server.py`). Two layers prevent: the command line removes
 every client tool and denies the rest, and a root-owned enforced policy
