@@ -137,8 +137,27 @@ Guild-scoped slash commands normally appear quickly. Run:
 ```
 
 Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>`,
-`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`, `-image`. This README uses the
+`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`, `-wishes`, `-image`. This README uses the
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
+
+### Wishlist
+
+Members discuss feature requests with the Bot in the guild's designated wishlist channel or
+its threads. It interviews them about the underlying need, assesses engineering feasibility
+(platform limits, APIs, data, cost and maintenance), and discusses alternatives when needed.
+After the member confirms a summary in a later message, the Bot records both the original
+request and the agreed request. Members can ask it to withdraw their own open wishes;
+`/codex-wishes` lists the guild's open wishes, with an option to list only their own.
+
+The operator designates the channel with
+`python -m discord_codex_bot.admin wish channel --guild 123456789012345678 --channel 234567890123456789`.
+Developers use `python -m discord_codex_bot.admin wish list` and
+`python -m discord_codex_bot.admin wish show --id 7` to inspect requests, then
+`python -m discord_codex_bot.admin wish status --id 7 --status in_progress --note "Implementation started"`
+to update progress. Status changes queue a notification mentioning the member in the original
+channel, replying to their message when available. Delivery retries up to five times. Wishes
+and notices live in `CODEX_HOME/wishes.sqlite3` and are included in nightly backups. See
+[the admin CLI guide](docs/admin-cli.md) for status choices and channel settings.
 
 ### Social tracking: YouTube, Twitch, X, Ruten stores and web pages
 

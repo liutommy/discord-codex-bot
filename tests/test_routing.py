@@ -956,6 +956,7 @@ async def test_a_routed_mention_names_the_model_that_answered(
         return types.SimpleNamespace(id=777)
 
     message = types.SimpleNamespace(
+        id=41,
         author=types.SimpleNamespace(bot=False, id=USER, display_name="m"),
         content="<@123> 嗨",
         mentions=[client._connection.user],
@@ -1000,6 +1001,7 @@ async def test_files_counts_what_the_model_gets_including_a_replied_to_pdf(
     monkeypatch.setattr(client, "_log_route", lambda plan, result: logged.append(plan.log))
 
     async def answer(*args, **kwargs):
+        assert kwargs["message_id"] == 42
         return CodexResult("好", via=kwargs["routed"])
 
     async def reply(text, **kw):
@@ -1011,6 +1013,7 @@ async def test_files_counts_what_the_model_gets_including_a_replied_to_pdf(
     )
     channel = types.SimpleNamespace(id=3, typing=contextlib.nullcontext)
     message = types.SimpleNamespace(
+        id=42,
         author=types.SimpleNamespace(bot=False, id=USER, display_name="B"),
         content="<@123> 幫我看這個",
         mentions=[client._connection.user],
