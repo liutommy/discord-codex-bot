@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from yarl import URL
+
 from discord_codex_bot import apis
 from discord_codex_bot.apis import Api, call_api, extract_api_calls, load_registry, render_doc
+from discord_codex_bot.links import FETCH_TAG
 
 
 def test_load_registry_expands_env_and_rejects_non_https(tmp_path: Path, monkeypatch) -> None:
@@ -333,3 +336,27 @@ async def test_redirects_never_carry_credentials_to_another_origin(config) -> No
 async def test_an_encoded_dot_dot_is_refused_like_a_plain_one(config) -> None:
     registry = {"lol": Api("lol", "https://api.example/gw/", {}, "")}
     assert "只能是相對" in await call_api("lol", "%2e%2e/%2E%2E/admin", registry, config)
+
+
+def test_shipped_registry_routes_yugioh_questions_to_their_sources() -> None:
+    # The model answers Yu-Gi-Oh from memory unless HELP tells it where each kind of answer lives.
+    registry = load_registry(Path(__file__).resolve().parents[1] / "config" / "apis.json")
+    ygocdb, ygoprodeck = registry["ygocdb"], registry["ygoprodeck"]
+    assert ygocdb.base == "https://ygocdb.com/api/v0/"
+    assert ygoprodeck.base == "https://db.ygoprodeck.com/api/v7/"
+    assert "cid" in ygocdb.doc and "?search=" in ygocdb.doc
+    # 巧巧屋 and the official Q&A are pages, not APIs: the doc gives <fetch> URLs the Bot's own
+    # tag parser accepts, and nothing else.
+    urls = [url for url, _render in FETCH_TAG.findall(ygocdb.doc)]
+    hosts = {URL(url).host for url in urls}
+    assert hosts == {"220.134.173.17", "www.db.yugioh-card.com"}
+    assert any("ocg_list.asp?call_item=60&call_data=" in url for url in urls)  # by name (Big5)
+    assert any("ocg_show.asp?call_no=" in url for url in urls)  # by card number
+    assert any("faq_search.action?ope=4&cid=<cid>" in url for url in urls)  # the card's Q&A
+    assert "cp950" in ygocdb.doc  # how the model gets the Big5 escapes it must send
+    assert "絕不自己推理或編造裁定" in ygocdb.doc
+    # The site's own terms: rate limit and no hotlinked images.
+    assert "每秒 20 次" in ygoprodeck.doc and "images.ygoprodeck.com" in ygoprodeck.doc
+    assert "num=5&offset=0" in ygoprodeck.doc
+    doc = render_doc(registry)
+    assert "- ygocdb：" in doc and "- ygoprodeck：" in doc

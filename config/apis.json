@@ -25,5 +25,19 @@
     },
     "names": "lol-names.json",
     "doc": "海克斯大亂鬥（帶強化符文的 ARAM）獨立數據站，每日更新、隨 Patch 走。回傳內容裡的英雄／海克斯／裝備名已由 Bot 改寫成「台服名（陸服名）」，回答直接用台服名即可。回答「某英雄大亂鬥勝率／層級」「適合哪些海克斯（強化符文）」「怎麼出裝」**只用這裡**，不要拿 web search 上其他站（arammayhem 之類）的數字混進來。兩個路徑：data/ai-summary.json 是本版摘要（heroAliases 全英雄別名與頁面 URL、top 英雄、top 符文、通用問答卡）；hero/<英雄名> 是單一英雄頁（回傳已轉成純文字：勝率、樣本、層級、「推荐海克斯」表、裝備適配度）——**英雄名直接照成員的寫法填**，台服名、陸服名、暱稱、數字 id 都可（hero/逆命、hero/崔斯特、hero/TF、hero/4 都會到同一頁），Bot 會自己解析，不用翻譯也不用查 id；海克斯頁 augment/<名字>、裝備頁 item/<名字> 同理。**海克斯與出裝只在英雄頁**，問到就一定要讀那頁；層級照站上的 T0/T1/T2 寫，不要自己換成 S/A。名稱全是**陸服簡中**（亚索、尤里卡、无尽之刃），成員用台服名（犽宿、靈光一閃、無盡之刃），英雄有 126 個兩邊不同——先 <search scope=\"permanent\" query=\"<台服名>|<陸服名>\"/> 在三張對照表（英雄譯名對照、海克斯譯名對照、裝備譯名對照）裡查，或 <recall scope=\"permanent\" name=\"海克斯譯名對照\"/> 整表讀；英雄表的「hexdata 路徑」欄就是 hero/ 後那段。回答用台服名，可括號附陸服名。引用要註明 Hexdata、Patch、資料日期並附該英雄頁連結（站方規定）；樣本不到 250 場只當參考、1,000 場以上才算充足；HexScore 只能同版本同模式內比。只查成員問到的英雄，不要成批抓。"
+  },
+  "ygocdb": {
+    "base": "https://ygocdb.com/api/v0/",
+    "headers": {
+      "User-Agent": "discord-codex-bot/1.0"
+    },
+    "doc": "百鴿（ygocdb）遊戲王卡片資料庫。路徑 ?search=<卡名或密碼>（繁中、簡中、日文、英文都可，中文直接寫），回傳 result[]：cid（Konami 官方資料庫編號）、id（卡片密碼）、cn_name（NW 譯名）、sc_name（簡中官方名）、jp_name、en_name、faqcount（官方 Q&A 數）、text.desc（簡中效果）。**遊戲王問題的資料來源分工，不要憑記憶回答：**(1) 卡名與效果以巧巧屋（台南卡店的繁中卡表，網頁不是 API，用 <fetch>）為準，卡名照它的寫法，不要自己翻譯。站台用 Big5，查名稱要先把卡名轉成 Big5 百分比編碼：<run lang=\"python\">import urllib.parse; print(urllib.parse.quote(\"黑魔導女孩\".encode(\"cp950\")))</run>，再 <fetch url=\"http://220.134.173.17/gameking/card/ocg_list.asp?call_item=60&call_data=<編碼結果>\"/>；名稱要與巧巧屋的寫法完全相同，列表每列的「內容」連結（ocg_show.asp?call_no=<卡號>…）才有效果全文，抓第一個即可。已知日文卡號（例 15AX-JPM01）就直接 <fetch url=\"http://220.134.173.17/gameking/card/ocg_show.asp?call_no=<卡號>&call_item=99\"/>。列表「共 0 筆」表示寫法不同：把 ygocdb 的 sc_name 換成繁體字形再查一次；還是沒有就照實說巧巧屋查不到，再附 ygocdb 的簡中效果並註明出處，不要自己翻成繁中冒充巧巧屋的版本。翻頁照頁面上的連結原樣抓，不要自己組或改網址裡的 call_sql。位址連不上時先抓 http://www.ocg.idv.tw/ 看它框架指到哪裡。(2) ygocdb 用來查 cid、卡片密碼與各語言卡名；英文資料用 ygoprodeck。(3) 裁定（規則問答）只能來自 Konami 官方 Q&A，**絕不自己推理或編造裁定**：用 ygocdb 取得 cid（faqcount 為 0 表示官方沒有 Q&A），<fetch url=\"https://www.db.yugioh-card.com/yugiohdb/faq_search.action?ope=4&cid=<cid>&rp=100&request_locale=ja\"/> 列出這張卡的全部問題與「補足情報」；挑相關的問題，抓它下一行的 faq_search.action?ope=5&fid=<編號> 連結（後面加 &request_locale=ja）讀回答。回答時引用日文原文的問與答並附該頁連結，再用繁中說明；官方沒有對應的問答就照實說查不到，請成員以官方或店家裁判為準。只查成員問到的卡，不要成批抓。"
+  },
+  "ygoprodeck": {
+    "base": "https://db.ygoprodeck.com/api/v7/",
+    "headers": {
+      "User-Agent": "discord-codex-bot/1.0"
+    },
+    "doc": "YGOPRODeck 英文卡片資料（TCG 卡名與英文效果、卡包與 TCG 卡號、禁限賽制、價格）。路徑：cardinfo.php?name=<完整英文名>、cardinfo.php?fname=<部分英文名>&num=5&offset=0（模糊查詢一定要加 num 與 offset，否則回傳整串卡）、cardinfo.php?id=<卡片密碼>；加 &misc=yes 會多出 misc_info（konami_id 就是官方資料庫 cid、formats、ocg_date／tcg_date）。英文名與密碼可先從 ygocdb 查。站方限制每秒 20 次、超過會封鎖：只查成員問到的卡，不要成批抓。卡圖不得盜連：回答不要貼 images.ygoprodeck.com 的圖片網址。中文卡名、效果與裁定照 ygocdb 說明的分工，不要從這裡翻譯。"
   }
 }
