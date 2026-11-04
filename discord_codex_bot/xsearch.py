@@ -57,6 +57,11 @@ def is_post_id(value: str) -> bool:
 POST_LOOKUPS_PER_HOUR = 30
 _post_lookups: deque[float] = deque()
 MAX_QUERY_CHARS = 200  # the sidecar's own bound (xsearch/server.py)
+# Distinct searches in one answer. Each is a Grok session on the operator's plan, shared with X
+# tracking, and the tags may come from a page or post the model read rather than from the member:
+# without a bound one question could spend hundreds of sessions. The most <web> searches seen in
+# one answer on 2026-11-04 was 8.
+MAX_SEARCHES_PER_ANSWER = 20
 
 
 class XSearchError(RuntimeError):

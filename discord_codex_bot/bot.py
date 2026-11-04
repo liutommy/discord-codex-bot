@@ -2067,6 +2067,13 @@ class DiscordCodexClient(discord.Client):
                     blocks.append(search.render_results(query, provider, hits))
                 for query in x_queries:
                     block = x_seen.get(query)
+                    if block is None and len(x_seen) >= xsearch.MAX_SEARCHES_PER_ANSWER:
+                        blocks.append(
+                            f'<RESULT kind="xsearch" query="{query}">\n'
+                            f"（這則回答的 X 搜尋已達 {xsearch.MAX_SEARCHES_PER_ANSWER} 次上限，"
+                            "這個查詢沒有執行；用已有的結果回答）\n</RESULT>"
+                        )
+                        continue
                     if block is None:
                         block = x_seen[query] = await self._x_search(query, guild_id, user_id)
                     else:

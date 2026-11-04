@@ -746,7 +746,9 @@ falls back to it, and `/codex-track source:https://x.com/<account>` tracks an X 
 A fourth question, a topic search, serves every backend: a model that cannot search X replies
 with `<xsearch query="…"/>` and the Bot returns the posts the sidecar found, each with its link.
 The query is the only free text that reaches a sidecar prompt, so the sidecar bounds it (200
-characters, one line, no control characters) and passes it as a JSON string.
+characters, one line, no control characters) and passes it as a JSON string. One answer runs at
+most 20 different searches (a repeated query reuses its result): the tags may come from a page or
+post the model read, and each search is a Grok session on the plan shared with X tracking.
 
 Grok Build is a coding agent with a shell, files, web fetching and background jobs. In the
 sidecar it has none of them (`xsearch/server.py`). Two layers prevent: the command line removes

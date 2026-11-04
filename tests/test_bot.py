@@ -2247,6 +2247,40 @@ async def test_a_repeated_x_search_in_one_answer_reuses_the_first_result(
     assert "沿用當時的結果" in calls[2] and "沿用當時的結果" not in calls[1]
 
 
+async def test_x_searches_in_one_answer_stop_at_the_answer_budget(client, monkeypatch) -> None:
+    # A fetched page can tell the model to send hundreds of searches; each is a Grok session.
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+    monkeypatch.setattr(xsearch_module, "MAX_SEARCHES_PER_ANSWER", 3)
+    many = "\n".join(f'<xsearch query="q{i}"/>' for i in range(5))
+    replies = iter(
+        [
+            CodexResult(many, (), None, "t1", False),
+            CodexResult('<xsearch query="q0"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls, asked = [], []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    async def fake_search(config, query, limit=8):
+        asked.append(query)
+        return []
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(xsearch_module, "search_posts", fake_search)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案" and asked == ["q0", "q1", "q2"]
+    assert calls[1].count("已達 3 次上限") == 2  # q3 and q4 told why, not silently dropped
+    assert "沿用當時的結果" in calls[2]  # a repeat of a served query still costs nothing
+
+
 async def test_x_search_without_a_sidecar_is_answered_with_the_reason(client, monkeypatch) -> None:
     from dataclasses import replace
 
