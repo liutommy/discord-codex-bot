@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import discord
+import pytest
 
 from discord_codex_bot import embedfix
 from discord_codex_bot.backends import BackendUnavailable, Resolved
@@ -53,12 +54,219 @@ def test_registers_only_expected_slash_commands(config: Config, tmp_path) -> Non
         "inmu-king-style",
         "inmu-king-model",
         "inmu-king-track",
+        "inmu-king-wishes",
         "inmu-king-linkclean",
         "inmu-king-embedfix",
         "inmu-king-image",
     }
     assert client.intents.guilds
     assert client.intents.message_content
+
+
+WISH = (
+    '<wish title="貼文搜尋" original="想搜尋舊貼文" need="搜尋頻道歷史" '
+    'feasibility="需要訊息權限與索引" alternatives="先做關鍵字搜尋"/>'
+)
+
+
+async def test_wish_tag_stores_and_deduplicates_with_member_message(client, backends):
+    codex, _ = backends
+    codex.replies = [f"記下了\n{WISH}"]
+    client.wish_settings.set_channel(GUILD, ALLOWED)
+    for _ in range(2):
+        result = await client._answer("確認", [], GUILD, USER, channel_id=ALLOWED, message_id=123)
+        assert "<wish" not in result.text
+    [wish] = client.wishes.list()
+    assert wish.original == "想搜尋舊貼文" and wish.need == "搜尋頻道歷史"
+    assert wish.asked == "確認" and wish.message_id == 123
+    assert wish.guild_id == GUILD and wish.channel_id == ALLOWED and wish.user_id == USER
+    assert "這個願望已經記過了：#1" in result.text
+
+
+async def test_wish_tag_outside_channel_is_refused(client):
+    client.wish_settings.set_channel(GUILD, ALLOWED)
+    text, unread, refused = await client._apply_action_tags(WISH, GUILD, ALLOWED + 1, USER)
+    assert client.wishes.list() == [] and "<wish" not in text and unread == []
+    assert "wishlist channel" in refused[0]
+    _, _, refused = await client._apply_action_tags(WISH, None, ALLOWED, USER, in_wish_channel=True)
+    assert client.wishes.list() == [] and refused
+
+
+async def test_wishlist_thread_counts_and_prompt_only_lists_speakers_open_wishes(client, backends):
+    codex, _ = backends
+    client.wish_settings.set_channel(GUILD, ALLOWED)
+    client.wishes.add(GUILD, ALLOWED, None, USER + 1, "別人的", "另一原話", "需求", "可行")
+    closed, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "結案的", "結案原話", "需求", "可行")
+    client.wishes.set_status(closed.id, "done")
+    client.wishes.add(GUILD + 1, ALLOWED, None, USER, "別服的", "原話", "需求", "可行")
+    codex.replies = [WISH, "答案"]
+    thread = types.SimpleNamespace(id=555, parent_id=ALLOWED)
+    result = await client._answer(
+        "確認", [], GUILD, USER, channel_id=555, conversation_channel=thread
+    )
+    assert "已記下願望" in result.text
+    [wish] = client.wishes.list(guild_id=GUILD, statuses=("open",), user_id=USER)
+    assert wish.channel_id == 555 and wish.message_id is None
+    await client._answer("進度", [], GUILD, USER, channel_id=ALLOWED)
+    section = codex.calls[-1][2]["memory"].split("[許願池]\n")[1]
+    assert f"#{wish.id} 「貼文搜尋」（待評估）" in section
+    assert all(title not in section for title in ("別人的", "結案的", "別服的"))
+    await client._answer("進度", [], GUILD, USER + 2, channel_id=ALLOWED)
+    assert "你目前沒有還沒結案的願望" in codex.calls[-1][2]["memory"]
+    await client._answer("進度", [], GUILD, USER, channel_id=556)
+    assert "[許願池]" not in codex.calls[-1][2]["memory"]
+    client.wish_settings.set_channel(GUILD, None)
+    await client._answer("進度", [], GUILD, USER, channel_id=ALLOWED)
+    assert "[許願池]" not in codex.calls[-1][2]["memory"]
+
+
+async def test_wish_cancel_is_owned_and_guild_scoped(client):
+    wish, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "標題", "原話", "需求", "可行")
+    tag = f'<cancel_wish id="{wish.id}"/>'
+    for guild, user in ((GUILD, USER + 1), (GUILD + 1, USER)):
+        text, unread, refused = await client._apply_action_tags(
+            tag, guild, ALLOWED, user, in_wish_channel=True
+        )
+        assert "找不到你的願望 #1" in text and unread == refused == []
+        assert client.wishes.get(wish.id).status == "open"
+    text, unread, refused = await client._apply_action_tags(
+        tag, GUILD, ALLOWED, USER, in_wish_channel=True
+    )
+    assert "已撤回願望 #1" in text and unread == refused == []
+    assert client.wishes.get(wish.id).status == "withdrawn"
+    assert client.wishes.pending_notices() == []
+
+
+@pytest.mark.parametrize("wrapped", [f"```\n{WISH}\n```", f"> {WISH}", f"`{WISH}`"])
+async def test_shown_wishes_are_not_stored(client, wrapped):
+    text, unread, refused = await client._apply_action_tags(
+        wrapped, GUILD, ALLOWED, USER, in_wish_channel=True
+    )
+    assert text == wrapped and unread == refused == [] and client.wishes.list() == []
+
+
+async def test_wish_attribute_refusal_is_retried_once(client, backends):
+    codex, _ = backends
+    codex.replies = [WISH.replace('title="貼文搜尋"', 'title=""'), WISH]
+    client.wish_settings.set_channel(GUILD, ALLOWED)
+    result = await client._answer("確認", [], GUILD, USER, channel_id=ALLOWED, message_id=123)
+    assert len(codex.calls) == 2 and "<TAG_ERRORS>" in codex.calls[1][0]
+    assert "title" in codex.calls[1][0] and "已記下願望 #1" in result.text
+    assert client.wishes.list()[0].message_id == 123
+
+
+async def test_wish_missing_attributes_bad_cancel_id_and_cap_are_refused(client):
+    for tag, attribute in (
+        ('<wish title="x"/>', "original"),
+        ('<cancel_wish id="abc"/>', "id"),
+        ("<wish/>", "title"),
+    ):
+        text, unread, refused = await client._apply_action_tags(
+            tag, GUILD, ALLOWED, USER, in_wish_channel=True
+        )
+        assert attribute in refused[0] and unread == [] and tag not in text
+    four = "\n".join(
+        WISH.replace("貼文搜尋", f"標題{i}").replace("想搜尋舊貼文", f"原話{i}") for i in range(4)
+    )
+    _, _, refused = await client._apply_action_tags(
+        four, GUILD, ALLOWED, USER, in_wish_channel=True
+    )
+    assert len(client.wishes.list()) == 3 and "at most 3" in refused[0]
+
+
+async def test_wish_notice_loop_replies_and_pings_only_owner(client, monkeypatch):
+    from discord_codex_bot import wishes
+
+    title = "**通知** @everyone"
+    wish, _ = client.wishes.add(GUILD, ALLOWED, 123, USER, title, "原話", "需求", "可行")
+    note = "*" * 1500
+    client.wishes.set_status(wish.id, "accepted", note)
+    sent = []
+
+    async def send(text, **kw):
+        assert len(text) < 2000
+        sent.append((text, kw))
+
+    channel = types.SimpleNamespace(id=ALLOWED, guild=types.SimpleNamespace(id=GUILD), send=send)
+    monkeypatch.setattr(client, "get_channel", lambda _: channel)
+
+    async def stop(seconds):
+        assert seconds == 30
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(wishes.asyncio, "sleep", stop)
+    with pytest.raises(asyncio.CancelledError):
+        await wishes.notice_loop(client.wishes, client._deliver_wish_notice)
+    [(text, kw)] = sent
+    assert text.startswith(
+        f"<@{USER}> 你的願望 #1「\\*\\*通知\\*\\* @\u200beveryone」狀態更新：已排入"
+    )
+    assert "\n開發者說明：" in text and "[輸出已截斷]" in text
+    reference = kw["reference"]
+    assert reference.message_id == 123 and reference.channel_id == ALLOWED
+    assert reference.guild_id == GUILD and reference.fail_if_not_exists is False
+    mentions = kw["allowed_mentions"].to_dict()
+    assert mentions == {"users": [USER], "parse": []}
+    assert kw["allowed_mentions"].replied_user is False
+    assert client.wishes.pending_notices() == []
+
+
+async def test_wish_notice_wrong_guild_or_disallowed_channel_is_not_posted(client, monkeypatch):
+    from discord_codex_bot.wishes import deliver_notices
+
+    wish, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "標題", "原話", "需求", "可行")
+    client.wishes.set_status(wish.id, "done", "完成")
+    channel = types.SimpleNamespace(id=ALLOWED, guild=types.SimpleNamespace(id=GUILD + 1))
+
+    async def fetch(channel_id):
+        assert channel_id == ALLOWED
+        return channel
+
+    monkeypatch.setattr(client, "get_channel", lambda _: None)
+    monkeypatch.setattr(client, "fetch_channel", fetch)
+    await deliver_notices(client.wishes, client._deliver_wish_notice)
+    assert client.wishes.pending_notices()[0].attempts == 1
+    channel.guild.id = GUILD
+    monkeypatch.setattr(client, "_access", lambda *args: "denied")
+    await deliver_notices(client.wishes, client._deliver_wish_notice)
+    assert client.wishes.pending_notices()[0].attempts == 2
+
+
+async def test_wishes_command_filters_and_suppresses_mentions(client):
+    sent = []
+
+    async def send(text, **kw):
+        sent.append((text, kw))
+
+    interaction = types.SimpleNamespace(
+        guild_id=GUILD,
+        channel_id=ALLOWED,
+        channel=types.SimpleNamespace(id=ALLOWED),
+        user=types.SimpleNamespace(id=USER),
+        response=types.SimpleNamespace(send_message=send),
+    )
+    await client.wishes_command(interaction)
+    assert sent[-1][0] == "這個伺服器還沒有設定許願頻道。"
+    client.wish_settings.set_channel(GUILD, ALLOWED)
+    await client.wishes_command(interaction)
+    assert sent[-1][0].startswith("目前沒有還沒結案的願望。")
+    client.wishes.add(GUILD, ALLOWED, None, USER, "**我的**", "原話", "需求", "可行")
+    client.wishes.add(GUILD, ALLOWED, None, USER + 1, "別人的", "原話", "需求", "可行")
+    closed, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "結案", "不同原話", "需求", "可行")
+    client.wishes.set_status(closed.id, "done")
+    await client.wishes_command(interaction)
+    text, kw = sent[-1]
+    assert "2 個還沒結案" in text and "別人的" in text and "結案」" not in text
+    assert kw["ephemeral"] and kw["allowed_mentions"].to_dict()["parse"] == []
+    await client.wishes_command(interaction, mine=True)
+    text, kw = sent[-1]
+    assert f"#1「\\*\\*我的\\*\\*」・待評估・<@{USER}>" in text
+    assert "別人的" not in text and text.endswith(f"許願頻道：<#{ALLOWED}>")
+    command = client.tree.get_command("codex-wishes")
+    assert command.parameters[0].display_name == "只看我的"
+    interaction.guild_id = None
+    await client.wishes_command(interaction)
+    assert sent[-1][0] == "只能在伺服器中使用。"
 
 
 class _FakeChannel:
@@ -331,8 +539,6 @@ def test_with_quoted_message_folds_reply_target_into_prompt() -> None:
 # ----- _answer: backend dispatch, recall loop, memory tags ---------------------------------------
 
 from dataclasses import replace  # noqa: E402
-
-import pytest  # noqa: E402
 
 from discord_codex_bot import bot as bot_module  # noqa: E402
 from discord_codex_bot.bot import QUEUE_FULL_MESSAGE  # noqa: E402

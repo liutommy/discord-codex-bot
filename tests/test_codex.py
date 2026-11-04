@@ -529,6 +529,26 @@ def test_the_model_and_help_know_fixed_tracking_times() -> None:
     assert "固定時間" in text and any("times:" in example for example in examples)
 
 
+def test_the_model_and_help_know_wishlist_interviews() -> None:
+    from discord_codex_bot.codex import _prompt
+    from discord_codex_bot.help import COMMAND_GUIDE, FEATURES
+
+    prompt = _prompt("q")
+    for phrase in (
+        "[許願池]",
+        '<wish title="…" original="…" need="…" feasibility="…" alternatives="…"/>',
+        '<cancel_wish id="N"/>',
+        "implementation standpoint",
+        "not what the Bot can do today",
+        "the member confirms in their own message",
+        "developer makes the final call",
+        "Tracking/reminder/wishlist operations",
+    ):
+        assert phrase in prompt
+    assert "許願頻道" in COMMAND_GUIDE["-wishes"][0]
+    assert any("許願池" in feature for feature in FEATURES)
+
+
 def _turns(codex_home: Path, thread: str, *infos: str | None) -> None:
     """A rollout of several turns, oldest first: each a task_started and a task_complete that
     carries an error with `info` (None: the turn succeeded)."""

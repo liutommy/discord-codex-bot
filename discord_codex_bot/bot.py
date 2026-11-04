@@ -199,6 +199,21 @@ from .ui import (
     recover_exchange,
 )
 from .usage import probe_rate_limits, read_rate_limits
+from .wishes import (
+    ATTR as WISH_ATTR,
+)
+from .wishes import (
+    CANCEL_WISH_TAG,
+    MAX_WISH_TAGS,
+    OPEN_STATUSES,
+    STATUS_LABELS,
+    WISH_DB,
+    WISH_TAG,
+    WishNotice,
+    WishSettings,
+    WishStore,
+    notice_loop,
+)
 
 LOGGER = logging.getLogger(__name__)
 # Closes every recall round; a spare taking over mid-recall gets the round's results without it.
@@ -547,7 +562,8 @@ INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{
 # is skipped whole: who="<@id>" is the documented form and holds both < and >; so is a mention
 # written without quotes (who=<@id>).
 _OWN = (
-    r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory|image_gen)"
+    r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory|image_gen"
+    r"|wish|cancel_wish)"
     r"(?![a-z_])"
 )
 _MENTION = r"<[@#][!&]?[0-9]{1,25}>"
@@ -575,6 +591,8 @@ ACTION_TAGS = (
     TRACK_EVERY_TAG,
     TRACK_AT_TAG,
     CANCEL_TRACK_TAG,
+    WISH_TAG,
+    CANCEL_WISH_TAG,
     IMAGE_TAG,
 )
 # One more turn for the operations the Bot could not read, with the reason, so the model can send
@@ -645,7 +663,7 @@ def action_tags(text: str) -> list[str]:
 # answer's prose (<track kind="captions">, #include <memory>), not an order that failed.
 _KEYS = re.compile(
     r"\b(?:when|text|who|source|interest|every|at|id|minutes|times|scope|name"
-    r"|prompt|model|aspect|count|seed|negative)\s*=",
+    r"|prompt|model|aspect|count|seed|negative|title|original|need|feasibility|alternatives)\s*=",
     re.I,
 )
 
@@ -885,6 +903,8 @@ class DiscordCodexClient(discord.Client):
         }
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
         self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
+        self.wishes = WishStore(config.codex_home / WISH_DB)
+        self.wish_settings = WishSettings(self.linkclean)
         # Image generation (imagegen.py): the service client, each guild's switch and spoiler
         # setting in linkclean's database, and detached delivery tasks.
         self.images = ImageService(config)
@@ -1020,6 +1040,13 @@ class DiscordCodexClient(discord.Client):
         )
         self.tree.add_command(
             app_commands.Command(
+                name=f"{prefix}-wishes",
+                description="許願池：列出這個伺服器還沒結案的願望",
+                callback=self.wishes_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
                 name=f"{prefix}-linkclean",
                 description="本伺服器的連結洗參數開關（只有伺服器的管理層）",
                 callback=self.linkclean_command,
@@ -1076,6 +1103,7 @@ class DiscordCodexClient(discord.Client):
         )
         if self.tracker is not None:
             self._tracking_loop = self.loop.create_task(self._tracking_forever())
+        self._wish_loop = self.loop.create_task(self._wishes_forever())
         self.admin.start()
         # A guild that has not invited the bot yet (e.g. production before rollout) must not take
         # the whole client down; the runtime access check still rejects it until it is synced.
@@ -1091,6 +1119,10 @@ class DiscordCodexClient(discord.Client):
 
     async def close(self) -> None:
         self.admin.stop()
+        if task := getattr(self, "_wish_loop", None):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await super().close()
 
     def _gateway_up(self) -> bool:
@@ -1442,6 +1474,46 @@ class DiscordCodexClient(discord.Client):
             self.config.tracking_keep_days,
         )
 
+    async def _wishes_forever(self) -> None:
+        await self.wait_until_ready()
+        await notice_loop(self.wishes, self._deliver_wish_notice)
+
+    async def _deliver_wish_notice(self, notice: WishNotice) -> None:
+        wish = notice.wish
+        channel = self.get_channel(wish.channel_id) or await self.fetch_channel(wish.channel_id)
+        if getattr(getattr(channel, "guild", None), "id", None) != wish.guild_id or self._access(
+            wish.guild_id, channel, wish.channel_id
+        ):
+            raise RuntimeError("wishlist destination is outside the configured allowlist")
+        title = discord.utils.escape_markdown(discord.utils.escape_mentions(wish.title))
+        text = (
+            f"<@{wish.user_id}> 你的願望 #{wish.id}「{title}」狀態更新："
+            f"{STATUS_LABELS[notice.status]}"
+        )
+        if notice.note:
+            note = discord.utils.escape_markdown(discord.utils.escape_mentions(notice.note))
+            text += "\n開發者說明：" + truncate(note, 1999 - len(text) - len("\n開發者說明："))
+        reference = (
+            discord.MessageReference(
+                message_id=wish.message_id,
+                channel_id=wish.channel_id,
+                guild_id=wish.guild_id,
+                fail_if_not_exists=False,
+            )
+            if wish.message_id is not None
+            else None
+        )
+        await channel.send(
+            text,
+            reference=reference,
+            allowed_mentions=discord.AllowedMentions(
+                users=[discord.Object(id=wish.user_id)],
+                everyone=False,
+                roles=False,
+                replied_user=False,
+            ),
+        )
+
     async def _read_page(self, url: str) -> tuple[str, bool]:
         """(one page as text with its links kept inline, whether it was read at all). No out_dir:
         a background poll has nobody to show a screenshot to, and nothing to clean up afterwards."""
@@ -1671,6 +1743,7 @@ class DiscordCodexClient(discord.Client):
         conversation_channel=None,
         replied_to: int | None = None,
         fresh: bool = False,
+        message_id: int | None = None,
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
         `on_delta` receives the accumulated answer while a backend streams it (agy, routers).
@@ -1681,6 +1754,11 @@ class DiscordCodexClient(discord.Client):
         from the routed target gets instead of the target's thread. The result's `via` is what
         answered. `conversation_channel` and `replied_to` scope Discord history reads even when
         the chosen backend cannot resume that conversation; `fresh` suppresses those reads."""
+        wish_channel = self.wish_settings.channel(guild_id) if guild_id is not None else None
+        in_wish_channel = wish_channel is not None and (
+            getattr(conversation_channel, "id", channel_id) == wish_channel
+            or getattr(conversation_channel, "parent_id", None) == wish_channel
+        )
         if self.emoji is not None and guild_id is not None:
             # `<:name:id>` as the model can read it; never the emoji's image, which would make
             # this an image turn (emoji.py).
@@ -1901,6 +1979,7 @@ class DiscordCodexClient(discord.Client):
                     else "",
                     f"[待辦提醒]\n{pending}" if pending else "",
                     f"[社群追蹤]\n{tracked}" if tracked else "",
+                    self._wish_section(guild_id, user_id) if in_wish_channel else "",
                 )
                 if section
             )
@@ -2036,7 +2115,14 @@ class DiscordCodexClient(discord.Client):
                         result = replace(result, text=READS_SPENT_MESSAGE)
             own = split_quoted(prompt)[1]  # a replied-to message is not the member asking
             text, unread, refused = await self._apply_action_tags(
-                result.text, guild_id, channel_id, user_id, own, result.thread_id
+                result.text,
+                guild_id,
+                channel_id,
+                user_id,
+                own,
+                result.thread_id,
+                in_wish_channel=in_wish_channel,
+                message_id=message_id,
             )
             if unread or refused:
                 LOGGER.warning(
@@ -2079,7 +2165,14 @@ class DiscordCodexClient(discord.Client):
                             seen.add(_spaced(tag))
                             resent.append(tag)
                     done, _, _ = await self._apply_action_tags(
-                        "\n".join(resent), guild_id, channel_id, user_id, own, result.thread_id
+                        "\n".join(resent),
+                        guild_id,
+                        channel_id,
+                        user_id,
+                        own,
+                        result.thread_id,
+                        in_wish_channel=in_wish_channel,
+                        message_id=message_id,
                     )
                     if done:
                         text = f"{text}\n\n{done}"
@@ -3071,8 +3164,10 @@ class DiscordCodexClient(discord.Client):
         user_id: int,
         asked: str = "",
         thread_id: str = "",
+        in_wish_channel: bool = False,
+        message_id: int | None = None,
     ) -> tuple[str, list[str], list[str]]:
-        """Carry out the memory, reminder, tracking and image tags in `text`: (the text without
+        """Carry out memory, reminder, tracking, wish and image tags in `text`: (the text without
         them, confirmations appended; each tag that could not be read, with the reason; each one
         read but refused for a reason the model can fix — a time, an id, a missing value)."""
         text, facts = extract_memory_tags(text)
@@ -3085,6 +3180,17 @@ class DiscordCodexClient(discord.Client):
         refused: list[str] = []
         text = self._apply_reminder_tags(text, guild_id, channel_id, user_id, notes, refused)
         text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id, notes, refused)
+        text = self._apply_wish_tags(
+            text,
+            guild_id,
+            channel_id,
+            user_id,
+            notes,
+            refused,
+            in_wish_channel,
+            message_id,
+            asked,
+        )
         text = await self._apply_image_tags(
             text, guild_id, channel_id, user_id, notes, refused, asked, thread_id
         )
@@ -3099,6 +3205,100 @@ class DiscordCodexClient(discord.Client):
         if notes:
             text = f"{text.strip()}\n\n" + "\n".join(notes)
         return text.strip(), problems, refused
+
+    def _apply_wish_tags(
+        self,
+        text: str,
+        guild_id: int | None,
+        channel_id: int | None,
+        user_id: int,
+        notes: list[str],
+        refused: list[str],
+        in_wish_channel: bool = False,
+        message_id: int | None = None,
+        asked: str = "",
+    ) -> str:
+        creates = tags.findall(WISH_TAG, text)
+        cancels = tags.findall(CANCEL_WISH_TAG, text)
+        clean = tags.strip(CANCEL_WISH_TAG, tags.strip(WISH_TAG, text))
+        if not creates and not cancels:
+            return text
+        if not in_wish_channel or guild_id is None or channel_id is None:
+            for name, found in (("wish", creates), ("cancel_wish", cancels)):
+                if found:
+                    refused.append(
+                        f"{len(found)} <{name}> tag(s): wishes are recorded and withdrawn only"
+                        " in the server's wishlist channel"
+                    )
+            return clean
+        for index, body in enumerate(creates):
+            if index >= MAX_WISH_TAGS:
+                refused.append(f"<wish>: at most {MAX_WISH_TAGS} wish tags per answer")
+                continue
+            attrs = dict(WISH_ATTR.findall(body))
+            missing = [
+                key
+                for key in ("title", "original", "need", "feasibility", "alternatives")
+                if key not in attrs
+            ]
+            if missing:
+                refused.append(f"<wish>: missing attribute {', '.join(missing)}")
+                continue
+            try:
+                wish, created = self.wishes.add(
+                    guild_id,
+                    channel_id,
+                    message_id,
+                    user_id,
+                    **{
+                        key: attrs[key]
+                        for key in ("title", "original", "need", "feasibility", "alternatives")
+                    },
+                    asked=asked,
+                )
+            except ValueError as error:
+                refused.append(f"<wish>: {error}")
+                continue
+            title = discord.utils.escape_markdown(discord.utils.escape_mentions(wish.title))
+            notes.append(
+                f"📝 已記下願望 #{wish.id}「{title}」；開發者更新進度時會在這裡通知你。"
+                if created
+                else f"📝 這個願望已經記過了：#{wish.id}「{title}」"
+                f"（{STATUS_LABELS[wish.status]}）。"
+            )
+            LOGGER.info(
+                "Wish add id=%s guild=%s user=%s created=%s", wish.id, guild_id, user_id, created
+            )
+        for body in cancels:
+            value = dict(WISH_ATTR.findall(body)).get("id", "")
+            if not re.fullmatch(r"[0-9]{1,9}", value):
+                refused.append("<cancel_wish>: id must be digits (1–9 characters)")
+                continue
+            wish_id = int(value)
+            existing = self.wishes.get(wish_id)
+            wish = (
+                self.wishes.withdraw(wish_id, user_id)
+                if existing is not None and existing.guild_id == guild_id
+                else None
+            )
+            notes.append(
+                f"⛔ 已撤回願望 #{wish_id}。" if wish else f"（找不到你的願望 #{wish_id}）"
+            )
+            LOGGER.info(
+                "Wish withdraw id=%s guild=%s user=%s found=%s",
+                wish_id,
+                guild_id,
+                user_id,
+                wish is not None,
+            )
+        return clean
+
+    def _wish_section(self, guild_id: int, user_id: int) -> str:
+        wishes = self.wishes.list(guild_id=guild_id, statuses=OPEN_STATUSES, user_id=user_id)
+        lines = [f"#{wish.id} 「{wish.title}」（{STATUS_LABELS[wish.status]}）" for wish in wishes]
+        return "[許願池]\n這段對話位於本伺服器的許願頻道。\n" + (
+            "\n".join(lines) if lines else "你目前沒有還沒結案的願望。"
+        )
 
     def _apply_reminder_tags(
         self,
@@ -3558,6 +3758,43 @@ class DiscordCodexClient(discord.Client):
             times=slots,
         )
         await interaction.followup.send(text, ephemeral=True)
+
+    @app_commands.rename(mine="只看我的")
+    @app_commands.describe(mine="只列出你自己的尚未結案願望")
+    async def wishes_command(self, interaction: discord.Interaction, mine: bool = False) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(
+                "只能在伺服器中使用。" if interaction.guild_id is None else reason, ephemeral=True
+            )
+            return
+        if interaction.guild_id is None:
+            await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
+            return
+        channel_id = self.wish_settings.channel(interaction.guild_id)
+        if channel_id is None:
+            await interaction.response.send_message(
+                "這個伺服器還沒有設定許願頻道。", ephemeral=True
+            )
+            return
+        wishes = self.wishes.list(
+            guild_id=interaction.guild_id,
+            statuses=OPEN_STATUSES,
+            user_id=interaction.user.id if mine else None,
+        )
+        lines = []
+        for wish in wishes:
+            title = discord.utils.escape_markdown(discord.utils.escape_mentions(wish.title))
+            lines.append(f"#{wish.id}「{title}」・{STATUS_LABELS[wish.status]}・<@{wish.user_id}>")
+        text = (
+            f"許願池（{len(wishes)} 個還沒結案）：\n" + "\n".join(lines)
+            if wishes
+            else "目前沒有還沒結案的願望。"
+        )
+        text = truncate(text, 1800) + f"\n許願頻道：<#{channel_id}>"
+        await interaction.response.send_message(
+            truncate(text, 1900), ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+        )
 
     async def export_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
@@ -5104,6 +5341,7 @@ class DiscordCodexClient(discord.Client):
                     on_delta=on_delta,
                     channel_id=message.channel.id,
                     conversation_channel=message.channel,
+                    message_id=message.id,
                     replied_to=replied_to,
                     **self._routed_kw(routed),
                 ),
