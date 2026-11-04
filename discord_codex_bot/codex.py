@@ -432,7 +432,7 @@ def _prompt(
             " the request in their own words; need is the agreed request (the chosen alternative"
             " if any); feasibility is the brief technical assessment; alternatives lists other"
             " options discussed (may be empty). Each other value is at most 1500 characters."
-            ' Values cannot contain double quotes; use 「」 and write Traditional Chinese.'
+            " Values cannot contain double quotes; use 「」 and write Traditional Chinese."
             ' <cancel_wish id="N"/> withdraws the speaker\'s own open wish N, using ids in'
             " [許願池]. Never claim a wish was recorded or withdrawn without emitting its tag.",
             *((image_gen,) if image_gen else ()),
