@@ -356,6 +356,11 @@ class _Text(HTMLParser):
             self.parts.append("\n")
         elif tag == "a":
             self._link(attrs)
+        elif tag == "input" and "link_value" in (dict(attrs).get("class") or "").split():
+            # Konami's card database links each row (a card, a Q&A) through a hidden
+            # <input class="link_value" value="/yugiohdb/…"> and a click handler, not an anchor:
+            # without this the model reads a ruling's question but can never open its answer.
+            self._link([("href", dict(attrs).get("value") or "")])
 
     def handle_endtag(self, tag):
         if tag in _SKIP and self._skip:
@@ -473,6 +478,26 @@ async def _read_bounded(response, limit: int) -> bytes:
     return b"".join(chunks)[:limit]
 
 
+_META_CHARSET = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?([A-Za-z0-9_.:-]+)""", re.I)
+# Python's "big5" lacks characters Taiwanese pages use (the Windows code page 950 additions
+# that browsers decode under the same label); cp950 has them.
+_CODECS = {"big5": "cp950"}
+
+
+def decode_body(raw: bytes, charset: str | None, content_type: str) -> str:
+    """The body as text: the header's charset, else for HTML the page's own <meta> charset,
+    else UTF-8. Older sites declare their encoding only in the page (a Big5 card shop answered
+    with a bare text/html), and decoding that as UTF-8 handed the model mojibake."""
+    if not charset and "html" in content_type:
+        match = _META_CHARSET.search(raw[:4096])
+        charset = match.group(1).decode("ascii") if match else None
+    charset = (charset or "utf-8").lower()
+    try:
+        return raw.decode(_CODECS.get(charset, charset), errors="replace")
+    except LookupError:  # a label Python does not know
+        return raw.decode("utf-8", errors="replace")
+
+
 async def fetch_link(url: str, config: Config) -> str:
     """Fetch one http(s) URL into bounded plain text; returns a user-readable failure otherwise.
 
@@ -495,7 +520,7 @@ async def fetch_link(url: str, config: Config) -> str:
                 raw = await _read_bounded(response, config.link_max_bytes)
     except (aiohttp.ClientError, TimeoutError) as error:
         return f"（{url}：抓取失敗——{type(error).__name__}）"
-    body = raw.decode(response.charset or "utf-8", errors="replace")
+    body = decode_body(raw, response.charset, content_type)
     if "html" in content_type:
         # Resolve relative links against where we actually landed, falling back to what we
         # asked for: after a redirect those differ, and without a redirect they are the same.

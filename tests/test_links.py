@@ -7,6 +7,7 @@ import sys
 import types
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import unquote_to_bytes
 
 import pytest
 from aiohttp import web
@@ -232,6 +233,81 @@ def test_html_to_text_keeps_article_links_when_given_a_base() -> None:
     assert text.count("https://yu-gi-oh.jp/news/detail/123") == 1  # deduplicated
     # No base: the old text-only behaviour is unchanged, so existing callers keep working.
     assert "http" not in html_to_text(html)[1]
+
+
+def test_html_to_text_keeps_konami_row_links_held_in_hidden_inputs() -> None:
+    # Konami's database links each Q&A row through <input class="link_value">, not an anchor.
+    html = (
+        '<div class="t_row"><span class="dack_name">「黒魔導」の効果について</span>'
+        '<input type="hidden" class="link_value" value="/yugiohdb/faq_search.action?ope=5&fid=1">'
+        '</div><input type="hidden" name="other" value="/not/a/link">'
+        '<input class="search" value="/also/not">'
+    )
+    _title, text = html_to_text(html, "https://www.db.yugioh-card.com/yugiohdb/faq_search.action")
+    assert "<https://www.db.yugioh-card.com/yugiohdb/faq_search.action?ope=5&fid=1>" in text
+    assert "/not/a/link" not in text and "/also/not" not in text  # only link_value inputs
+    assert "http" not in html_to_text(html)[1]  # no base, no links, as for anchors
+
+
+@pytest.mark.parametrize(
+    ("raw", "charset", "ctype", "expected"),
+    [
+        # A bare text/html whose page declares Big5 (the 巧巧屋 card shop): read the <meta>.
+        (
+            '<meta http-equiv="Content-Type" content="text/html; charset=big5">黑魔導女孩'.encode(
+                "cp950"
+            ),
+            None,
+            "text/html",
+            "黑魔導女孩",
+        ),
+        ("<meta charset='Shift_JIS'>ブラック".encode("shift_jis"), None, "text/html", "ブラック"),
+        # The header wins over the page, and nothing but HTML is sniffed.
+        ('<meta charset="big5">é'.encode(), "utf-8", "text/html", "é"),
+        ('<meta charset="big5">é'.encode(), None, "text/plain", "é"),
+        # No declaration, or a label Python does not know: UTF-8 as before.
+        ("ok é".encode(), None, "text/html", "ok é"),
+        ('<meta charset="x-nonsense">é'.encode(), None, "text/html", "é"),
+    ],
+)
+def test_decode_body_falls_back_to_the_pages_own_charset(raw, charset, ctype, expected) -> None:
+    assert links.decode_body(raw, charset, ctype).endswith(expected)
+
+
+async def test_fetch_link_reads_a_big5_page_and_passes_big5_escapes_through(
+    monkeypatch, config: Config
+) -> None:
+    seen: list[str] = []
+
+    async def card(request: web.Request) -> web.Response:
+        seen.append(request.raw_path.partition("call_data=")[2])
+        body = '<meta charset="big5"><title>效果查詢</title><p>黑魔導女孩</p>'.encode("cp950")
+        return web.Response(body=body, headers={"Content-Type": "text/html"})  # no charset
+
+    app = web.Application()
+    app.add_routes([web.get("/ocg_list.asp", card)])
+    async with TestServer(app) as server:
+
+        async def to_test_server(self, host, port=0, family=socket.AF_INET):
+            return [
+                {
+                    "hostname": host,
+                    "host": "127.0.0.1",
+                    "port": port,
+                    "family": family,
+                    "proto": 6,
+                    "flags": 0,
+                }
+            ]
+
+        monkeypatch.setattr(links._PublicResolver, "resolve", to_test_server)
+        monkeypatch.setattr(links, "_resolve_public", _resolve_ok)
+        escaped = "%B6%C2%C5%5D%BE%C9%A4k%AB%C4"  # 黑魔導女孩 in Big5, as the model writes it
+        url = f"http://shop.example:{server.port}/ocg_list.asp?call_item=60&call_data={escaped}"
+        text = await fetch_link(url, config)
+    assert text == "標題：效果查詢\n黑魔導女孩"
+    # The bytes the shop receives are the Big5 ones, not those escapes re-encoded as UTF-8.
+    assert [unquote_to_bytes(raw) for raw in seen] == ["黑魔導女孩".encode("cp950")]
 
 
 @pytest.mark.parametrize(

@@ -394,6 +394,19 @@ crawler is a Cloudflare-verified bot and gets the title, description and picture
 a preview, not the full page (`LINK_PREVIEW_WAIT_SECONDS` waits once for the embed to appear).
 Pages behind logins still come back as "打不開"; on the Codex backend OpenAI's own web tool
 remains available as a second path.
+A page served as bare `text/html` is decoded with the charset its own `<meta>` declares (Big5
+pages are read as code page 950), and the hidden `<input class="link_value">` targets Konami's
+card database uses instead of anchors are kept as links like any `href`.
+
+Registered data APIs live in `config/apis.json` (base URL, fixed headers, and a usage note the
+model reads in its HELP block); the model calls one with `<api name="…" path="…"/>`. For
+Yu-Gi-Oh! questions there are two: `ygocdb` (ygocdb.com, card names in every language, the
+passcode and the Konami database id) and `ygoprodeck` (YGOPRODeck, English card data; at most
+20 requests a second, and its card images are not linked). The `ygocdb` note also tells the
+model where the other answers come from, through `<fetch>`: Traditional Chinese card names and
+effect text from the 巧巧屋 card shop's lookup pages (plain HTTP, Big5; a name query needs the
+name as Big5 percent-escapes, which the model computes with `<run>`), and rulings only from the
+official per-card Q&A pages of the Konami database, quoted with their link, never inferred.
 
 Videos in a link are understood through Gemini's free tier used as a tool (not a chat backend;
 `GEMINI_API_KEY`, no billing attached). A YouTube link is understood from its URL alone — Gemini
