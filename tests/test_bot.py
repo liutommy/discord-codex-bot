@@ -2214,6 +2214,39 @@ async def test_recall_loop_runs_x_searches_for_a_model_that_cannot_search_x(
     assert "未經驗證" in calls[1]
 
 
+async def test_a_repeated_x_search_in_one_answer_reuses_the_first_result(
+    client, monkeypatch
+) -> None:
+    # Each search is a Grok session on the operator's plan; a resent query must not start another.
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+    replies = iter(
+        [
+            CodexResult('<xsearch query="q"/>', (), None, "t1", False),
+            CodexResult('<xsearch query="q"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls, asked = [], []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    async def fake_search(config, query, limit=8):
+        asked.append(query)
+        return []
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(xsearch_module, "search_posts", fake_search)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案" and asked == ["q"]
+    assert "沿用當時的結果" in calls[2] and "沿用當時的結果" not in calls[1]
+
+
 async def test_x_search_without_a_sidecar_is_answered_with_the_reason(client, monkeypatch) -> None:
     from dataclasses import replace
 

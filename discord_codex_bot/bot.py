@@ -2021,6 +2021,7 @@ class DiscordCodexClient(discord.Client):
             # query (one sent an identical Leaguepedia query three times) must not spend the
             # source's quota again to be told the same thing.
             api_seen: dict[tuple[str, str], str] = {}
+            x_seen: dict[str, str] = {}  # same for X searches: each one is a Grok session
             for _ in range(self.config.memory_recall_rounds):
                 if not request_only(result.text):
                     break  # an answer that merely quotes a tag (e.g. from a page) is an answer
@@ -2065,7 +2066,14 @@ class DiscordCodexClient(discord.Client):
                     provider, hits = await search.search_web(query, self.config)
                     blocks.append(search.render_results(query, provider, hits))
                 for query in x_queries:
-                    blocks.append(await self._x_search(query, guild_id, user_id))
+                    block = x_seen.get(query)
+                    if block is None:
+                        block = x_seen[query] = await self._x_search(query, guild_id, user_id)
+                    else:
+                        block = block.replace(
+                            ">\n", ">\n（與稍早完全相同的查詢，沿用當時的結果）\n", 1
+                        )
+                    blocks.append(block)
                 for name, path in api_calls:
                     body = api_seen.get((name, path))
                     if body is None:

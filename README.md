@@ -758,8 +758,9 @@ shapes we know — anything else is refused and logged as `REFUSED unsafe grok s
 check cannot undo a tool that already ran; it is how a failure of the first two shows up.
 Every lookup runs in a fresh, empty Grok home and working directory on tmpfs holding only a copy
 of the login, and everything it wrote is deleted afterwards, so no session can shape the next.
-Members never write the prompt: the Bot sends a numeric post id or an account name, both
-validated. What comes back was read out by a model from X content, so it is re-checked: a post
+Members never write the prompt of a post, account or recent-posts lookup: the Bot sends a
+numeric post id or an account name, both validated. A topic search carries a query instead,
+bounded and quoted as described above. What comes back was read out by a model from X content, so it is re-checked: a post
 whose snowflake id disagrees with its time is dropped (otherwise one injected post with a huge
 id would become the tracking cursor and hide every real post), and posts read for a link are
 labelled unverified, with a note when the author differs from the link's account. Grok's own `--sandbox`
