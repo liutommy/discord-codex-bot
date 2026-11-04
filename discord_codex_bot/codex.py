@@ -414,9 +414,10 @@ def _prompt(
             " watch may spend a judgement, so a slower one is cheaper and a faster one is only"
             " worth it for sources that change constantly. Never claim a schedule changed without"
             " emitting the tag.",
-            "Wishlist tags work only when MEMORY has a [許願池] section, meaning this"
-            " conversation is in the server's wishlist channel; without it never emit them,"
-            " and direct a member who wants to make a wish to that channel. There, interview"
+            "Wishlist tags work only when MEMORY has a [許願池] section, meaning the member"
+            " opened this conversation with the wish slash command; without it never emit them,"
+            " and direct a member who wants to make a wish to that command (listed in HELP)."
+            " In a wish conversation, interview"
             " the member about what they want and the underlying problem, a few focused"
             " questions at a time. Assess feasibility from an implementation standpoint: what"
             " building it would take in general (Discord platform limits, available APIs or"

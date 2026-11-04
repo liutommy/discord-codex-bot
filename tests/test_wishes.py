@@ -3,11 +3,9 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from discord_codex_bot.linkclean import SwitchStore
 from discord_codex_bot.wishes import (
     MAX_NOTICE_ATTEMPTS,
     OPEN_STATUSES,
-    WishSettings,
     WishStore,
     deliver_notices,
 )
@@ -156,16 +154,20 @@ def test_status_validates_and_allows_maximum_lengths(store):
     assert store.set_status(wish.id, "open", "x" * 1500).note == "x" * 1500
 
 
-def test_channel_settings_persist_and_clear_as_empty_row(tmp_path):
-    path = tmp_path / "switches.sqlite3"
-    settings = WishSettings(SwitchStore(path))
-    assert settings.channel(1) is None
-    settings.set_channel(1, 22)
-    assert WishSettings(SwitchStore(path)).channel(1) == 22
-    assert settings.channel(2) is None
-    settings.set_channel(1, None)
-    assert settings.channel(1) is None
-    assert settings.switches._get(1, "wish_channel") == ""
+def test_wish_threads_are_marked_once_and_persist(tmp_path):
+    path = tmp_path / "state" / "wishes.sqlite3"
+    store = WishStore(path)
+    assert not store.is_wish_thread("t1") and not store.is_wish_thread("")
+    store.mark_thread("t1", 1, 4)
+    store.mark_thread("t1", 1, 5)  # another member continuing it does not take it over
+    store.mark_thread("", 1, 4)  # a turn whose thread was dropped marks nothing
+    reopened = WishStore(path)
+    assert reopened.is_wish_thread("t1") and not reopened.is_wish_thread("t2")
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute(
+            "SELECT thread_id, guild_id, user_id FROM wish_threads"
+        ).fetchall()
+    assert rows == [("t1", 1, 4)]
 
 
 async def test_a_failed_notice_holds_back_its_wish_but_not_other_wishes(store):

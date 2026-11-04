@@ -67,7 +67,6 @@ def test_all_commands_have_valid_schemas_and_cli_forms(monkeypatch):
             "wish.list",
             "wish.show",
             "wish.status",
-            "wish.channel",
         }
     )
     assert admin_wish in admin.handler_modules()
@@ -136,23 +135,6 @@ async def test_id_operations_reject_disallowed_guild_and_missing_wish(bot, serve
     assert bot.wishes.get(foreign.id).status == "open" and bot.wishes.pending_notices() == []
     status, document = await run(server, command, id=999, **args)
     assert status == "done" and not document["ok"]
-
-
-async def test_channel_is_context_checked_and_clear_disables(bot, server):
-    _, document = await run(server, "wish.channel", guild=GUILD)
-    assert document["result"]["channel"] is None
-    _, document = await run(server, "wish.channel", guild=GUILD, channel=CHANNEL)
-    assert document["ok"] and bot.wish_settings.channel(GUILD) == CHANNEL
-    _, document = await run(server, "wish.channel", guild=GUILD)
-    assert document["result"]["channel"] == CHANNEL
-    status, _ = await run(server, "wish.channel", guild=GUILD, channel=777)
-    assert status == "rejected"  # not an allowed channel
-    status, _ = await run(server, "wish.channel", guild=GUILD, channel=888)
-    assert status == "rejected"  # another guild
-    status, _ = await run(server, "wish.channel", guild=GUILD, channel=CHANNEL, clear=True)
-    assert status == "rejected" and bot.wish_settings.channel(GUILD) == CHANNEL
-    _, document = await run(server, "wish.channel", guild=GUILD, clear=True)
-    assert document["ok"] and bot.wish_settings.channel(GUILD) is None
 
 
 async def test_invalid_status_note_and_limit_are_rejected(bot, server):

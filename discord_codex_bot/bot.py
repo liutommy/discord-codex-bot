@@ -209,7 +209,6 @@ from .wishes import (
     WISH_DB,
     WISH_TAG,
     WishNotice,
-    WishSettings,
     WishStore,
     notice_loop,
 )
@@ -905,7 +904,6 @@ class DiscordCodexClient(discord.Client):
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
         self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
         self.wishes = WishStore(config.codex_home / WISH_DB)
-        self.wish_settings = WishSettings(self.linkclean)
         # Image generation (imagegen.py): the service client, each guild's switch and spoiler
         # setting in linkclean's database, and detached delivery tasks.
         self.images = ImageService(config)
@@ -1037,6 +1035,13 @@ class DiscordCodexClient(discord.Client):
                 name=f"{prefix}-track",
                 description="追蹤 YouTube／Twitch／X／露天賣場／網頁；留空列出，或用編號取消",
                 callback=self.track_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-wish",
+                description="許願池：跟 Bot 討論你想要的功能，它會評估可行性並整理給開發者",
+                callback=self.wish_command,
             )
         )
         self.tree.add_command(
@@ -1755,6 +1760,8 @@ class DiscordCodexClient(discord.Client):
         replied_to: int | None = None,
         fresh: bool = False,
         message_id: int | None = None,
+        wish: bool = False,
+        earlier_threads: Sequence[str] = (),
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
         `on_delta` receives the accumulated answer while a backend streams it (agy, routers).
@@ -1764,11 +1771,12 @@ class DiscordCodexClient(discord.Client):
         replayed to a backend that did not hold it; `spare_history` is what a spare taking over
         from the routed target gets instead of the target's thread. The result's `via` is what
         answered. `conversation_channel` and `replied_to` scope Discord history reads even when
-        the chosen backend cannot resume that conversation; `fresh` suppresses those reads."""
-        wish_channel = self.wish_settings.channel(guild_id) if guild_id is not None else None
-        in_wish_channel = wish_channel is not None and (
-            getattr(conversation_channel, "id", channel_id) == wish_channel
-            or getattr(conversation_channel, "parent_id", None) == wish_channel
+        the chosen backend cannot resume that conversation; `fresh` suppresses those reads.
+        `wish` opens a wish conversation (the wish command); a later turn is one when the thread
+        it resumes, or an earlier thread of its routed conversation (`earlier_threads`, set when
+        the router moved it to another backend), was marked by a wish-mode answer."""
+        wish_mode = guild_id is not None and (
+            wish or any(self.wishes.is_wish_thread(thread) for thread in (resume, *earlier_threads))
         )
         if self.emoji is not None and guild_id is not None:
             # `<:name:id>` as the model can read it; never the emoji's image, which would make
@@ -1990,7 +1998,7 @@ class DiscordCodexClient(discord.Client):
                     else "",
                     f"[待辦提醒]\n{pending}" if pending else "",
                     f"[社群追蹤]\n{tracked}" if tracked else "",
-                    self._wish_section(guild_id, user_id) if in_wish_channel else "",
+                    self._wish_section(guild_id, user_id) if wish_mode else "",
                 )
                 if section
             )
@@ -2161,7 +2169,7 @@ class DiscordCodexClient(discord.Client):
                 user_id,
                 own,
                 result.thread_id,
-                in_wish_channel=in_wish_channel,
+                wish_mode=wish_mode,
                 message_id=message_id,
             )
             if unread or refused:
@@ -2211,7 +2219,7 @@ class DiscordCodexClient(discord.Client):
                         user_id,
                         own,
                         result.thread_id,
-                        in_wish_channel=in_wish_channel,
+                        wish_mode=wish_mode,
                         message_id=message_id,
                     )
                     if done:
@@ -2237,13 +2245,18 @@ class DiscordCodexClient(discord.Client):
             # A fallback is not announced in the answer: the member gains nothing from it, and
             # /status shows the last one. The thread id is dropped so nothing tries to resume it
             # back on Codex.
+            thread_id = "" if fell_back and routed is None else result.thread_id
+            if wish_mode and guild_id is not None:
+                # The id the caller records is the one the next turn resumes; a backend that
+                # starts a new id (a spare, a failed resume, a tag retry) keeps the wish mode.
+                self.wishes.mark_thread(thread_id, guild_id, user_id)
             return CodexResult(
                 truncate(text, self.config.max_response_chars),
                 outgoing,
                 generated_dir,
                 # A routed turn keeps its spare's thread: the caller records it under the spare
                 # that made it (`_routed_memo`), and the conversation goes on from there.
-                "" if fell_back and routed is None else result.thread_id,
+                thread_id,
                 result.resumed and not (fell_back and routed is None),
                 via=target,
             )
@@ -2811,6 +2824,9 @@ class DiscordCodexClient(discord.Client):
             "routed_spares": route_plan.spares,
             "history": route_plan.history,
             "spare_history": route_plan.replay,
+            # A move to another backend resumes nothing; the conversation's earlier threads
+            # still tell whether it is a wish conversation.
+            "earlier_threads": route_plan.route.earlier,
         }
 
     def _log_route(self, route_plan: RoutePlan, result: CodexResult) -> None:
@@ -3204,7 +3220,7 @@ class DiscordCodexClient(discord.Client):
         user_id: int,
         asked: str = "",
         thread_id: str = "",
-        in_wish_channel: bool = False,
+        wish_mode: bool = False,
         message_id: int | None = None,
     ) -> tuple[str, list[str], list[str]]:
         """Carry out memory, reminder, tracking, wish and image tags in `text`: (the text without
@@ -3227,7 +3243,7 @@ class DiscordCodexClient(discord.Client):
             user_id,
             notes,
             refused,
-            in_wish_channel,
+            wish_mode,
             message_id,
             asked,
         )
@@ -3254,7 +3270,7 @@ class DiscordCodexClient(discord.Client):
         user_id: int,
         notes: list[str],
         refused: list[str],
-        in_wish_channel: bool = False,
+        wish_mode: bool = False,
         message_id: int | None = None,
         asked: str = "",
     ) -> str:
@@ -3263,9 +3279,13 @@ class DiscordCodexClient(discord.Client):
         clean = tags.strip(CANCEL_WISH_TAG, tags.strip(WISH_TAG, text))
         if not creates and not cancels:
             return text
-        if not in_wish_channel or guild_id is None or channel_id is None:
-            # No retry can fix the place, so the member is told and the model is not asked.
-            notes.append("（這裡不是許願頻道，願望沒有記下，也沒有撤回）")
+        if not wish_mode or guild_id is None or channel_id is None:
+            # No retry can turn this into a wish conversation, so the member is told and the
+            # model is not asked.
+            notes.append(
+                "（這段對話不是許願對話，願望沒有記下，也沒有撤回；"
+                f"請用 /{self.config.command_prefix}-wish 開始許願）"
+            )
             return clean
         for body in creates:
             attrs = dict(WISH_ATTR.findall(body))
@@ -3328,7 +3348,7 @@ class DiscordCodexClient(discord.Client):
     def _wish_section(self, guild_id: int, user_id: int) -> str:
         wishes = self.wishes.list(guild_id=guild_id, statuses=OPEN_STATUSES, user_id=user_id)
         lines = [f"#{wish.id} 「{wish.title}」（{STATUS_LABELS[wish.status]}）" for wish in wishes]
-        return "[許願池]\n這段對話位於本伺服器的許願頻道。\n" + (
+        return "[許願池]\n這段對話由成員以許願指令開啟。\n" + (
             "\n".join(lines) if lines else "你目前沒有還沒結案的願望。"
         )
 
@@ -3803,12 +3823,6 @@ class DiscordCodexClient(discord.Client):
         if interaction.guild_id is None:
             await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
             return
-        channel_id = self.wish_settings.channel(interaction.guild_id)
-        if channel_id is None:
-            await interaction.response.send_message(
-                "這個伺服器還沒有設定許願頻道。", ephemeral=True
-            )
-            return
         wishes = self.wishes.list(
             guild_id=interaction.guild_id,
             statuses=OPEN_STATUSES,
@@ -3823,7 +3837,7 @@ class DiscordCodexClient(discord.Client):
             if wishes
             else "目前沒有還沒結案的願望。"
         )
-        text = truncate(text, 1800) + f"\n許願頻道：<#{channel_id}>"
+        text = truncate(text, 1800) + f"\n用 /{self.config.command_prefix}-wish 許願。"
         await interaction.response.send_message(
             truncate(text, 1900), ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
         )
@@ -5156,19 +5170,48 @@ class DiscordCodexClient(discord.Client):
     ) -> None:
         attachments = [image] if image is not None else []
         prompt = prompt.strip()
-        # Unset means the member's own /model effort (or DEFAULT_MODEL's), not Codex's default.
-        effort_value = (
-            effort.value
-            if effort is not None
-            else self._member_effort(interaction.guild_id, interaction.user.id)
-        )
         reason = self._access(
             interaction.guild_id, interaction.channel, interaction.channel_id
         ) or self._validate(prompt, attachments)
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
+        await self._slash_ask(
+            interaction, prompt, attachments, effort.value if effort is not None else "", new
+        )
 
+    @app_commands.rename(request="需求")
+    @app_commands.describe(request="想要 Bot 做到的功能或改進；Bot 會追問細節並評估可行性")
+    async def wish_command(self, interaction: discord.Interaction, request: str) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason or interaction.guild_id is None:
+            await interaction.response.send_message(
+                "只能在伺服器中使用。" if interaction.guild_id is None else reason, ephemeral=True
+            )
+            return
+        request = request.strip()
+        reason = self._validate(request, [])
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        # Always a new conversation: the wish mode belongs to the thread this answer starts, and
+        # replying to the answer (or @mentioning the Bot here afterwards) continues it.
+        await self._slash_ask(interaction, request, [], "", new=True, wish=True)
+
+    async def _slash_ask(
+        self,
+        interaction: discord.Interaction,
+        prompt: str,
+        attachments: Sequence[discord.Attachment],
+        effort: str,
+        new: bool,
+        wish: bool = False,
+    ) -> None:
+        """Answer a validated slash question in public, as the deferred interaction response;
+        `effort` is the one the member chose for this message ("" for none), `wish` opens a
+        wish conversation."""
+        # Unset means the member's own /model effort (or DEFAULT_MODEL's), not Codex's default.
+        effort_value = effort or self._member_effort(interaction.guild_id, interaction.user.id)
         key = ThreadStore.key(interaction.guild_id, interaction.channel_id, interaction.user.id)
         plain = self.memory.get_persona_off(interaction.guild_id, interaction.user.id)
         model = self._model(interaction.guild_id, interaction.user.id)
@@ -5185,7 +5228,7 @@ class DiscordCodexClient(discord.Client):
             attachments,
             plain,
             fresh=new,
-            effort=effort.value if effort is not None else "",
+            effort=effort,
         )
         if routed is not None:
             resume = routed.resume
@@ -5209,6 +5252,7 @@ class DiscordCodexClient(discord.Client):
                     channel_id=interaction.channel_id,
                     conversation_channel=interaction.channel,
                     fresh=new,
+                    wish=wish,
                     **self._routed_kw(routed),
                 ),
             )
@@ -5224,6 +5268,8 @@ class DiscordCodexClient(discord.Client):
         # Discord does not echo slash command inputs, so quote the question above the answer.
         # The model named is the one that answered, a fallback spare included.
         tag = self._slash_tag(routed, result, model, effort_value)
+        if wish:
+            tag = "、".join(part for part in ("許願", tag) if part)
         target = result.via
         answer = result.text
         if routed is not None and routed.no_x and target is not None and target.backend != GROK:

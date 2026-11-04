@@ -545,7 +545,9 @@ def test_the_model_and_help_know_wishlist_interviews() -> None:
         "Tracking/reminder/wishlist operations",
     ):
         assert phrase in prompt
-    assert "許願頻道" in COMMAND_GUIDE["-wishes"][0]
+    assert "wish slash command" in prompt and "許願頻道" not in prompt
+    assert "許願對話" in COMMAND_GUIDE["-wish"][0] and "/{p}-wish" in COMMAND_GUIDE["-wishes"][0]
+    assert all("許願頻道" not in text for text, _ in COMMAND_GUIDE.values())
     assert any("許願池" in feature for feature in FEATURES)
 
 
