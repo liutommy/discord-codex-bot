@@ -1896,3 +1896,14 @@ def test_image_bodies_are_buffered_a_few_at_a_time(monkeypatch) -> None:
         assert gate.acquire(timeout=2)  # and the slot came back afterwards
     finally:
         httpd.shutdown()
+
+
+def test_a_post_link_without_a_valid_handle_uses_the_any_author_form() -> None:
+    posts = [
+        {"id": "1", "author_handle": ""},
+        {"id": "2", "author_handle": "a b/c"},
+        {"id": "3", "author_handle": "Riot"},
+    ]
+    block = xsearch.render_search("q", posts)
+    assert "https://x.com/i/status/1" in block and "https://x.com/i/status/2" in block
+    assert "https://x.com/Riot/status/3" in block and "x.com//" not in block

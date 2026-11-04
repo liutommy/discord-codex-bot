@@ -33,6 +33,13 @@ def extract_xsearch_queries(answer: str) -> list[str]:
     return seen
 
 
+def _link_handle(post: dict) -> str:
+    """The author for a post link, or `i` (x.com/i/status/<id> works for any author) when the
+    model read out no handle or one that is not an X username."""
+    handle = str(post.get("author_handle") or "")
+    return handle if HANDLE.fullmatch(handle) else "i"
+
+
 def render_search(query: str, posts: list[dict] | None, error: str = "") -> str:
     """The RESULT block for one <xsearch>; every post is X content read out by a model."""
     if posts is None:
@@ -41,8 +48,7 @@ def render_search(query: str, posts: list[dict] | None, error: str = "") -> str:
         body = "（X 搜尋沒有找到相關貼文）"
     else:
         body = "\n\n".join(
-            f"{post_text(post)}\nhttps://x.com/{post.get('author_handle', 'i')}/status/"
-            f"{post.get('id', '')}"
+            f"{post_text(post)}\nhttps://x.com/{_link_handle(post)}/status/{post.get('id', '')}"
             for post in posts
         )
     return f'<RESULT kind="xsearch" query="{query}">\n{body}\n</RESULT>'
