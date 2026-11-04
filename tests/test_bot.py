@@ -84,12 +84,26 @@ async def test_wish_tag_stores_and_deduplicates_with_member_message(client, back
 
 
 async def test_wish_tag_outside_channel_is_refused(client):
+    # No retry can move the conversation, so the member is told and the model is not asked again.
     client.wish_settings.set_channel(GUILD, ALLOWED)
     text, unread, refused = await client._apply_action_tags(WISH, GUILD, ALLOWED + 1, USER)
     assert client.wishes.list() == [] and "<wish" not in text and unread == []
-    assert "wishlist channel" in refused[0]
-    _, _, refused = await client._apply_action_tags(WISH, None, ALLOWED, USER, in_wish_channel=True)
-    assert client.wishes.list() == [] and refused
+    assert refused == [] and "這裡不是許願頻道，願望沒有記下" in text
+    text, _, refused = await client._apply_action_tags(
+        WISH, None, ALLOWED, USER, in_wish_channel=True
+    )
+    assert client.wishes.list() == [] and refused == [] and "不是許願頻道" in text
+
+
+async def test_a_bare_wish_name_in_prose_is_not_an_order(client):
+    # The summary answer may name the tag; without attributes it must not trigger a retry that
+    # could record the wish before the member confirms (Claude review on PR #89).
+    prose = "確認後我會用 <wish> 幫你記錄，要送出嗎？也可以 <cancel_wish/> 撤回。"
+    text, unread, refused = await client._apply_action_tags(
+        prose, GUILD, ALLOWED, USER, in_wish_channel=True
+    )
+    assert client.wishes.list() == [] and refused == [] and unread == []
+    assert "<wish>" in text and "<cancel_wish/>" in text
 
 
 async def test_wishlist_thread_counts_and_prompt_only_lists_speakers_open_wishes(client, backends):
@@ -155,23 +169,29 @@ async def test_wish_attribute_refusal_is_retried_once(client, backends):
     assert client.wishes.list()[0].message_id == 123
 
 
-async def test_wish_missing_attributes_bad_cancel_id_and_cap_are_refused(client):
-    for tag, attribute in (
-        ('<wish title="x"/>', "original"),
-        ('<cancel_wish id="abc"/>', "id"),
-        ("<wish/>", "title"),
+async def test_wish_refusals_are_told_to_the_member_and_sent_back_to_the_model(client):
+    for tag, attribute, note in (
+        ('<wish title="x"/>', "original", "願望的格式不對，沒有記下"),
+        ('<cancel_wish id="abc"/>', "id", "撤回願望的格式不對"),
+        (WISH.replace("貼文搜尋", "長" * 61), "title", "超出長度限制"),
     ):
         text, unread, refused = await client._apply_action_tags(
             tag, GUILD, ALLOWED, USER, in_wish_channel=True
         )
-        assert attribute in refused[0] and unread == [] and tag not in text
+        assert attribute in refused[0] and unread == [] and tag not in text and note in text
+    assert client.wishes.list() == []
+
+
+async def test_alternatives_may_be_left_out_and_any_number_of_wishes_is_recorded(client):
+    bare = WISH.replace(' alternatives="先做關鍵字搜尋"', "")
     four = "\n".join(
-        WISH.replace("貼文搜尋", f"標題{i}").replace("想搜尋舊貼文", f"原話{i}") for i in range(4)
+        bare.replace("貼文搜尋", f"標題{i}").replace("想搜尋舊貼文", f"原話{i}") for i in range(4)
     )
     _, _, refused = await client._apply_action_tags(
         four, GUILD, ALLOWED, USER, in_wish_channel=True
     )
-    assert len(client.wishes.list()) == 3 and "at most 3" in refused[0]
+    wishes = client.wishes.list()
+    assert refused == [] and len(wishes) == 4 and {w.alternatives for w in wishes} == {""}
 
 
 async def test_wish_notice_loop_replies_and_pings_only_owner(client, monkeypatch):

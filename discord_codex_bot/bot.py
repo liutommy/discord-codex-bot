@@ -204,7 +204,6 @@ from .wishes import (
 )
 from .wishes import (
     CANCEL_WISH_TAG,
-    MAX_WISH_TAGS,
     OPEN_STATUSES,
     STATUS_LABELS,
     WISH_DB,
@@ -3250,25 +3249,17 @@ class DiscordCodexClient(discord.Client):
         if not creates and not cancels:
             return text
         if not in_wish_channel or guild_id is None or channel_id is None:
-            for name, found in (("wish", creates), ("cancel_wish", cancels)):
-                if found:
-                    refused.append(
-                        f"{len(found)} <{name}> tag(s): wishes are recorded and withdrawn only"
-                        " in the server's wishlist channel"
-                    )
+            # No retry can fix the place, so the member is told and the model is not asked.
+            notes.append("（這裡不是許願頻道，願望沒有記下，也沒有撤回）")
             return clean
-        for index, body in enumerate(creates):
-            if index >= MAX_WISH_TAGS:
-                refused.append(f"<wish>: at most {MAX_WISH_TAGS} wish tags per answer")
-                continue
+        for body in creates:
             attrs = dict(WISH_ATTR.findall(body))
             missing = [
-                key
-                for key in ("title", "original", "need", "feasibility", "alternatives")
-                if key not in attrs
+                key for key in ("title", "original", "need", "feasibility") if key not in attrs
             ]
             if missing:
                 refused.append(f"<wish>: missing attribute {', '.join(missing)}")
+                notes.append("（願望的格式不對，沒有記下）")
                 continue
             try:
                 wish, created = self.wishes.add(
@@ -3276,14 +3267,13 @@ class DiscordCodexClient(discord.Client):
                     channel_id,
                     message_id,
                     user_id,
-                    **{
-                        key: attrs[key]
-                        for key in ("title", "original", "need", "feasibility", "alternatives")
-                    },
+                    **{key: attrs[key] for key in ("title", "original", "need", "feasibility")},
+                    alternatives=attrs.get("alternatives", ""),
                     asked=asked,
                 )
             except ValueError as error:
                 refused.append(f"<wish>: {error}")
+                notes.append("（願望的內容超出長度限制，沒有記下）")
                 continue
             title = discord.utils.escape_markdown(discord.utils.escape_mentions(wish.title))
             notes.append(
@@ -3299,6 +3289,7 @@ class DiscordCodexClient(discord.Client):
             value = dict(WISH_ATTR.findall(body)).get("id", "")
             if not re.fullmatch(r"[0-9]{1,9}", value):
                 refused.append("<cancel_wish>: id must be digits (1–9 characters)")
+                notes.append("（撤回願望的格式不對，沒有撤回）")
                 continue
             wish_id = int(value)
             existing = self.wishes.get(wish_id)

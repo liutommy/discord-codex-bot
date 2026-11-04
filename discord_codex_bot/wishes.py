@@ -15,7 +15,6 @@ from .linkclean import SwitchStore
 
 LOGGER = logging.getLogger(__name__)
 WISH_DB = "wishes.sqlite3"
-MAX_WISH_TAGS = 3
 MAX_NOTICE_ATTEMPTS = 5
 STATUS_LABELS = {
     "open": "待評估",
@@ -29,9 +28,9 @@ OPEN_STATUSES = ("open", "accepted", "in_progress")
 DEVELOPER_STATUSES = ("open", "accepted", "in_progress", "done", "rejected")
 
 # Read attributes by name; alternatives is twelve characters (tags._TAG's limit).
-WISH_TAG = re.compile(r'<wish\b((?:\s+[a-z_]{1,12}="[^"]*")*)\s*/?>(?:\s*</wish>)?')
+WISH_TAG = re.compile(r'<wish\b((?:\s+[a-z_]{1,12}="[^"]*")+)\s*/?>(?:\s*</wish>)?')
 CANCEL_WISH_TAG = re.compile(
-    r'<cancel_wish\b((?:\s+[a-z_]{1,12}="[^"]*")*)\s*/?>(?:\s*</cancel_wish>)?'
+    r'<cancel_wish\b((?:\s+[a-z_]{1,12}="[^"]*")+)\s*/?>(?:\s*</cancel_wish>)?'
 )
 ATTR = re.compile(r'([a-z_]{1,12})="([^"]*)"')
 
@@ -233,12 +232,20 @@ class WishStore:
         note = _validate("note", note, 0, 1500)
         now = _now()
         with self._connect() as connection:
+            # A wish its member withdrew stays withdrawn: reopening it would notify them about
+            # something they took back.
             cursor = connection.execute(
-                "UPDATE wishes SET status=?, note=?, updated_at=? WHERE id=?",
+                "UPDATE wishes SET status=?, note=?, updated_at=? "
+                "WHERE id=? AND status!='withdrawn'",
                 (status, note, now, wish_id),
             )
             if not cursor.rowcount:
-                raise ValueError("wish does not exist")
+                exists = connection.execute(
+                    "SELECT 1 FROM wishes WHERE id=?", (wish_id,)
+                ).fetchone()
+                raise ValueError(
+                    "wish was withdrawn by its member" if exists else "wish does not exist"
+                )
             connection.execute(
                 "INSERT INTO wish_notices (wish_id, status, note, created_at) VALUES (?,?,?,?)",
                 (wish_id, status, note, now),

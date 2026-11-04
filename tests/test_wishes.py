@@ -210,3 +210,14 @@ async def test_a_notice_given_up_on_releases_the_ones_after_it(store):
     assert store.notices(wish.id)[0].state == "failed"
     await deliver_notices(store, deliver)
     assert sent == ["done"]
+
+
+def test_a_withdrawn_wish_cannot_be_reopened_or_notified(store):
+    # The member took it back; a status change would ping them about it (Claude review on #89).
+    wish, _ = add(store)
+    assert store.withdraw(wish.id, 4).status == "withdrawn"
+    with pytest.raises(ValueError, match="withdrawn"):
+        store.set_status(wish.id, "accepted", "排入")
+    assert store.get(wish.id).status == "withdrawn" and store.notices(wish.id) == []
+    with pytest.raises(ValueError, match="does not exist"):
+        store.set_status(999, "accepted")
