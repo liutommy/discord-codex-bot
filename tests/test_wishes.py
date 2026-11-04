@@ -1,5 +1,5 @@
 import sqlite3
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -7,6 +7,7 @@ from discord_codex_bot.linkclean import SwitchStore
 from discord_codex_bot.wishes import (
     MAX_NOTICE_ATTEMPTS,
     OPEN_STATUSES,
+    WishNotice,
     WishSettings,
     WishStore,
     deliver_notices,
@@ -221,3 +222,36 @@ def test_a_withdrawn_wish_cannot_be_reopened_or_notified(store):
     assert store.get(wish.id).status == "withdrawn" and store.notices(wish.id) == []
     with pytest.raises(ValueError, match="does not exist"):
         store.set_status(999, "accepted")
+
+
+async def test_withdrawing_a_wish_cancels_its_queued_notices(store):
+    # A member who took the wish back must not be pinged that it was accepted (Codex on #89).
+    wish, _ = add(store)
+    other, _ = add(store, title="另一個", original="另一個需求")
+    store.set_status(wish.id, "accepted")
+    store.set_status(other.id, "accepted")
+    store.withdraw(wish.id, 4)
+    sent = []
+
+    async def deliver(notice):
+        sent.append(notice.wish_id)
+
+    await deliver_notices(store, deliver)
+    assert sent == [other.id]
+    [notice] = store.notices(wish.id)
+    assert notice.state == "failed" and notice.last_error == "wish withdrawn"
+
+
+async def test_a_notice_read_before_a_withdrawal_is_dropped_not_sent(store, monkeypatch):
+    wish, _ = add(store)
+    store.set_status(wish.id, "accepted")
+    [pending] = store.pending_notices()
+    stale = WishNotice(**{**pending.__dict__, "wish": replace(pending.wish, status="withdrawn")})
+    monkeypatch.setattr(store, "pending_notices", lambda: [stale])
+    sent = []
+
+    async def deliver(notice):
+        sent.append(notice.id)
+
+    await deliver_notices(store, deliver)
+    assert sent == [] and store.notices(wish.id)[0].state == "failed"
