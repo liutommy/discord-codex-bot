@@ -21,7 +21,7 @@ HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
 
 
 # A model's request for X search, answered by the Bot for every backend (bot.py read loop).
-XSEARCH_TAG = re.compile(r'<xsearch\s+query="([^"]{1,300})"\s*/?>(?:\s*</xsearch>)?')
+XSEARCH_TAG = re.compile(r'<xsearch\s+query="([^"]{1,200})"\s*/?>(?:\s*</xsearch>)?')
 
 
 def extract_xsearch_queries(answer: str) -> list[str]:
