@@ -293,13 +293,15 @@ class WishStore:
                 (_now(), notice_id),
             )
 
-    def drop_notice(self, notice_id: int, reason: str) -> None:
+    def still_pending(self, notice_id: int) -> bool:
+        """The notice is still to be sent and its wish was not withdrawn, as of now."""
         with self._connect() as connection:
-            connection.execute(
-                "UPDATE wish_notices SET state='failed', last_error=? "
-                "WHERE id=? AND state='pending'",
-                (reason[:500], notice_id),
-            )
+            row = connection.execute(
+                "SELECT 1 FROM wish_notices n JOIN wishes w ON w.id = n.wish_id "
+                "WHERE n.id=? AND n.state='pending' AND w.status!='withdrawn'",
+                (notice_id,),
+            ).fetchone()
+            return row is not None
 
     def mark_failed(self, notice_id: int, error: str) -> None:
         with self._connect() as connection:
@@ -340,8 +342,9 @@ async def deliver_notices(
     for notice in store.pending_notices():
         if notice.wish_id in held:
             continue
-        if notice.wish.status == "withdrawn":  # withdrawn between the read above and now
-            store.drop_notice(notice.id, "wish withdrawn")
+        # Read again just before sending: an earlier send in this pass can take seconds, and the
+        # member may have withdrawn the wish meanwhile (withdraw() fails its pending notices).
+        if not store.still_pending(notice.id):
             continue
         try:
             await deliver(notice)

@@ -1,5 +1,5 @@
 import sqlite3
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -7,7 +7,6 @@ from discord_codex_bot.linkclean import SwitchStore
 from discord_codex_bot.wishes import (
     MAX_NOTICE_ATTEMPTS,
     OPEN_STATUSES,
-    WishNotice,
     WishSettings,
     WishStore,
     deliver_notices,
@@ -242,16 +241,19 @@ async def test_withdrawing_a_wish_cancels_its_queued_notices(store):
     assert notice.state == "failed" and notice.last_error == "wish withdrawn"
 
 
-async def test_a_notice_read_before_a_withdrawal_is_dropped_not_sent(store, monkeypatch):
-    wish, _ = add(store)
-    store.set_status(wish.id, "accepted")
-    [pending] = store.pending_notices()
-    stale = WishNotice(**{**pending.__dict__, "wish": replace(pending.wish, status="withdrawn")})
-    monkeypatch.setattr(store, "pending_notices", lambda: [stale])
+async def test_a_wish_withdrawn_while_an_earlier_notice_is_sending_is_not_notified(store):
+    # The pass reads every pending notice first; the member withdraws during an earlier send.
+    first, _ = add(store)
+    second, _ = add(store, title="另一個", original="另一個需求")
+    store.set_status(first.id, "accepted")
+    store.set_status(second.id, "accepted")
     sent = []
 
     async def deliver(notice):
-        sent.append(notice.id)
+        if notice.wish_id == first.id:
+            store.withdraw(second.id, 4)  # while this send is in flight
+        sent.append(notice.wish_id)
 
     await deliver_notices(store, deliver)
-    assert sent == [] and store.notices(wish.id)[0].state == "failed"
+    assert sent == [first.id]
+    assert store.notices(second.id)[0].state == "failed"
