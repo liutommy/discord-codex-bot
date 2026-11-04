@@ -500,7 +500,6 @@ BROKEN_READ = re.compile(
     rf"|<{_READ_NAME}\s[^<>\n]{{0,2500}}$",
     re.M,
 )
-WEB_PER_ROUND = 2
 # Every read round spent and the model still asking: what it asked for last is not read.
 READS_SPENT = (
     '<RESULT kind="error">\nThe read limit for this question is used up; nothing more will be'
@@ -536,12 +535,6 @@ def unserved_reads(answer: str, config: Config, has_apis: bool) -> list[str]:
         problems.append("<xsearch>: X search is not available here; use <web> instead")
     limits = (
         ("fetch", len(extract_fetch_tags(answer)), config.link_max_urls),
-        ("web", len(search.extract_web_queries(answer)), WEB_PER_ROUND),
-        (
-            "xsearch",
-            len(x_queries) if xsearch.enabled(config) else 0,
-            xsearch.XSEARCH_PER_ROUND,
-        ),
         ("api", len(calls) if has_apis else 0, apis.MAX_CALLS_PER_ROUND),
         (
             "run",
@@ -2034,9 +2027,9 @@ class DiscordCodexClient(discord.Client):
                     break  # an answer that merely quotes a tag (e.g. from a page) is an answer
                 wanted = extract_read_requests(result.text)
                 urls = extract_fetch_tags(result.text)[: self.config.link_max_urls]
-                queries = search.extract_web_queries(result.text)[:WEB_PER_ROUND]
+                queries = search.extract_web_queries(result.text)
                 x_queries = (
-                    xsearch.extract_xsearch_queries(result.text)[: xsearch.XSEARCH_PER_ROUND]
+                    xsearch.extract_xsearch_queries(result.text)
                     if xsearch.enabled(self.config)
                     else []
                 )

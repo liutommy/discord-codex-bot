@@ -2206,9 +2206,7 @@ async def test_x_search_without_a_sidecar_is_answered_with_the_reason(client, mo
     ]
     on = replace(client.config, xsearch_url="http://xsearch:8080")
     two = '<xsearch query="a"/>\n<xsearch query="b"/>'
-    assert unserved_reads(two, on, False) == [
-        "<xsearch>: only the first 1 are carried out per round; send the rest again"
-    ]
+    assert unserved_reads(two, on, False) == []  # every search asked for is carried out
 
     async def never(*args, **kw):  # pragma: no cover - must not run without a sidecar
         raise AssertionError("searched X without a sidecar")
@@ -2498,7 +2496,7 @@ async def test_unserved_reads_go_back_as_results_not_to_the_member(
     assert result.text == "答案"
     second = codex.calls[1][0]
     assert f"{broken}: not in the documented form" in second and "no sandbox here" in second
-    assert queries == ["q0", "q1"] and "only the first 2" in codex.calls[2][0]
+    assert queries == ["q0", "q1", "q2"] and "only the first" not in codex.calls[2][0]
 
 
 async def test_read_requests_past_a_limit_or_written_as_a_body_are_answered(
