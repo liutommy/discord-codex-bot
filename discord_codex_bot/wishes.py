@@ -312,12 +312,18 @@ class WishSettings:
 async def deliver_notices(
     store: WishStore, deliver: Callable[[WishNotice], Awaitable[None]]
 ) -> None:
-    """One pass; an inaccessible destination cannot prevent another notice being sent."""
+    """One pass, oldest first. A failed notice holds back the later ones of the same wish until
+    it is delivered or given up on, so a member never reads an older status after a newer one;
+    other wishes' notices still go."""
+    held: set[int] = set()
     for notice in store.pending_notices():
+        if notice.wish_id in held:
+            continue
         try:
             await deliver(notice)
         except Exception as error:
             store.mark_failed(notice.id, str(error))
+            held.add(notice.wish_id)
         else:
             store.mark_delivered(notice.id)
 

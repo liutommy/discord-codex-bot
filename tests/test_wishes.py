@@ -168,18 +168,45 @@ def test_channel_settings_persist_and_clear_as_empty_row(tmp_path):
     assert settings.switches._get(1, "wish_channel") == ""
 
 
-async def test_failed_delivery_does_not_prevent_other_notices(store):
+async def test_a_failed_notice_holds_back_its_wish_but_not_other_wishes(store):
+    # A member must never read an older status after a newer one (Codex on PR #89).
+    wish, _ = add(store)
+    other, _ = add(store, title="另一個", original="另一個需求", user_id=5)
+    store.set_status(wish.id, "accepted")
+    store.set_status(wish.id, "done")
+    store.set_status(other.id, "accepted")
+    sent, down = [], {"accepted"}
+
+    async def deliver(notice):
+        if notice.wish_id == wish.id and notice.status in down:
+            raise RuntimeError("unavailable")
+        sent.append((notice.wish_id, notice.status))
+
+    await deliver_notices(store, deliver)
+    first, second = store.notices(wish.id)
+    assert first.state == "pending" and first.attempts == 1
+    assert second.state == "pending" and second.attempts == 0  # held, not tried
+    assert sent == [(other.id, "accepted")]
+
+    down.clear()
+    await deliver_notices(store, deliver)
+    assert sent[1:] == [(wish.id, "accepted"), (wish.id, "done")]  # in the order they were set
+
+
+async def test_a_notice_given_up_on_releases_the_ones_after_it(store):
     wish, _ = add(store)
     store.set_status(wish.id, "accepted")
-    store.set_status(wish.id, "in_progress")
+    store.set_status(wish.id, "done")
     sent = []
 
     async def deliver(notice):
         if notice.status == "accepted":
             raise RuntimeError("unavailable")
-        sent.append(notice.id)
+        sent.append(notice.status)
 
+    for _ in range(MAX_NOTICE_ATTEMPTS):
+        await deliver_notices(store, deliver)
+    assert sent == []
+    assert store.notices(wish.id)[0].state == "failed"
     await deliver_notices(store, deliver)
-    first, second = store.notices(wish.id)
-    assert first.state == "pending" and first.attempts == 1
-    assert second.state == "delivered" and sent == [second.id]
+    assert sent == ["done"]
