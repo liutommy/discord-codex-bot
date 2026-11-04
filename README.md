@@ -387,7 +387,15 @@ falls back to headless Chromium (Playwright, installed in the image): it waits o
 takes the rendered text and attaches a full-page screenshot (`LINK_RENDER_TIMEOUT_SECONDS`,
 `LINK_SCREENSHOT_MAX_HEIGHT`) so the model can see the pictures. X posts (x.com and the
 fxtwitter/vxtwitter/fixupx/fixvx mirrors) are read through the fxtwitter API instead — text plus
-the photos or video poster frames, attached as images — with the page as fallback. When neither
+the photos or video poster frames, attached as images — with the page as fallback. A Yu-Gi-Oh!
+Neuron deck share link (`neuron.konami.net/link/<code>`, or the `member_deck.action` page on
+`www.db.yugioh-card.com` it redirects to) is read as the exact deck list (`neuron.py`): the Bot
+reads the share link's redirect without following it, accepts only a redirect to that deck page,
+fetches the one page in Japanese (`request_locale=ja`, no redirects, `LINK_MAX_BYTES`), and gives
+the model the deck name and one line per card (`N× name (cid N)`) per section. The block says the
+list is authoritative only when the rows add up to the totals the page prints for the main, extra
+and side deck; otherwise it says the list may be incomplete. Any failure falls back to the generic
+fetch. When neither
 the plain fetch nor Chromium can read a page (an interactive Turnstile, e.g. Dcard, is given up
 on at once), the Bot falls back to the link preview Discord attached to the message — Discord's
 crawler is a Cloudflare-verified bot and gets the title, description and picture — labelled as
