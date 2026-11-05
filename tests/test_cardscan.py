@@ -394,3 +394,24 @@ async def test_a_failing_gemini_fallback_keeps_the_first_result(
     image = tmp_path / "photo.jpg"
     image.write_bytes(b"jpg")
     assert (await cardscan.scan(replace(config, cardscan_url=url), image)) == PHOTO
+
+
+async def test_a_failing_rescan_keeps_the_first_result(config, tmp_path, monkeypatch) -> None:
+    calls = []
+
+    async def post(cfg, body):
+        calls.append(body)
+        if "boxes" in body:
+            raise cardscan.CardScanError("HTTP 503 busy")
+        return PHOTO
+
+    async def boxes(*a):
+        return [[0, 0, 10, 10], [20, 0, 10, 10]]
+
+    monkeypatch.setattr(cardscan, "_post", post)
+    monkeypatch.setattr(gemini, "available", lambda c: True)
+    monkeypatch.setattr(gemini, "card_boxes", boxes)
+    image = tmp_path / "photo.jpg"
+    image.write_bytes(b"jpg")
+    assert await cardscan.scan(replace(config, cardscan_url="http://c:1"), image) == PHOTO
+    assert len(calls) == 2

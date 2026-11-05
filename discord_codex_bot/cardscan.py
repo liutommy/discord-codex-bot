@@ -130,7 +130,11 @@ async def scan(config: Config, path: Path) -> dict:
         LOGGER.info(
             "card scan: outlines found %d, Gemini marked %d; scanning again", found, len(boxes)
         )
-        return await _post(config, body | {"boxes": boxes})
+        try:
+            return await _post(config, body | {"boxes": boxes})
+        except CardScanError as error:  # the first result still stands
+            LOGGER.warning("card scan: rescan with Gemini boxes failed: %s", error)
+            return result
 
 
 def _text(value: object, limit: int = 120) -> str:

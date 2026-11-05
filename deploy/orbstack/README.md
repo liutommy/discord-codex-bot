@@ -207,14 +207,16 @@ For the local LLM relay, also as root in the machine:
 
 ```sh
 apt-get install -y socat
-# /etc/default/dcb: DCB_LLM_RELAY_PORT=<port>, an integer 1024-65535, and for the image service
-# relay DCB_IMG_RELAY_PORT=<another port> (empty = no rule for it)
+# /etc/default/dcb: DCB_LLM_RELAY_PORT=<port>, an integer 1024-65535, for the image service
+# relay DCB_IMG_RELAY_PORT=<another port> and for the card recognition relay
+# DCB_CARD_RELAY_PORT=<a third port> (empty = no rule for it)
 systemctl reload dcb-firewall
 iptables -S DCB-INPUT | grep br-dcb-llm    # one rule for 172.31.254.1 per port that is set
 ```
 
-With both ports set the check lists exactly two rules, one per port. `dcb-firewall` exits 1 and
-loads nothing when either port is not an integer 1024-65535 or both are the same.
+With all three ports set the check lists exactly three rules, one per port. `dcb-firewall` exits 1
+and loads nothing when a port is set but is not an integer 1024-65535, or when two of the set
+ports are the same.
 
 The listeners run as the machine's default (unprivileged) user and are started by the Mac's relay;
 nothing new runs from systemd.
