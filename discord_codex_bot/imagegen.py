@@ -37,6 +37,8 @@ LOGGER = logging.getLogger(__name__)
 CATALOG_TTL_SECONDS = 60.0
 REQUEST_TIMEOUT_SECONDS = 30
 DOWNLOAD_TIMEOUT_SECONDS = 120
+# The shortest limit of a status poll: the one sent after a deadline passed during the interval.
+LAST_POLL_SECONDS = 2.0
 POLL_SECONDS = 2.0
 # Polls that may fail in a row (the relay dropping a connection) before the job is given up.
 POLL_FAILURES = 3
@@ -747,26 +749,30 @@ async def run_job(
             raise
 
 
+def _remaining(
+    service: ImageService, submitted: float, started: float | None, clock: Callable[[], float]
+) -> float:
+    """Seconds left before the queue wait (while queued) or the run timeout ends."""
+    if started is None:
+        return service.queue_wait_seconds - (clock() - submitted)
+    return service.timeout_seconds - (clock() - started)
+
+
 def _left(
     service: ImageService,
     job: Job,
     submitted: float,
     started: float | None,
     clock: Callable[[], float],
-) -> float:
-    """Seconds left before the queue wait (while queued) or the run timeout ends; raises the
-    matching timeout once nothing is left."""
+) -> None:
+    """Raise the matching timeout once nothing is left of the queue wait or the run time."""
+    if _remaining(service, submitted, started, clock) > 0:
+        return
     if started is None:
-        left = service.queue_wait_seconds - (clock() - submitted)
-        if left <= 0:
-            LOGGER.warning("Image job %s waited too long in the queue", job.job_id)
-            raise ImageGenError(QUEUE_TIMED_OUT, "queue_timeout")
-    else:
-        left = service.timeout_seconds - (clock() - started)
-        if left <= 0:
-            LOGGER.warning("Image job %s timed out", job.job_id)
-            raise ImageGenError(TIMED_OUT, "timeout")
-    return left
+        LOGGER.warning("Image job %s waited too long in the queue", job.job_id)
+        raise ImageGenError(QUEUE_TIMED_OUT, "queue_timeout")
+    LOGGER.warning("Image job %s timed out", job.job_id)
+    raise ImageGenError(TIMED_OUT, "timeout")
 
 
 async def _follow(
@@ -798,11 +804,13 @@ async def _follow(
             raise ImageGenError(STOPPED, "stopped")
         _left(service, job, submitted, started, clock)
         await sleep_for(POLL_SECONDS, clock=clock)
-        # A poll gets only what is left of the wait or run budget: one that stalls just before
-        # the deadline must not push the give-up a whole request timeout past it.
-        left = _left(service, job, submitted, started, clock)
+        # A poll gets only what is left of the wait or run budget, so one that stalls just
+        # before the deadline cannot push the give-up a whole request timeout past it. A deadline
+        # that passed during the interval still gets one short poll: the job may have finished
+        # or left the queue meanwhile, and the loop head reads that before it gives up.
+        left = _remaining(service, submitted, started, clock)
         try:
-            job = await service.status(session, job.job_id, left)
+            job = await service.status(session, job.job_id, max(left, LAST_POLL_SECONDS))
             failures = 0
         except (aiohttp.ClientError, TimeoutError, ValueError) as error:
             if isinstance(error, TimeoutError):
