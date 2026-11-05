@@ -919,16 +919,17 @@ with no rules file. Generic application parameters such as `ref` and `source` re
 YouTube `si`/`feature` and Threads `xmt` are removed only on those hosts. Recognized signed
 URLs are left intact. This cannot identify every site's custom signing or routing scheme.
 
-`/<prefix>-embedfix` (default on) additionally swaps post links on X, Threads, TikTok, Pixiv
-and Tumblr to embed-fixer proxies (`vxtwitter.com` / `fixupx.com`, `vxthreads.com`,
-`tnktok.com` / `tiktxk.com`, `phixiv.net`, `tpmblr.com`) so Discord previews the video or image; a human who clicks is
+`/<prefix>-embedfix` (default on) additionally swaps post links on X, Threads, TikTok, Pixiv,
+Tumblr and Facebook to embed-fixer proxies (`vxtwitter.com` / `fixupx.com`, `vxthreads.com`,
+`tnktok.com` / `tiktxk.com`, `phixiv.net`, `tpmblr.com`, `facebed.com`) so Discord previews the video or image; a human who clicks is
 sent back to the original site. Before swapping, the Bot fetches the proxy page as Discord's
 crawler would and keeps the original link unless that page carries a card, so
 a proxy that is down or blocked never replaces a working link. A card means a video or image
-tag; for Threads it may instead be the post's own text, because a text post has no picture and
+tag; for Threads and Facebook it may instead be the post's own text, because a text post has no picture and
 is exactly the post whose native preview is worth replacing. That relaxation is guarded: a
 share code the proxy cannot resolve still answers 200 with a card, so the generic placeholder
-description it serves there is refused. Pixiv works are rated through
+description it serves there is refused; facebed answers a post it cannot read with Facebook's
+login wall, whose fixed description is refused the same way. Pixiv works are rated through
 Pixiv's public illust endpoint first: R-18 / R-18G links are delivered as `||spoilers||` so
 Discord blurs the preview, and a work whose rating cannot be read is not swapped at all. X posts
 are rated the same way through the vxtwitter API's `possibly_sensitive` flag. A link

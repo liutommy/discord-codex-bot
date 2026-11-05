@@ -56,6 +56,29 @@ from discord_codex_bot.embedfix import (
             "https://www.tumblr.com/staff/811651663989538816/title",
             ["https://tpmblr.com/staff/811651663989538816/title"],
         ),
+        (
+            "https://www.facebook.com/FPCChannel/posts/1681075973388917",
+            ["https://facebed.com/FPCChannel/posts/1681075973388917"],
+        ),
+        (
+            "https://m.facebook.com/reel/2094282871197652",
+            ["https://facebed.com/reel/2094282871197652"],
+        ),
+        (
+            "https://www.facebook.com/share/r/1N2uyc1RzY/",
+            ["https://facebed.com/share/r/1N2uyc1RzY/"],
+        ),
+        ("https://www.facebook.com/share/1ER9RCfJLi/", ["https://facebed.com/share/1ER9RCfJLi/"]),
+        (
+            "https://www.facebook.com/permalink.php?story_fbid=1&id=2",
+            ["https://facebed.com/permalink.php?story_fbid=1&id=2"],
+        ),
+        (
+            "https://web.facebook.com/groups/123/posts/456/?comment_id=7",
+            ["https://facebed.com/groups/123/posts/456/?comment_id=7"],
+        ),
+        ("https://www.facebook.com/FPCChannel", []),  # a page, not a post
+        ("https://www.facebook.com/watch/?v=1", []),  # not a facebed scheme
         ("https://x.com/jack", []),  # a profile, not a post
         ("https://fixupx.com/jack/status/20", []),  # already a proxy link
         ("https://www.tiktok.com/@tiktok", []),
@@ -186,3 +209,28 @@ async def test_pixiv_rating_drives_the_spoiler_and_an_unreadable_rating_blocks_t
 def test_every_proxy_host_is_excluded_from_rewriting():
     for host in embedfix.PROXY_HOSTS:
         assert candidates(f"https://{host}/u/status/1") == []
+
+
+async def test_pick_swaps_a_facebook_post_but_not_the_login_wall():
+    # facebed answers 200 for a post it cannot read, with Facebook's login wall: no media and
+    # a fixed description (captured 2026-11-05 from facebed.com/share/p/ZZZZZZZZZZ/).
+    wall = (
+        '<meta property="og:title" content="Log in or sign up to view"/>'
+        '<meta property="og:description" content="See posts, photos and more on Facebook."/>'
+    )
+    pages = {
+        "https://facebed.com/reel/1": '<meta property="og:video" content="https://v/a.mp4"/>',
+        "https://facebed.com/share/p/TEXT/": '<meta property="og:description" content="body"/>',
+        "https://facebed.com/share/p/DEAD/": wall,
+    }
+
+    async def fetch(url: str, headers: dict[str, str]) -> str | None:
+        return pages.get(url)
+
+    assert await pick("https://www.facebook.com/reel/1", fetch) == Fix(
+        "https://facebed.com/reel/1", spoiler=False
+    )
+    assert await pick("https://www.facebook.com/share/p/TEXT/", fetch) == Fix(
+        "https://facebed.com/share/p/TEXT/", spoiler=False
+    )
+    assert await pick("https://www.facebook.com/share/p/DEAD/", fetch) is None
