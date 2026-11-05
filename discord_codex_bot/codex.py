@@ -339,7 +339,13 @@ def _prompt(
             " attaches a full-page screenshot for you to look at.",
             'To search the web, reply with ONLY <web query="…"/> (one tag per query); the Bot'
             " returns titles, URLs and snippets, and you then <fetch> the pages worth reading."
-            " Search when the question needs current or verifiable facts you do not have.",
+            " Search when the question needs current or verifiable facts you do not have."
+            " An attached image that looks like a recent post, news item or announcement naming"
+            " specific products, versions, hashes or events: search those names before"
+            " explaining it, since it may refer to events after your training data."
+            " When the member asks you to look something up after your earlier answer, build"
+            " the queries from the names and numbers in the original post, image or quoted"
+            " text, not from your earlier answer, and say so when the results contradict it.",
             'To search X (Twitter) posts on a topic, reply with ONLY <xsearch query="…"/> (at'
             " most 200 characters, 20 different searches per answer); the Bot has Grok search X"
             " and returns the"

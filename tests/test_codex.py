@@ -502,6 +502,14 @@ def test_the_instructions_know_every_kind_of_source() -> None:
         assert source in text, source
 
 
+def test_the_instructions_search_from_the_source_not_the_earlier_answer() -> None:
+    # A member posted a screenshot mocking recent security incidents; the model read a commit
+    # hash as a kernel version, then on "查一下" searched that misreading and cited it as proof.
+    text = codex._prompt("q")
+    assert "search those names before explaining it" in text
+    assert "not from your earlier answer" in text
+
+
 def test_a_quoted_message_sits_outside_user_message() -> None:
     from discord_codex_bot.codex import QUOTE_FENCE, _prompt, split_quoted
 
