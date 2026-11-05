@@ -1,0 +1,27 @@
+# Settings for the card recognition service's instance of dcb-llm-relay.py. Install as
+# ~/.config/dcb-llm-relay/card.config; com.example.dcb-card-relay.plist passes that path as the
+# relay's argument. Same keys as dcb-llm-relay.config.example (the script is the same); every key
+# except the two ports is optional. An environment variable of the same name overrides the file
+# for every instance, so set these here, not in the launchd environment.
+
+DCB_LLM_RELAY_MACHINE=dcb
+DCB_LLM_RELAY_USER=
+
+# The machine's DCB_CARD_RELAY_PORT (/etc/default/dcb there); it must differ from the other
+# relays' listen ports. Required: the port.
+DCB_LLM_RELAY_LISTEN_ADDR=172.31.254.1
+DCB_LLM_RELAY_LISTEN_PORT=<DCB_CARD_RELAY_PORT>
+
+# The Mac's card recognition service, bound to 127.0.0.1 only: only the relay on this Mac reaches
+# it. Required: the port.
+DCB_LLM_RELAY_UPSTREAM_HOST=127.0.0.1
+DCB_LLM_RELAY_UPSTREAM_PORT=<CARD_PORT>
+
+# Connections served at once. The Bot sends one scan at a time (one request per image, two when
+# Gemini marks cards a photo's outline search missed), so two workers are enough. A scan takes a
+# few seconds; the idle timeout gives a silent connection's worker back after that many seconds.
+DCB_LLM_RELAY_WORKERS=2
+DCB_LLM_RELAY_IDLE=120
+
+# One line per served connection (bytes each way, duration), never any content.
+DCB_LLM_RELAY_LOG=~/Library/Logs/dcb-card-relay.log

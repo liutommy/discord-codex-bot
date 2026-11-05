@@ -620,3 +620,35 @@ def test_the_llm_server_cannot_download_a_model_a_request_names() -> None:
     plist = plistlib.loads((RELAY.parent / "com.example.local-llm.plist").read_bytes())
     assert plist["EnvironmentVariables"]["HF_HUB_OFFLINE"] == "1"
     assert plist["ProgramArguments"][1:3] == ["--host", "127.0.0.1"]
+
+
+def test_the_card_relay_plist_and_config_are_their_own_instance() -> None:
+    import plistlib
+
+    llm = plistlib.loads((RELAY.parent / "com.example.dcb-llm-relay.plist").read_bytes())
+    card = plistlib.loads((RELAY.parent / "com.example.dcb-card-relay.plist").read_bytes())
+    assert card["ProgramArguments"] == [
+        *llm["ProgramArguments"],
+        "__HOME__/.config/dcb-llm-relay/card.config",
+    ]
+    assert card["Label"] == "com.example.dcb-card-relay"
+    assert "dcb-card-relay" in card["StandardErrorPath"]
+    own = ("Label", "ProgramArguments", "StandardOutPath", "StandardErrorPath")
+    assert {k: v for k, v in card.items() if k not in own} == {
+        k: v for k, v in llm.items() if k not in own
+    }
+
+    def keys(name: str) -> dict[str, str]:
+        text = (RELAY.parent / name).read_text()
+        return dict(
+            line.split("=", 1) for line in text.splitlines() if line and not line.startswith("#")
+        )
+
+    lines, llm_lines = keys("dcb-card-relay.config.example"), keys("dcb-llm-relay.config.example")
+    assert set(lines) == set(llm_lines)
+    assert lines["DCB_LLM_RELAY_LISTEN_PORT"] == "<DCB_CARD_RELAY_PORT>"
+    assert lines["DCB_LLM_RELAY_UPSTREAM_HOST"] == "127.0.0.1"
+    assert lines["DCB_LLM_RELAY_LOG"] not in (
+        llm_lines["DCB_LLM_RELAY_LOG"],
+        keys("dcb-image-relay.config.example")["DCB_LLM_RELAY_LOG"],
+    )

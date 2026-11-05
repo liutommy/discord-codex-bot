@@ -300,6 +300,14 @@ IMAGE_FEATURE = (
 )
 
 
+# Shown only while CARDSCAN_URL is set (cardscan.py).
+CARD_FEATURE = (
+    "**認得遊戲王卡**：貼 Neuron 牌組截圖、攤在桌上的卡片照片或單張卡，問 Bot 這是什麼牌，"
+    "它會依卡圖認出每張卡、合併張數，並分主牌組、額外牌組（截圖還分得出副牌組）。"
+    "依卡圖比對，異圖與日版、美版卡圖不同的卡可能認錯，不確定的會標出來。"
+)
+
+
 # Shown only while EMOJI_ENABLED is on (emoji.py).
 EMOJI_FEATURE = (
     "**看得懂伺服器表情**：訊息裡（含你回覆的那則）的本伺服器自訂表情，Bot 會照大家平常的用法"
@@ -314,17 +322,24 @@ EMOJI_REPLY_FEATURE = (
 
 
 def _features(
-    image_order: str, emoji: bool = False, emoji_reply: bool = False, image: bool = False
+    image_order: str,
+    emoji: bool = False,
+    emoji_reply: bool = False,
+    image: bool = False,
+    cards: bool = False,
 ) -> list[str]:
     """The ability list; with routing on (`image_order` names the image list, from
     config/routing.json) it also explains automatic model choice, with emoji on how the
     server's own emoji are read, with `emoji_reply` too that answers use them, and with the
-    image service (`image`) that the Bot draws."""
+    image service (`image`) that the Bot draws, with the card service (`cards`) that it
+    recognises Yu-Gi-Oh cards in images."""
     features = list(FEATURES)
     if image_order:
         features.append(ROUTING_FEATURE.replace("{image}", image_order))
     if image:
         features.append(IMAGE_FEATURE)
+    if cards:
+        features.append(CARD_FEATURE)
     if emoji:
         features.append(EMOJI_FEATURE)
         if emoji_reply:
@@ -344,6 +359,7 @@ def render_guide(
     emoji: bool = False,
     emoji_reply: bool = False,
     image: bool = False,
+    cards: bool = False,
 ) -> str:
     """The member-facing guide for /<prefix>-help, in registered-command order. `default`
     is DEFAULT_MODEL as members read it; it is configuration, so never written in the text."""
@@ -358,7 +374,8 @@ def render_guide(
     blocks.append(
         "**不用指令也能做的事**\n"
         + "\n".join(
-            f"・{_fill(f, p, default)}" for f in _features(image_order, emoji, emoji_reply, image)
+            f"・{_fill(f, p, default)}"
+            for f in _features(image_order, emoji, emoji_reply, image, cards)
         )
     )
     return "\n\n".join(blocks)
@@ -372,6 +389,7 @@ def render_sheet(
     emoji: bool = False,
     emoji_reply: bool = False,
     image: bool = False,
+    cards: bool = False,
 ) -> str:
     """The compact sheet injected into the model's prompt: one line per command plus the
     feature list, Markdown stripped so it reads as facts rather than formatting."""
@@ -383,7 +401,7 @@ def render_sheet(
         "其他用法："
         + " ".join(
             _fill(f, prefix, default).replace("**", "")
-            for f in _features(image_order, emoji, emoji_reply, image)
+            for f in _features(image_order, emoji, emoji_reply, image, cards)
         )
     )
     return "\n".join(lines)

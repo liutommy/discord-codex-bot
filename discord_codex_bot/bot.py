@@ -24,6 +24,7 @@ from discord import app_commands
 from . import agy as agy_module
 from . import (
     apis,
+    cardscan,
     characters,
     earlier,
     embedfix,
@@ -482,11 +483,12 @@ READ_TAGS = (
     apis.API_TAG,
     earlier.EARLIER_TAG,
     xsearch.XSEARCH_TAG,
+    cardscan.CARDSCAN_TAG,
 )
 # A read tag in a shape its parser does not take. Still a request — answered with the reason, so
 # the model can send it again — never an answer to post with the raw tag in it.
 _READ_ATTRS = r'(?:(?:[^<>"]|"[^"]{0,2000}"){0,4000}|[^<>]{0,2500})'  # stray quote: the plain one
-_READ_NAME = r"(?:search|recall|fetch|web|api|earlier|xsearch)(?![a-z_])"
+_READ_NAME = r"(?:search|recall|fetch|web|api|earlier|xsearch|cardscan)(?![a-z_])"
 BROKEN_READ = re.compile(
     # A <run> body goes to its </run> but never past the next <run>: an answer full of unclosed
     # ones would otherwise be read to the end again from each of them.
@@ -531,6 +533,8 @@ def unserved_reads(answer: str, config: Config, has_apis: bool) -> list[str]:
     x_queries = xsearch.extract_xsearch_queries(answer)
     if x_queries and not xsearch.enabled(config):
         problems.append("<xsearch>: X search is not available here; use <web> instead")
+    if cardscan.extract_requests(answer) and not cardscan.enabled(config):
+        problems.append("<cardscan>: card recognition is not available here")
     limits = (
         ("fetch", len(extract_fetch_tags(answer)), config.link_max_urls),
         ("api", len(calls) if has_apis else 0, apis.MAX_CALLS_PER_ROUND),
@@ -1520,6 +1524,55 @@ class DiscordCodexClient(discord.Client):
             ),
         )
 
+    async def _card_scans(
+        self,
+        requests: list[int],
+        pool: list[Path],
+        scanned: dict[Path, str],
+        guild_id: int | None,
+        user_id: int,
+    ) -> list[str]:
+        """RESULT blocks for one round's <cardscan> tags. `pool` is this turn's images in the
+        order the model received them (attachments, then link screenshots, then images read
+        with <earlier>); an image scanned earlier in this answer is not scanned again."""
+        numbers, missing = cardscan.targets(requests, len(pool))
+        blocks = []
+        if not pool:
+            blocks.append(cardscan.render(0, None, "這個問題沒有附圖"))
+        for n in missing:
+            if pool:
+                blocks.append(cardscan.render(n, None, f"只有 {len(pool)} 張圖"))
+        for n in numbers:
+            path = pool[n - 1]
+            block = scanned.get(path)
+            if block is None and len(scanned) >= cardscan.MAX_SCANS_PER_ANSWER:
+                blocks.append(
+                    cardscan.render(
+                        n, None, f"這則回答已認過 {cardscan.MAX_SCANS_PER_ANSWER} 張圖，沒有再認"
+                    )
+                )
+                continue
+            if block is None:
+                try:
+                    result = await cardscan.scan(self.config, path)
+                except cardscan.CardScanError as error:
+                    LOGGER.warning(
+                        "Card scan guild=%s user=%s failed: %s", guild_id, user_id, error
+                    )
+                    block = cardscan.render(n, None, str(error))
+                else:
+                    LOGGER.info(
+                        "Card scan guild=%s user=%s kind=%s cards=%d",
+                        guild_id,
+                        user_id,
+                        result.get("kind"),
+                        len(result.get("cards") or []),
+                    )
+                    block = cardscan.render(n, result)
+                scanned[path] = block
+            blocks.append(block)
+        return blocks
+
     async def _x_search(self, query: str, guild_id: int | None, user_id: int) -> str:
         """One <xsearch> for whichever model asked: the sidecar's Grok session searches X."""
         try:
@@ -1667,9 +1720,10 @@ class DiscordCodexClient(discord.Client):
             emoji=self.emoji is not None,
             emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
             image=self.images.enabled,
+            cards=cardscan.enabled(self.config),
         )
-        doc = apis.render_doc(self.apis)
-        return f"{sheet}\n{doc}" if doc else sheet
+        docs = [d for d in (apis.render_doc(self.apis), cardscan.render_doc(self.config)) if d]
+        return "\n".join([sheet, *docs])
 
     def help_guide(self) -> str:
         """The detailed member guide behind /<prefix>-help (same source as the model's sheet)."""
@@ -1681,6 +1735,7 @@ class DiscordCodexClient(discord.Client):
             emoji=self.emoji is not None,
             emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
             image=self.images.enabled,
+            cards=cardscan.enabled(self.config),
         )
 
     def _image_order(self) -> str:
@@ -2030,6 +2085,7 @@ class DiscordCodexClient(discord.Client):
             # source's quota again to be told the same thing.
             api_seen: dict[tuple[str, str], str] = {}
             x_seen: dict[str, str] = {}  # same for X searches: each one is a Grok session
+            scanned: dict[Path, str] = {}  # card scans of this answer, by image
             for _ in range(self.config.memory_recall_rounds):
                 if not request_only(result.text):
                     break  # an answer that merely quotes a tag (e.g. from a page) is an answer
@@ -2044,12 +2100,16 @@ class DiscordCodexClient(discord.Client):
                 runs = sandbox.extract_runs(result.text) if sandbox.available(self.config) else []
                 api_calls = apis.extract_api_calls(result.text) if self.apis else []
                 earlier_turns = earlier.requested_turns(result.text)
+                scans = (
+                    cardscan.extract_requests(result.text) if cardscan.enabled(self.config) else []
+                )
                 unserved = unserved_reads(result.text, self.config, bool(self.apis))
                 if not (
                     wanted
                     or urls
                     or queries
                     or x_queries
+                    or scans
                     or runs
                     or api_calls
                     or earlier_turns
@@ -2089,6 +2149,12 @@ class DiscordCodexClient(discord.Client):
                             ">\n", ">\n（與稍早完全相同的查詢，沿用當時的結果）\n", 1
                         )
                     blocks.append(block)
+                if scans:
+                    blocks.extend(
+                        await self._card_scans(
+                            scans, [*images, *earlier_images], scanned, guild_id, user_id
+                        )
+                    )
                 for name, path in api_calls:
                     body = api_seen.get((name, path))
                     if body is None:
