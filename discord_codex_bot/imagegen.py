@@ -664,8 +664,12 @@ class ImageService:
         }
         return _job(await self._call(session, "POST", "/v1/image/jobs", model, json=body))
 
-    async def status(self, session: aiohttp.ClientSession, job_id: str) -> Job:
-        return _job(await self._call(session, "GET", f"/v1/image/jobs/{job_id}"))
+    async def status(
+        self, session: aiohttp.ClientSession, job_id: str, limit: float = REQUEST_TIMEOUT_SECONDS
+    ) -> Job:
+        """One reading of the job within `limit` seconds (at most the request timeout)."""
+        timeout = aiohttp.ClientTimeout(total=min(limit, REQUEST_TIMEOUT_SECONDS))
+        return _job(await self._call(session, "GET", f"/v1/image/jobs/{job_id}", timeout=timeout))
 
     async def download(
         self,
@@ -743,6 +747,28 @@ async def run_job(
             raise
 
 
+def _left(
+    service: ImageService,
+    job: Job,
+    submitted: float,
+    started: float | None,
+    clock: Callable[[], float],
+) -> float:
+    """Seconds left before the queue wait (while queued) or the run timeout ends; raises the
+    matching timeout once nothing is left."""
+    if started is None:
+        left = service.queue_wait_seconds - (clock() - submitted)
+        if left <= 0:
+            LOGGER.warning("Image job %s waited too long in the queue", job.job_id)
+            raise ImageGenError(QUEUE_TIMED_OUT, "queue_timeout")
+    else:
+        left = service.timeout_seconds - (clock() - started)
+        if left <= 0:
+            LOGGER.warning("Image job %s timed out", job.job_id)
+            raise ImageGenError(TIMED_OUT, "timeout")
+    return left
+
+
 async def _follow(
     service: ImageService,
     session: aiohttp.ClientSession,
@@ -770,17 +796,17 @@ async def _follow(
             raise ImageGenError(FAILED, "failed")
         if job.state == "cancelled":
             raise ImageGenError(STOPPED, "stopped")
-        if started is None and clock() - submitted >= service.queue_wait_seconds:
-            LOGGER.warning("Image job %s waited too long in the queue", job.job_id)
-            raise ImageGenError(QUEUE_TIMED_OUT, "queue_timeout")
-        if started is not None and clock() - started >= service.timeout_seconds:
-            LOGGER.warning("Image job %s timed out", job.job_id)
-            raise ImageGenError(TIMED_OUT, "timeout")
+        _left(service, job, submitted, started, clock)
         await sleep_for(POLL_SECONDS, clock=clock)
+        # A poll gets only what is left of the wait or run budget: one that stalls just before
+        # the deadline must not push the give-up a whole request timeout past it.
+        left = _left(service, job, submitted, started, clock)
         try:
-            job = await service.status(session, job.job_id)
+            job = await service.status(session, job.job_id, left)
             failures = 0
         except (aiohttp.ClientError, TimeoutError, ValueError) as error:
+            if isinstance(error, TimeoutError):
+                _left(service, job, submitted, started, clock)
             failures += 1
             LOGGER.warning("Image job %s poll failed: %s", job.job_id, type(error).__name__)
             if failures >= POLL_FAILURES:

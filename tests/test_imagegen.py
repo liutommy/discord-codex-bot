@@ -4,6 +4,7 @@ service speaking the contract in docs/image-service.md over real HTTP."""
 import asyncio
 import base64
 import json
+import time
 import types
 from dataclasses import replace
 from datetime import timedelta
@@ -91,6 +92,8 @@ class FakeImageService:
         self.enhance_used = "local"
         self.sensitive = False
         self.polls = 0
+        self.stall = 0.0  # seconds a status poll waits before it answers...
+        self.stall_from = 1  # ...from this poll on
         self.lora_fails = False  # a job with a LoRA ends failed with lora_unavailable
         self._failing = False
         self.url = ""
@@ -132,6 +135,8 @@ class FakeImageService:
         async def job(request):
             await record(request)
             self.polls += 1
+            if self.stall and self.polls >= self.stall_from:
+                await asyncio.sleep(self.stall)
             queued_s = float(min(self.polls, self.queued_polls))
             state = {
                 "job_id": "j-1",
@@ -541,7 +546,55 @@ async def test_a_job_stuck_in_the_queue_is_given_up_and_cancelled(
         )
     assert caught.value.code == "queue_timeout" and str(caught.value) == imagegen.QUEUE_TIMED_OUT
     assert service.deletes() == ["/v1/image/jobs/j-1"], "it gives up its place in the queue"
-    assert 10 <= service.polls <= 11
+    # polls at 100 s ... 900 s; at 1000 s nothing is left of the wait, so no tenth poll is sent
+    assert service.polls == 9
+
+
+@pytest.mark.parametrize("queued", [True, False])
+async def test_a_stalled_poll_is_given_up_at_the_deadline(
+    service, client, tmp_path, queued
+) -> None:
+    """A poll that stalls just before the queue or run deadline gets only what is left of it, so
+    the job is given up on time instead of a whole request timeout (30 s) later."""
+    client.images._config = replace(
+        client.config,
+        image_gen_timeout_seconds=1 if not queued else 300,
+        image_gen_queue_wait_seconds=1 if queued else 300,
+    )
+    service.queued_polls = 10_000 if queued else 0
+    service.stall = 20.0
+    service.stall_from = 1 if queued else 2  # the run timeout starts with the first poll
+    service.hold = asyncio.Event()  # never set: the job keeps generating
+    started = time.monotonic()
+    with pytest.raises(ImageGenError) as caught:
+        await asyncio.wait_for(
+            imagegen.run_job(client.images, ImageRequest("貓"), tmp_path, 8_000_000, GUILD, USER),
+            10,
+        )
+    assert caught.value.code == ("queue_timeout" if queued else "timeout")
+    assert time.monotonic() - started < 5
+    assert service.deletes() == ["/v1/image/jobs/j-1"]
+
+
+async def test_a_poll_is_not_sent_once_the_budget_is_spent(
+    service, client, tmp_path, fake_time
+) -> None:
+    # 250 s of queue wait, 100 s per poll interval: polls at 100 s and 200 s, none at 300 s.
+    client.images._config = replace(
+        client.config, image_gen_timeout_seconds=300, image_gen_queue_wait_seconds=250
+    )
+    service.queued_polls = 10_000
+    with pytest.raises(ImageGenError) as caught:
+        await imagegen.run_job(
+            client.images,
+            ImageRequest("貓"),
+            tmp_path,
+            8_000_000,
+            GUILD,
+            USER,
+            clock=lambda: fake_time["t"],
+        )
+    assert caught.value.code == "queue_timeout" and service.polls == 2
 
 
 def test_settings_defaults_validate_and_persist(tmp_path) -> None:
