@@ -1,6 +1,7 @@
 """The host relays' machine side: compose.yaml's llm network, the DCB-INPUT rules dcb-firewall adds
-for DCB_LLM_RELAY_PORT and DCB_IMG_RELAY_PORT, and dcb-probe's subnet check. dcb-firewall and
-dcb-probe need root, iptables and docker, so the pieces are exercised on their own."""
+for DCB_LLM_RELAY_PORT, DCB_IMG_RELAY_PORT and DCB_CARD_RELAY_PORT, and dcb-probe's subnet
+check. dcb-firewall and dcb-probe need root, iptables and docker, so the pieces are exercised on
+their own."""
 
 from __future__ import annotations
 
@@ -23,7 +24,9 @@ def _function(text: str, name: str) -> str:
     return text[start : text.index("\n}\n", start) + 3]
 
 
-def _firewall_rules(port: str | None, img: str | None = None) -> subprocess.CompletedProcess:
+def _firewall_rules(
+    port: str | None, img: str | None = None, card: str | None = None
+) -> subprocess.CompletedProcess:
     text = FIREWALL.read_text()
     relay = text[text.index("# --- host service relays ---") : text.index("# --- WAN IP ---")]
     script = (
@@ -31,6 +34,7 @@ def _firewall_rules(port: str | None, img: str | None = None) -> subprocess.Comp
         + text[text.index("die() {") : text.index("\n", text.index("die() {")) + 1]
         + (f"DCB_LLM_RELAY_PORT={port}\n" if port is not None else "")
         + (f"DCB_IMG_RELAY_PORT={img}\n" if img is not None else "")
+        + (f"DCB_CARD_RELAY_PORT={card}\n" if card is not None else "")
         + 'BLOCK4="10.0.0.0/8 172.16.0.0/12"\nwan=203.0.113.9\n'
         + "DCB_POOL_NETS=172.30.0.0/16\nDCB_BIP_NET=172.31.255.0/24\n"
         + relay
@@ -132,6 +136,37 @@ def test_the_relay_ports_are_documented_and_empty_by_default() -> None:
     defaults = DEFAULTS.read_text()
     assert "\nDCB_LLM_RELAY_PORT=\n" in defaults
     assert "\nDCB_IMG_RELAY_PORT=\n" in defaults
+    assert "\nDCB_CARD_RELAY_PORT=\n" in defaults
+
+
+def test_the_card_relay_port_adds_its_own_rule() -> None:
+    out = _firewall_rules("18081", "18082", "18084")
+    assert out.returncode == 0, out.stderr
+    rules = _input_chain(out.stdout)
+    assert [r for r in rules if BRIDGE in r] == [
+        _allow("18081"),
+        _allow("18082"),
+        _allow("18084"),
+    ], rules
+    alone = _input_chain(_firewall_rules("", "", "18084").stdout)
+    assert [r for r in alone if BRIDGE in r] == [_allow("18084")], alone
+
+
+@pytest.mark.parametrize(
+    "ports", [("18081", "18082", "18081"), ("18081", "18082", "18082"), ("", "18082", "18082")]
+)
+def test_the_card_relay_port_must_differ_from_the_others(ports) -> None:
+    out = _firewall_rules(*ports)
+    assert out.returncode == 1, out.stdout
+    assert "DCB_CARD_RELAY_PORT must differ" in out.stderr, out.stderr
+    assert "*filter" not in out.stdout
+
+
+@pytest.mark.parametrize("port", ["80", "65536", "18084x"])
+def test_a_bad_card_relay_port_fails_the_firewall(port) -> None:
+    out = _firewall_rules("18081", "18082", f"'{port}'")
+    assert out.returncode == 1, out.stdout
+    assert "DCB_CARD_RELAY_PORT must be an integer 1024-65535" in out.stderr, out.stderr
 
 
 def _top_level(compose: str, section: str) -> dict[str, list[str]]:

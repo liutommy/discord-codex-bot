@@ -699,6 +699,19 @@ newest 100 samples are kept per emoji, and a deleted message takes its samples w
 lists the server's 50 most used emoji in a `[伺服器表情]` section. No emoji picture is ever sent
 along: that would make the message an image turn, which skips the router.
 
+### Yu-Gi-Oh card recognition (optional, `CARDSCAN_URL`)
+
+A separate service on the Docker host recognises the cards in an image from their artwork,
+reached through its own relay; its HTTP contract is in [`docs/card-scan.md`](docs/card-scan.md).
+While `CARDSCAN_URL` is set, HELP tells the model to reply with `<cardscan/>` (or
+`<cardscan image="N"/>`) when an attached image shows cards and the member asks what they are.
+The Bot sends each image to the service (`cardscan.py`), at most 8 per answer and one at a time,
+and returns the cards grouped by main, extra and side deck with copy counts, Japanese and English
+names, passcode and Konami cid, listing the candidates of every uncertain card. A Neuron deck
+screenshot is split by its section headers; a photo is split by card outlines, and when
+`GEMINI_API_KEY` is set and Gemini marks more cards than the outlines found, the Bot scans again
+with Gemini's boxes.
+
 ### Image generation (optional, `IMAGE_GEN_URL`)
 
 Pictures come from a separate image service on the Docker host, reached through the same relay

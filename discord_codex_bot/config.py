@@ -209,6 +209,8 @@ class Config:
     local_llm_queue_wait_seconds: int
     local_llm_params: str  # a JSON object, validated at load (`local_params`)
     image_gen_url: str
+    cardscan_url: str
+    cardscan_timeout_seconds: int
     # Sent only to the image service, as a Bearer token; never in a log line, a prompt or a
     # message.
     image_gen_api_key: str = field(repr=False)
@@ -421,6 +423,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # empty = no image generation. It owns the models and the prompt pipeline; the Bot owns
         # who may generate, how many, and delivery.
         image_gen_url=values.get("IMAGE_GEN_URL", "").strip(),
+        # The Yu-Gi-Oh card recognition service on the host (docs/card-scan.md), reached like
+        # the image service; empty = no <cardscan>. One scan is one image.
+        cardscan_url=values.get("CARDSCAN_URL", "").strip(),
+        cardscan_timeout_seconds=_bounded_int(values, "CARDSCAN_TIMEOUT_SECONDS", 90, 5, 600),
         image_gen_api_key=values.get("IMAGE_GEN_API_KEY", "").strip(),
         # One job from leaving the GPU queue to the last image downloaded; the wait before has
         # its own cap.
@@ -635,6 +641,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     if config.image_gen_url and not _plain_http_url(config.image_gen_url):
         raise ValueError(
             "IMAGE_GEN_URL must be an http:// or https:// URL with a host and no credentials, "
+            "query or fragment"
+        )
+    if config.cardscan_url and not _plain_http_url(config.cardscan_url):
+        raise ValueError(
+            "CARDSCAN_URL must be an http:// or https:// URL with a host and no credentials, "
             "query or fragment"
         )
     local_params(config)  # a malformed value stops the start, not each local request

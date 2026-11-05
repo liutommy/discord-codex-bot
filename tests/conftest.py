@@ -55,6 +55,8 @@ def config() -> Config:
         local_llm_queue_wait_seconds=3600,
         local_llm_params="",
         image_gen_url="",
+        cardscan_url="",
+        cardscan_timeout_seconds=90,
         image_gen_api_key="",
         image_gen_timeout_seconds=1800,
         image_gen_queue_wait_seconds=5400,
