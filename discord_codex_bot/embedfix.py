@@ -13,7 +13,9 @@ or, where the rule allows it, the post's own text instead of the proxy's placeho
 proxy that is down, blocked or serving an error page never replaces a working link; the
 per-guild switch (``/<prefix>-embedfix``) turns the whole thing off without a rebuild.
 
-PROXIES was verified live on 2026-09-16 (crawler UA vs. human UA, one real post each).
+PROXIES was verified live on 2026-09-16 (crawler UA vs. human UA, one real post each);
+facebed.com (Facebook) on 2026-11-05: a reel answered og:video, a shared post og:image, and a
+human was sent back to facebook.com with 302.
 Sites without a working, redirecting proxy that beats the native preview are deliberately
 absent: Instagram (ddinstagram / kkinstagram dead; instagramez sends humans to an ad
 domain), Reddit (proxies add nothing over the native card), Bluesky (native already carries
@@ -94,6 +96,21 @@ PROXIES: tuple[Rule, ...] = (
     ),
     Rule(frozenset({"pixiv.net"}), re.compile(r"^/(?:en/)?artworks/\d+"), ("phixiv.net",)),
     Rule(frozenset({"tumblr.com"}), re.compile(r"^/[A-Za-z0-9_-]+/\d{6,}"), ("tpmblr.com",)),
+    Rule(
+        frozenset({"facebook.com"}),
+        # facebed's supported schemes: page and group posts, permalink.php / story.php,
+        # share links (/share/<hash>, /share/p|r|v/<hash>) and reels.
+        re.compile(
+            r"^/(?:[A-Za-z0-9.]+/posts/[A-Za-z0-9]+|groups/[A-Za-z0-9.]+/posts/[A-Za-z0-9]+"
+            r"|(?:permalink|story)\.php$|share/(?:[prv]/)?[A-Za-z0-9]+|reel/\d+)"
+        ),
+        ("facebed.com",),
+        # A text post carries its own text in og:description. A post facebed cannot read
+        # (private, removed or unknown) answers 200 with Facebook's login wall, whose fixed
+        # description is the placeholder (verified 2026-11-05 on three bogus links).
+        text_ok=True,
+        placeholders=frozenset({"See posts, photos and more on Facebook."}),
+    ),
 )
 PROXY_HOSTS = frozenset(host for rule in PROXIES for host in rule.proxies)
 MEDIA_TAGS = {
@@ -114,7 +131,7 @@ _ATTR = re.compile(r'([\w:-]+)\s*=\s*"([^"]*)"')
 def _host(url: str) -> tuple[str, str]:
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
-    for prefix in ("www.", "mobile.", "m."):
+    for prefix in ("www.", "mobile.", "m.", "web."):
         host = host.removeprefix(prefix)
     return host, parts.path
 
