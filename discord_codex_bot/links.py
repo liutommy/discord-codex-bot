@@ -17,7 +17,7 @@ import aiohttp
 from aiohttp.resolver import ThreadedResolver
 from yarl import URL
 
-from . import clearurls, gemini, tags, xsearch
+from . import clearurls, gemini, neuron, tags, xsearch
 from .config import Config, IPNetwork
 from .fetchproxy import FilterProxy
 
@@ -356,6 +356,11 @@ class _Text(HTMLParser):
             self.parts.append("\n")
         elif tag == "a":
             self._link(attrs)
+        elif tag == "input" and "link_value" in (dict(attrs).get("class") or "").split():
+            # Konami's card database links each row (a card, a Q&A) through a hidden
+            # <input class="link_value" value="/yugiohdb/…"> and a click handler, not an anchor:
+            # without this the model reads a ruling's question but can never open its answer.
+            self._link([("href", dict(attrs).get("value") or "")])
 
     def handle_endtag(self, tag):
         if tag in _SKIP and self._skip:
@@ -473,6 +478,26 @@ async def _read_bounded(response, limit: int) -> bytes:
     return b"".join(chunks)[:limit]
 
 
+_META_CHARSET = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?([A-Za-z0-9_.:-]+)""", re.I)
+# Python's "big5" lacks characters Taiwanese pages use (the Windows code page 950 additions
+# that browsers decode under the same label); cp950 has them.
+_CODECS = {"big5": "cp950"}
+
+
+def decode_body(raw: bytes, charset: str | None, content_type: str) -> str:
+    """The body as text: the header's charset, else for HTML the page's own <meta> charset,
+    else UTF-8. Older sites declare their encoding only in the page (a Big5 card shop answered
+    with a bare text/html), and decoding that as UTF-8 handed the model mojibake."""
+    if not charset and "html" in content_type:
+        match = _META_CHARSET.search(raw[:4096])
+        charset = match.group(1).decode("ascii") if match else None
+    charset = (charset or "utf-8").lower()
+    try:
+        return raw.decode(_CODECS.get(charset, charset), errors="replace")
+    except LookupError:  # a label Python does not know
+        return raw.decode("utf-8", errors="replace")
+
+
 async def fetch_link(url: str, config: Config) -> str:
     """Fetch one http(s) URL into bounded plain text; returns a user-readable failure otherwise.
 
@@ -495,7 +520,7 @@ async def fetch_link(url: str, config: Config) -> str:
                 raw = await _read_bounded(response, config.link_max_bytes)
     except (aiohttp.ClientError, TimeoutError) as error:
         return f"（{url}：抓取失敗——{type(error).__name__}）"
-    body = raw.decode(response.charset or "utf-8", errors="replace")
+    body = decode_body(raw, response.charset, content_type)
     if "html" in content_type:
         # Resolve relative links against where we actually landed, falling back to what we
         # asked for: after a redirect those differ, and without a redirect they are the same.
@@ -746,6 +771,52 @@ async def fetch_x_status(
     if quote.get("text"):
         lines.append(f"引用 @{(quote.get('author') or {}).get('screen_name', '')}：{quote['text']}")
     return "\n".join(lines), images
+
+
+_REDIRECTS = (301, 302, 303, 307, 308)
+
+
+async def fetch_neuron_deck(url: str, config: Config) -> str | None:
+    """A Yu-Gi-Oh! Neuron share link or deck page as the exact deck list (`neuron.render`).
+
+    A share link is resolved by reading its redirect without following it; only a redirect to
+    the card database's member_deck page is taken, and that one page is fetched (Japanese,
+    no further redirects, bounded by LINK_MAX_BYTES). None when any step fails or the page
+    holds no deck, so the caller falls back to the generic fetch."""
+    page = neuron.deck_page(url)
+    try:
+        async with _guarded_session(config) as session:
+            if not page:
+                async with session.get(url, allow_redirects=False) as response:
+                    location = response.headers.get("Location", "")
+                    if response.status in _REDIRECTS and location:
+                        page = neuron.deck_page(urljoin(url, location))
+                if not page:
+                    LOGGER.warning("Neuron link %s did not redirect to a deck page", url)
+                    return None
+            async with session.get(page, allow_redirects=False) as response:
+                content_type = response.headers.get("Content-Type", "")
+                if response.status != 200 or "html" not in content_type:
+                    LOGGER.warning("Neuron deck page %s: HTTP %s", page, response.status)
+                    return None
+                raw = await _read_bounded(response, config.link_max_bytes)
+                charset = response.charset
+    except (aiohttp.ClientError, TimeoutError) as error:
+        LOGGER.warning("Neuron deck %s failed: %s", url, type(error).__name__)
+        return None
+    if len(raw) >= config.link_max_bytes:
+        LOGGER.warning("Neuron deck page %s exceeds LINK_MAX_BYTES", page)
+        return None  # a cut-off page would drop the last sections without a trace
+    try:
+        text = raw.decode(charset or "utf-8", errors="replace")
+    except LookupError:  # a charset name Python does not know: the page is not one we expect
+        LOGGER.warning("Neuron deck page %s has an unknown charset", page)
+        return None
+    deck = neuron.parse(text)
+    if deck is None:
+        LOGGER.warning("Neuron deck page %s holds no deck list", page)
+        return None
+    return neuron.render(deck)
 
 
 async def link_blocks(
@@ -1008,13 +1079,18 @@ async def fetch_or_render(
     preview: Preview | None = None,
     x_lookup: bool = False,
 ) -> tuple[str, list[Path]]:
-    """(text, images): X posts through the API; otherwise plain fetch first, Chromium when that
-    cannot read the page (or when the model asked for the rendered page), and only when the site
-    itself cannot be read at all, the Discord preview the message carried.
+    """(text, images): Neuron deck links as the deck list, X posts through the API; otherwise
+    plain fetch first, Chromium when that cannot read the page (or when the model asked for the
+    rendered page), and only when the site itself cannot be read at all, the Discord preview the
+    message carried.
 
     `x_lookup`: an X post fxtwitter cannot serve may fall back to the X lookup sidecar — one
     Grok session on the operator's plan — so only for links a member posted, never for page
     tracking or the model's own <fetch> requests."""
+    if neuron.is_deck_link(url):
+        deck = await fetch_neuron_deck(url, config)
+        if deck is not None:
+            return deck, []
     user, post_id = x_status(url)
     if post_id:
         post = await fetch_x_status(url, config, out_dir)

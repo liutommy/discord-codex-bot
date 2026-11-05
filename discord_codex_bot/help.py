@@ -139,6 +139,16 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
             "/{p}-track cancel:1",
         ],
     ),
+    "-wish": (
+        "開始一段許願對話：寫下想要的功能，Bot 會追問需求、評估技術可行性、必要時提出替代方案，"
+        "等你確認摘要後記錄願望。回覆 Bot 的回答（或之後在同一頻道 @Bot）即可接著討論；"
+        "開發者更新進度時會通知你，也可以在許願對話中請 Bot 撤回自己的願望。",
+        ["/{p}-wish 需求:每天早上整理我追蹤頻道的新影片", "/{p}-wish 需求:撤回我的願望 #3"],
+    ),
+    "-wishes": (
+        "列出這個伺服器還沒結案的願望；「只看我的」可只列自己的。許願用 `/{p}-wish`。",
+        ["/{p}-wishes", "/{p}-wishes 只看我的:True"],
+    ),
     "-linkclean": (
         "設定「連結洗參數」：全部清洗（預設；純連結訊息整則換成乾淨版、帶文字的在下面補乾淨連結）、"
         "只清洗純連結（只換純連結訊息，帶文字的不動也不補連結；Bot 沒有刪訊息權限時就什麼都不做）、"
@@ -229,7 +239,9 @@ FEATURES: list[str] = [
     "**回覆某則訊息**再 @Bot：接續那段對話，或讓 Bot 看那則訊息的文字與圖。",
     "**找回較早的內容**：提到剛剛的貼文、圖片或連結時，Bot 可回讀你在同一頻道最近幾輪問答的"
     "原始訊息與附圖（/reset 之後的）；換模型後也能找回，限仍可讀取的訊息。",
-    "**貼連結**會自動讀網頁（含 X／fixvx 貼文的全文與圖片；網站擋 Bot 時退回 Discord 預覽）。",
+    "**貼連結**會自動讀網頁（含 X／fixvx 貼文的全文與圖片；網站擋 Bot 時退回 Discord 預覽）。"
+    "遊戲王 Neuron 的牌組分享連結（neuron.konami.net/link/…）會讀出官方資料庫上的完整牌組清單"
+    "（日文卡名與張數），不必另外截圖。",
     "**連結洗參數**：貼出的連結會自動去掉 utm 等追蹤參數。整則訊息只有連結時，Bot 會把原訊息換成"
     "乾淨版並 @你；有其他文字的訊息則在下面補上乾淨連結。伺服器主人或管理員可用 "
     "`/{p}-linkclean` 設為全部清洗、只清洗純連結或全關。",
@@ -247,13 +259,19 @@ FEATURES: list[str] = [
     "**記憶**分個人與伺服器兩層，另有管理者維護的永久記憶；Bot 會在需要時自己查閱。"
     "每週還會從你最近幾段對話推測出「（推測）」開頭的個人記憶，從多位成員都提到的事整理出"
     "「（多人提及）」開頭的伺服器記憶；不對就用 `/{p}-forget` 刪掉。",
-    "**會上網搜尋**：問到需要最新或可查證的事，Bot 會自己搜尋再讀網頁，不用你貼連結。",
+    "**會上網搜尋**：問到需要最新或可查證的事，Bot 會自己搜尋再讀網頁，不用你貼連結；"
+    "答案在 X 貼文裡時（例如最近大家在玩什麼牌組），不論哪個模型回答，都會請 Grok 搜尋 X。",
     "**會寫程式算東西**：算數、資料整理、格式轉換、影片抽幀，Bot 會在隔離沙盒裡跑 Python／shell，"
     "產生的檔案直接附給你。",
-    "**會查資料庫**：像英雄聯盟電競的賽程、比分、積分，Bot 會直接打官方資料 API，不靠新聞站。",
+    "**會查資料庫**：像英雄聯盟電競的賽程、比分、積分，Bot 會直接打官方資料 API，不靠新聞站。"
+    "遊戲王卡片的繁中卡名與效果照巧巧屋卡表回答，日文、英文卡名查百鴿與 YGOPRODeck，"
+    "裁定只引用 Konami 官方 Q&A 並附連結，官方沒有的問答會直接說查不到。",
     "**會定期追蹤**：YouTube／Twitch 頻道、X 帳號、露天賣場與任何網頁的新內容由隔離的 AI 判斷，"
     "符合你設定的條件才 @你；直接跟 Bot 說「追蹤 <網址>」就行，"
     "判斷紀錄用 `/{p}-track log:<編號>` 自己查，只有你看得到。",
+    "**許願池**：用 `/{p}-wish` 開始許願對話，Bot 會跟你討論需求、評估技術可行性並提出替代方案，"
+    "等你確認後記錄願望，開發者更新進度時會通知你。"
+    "`/{p}-wishes` 列出尚未結案的願望；在許願對話中也可以請 Bot 撤回自己的願望。",
     "**回答上的按鈕**：生成中 ❌ 取消；答完後 🔁 用同一題重答（新開對話）、"
     "👍 把這段問答記進個人記憶。只有發問的人能按。",
 ]
@@ -282,6 +300,14 @@ IMAGE_FEATURE = (
 )
 
 
+# Shown only while CARDSCAN_URL is set (cardscan.py).
+CARD_FEATURE = (
+    "**認得遊戲王卡**：貼 Neuron 牌組截圖、攤在桌上的卡片照片或單張卡，問 Bot 這是什麼牌，"
+    "它會依卡圖認出每張卡、合併張數，並分主牌組、額外牌組（截圖還分得出副牌組）。"
+    "依卡圖比對，異圖與日版、美版卡圖不同的卡可能認錯，不確定的會標出來。"
+)
+
+
 # Shown only while EMOJI_ENABLED is on (emoji.py).
 EMOJI_FEATURE = (
     "**看得懂伺服器表情**：訊息裡（含你回覆的那則）的本伺服器自訂表情，Bot 會照大家平常的用法"
@@ -296,17 +322,24 @@ EMOJI_REPLY_FEATURE = (
 
 
 def _features(
-    image_order: str, emoji: bool = False, emoji_reply: bool = False, image: bool = False
+    image_order: str,
+    emoji: bool = False,
+    emoji_reply: bool = False,
+    image: bool = False,
+    cards: bool = False,
 ) -> list[str]:
     """The ability list; with routing on (`image_order` names the image list, from
     config/routing.json) it also explains automatic model choice, with emoji on how the
     server's own emoji are read, with `emoji_reply` too that answers use them, and with the
-    image service (`image`) that the Bot draws."""
+    image service (`image`) that the Bot draws, with the card service (`cards`) that it
+    recognises Yu-Gi-Oh cards in images."""
     features = list(FEATURES)
     if image_order:
         features.append(ROUTING_FEATURE.replace("{image}", image_order))
     if image:
         features.append(IMAGE_FEATURE)
+    if cards:
+        features.append(CARD_FEATURE)
     if emoji:
         features.append(EMOJI_FEATURE)
         if emoji_reply:
@@ -326,6 +359,7 @@ def render_guide(
     emoji: bool = False,
     emoji_reply: bool = False,
     image: bool = False,
+    cards: bool = False,
 ) -> str:
     """The member-facing guide for /<prefix>-help, in registered-command order. `default`
     is DEFAULT_MODEL as members read it; it is configuration, so never written in the text."""
@@ -340,7 +374,8 @@ def render_guide(
     blocks.append(
         "**不用指令也能做的事**\n"
         + "\n".join(
-            f"・{_fill(f, p, default)}" for f in _features(image_order, emoji, emoji_reply, image)
+            f"・{_fill(f, p, default)}"
+            for f in _features(image_order, emoji, emoji_reply, image, cards)
         )
     )
     return "\n\n".join(blocks)
@@ -354,6 +389,7 @@ def render_sheet(
     emoji: bool = False,
     emoji_reply: bool = False,
     image: bool = False,
+    cards: bool = False,
 ) -> str:
     """The compact sheet injected into the model's prompt: one line per command plus the
     feature list, Markdown stripped so it reads as facts rather than formatting."""
@@ -365,7 +401,7 @@ def render_sheet(
         "其他用法："
         + " ".join(
             _fill(f, prefix, default).replace("**", "")
-            for f in _features(image_order, emoji, emoji_reply, image)
+            for f in _features(image_order, emoji, emoji_reply, image, cards)
         )
     )
     return "\n".join(lines)

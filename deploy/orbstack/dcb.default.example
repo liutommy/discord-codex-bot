@@ -68,3 +68,7 @@ DCB_LLM_RELAY_PORT=
 # Must equal that instance's DCB_LLM_RELAY_LISTEN_PORT and differ from DCB_LLM_RELAY_PORT; integer
 # 1024-65535. Empty = no rule for it.
 DCB_IMG_RELAY_PORT=
+# Card recognition relay: a third instance of dcb-llm-relay.py keeps listeners on 172.31.254.1 at
+# this port. Must equal that instance's DCB_LLM_RELAY_LISTEN_PORT and differ from both ports
+# above; integer 1024-65535. Empty = no rule for it.
+DCB_CARD_RELAY_PORT=

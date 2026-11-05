@@ -537,6 +537,28 @@ def test_the_model_and_help_know_fixed_tracking_times() -> None:
     assert "固定時間" in text and any("times:" in example for example in examples)
 
 
+def test_the_model_and_help_know_wishlist_interviews() -> None:
+    from discord_codex_bot.codex import _prompt
+    from discord_codex_bot.help import COMMAND_GUIDE, FEATURES
+
+    prompt = _prompt("q")
+    for phrase in (
+        "[許願池]",
+        '<wish title="…" original="…" need="…" feasibility="…" alternatives="…"/>',
+        '<cancel_wish id="N"/>',
+        "implementation standpoint",
+        "not what the Bot can do today",
+        "the member confirms in their own message",
+        "developer makes the final call",
+        "Tracking/reminder/wishlist operations",
+    ):
+        assert phrase in prompt
+    assert "wish slash command" in prompt and "許願頻道" not in prompt
+    assert "許願對話" in COMMAND_GUIDE["-wish"][0] and "/{p}-wish" in COMMAND_GUIDE["-wishes"][0]
+    assert all("許願頻道" not in text for text, _ in COMMAND_GUIDE.values())
+    assert any("許願池" in feature for feature in FEATURES)
+
+
 def _turns(codex_home: Path, thread: str, *infos: str | None) -> None:
     """A rollout of several turns, oldest first: each a task_started and a task_complete that
     carries an error with `info` (None: the turn succeeded)."""
@@ -572,3 +594,11 @@ async def test_an_old_failure_in_the_thread_does_not_fail_a_good_turn(
     assert isinstance(error, CodexServiceError) and error.info == "rate_limit_exceeded"
     # a resume that died before its turn started is not the last turn's failure again
     assert parse_fallback_error("", tmp_path, "t-three", 1) is None
+
+
+def test_the_model_and_help_know_x_search() -> None:
+    from discord_codex_bot.codex import _prompt
+    from discord_codex_bot.help import FEATURES
+
+    assert '<xsearch query="…"/>' in _prompt("q")
+    assert any("請 Grok 搜尋 X" in line for line in FEATURES)

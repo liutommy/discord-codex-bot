@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
+import math
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,14 +50,16 @@ async def _post(config: Config, model: str, body: dict) -> tuple[int, dict]:
             return response.status, await response.json(content_type=None)
 
 
-async def _generate(config: Config, parts: list[dict]) -> str | None:
+async def _generate(
+    config: Config, parts: list[dict], max_tokens: int = 2000, json_output: bool = False
+) -> str | None:
     """One generateContent call across the model chain (GEMINI_MODEL, then GEMINI_FALLBACK_MODEL),
     retrying a transient status once; the text, or None on any error/refusal so the caller can
     fall back further. Gemini is a fixed Google host, so no SSRF guard is needed here."""
-    body = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {"maxOutputTokens": 2000, "temperature": 0.2},
-    }
+    generation: dict = {"maxOutputTokens": max_tokens, "temperature": 0.2}
+    if json_output:
+        generation["responseMimeType"] = "application/json"
+    body = {"contents": [{"parts": parts}], "generationConfig": generation}
     models = [m for m in (config.gemini_model, config.gemini_fallback_model) if m]
     payload: dict = {}
     for model in dict.fromkeys(models):
@@ -138,3 +142,63 @@ async def youtube_transcript(video_id: str, config: Config) -> str | None:
 
     text = await asyncio.to_thread(fetch)
     return _clip(text, config.gemini_video_max_chars) if text else None
+
+
+_BOXES_INSTRUCTION = (
+    "Find every Yu-Gi-Oh! card in this image, face up or face down, including cards partly"
+    " covered by others. Return only a JSON list with one object per card:"
+    ' {"box_2d": [ymin, xmin, ymax, xmax]} with coordinates normalised to 0-1000.'
+    " Return [] when there is no card."
+)
+MAX_CARD_BOXES = 100  # the card service's own limit per scan
+
+
+def _coordinate(value: object) -> float:
+    """One normalised coordinate clamped to 0-1000; anything but a finite number raises."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("not a number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("not finite")
+    return min(max(number, 0.0), 1000.0)
+
+
+async def card_boxes(path: Path, config: Config, width: int, height: int) -> list[list[int]] | None:
+    """Pixel boxes [x, y, w, h] around the cards Gemini sees in an image of `width` x `height`,
+    or None when Gemini is off, fails, or answers something that is not a list of boxes. Used
+    when the card service's own outline search misses cards in a photo."""
+    if not available(config) or width <= 0 or height <= 0:
+        return None
+    try:
+        raw = await asyncio.to_thread(path.read_bytes)
+    except OSError:
+        return None
+    mime = mimetypes.guess_type(path.name)[0] or "image/png"
+    parts = [
+        {"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode("ascii")}},
+        {"text": _BOXES_INSTRUCTION},
+    ]
+    text = await _generate(config, parts, max_tokens=6000, json_output=True)
+    if not text:
+        return None
+    try:
+        items = json.loads(text)
+    except ValueError:
+        LOGGER.warning("Gemini card boxes: not JSON")
+        return None
+    if not isinstance(items, list):
+        return None
+    boxes = []
+    for item in items[:MAX_CARD_BOXES]:
+        box = item.get("box_2d") if isinstance(item, dict) else None
+        if not (isinstance(box, list) and len(box) == 4):
+            continue
+        try:
+            y0, x0, y1, x1 = (_coordinate(v) for v in box)
+        except (TypeError, ValueError, OverflowError):  # NaN, 1e400, a string, a bool
+            continue
+        if x1 <= x0 or y1 <= y0:
+            continue
+        x, y = round(x0 * width / 1000), round(y0 * height / 1000)
+        boxes.append([x, y, round(x1 * width / 1000) - x, round(y1 * height / 1000) - y])
+    return boxes

@@ -10,6 +10,7 @@ from discord_codex_bot import apis, links, sandbox, search
 from discord_codex_bot.memory import extract_memory_tags, extract_read_requests
 from discord_codex_bot.tags import findall, strip
 from discord_codex_bot.tracking import CANCEL_TRACK_TAG, extract_track_tags
+from discord_codex_bot.wishes import CANCEL_WISH_TAG, WISH_TAG
 
 MEMORY = '<memory scope="user" name="住">住台中</memory>'
 SEARCH = '<search scope="user" query="住"/>'
@@ -45,6 +46,11 @@ def shown(tag: str) -> list[str]:
         (TRACK_EVERY, lambda text: extract_track_tags(text)[2]),
         (TRACK_AT, lambda text: extract_track_tags(text)[3]),
         (CANCEL_TRACK, lambda text: extract_track_tags(text)[4]),
+        (
+            '<wish title="a" original="b" need="c" feasibility="d" alternatives=""/>',
+            lambda text: findall(WISH_TAG, text),
+        ),
+        ('<cancel_wish id="4"/>', lambda text: findall(CANCEL_WISH_TAG, text)),
         (FETCH, links.extract_fetch_tags),
         (WEB, search.extract_web_queries),
         (RUN, sandbox.extract_runs),

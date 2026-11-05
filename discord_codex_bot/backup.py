@@ -1,6 +1,6 @@
 """Backups and exports of what the Bot keeps for people. Daily, the Bot's own state (member and
 server memories, router and Grok transcripts, thread map, reminders, uploaded persona and style,
-the harvest ledger, and the tracking, emoji and link-cleaning databases) is tarred into
+the harvest ledger, and the tracking, emoji, link-cleaning and wishlist databases) is tarred into
 BACKUP_DIR — a bind-mounted host directory — and old archives are pruned; a member can also
 export their own memories with /<prefix>-export. Codex's own files (sessions, auth.json) are not
 ours to copy."""
@@ -23,6 +23,7 @@ from .clock import sleep_for
 from .config import Config
 from .consolidate import seconds_until
 from .memory import is_scratch
+from .wishes import WISH_DB
 
 LOGGER = logging.getLogger(__name__)
 # Relative to codex_home: everything the Bot itself wrote and would miss after a lost volume.
@@ -100,6 +101,7 @@ def make_backup(config: Config, now: float | None = None) -> Path | None:
             (config.tracking_db_path, TRACKING_DB),
             (config.emoji_db_path, EMOJI_DB),
             (config.codex_home / LINKCLEAN_DB, LINKCLEAN_DB),
+            (config.codex_home / WISH_DB, WISH_DB),
         )
         if path.exists()
     ]

@@ -15,11 +15,12 @@
 # DNS_MUST_PASS resolves to). Otherwise the last accepted one is kept and /run/dcb/wan-status says
 # "stale <ip>" or "none"; dcb-probe treats both as inconclusive.
 # Host service relays (optional, DCB_LLM_RELAY_PORT for the local LLM, DCB_IMG_RELAY_PORT for the
-# image service): the bridge br-dcb-llm (compose.yaml's llm network, the Bot only) may open TCP
-# connections to its gateway address on those ports, where the Mac's relay instances keep socat
-# listeners. Each port is its own relay instance, so image traffic cannot take the LLM relay's
-# workers. Every other port on that bridge and every other bridge stays rejected; a port unset or
-# empty = no rule for it. The two ports must differ. Not in IPv6 (the network has no IPv6).
+# image service, DCB_CARD_RELAY_PORT for the card recognition service): the bridge br-dcb-llm
+# (compose.yaml's llm network, the Bot only) may open TCP connections to its gateway address on
+# those ports, where the Mac's relay instances keep socat listeners. Each port is its own relay
+# instance, so image or card traffic cannot take the LLM relay's workers. Every other port on that
+# bridge and every other bridge stays rejected; a port unset or empty = no rule for it. The ports
+# must differ from each other. Not in IPv6 (the network has no IPv6).
 # Serialised by its own lock (boot unit, systemctl reload, dcb-up and dcb-guard may overlap).
 # Exit 0 = rules in force (prints applied|unchanged); 1 = failed.
 set -uo pipefail
@@ -42,9 +43,12 @@ relay_port() {  # relay_port <variable>: prints its value; empty, or an integer 
 }
 llm_port=$(relay_port DCB_LLM_RELAY_PORT) || exit 1
 img_port=$(relay_port DCB_IMG_RELAY_PORT) || exit 1
+card_port=$(relay_port DCB_CARD_RELAY_PORT) || exit 1
 [ -n "$img_port" ] && [ "$img_port" = "$llm_port" ] \
     && die "DCB_IMG_RELAY_PORT must differ from DCB_LLM_RELAY_PORT (both '$img_port')"
-relay_ports="$llm_port $img_port"
+[ -n "$card_port" ] && { [ "$card_port" = "$llm_port" ] || [ "$card_port" = "$img_port" ]; } \
+    && die "DCB_CARD_RELAY_PORT must differ from DCB_LLM_RELAY_PORT and DCB_IMG_RELAY_PORT (got '$card_port')"
+relay_ports="$llm_port $img_port $card_port"
 
 BLOCK4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4"
 BLOCK6="::1/128 ::ffff:0:0/96 64:ff9b::/96 fc00::/7 fe80::/10 ff00::/8"   # fc00::/7: Tailscale fd7a:115c:a1e0::/48, OrbStack fd07:...

@@ -18,6 +18,8 @@ from discord_codex_bot.backup import (
     prune_backups,
     run_backup,
 )
+from discord_codex_bot.linkclean import SwitchStore
+from discord_codex_bot.wishes import WISH_DB, WishStore
 
 
 def _home(tmp_path: Path) -> Path:
@@ -55,6 +57,25 @@ def test_make_backup_archives_the_bots_state_only(tmp_path: Path, config) -> Non
     empty = tmp_path / "empty"
     empty_config = replace(cfg, codex_home=empty, tracking_db_path=empty / "tracking.sqlite3")
     assert make_backup(empty_config) is None
+
+
+def test_backup_includes_wishes_and_notices_from_wal(tmp_path: Path, config) -> None:
+    home = tmp_path / "codex"
+    store = WishStore(home / WISH_DB)
+    wish, _ = store.add(1, 2, 3, 4, "標題", "原話", "需求", "可行")
+    store.set_status(wish.id, "accepted", "說明")
+    store.mark_thread("t1", 1, 4)
+    SwitchStore(home / "linkclean.sqlite3")._put(1, "wish_channel", "2")
+    cfg = replace(config, codex_home=home, backup_dir=tmp_path / "backups")
+    target = make_backup(cfg)
+    with tarfile.open(target) as tar:
+        assert WISH_DB in tar.getnames() and "linkclean.sqlite3" in tar.getnames()
+        restored = tmp_path / WISH_DB
+        restored.write_bytes(tar.extractfile(WISH_DB).read())
+    restored_store = WishStore(restored)
+    assert restored_store.get(wish.id).status == "accepted"
+    assert restored_store.is_wish_thread("t1")
+    assert restored_store.pending_notices()[0].note == "說明"
 
 
 def test_prune_keeps_recent_archives(tmp_path: Path, config) -> None:

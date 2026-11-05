@@ -137,8 +137,27 @@ Guild-scoped slash commands normally appear quickly. Run:
 ```
 
 Every slash command is named from `COMMAND_PREFIX` (default `codex`): `/<prefix>`,
-`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`, `-image`. This README uses the
+`/<prefix>-status`, `-reset`, `-remember`, `-forget`, `-memory`, `-style`, `-track`, `-wish`, `-wishes`, `-image`. This README uses the
 default; set `COMMAND_PREFIX=my-bot` in `.env` and recreate to rename them all at once.
+
+### Wishlist
+
+Members start a wish conversation with `/codex-wish`, in any allowed channel; replying to the
+answer, or mentioning the Bot in that channel afterwards, continues the same conversation. Wish
+tags take effect only in such a conversation. The Bot interviews the member about the underlying
+need, assesses engineering feasibility (platform limits, APIs, data, cost and maintenance), and
+discusses alternatives when needed. After the member confirms a summary in a later message, the
+Bot records both the original request and the agreed request. In a wish conversation, members
+can ask it to withdraw their own open wishes; `/codex-wishes` lists the guild's open wishes,
+with an option to list only their own.
+
+Developers use `python -m discord_codex_bot.admin wish list` and
+`python -m discord_codex_bot.admin wish show --id 7` to inspect requests, then
+`python -m discord_codex_bot.admin wish status --id 7 --status in_progress --note "Implementation started"`
+to update progress. Status changes queue a notification mentioning the member in the original
+channel, replying to their message when available. Delivery retries up to five times. Wishes
+and notices live in `CODEX_HOME/wishes.sqlite3` and are included in nightly backups. See
+[the admin CLI guide](docs/admin-cli.md) for status choices.
 
 ### Social tracking: YouTube, Twitch, X, Ruten stores and web pages
 
@@ -368,13 +387,34 @@ falls back to headless Chromium (Playwright, installed in the image): it waits o
 takes the rendered text and attaches a full-page screenshot (`LINK_RENDER_TIMEOUT_SECONDS`,
 `LINK_SCREENSHOT_MAX_HEIGHT`) so the model can see the pictures. X posts (x.com and the
 fxtwitter/vxtwitter/fixupx/fixvx mirrors) are read through the fxtwitter API instead — text plus
-the photos or video poster frames, attached as images — with the page as fallback. When neither
+the photos or video poster frames, attached as images — with the page as fallback. A Yu-Gi-Oh!
+Neuron deck share link (`neuron.konami.net/link/<code>`, or the `member_deck.action` page on
+`www.db.yugioh-card.com` it redirects to) is read as the exact deck list (`neuron.py`): the Bot
+reads the share link's redirect without following it, accepts only a redirect to that deck page,
+fetches the one page in Japanese (`request_locale=ja`, no redirects, `LINK_MAX_BYTES`), and gives
+the model the deck name and one line per card (`N× name (cid N)`) per section. The block says the
+list is authoritative only when the rows add up to the totals the page prints for the main, extra
+and side deck; otherwise it says the list may be incomplete. Any failure falls back to the generic
+fetch. When neither
 the plain fetch nor Chromium can read a page (an interactive Turnstile, e.g. Dcard, is given up
 on at once), the Bot falls back to the link preview Discord attached to the message — Discord's
 crawler is a Cloudflare-verified bot and gets the title, description and picture — labelled as
 a preview, not the full page (`LINK_PREVIEW_WAIT_SECONDS` waits once for the embed to appear).
 Pages behind logins still come back as "打不開"; on the Codex backend OpenAI's own web tool
 remains available as a second path.
+A page served as bare `text/html` is decoded with the charset its own `<meta>` declares (Big5
+pages are read as code page 950), and the hidden `<input class="link_value">` targets Konami's
+card database uses instead of anchors are kept as links like any `href`.
+
+Registered data APIs live in `config/apis.json` (base URL, fixed headers, and a usage note the
+model reads in its HELP block); the model calls one with `<api name="…" path="…"/>`. For
+Yu-Gi-Oh! questions there are two: `ygocdb` (ygocdb.com, card names in every language, the
+passcode and the Konami database id) and `ygoprodeck` (YGOPRODeck, English card data; at most
+20 requests a second, and its card images are not linked). The `ygocdb` note also tells the
+model where the other answers come from, through `<fetch>`: Traditional Chinese card names and
+effect text from the 巧巧屋 card shop's lookup pages (plain HTTP, Big5; a name query needs the
+name as Big5 percent-escapes, which the model computes with `<run>`), and rulings only from the
+official per-card Q&A pages of the Konami database, quoted with their link, never inferred.
 
 Videos in a link are understood through Gemini's free tier used as a tool (not a chat backend;
 `GEMINI_API_KEY`, no billing attached). A YouTube link is understood from its URL alone — Gemini
@@ -659,6 +699,19 @@ newest 100 samples are kept per emoji, and a deleted message takes its samples w
 lists the server's 50 most used emoji in a `[伺服器表情]` section. No emoji picture is ever sent
 along: that would make the message an image turn, which skips the router.
 
+### Yu-Gi-Oh card recognition (optional, `CARDSCAN_URL`)
+
+A separate service on the Docker host recognises the cards in an image from their artwork,
+reached through its own relay; its HTTP contract is in [`docs/card-scan.md`](docs/card-scan.md).
+While `CARDSCAN_URL` is set, HELP tells the model to reply with `<cardscan/>` (or
+`<cardscan image="N"/>`) when an attached image shows cards and the member asks what they are.
+The Bot sends each image to the service (`cardscan.py`), at most 8 per answer and one at a time,
+and returns the cards grouped by main, extra and side deck with copy counts, Japanese and English
+names, passcode and Konami cid, listing the candidates of every uncertain card. A Neuron deck
+screenshot is split by its section headers; a photo is split by card outlines, and when
+`GEMINI_API_KEY` is set and Gemini marks more cards than the outlines found, the Bot scans again
+with Gemini's boxes.
+
 ### Image generation (optional, `IMAGE_GEN_URL`)
 
 Pictures come from a separate image service on the Docker host, reached through the same relay
@@ -724,6 +777,14 @@ falls back to it, and `/codex-track source:https://x.com/<account>` tracks an X 
 `X_TRACKING_INTERVAL_MINUTES`, default 60, because each check is a Grok session; a check takes
 10–100 s).
 
+A fourth question, a topic search, serves every backend: a model that cannot search X replies
+with `<xsearch query="…"/>` and the Bot returns the posts the sidecar found, each with its link.
+Among the `/x/*` lookups the query is the only free text that reaches a prompt (`/chat` forwards
+members' conversation as before and is not bounded this way), so the sidecar bounds it (200
+characters, one line, no control characters) and passes it as a JSON string. One answer runs at
+most 20 different searches (a repeated query reuses its result): the tags may come from a page or
+post the model read, and each search is a Grok session on the plan shared with X tracking.
+
 Grok Build is a coding agent with a shell, files, web fetching and background jobs. In the
 sidecar it has none of them (`xsearch/server.py`). Two layers prevent: the command line removes
 every client tool and denies the rest, and a root-owned enforced policy
@@ -734,8 +795,9 @@ shapes we know — anything else is refused and logged as `REFUSED unsafe grok s
 check cannot undo a tool that already ran; it is how a failure of the first two shows up.
 Every lookup runs in a fresh, empty Grok home and working directory on tmpfs holding only a copy
 of the login, and everything it wrote is deleted afterwards, so no session can shape the next.
-Members never write the prompt: the Bot sends a numeric post id or an account name, both
-validated. What comes back was read out by a model from X content, so it is re-checked: a post
+Members never write the prompt of a post, account or recent-posts lookup: the Bot sends a
+numeric post id or an account name, both validated. A topic search carries a query instead,
+bounded and quoted as described above. What comes back was read out by a model from X content, so it is re-checked: a post
 whose snowflake id disagrees with its time is dropped (otherwise one injected post with a huge
 id would become the tracking cursor and hide every real post), and posts read for a link are
 labelled unverified, with a note when the author differs from the link's account. Grok's own `--sandbox`

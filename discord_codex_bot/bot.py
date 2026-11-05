@@ -24,6 +24,7 @@ from discord import app_commands
 from . import agy as agy_module
 from . import (
     apis,
+    cardscan,
     characters,
     earlier,
     embedfix,
@@ -199,6 +200,19 @@ from .ui import (
     recover_exchange,
 )
 from .usage import probe_rate_limits, read_rate_limits
+from .wishes import (
+    ATTR as WISH_ATTR,
+)
+from .wishes import (
+    CANCEL_WISH_TAG,
+    OPEN_STATUSES,
+    STATUS_LABELS,
+    WISH_DB,
+    WISH_TAG,
+    WishNotice,
+    WishStore,
+    notice_loop,
+)
 
 LOGGER = logging.getLogger(__name__)
 # Closes every recall round; a spare taking over mid-recall gets the round's results without it.
@@ -468,11 +482,13 @@ READ_TAGS = (
     sandbox.RUN_TAG,
     apis.API_TAG,
     earlier.EARLIER_TAG,
+    xsearch.XSEARCH_TAG,
+    cardscan.CARDSCAN_TAG,
 )
 # A read tag in a shape its parser does not take. Still a request — answered with the reason, so
 # the model can send it again — never an answer to post with the raw tag in it.
 _READ_ATTRS = r'(?:(?:[^<>"]|"[^"]{0,2000}"){0,4000}|[^<>]{0,2500})'  # stray quote: the plain one
-_READ_NAME = r"(?:search|recall|fetch|web|api|earlier)(?![a-z_])"
+_READ_NAME = r"(?:search|recall|fetch|web|api|earlier|xsearch|cardscan)(?![a-z_])"
 BROKEN_READ = re.compile(
     # A <run> body goes to its </run> but never past the next <run>: an answer full of unclosed
     # ones would otherwise be read to the end again from each of them.
@@ -484,7 +500,6 @@ BROKEN_READ = re.compile(
     rf"|<{_READ_NAME}\s[^<>\n]{{0,2500}}$",
     re.M,
 )
-WEB_PER_ROUND = 2
 # Every read round spent and the model still asking: what it asked for last is not read.
 READS_SPENT = (
     '<RESULT kind="error">\nThe read limit for this question is used up; nothing more will be'
@@ -515,9 +530,13 @@ def unserved_reads(answer: str, config: Config, has_apis: bool) -> list[str]:
     calls = list(dict.fromkeys(tags.findall(apis.API_TAG, answer)))
     if calls and not has_apis:
         problems.append("<api>: no APIs are registered here")
+    x_queries = xsearch.extract_xsearch_queries(answer)
+    if x_queries and not xsearch.enabled(config):
+        problems.append("<xsearch>: X search is not available here; use <web> instead")
+    if cardscan.extract_requests(answer) and not cardscan.enabled(config):
+        problems.append("<cardscan>: card recognition is not available here")
     limits = (
         ("fetch", len(extract_fetch_tags(answer)), config.link_max_urls),
-        ("web", len(search.extract_web_queries(answer)), WEB_PER_ROUND),
         ("api", len(calls) if has_apis else 0, apis.MAX_CALLS_PER_ROUND),
         (
             "run",
@@ -547,7 +566,8 @@ INVENTED_TAG = re.compile(r'<([a-z]{1,15}_[a-z_]{1,15})(?:\s+[a-z_]{1,16}="[^"]{
 # is skipped whole: who="<@id>" is the documented form and holds both < and >; so is a mention
 # written without quotes (who=<@id>).
 _OWN = (
-    r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory|image_gen)"
+    r"(?:remind|cancel_reminder|track|track_every|track_at|cancel_track|memory|image_gen"
+    r"|wish|cancel_wish)"
     r"(?![a-z_])"
 )
 _MENTION = r"<[@#][!&]?[0-9]{1,25}>"
@@ -575,6 +595,8 @@ ACTION_TAGS = (
     TRACK_EVERY_TAG,
     TRACK_AT_TAG,
     CANCEL_TRACK_TAG,
+    WISH_TAG,
+    CANCEL_WISH_TAG,
     IMAGE_TAG,
 )
 # One more turn for the operations the Bot could not read, with the reason, so the model can send
@@ -645,7 +667,7 @@ def action_tags(text: str) -> list[str]:
 # answer's prose (<track kind="captions">, #include <memory>), not an order that failed.
 _KEYS = re.compile(
     r"\b(?:when|text|who|source|interest|every|at|id|minutes|times|scope|name"
-    r"|prompt|model|aspect|count|seed|negative)\s*=",
+    r"|prompt|model|aspect|count|seed|negative|title|original|need|feasibility|alternatives)\s*=",
     re.I,
 )
 
@@ -885,6 +907,7 @@ class DiscordCodexClient(discord.Client):
         }
         self.tracker = TrackerStore(config.tracking_db_path) if config.tracking_enabled else None
         self.linkclean = SwitchStore(config.codex_home / "linkclean.sqlite3")
+        self.wishes = WishStore(config.codex_home / WISH_DB)
         # Image generation (imagegen.py): the service client, each guild's switch and spoiler
         # setting in linkclean's database, and detached delivery tasks.
         self.images = ImageService(config)
@@ -1020,6 +1043,20 @@ class DiscordCodexClient(discord.Client):
         )
         self.tree.add_command(
             app_commands.Command(
+                name=f"{prefix}-wish",
+                description="許願池：跟 Bot 討論你想要的功能，它會評估可行性並整理給開發者",
+                callback=self.wish_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
+                name=f"{prefix}-wishes",
+                description="許願池：列出這個伺服器還沒結案的願望",
+                callback=self.wishes_command,
+            )
+        )
+        self.tree.add_command(
+            app_commands.Command(
                 name=f"{prefix}-linkclean",
                 description="本伺服器的連結洗參數開關（只有伺服器的管理層）",
                 callback=self.linkclean_command,
@@ -1076,6 +1113,7 @@ class DiscordCodexClient(discord.Client):
         )
         if self.tracker is not None:
             self._tracking_loop = self.loop.create_task(self._tracking_forever())
+        self._wish_loop = self.loop.create_task(self._wishes_forever())
         self.admin.start()
         # A guild that has not invited the bot yet (e.g. production before rollout) must not take
         # the whole client down; the runtime access check still rejects it until it is synced.
@@ -1091,6 +1129,10 @@ class DiscordCodexClient(discord.Client):
 
     async def close(self) -> None:
         self.admin.stop()
+        if task := getattr(self, "_wish_loop", None):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await super().close()
 
     def _gateway_up(self) -> bool:
@@ -1442,6 +1484,105 @@ class DiscordCodexClient(discord.Client):
             self.config.tracking_keep_days,
         )
 
+    async def _wishes_forever(self) -> None:
+        await self.wait_until_ready()
+        await notice_loop(self.wishes, self._deliver_wish_notice)
+
+    async def _deliver_wish_notice(self, notice: WishNotice) -> None:
+        wish = notice.wish
+        channel = self.get_channel(wish.channel_id) or await self.fetch_channel(wish.channel_id)
+        if getattr(getattr(channel, "guild", None), "id", None) != wish.guild_id or self._access(
+            wish.guild_id, channel, wish.channel_id
+        ):
+            raise RuntimeError("wishlist destination is outside the configured allowlist")
+        title = discord.utils.escape_markdown(discord.utils.escape_mentions(wish.title))
+        text = (
+            f"<@{wish.user_id}> 你的願望 #{wish.id}「{title}」狀態更新："
+            f"{STATUS_LABELS[notice.status]}"
+        )
+        if notice.note:
+            note = discord.utils.escape_markdown(discord.utils.escape_mentions(notice.note))
+            text += "\n開發者說明：" + truncate(note, 1999 - len(text) - len("\n開發者說明："))
+        reference = (
+            discord.MessageReference(
+                message_id=wish.message_id,
+                channel_id=wish.channel_id,
+                guild_id=wish.guild_id,
+                fail_if_not_exists=False,
+            )
+            if wish.message_id is not None
+            else None
+        )
+        await channel.send(
+            text,
+            reference=reference,
+            allowed_mentions=discord.AllowedMentions(
+                users=[discord.Object(id=wish.user_id)],
+                everyone=False,
+                roles=False,
+                replied_user=False,
+            ),
+        )
+
+    async def _card_scans(
+        self,
+        requests: list[int],
+        pool: list[Path],
+        scanned: dict[Path, str],
+        guild_id: int | None,
+        user_id: int,
+    ) -> list[str]:
+        """RESULT blocks for one round's <cardscan> tags. `pool` is this turn's images in the
+        order the model received them (attachments, then link screenshots, then images read
+        with <earlier>); an image scanned earlier in this answer is not scanned again."""
+        numbers, missing = cardscan.targets(requests, len(pool))
+        blocks = []
+        if not pool:
+            blocks.append(cardscan.render(0, None, "這個問題沒有附圖"))
+        for n in missing:
+            if pool:
+                blocks.append(cardscan.render(n, None, f"只有 {len(pool)} 張圖"))
+        for n in numbers:
+            path = pool[n - 1]
+            block = scanned.get(path)
+            if block is None and len(scanned) >= cardscan.MAX_SCANS_PER_ANSWER:
+                blocks.append(
+                    cardscan.render(
+                        n, None, f"這則回答已認過 {cardscan.MAX_SCANS_PER_ANSWER} 張圖，沒有再認"
+                    )
+                )
+                continue
+            if block is None:
+                try:
+                    result = await cardscan.scan(self.config, path)
+                except cardscan.CardScanError as error:
+                    LOGGER.warning(
+                        "Card scan guild=%s user=%s failed: %s", guild_id, user_id, error
+                    )
+                    block = cardscan.render(n, None, str(error))
+                else:
+                    LOGGER.info(
+                        "Card scan guild=%s user=%s kind=%s cards=%d",
+                        guild_id,
+                        user_id,
+                        result.get("kind"),
+                        len(result.get("cards") or []),
+                    )
+                    block = cardscan.render(n, result)
+                scanned[path] = block
+            blocks.append(block)
+        return blocks
+
+    async def _x_search(self, query: str, guild_id: int | None, user_id: int) -> str:
+        """One <xsearch> for whichever model asked: the sidecar's Grok session searches X."""
+        try:
+            posts = await xsearch.search_posts(self.config, query)
+        except (xsearch.XSearchError, ValueError) as error:
+            LOGGER.warning("X search guild=%s user=%s failed: %s", guild_id, user_id, error)
+            return xsearch.render_search(query, None, str(error))
+        LOGGER.info("X search guild=%s user=%s posts=%s", guild_id, user_id, len(posts))
+        return xsearch.render_search(query, posts)
+
     async def _read_page(self, url: str) -> tuple[str, bool]:
         """(one page as text with its links kept inline, whether it was read at all). No out_dir:
         a background poll has nobody to show a screenshot to, and nothing to clean up afterwards."""
@@ -1579,9 +1720,10 @@ class DiscordCodexClient(discord.Client):
             emoji=self.emoji is not None,
             emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
             image=self.images.enabled,
+            cards=cardscan.enabled(self.config),
         )
-        doc = apis.render_doc(self.apis)
-        return f"{sheet}\n{doc}" if doc else sheet
+        docs = [d for d in (apis.render_doc(self.apis), cardscan.render_doc(self.config)) if d]
+        return "\n".join([sheet, *docs])
 
     def help_guide(self) -> str:
         """The detailed member guide behind /<prefix>-help (same source as the model's sheet)."""
@@ -1593,6 +1735,7 @@ class DiscordCodexClient(discord.Client):
             emoji=self.emoji is not None,
             emoji_reply=self.config.emoji_reply,  # read only with emoji on (_features)
             image=self.images.enabled,
+            cards=cardscan.enabled(self.config),
         )
 
     def _image_order(self) -> str:
@@ -1671,6 +1814,9 @@ class DiscordCodexClient(discord.Client):
         conversation_channel=None,
         replied_to: int | None = None,
         fresh: bool = False,
+        message_id: int | None = None,
+        wish: bool = False,
+        earlier_threads: Sequence[str] = (),
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
         `on_delta` receives the accumulated answer while a backend streams it (agy, routers).
@@ -1680,7 +1826,13 @@ class DiscordCodexClient(discord.Client):
         replayed to a backend that did not hold it; `spare_history` is what a spare taking over
         from the routed target gets instead of the target's thread. The result's `via` is what
         answered. `conversation_channel` and `replied_to` scope Discord history reads even when
-        the chosen backend cannot resume that conversation; `fresh` suppresses those reads."""
+        the chosen backend cannot resume that conversation; `fresh` suppresses those reads.
+        `wish` opens a wish conversation (the wish command); a later turn is one when the thread
+        it resumes, or an earlier thread of its routed conversation (`earlier_threads`, set when
+        the router moved it to another backend), was marked by a wish-mode answer."""
+        wish_mode = guild_id is not None and (
+            wish or any(self.wishes.is_wish_thread(thread) for thread in (resume, *earlier_threads))
+        )
         if self.emoji is not None and guild_id is not None:
             # `<:name:id>` as the model can read it; never the emoji's image, which would make
             # this an image turn (emoji.py).
@@ -1901,6 +2053,7 @@ class DiscordCodexClient(discord.Client):
                     else "",
                     f"[待辦提醒]\n{pending}" if pending else "",
                     f"[社群追蹤]\n{tracked}" if tracked else "",
+                    self._wish_section(guild_id, user_id) if wish_mode else "",
                 )
                 if section
             )
@@ -1931,18 +2084,36 @@ class DiscordCodexClient(discord.Client):
             # query (one sent an identical Leaguepedia query three times) must not spend the
             # source's quota again to be told the same thing.
             api_seen: dict[tuple[str, str], str] = {}
+            x_seen: dict[str, str] = {}  # same for X searches: each one is a Grok session
+            scanned: dict[Path, str] = {}  # card scans of this answer, by image
             for _ in range(self.config.memory_recall_rounds):
                 if not request_only(result.text):
                     break  # an answer that merely quotes a tag (e.g. from a page) is an answer
                 wanted = extract_read_requests(result.text)
                 urls = extract_fetch_tags(result.text)[: self.config.link_max_urls]
-                queries = search.extract_web_queries(result.text)[:WEB_PER_ROUND]
+                queries = search.extract_web_queries(result.text)
+                x_queries = (
+                    xsearch.extract_xsearch_queries(result.text)
+                    if xsearch.enabled(self.config)
+                    else []
+                )
                 runs = sandbox.extract_runs(result.text) if sandbox.available(self.config) else []
                 api_calls = apis.extract_api_calls(result.text) if self.apis else []
                 earlier_turns = earlier.requested_turns(result.text)
+                scans = (
+                    cardscan.extract_requests(result.text) if cardscan.enabled(self.config) else []
+                )
                 unserved = unserved_reads(result.text, self.config, bool(self.apis))
                 if not (
-                    wanted or urls or queries or runs or api_calls or earlier_turns or unserved
+                    wanted
+                    or urls
+                    or queries
+                    or x_queries
+                    or scans
+                    or runs
+                    or api_calls
+                    or earlier_turns
+                    or unserved
                 ):
                     break
                 blocks = [
@@ -1962,6 +2133,28 @@ class DiscordCodexClient(discord.Client):
                 for query in queries:
                     provider, hits = await search.search_web(query, self.config)
                     blocks.append(search.render_results(query, provider, hits))
+                for query in x_queries:
+                    block = x_seen.get(query)
+                    if block is None and len(x_seen) >= xsearch.MAX_SEARCHES_PER_ANSWER:
+                        blocks.append(
+                            f'<RESULT kind="xsearch" query="{query}">\n'
+                            f"（這則回答的 X 搜尋已達 {xsearch.MAX_SEARCHES_PER_ANSWER} 次上限，"
+                            "這個查詢沒有執行；用已有的結果回答）\n</RESULT>"
+                        )
+                        continue
+                    if block is None:
+                        block = x_seen[query] = await self._x_search(query, guild_id, user_id)
+                    else:
+                        block = block.replace(
+                            ">\n", ">\n（與稍早完全相同的查詢，沿用當時的結果）\n", 1
+                        )
+                    blocks.append(block)
+                if scans:
+                    blocks.extend(
+                        await self._card_scans(
+                            scans, [*images, *earlier_images], scanned, guild_id, user_id
+                        )
+                    )
                 for name, path in api_calls:
                     body = api_seen.get((name, path))
                     if body is None:
@@ -2036,7 +2229,14 @@ class DiscordCodexClient(discord.Client):
                         result = replace(result, text=READS_SPENT_MESSAGE)
             own = split_quoted(prompt)[1]  # a replied-to message is not the member asking
             text, unread, refused = await self._apply_action_tags(
-                result.text, guild_id, channel_id, user_id, own, result.thread_id
+                result.text,
+                guild_id,
+                channel_id,
+                user_id,
+                own,
+                result.thread_id,
+                wish_mode=wish_mode,
+                message_id=message_id,
             )
             if unread or refused:
                 LOGGER.warning(
@@ -2079,7 +2279,14 @@ class DiscordCodexClient(discord.Client):
                             seen.add(_spaced(tag))
                             resent.append(tag)
                     done, _, _ = await self._apply_action_tags(
-                        "\n".join(resent), guild_id, channel_id, user_id, own, result.thread_id
+                        "\n".join(resent),
+                        guild_id,
+                        channel_id,
+                        user_id,
+                        own,
+                        result.thread_id,
+                        wish_mode=wish_mode,
+                        message_id=message_id,
                     )
                     if done:
                         text = f"{text}\n\n{done}"
@@ -2104,13 +2311,18 @@ class DiscordCodexClient(discord.Client):
             # A fallback is not announced in the answer: the member gains nothing from it, and
             # /status shows the last one. The thread id is dropped so nothing tries to resume it
             # back on Codex.
+            thread_id = "" if fell_back and routed is None else result.thread_id
+            if wish_mode and guild_id is not None:
+                # The id the caller records is the one the next turn resumes; a backend that
+                # starts a new id (a spare, a failed resume, a tag retry) keeps the wish mode.
+                self.wishes.mark_thread(thread_id, guild_id, user_id)
             return CodexResult(
                 truncate(text, self.config.max_response_chars),
                 outgoing,
                 generated_dir,
                 # A routed turn keeps its spare's thread: the caller records it under the spare
                 # that made it (`_routed_memo`), and the conversation goes on from there.
-                "" if fell_back and routed is None else result.thread_id,
+                thread_id,
                 result.resumed and not (fell_back and routed is None),
                 via=target,
             )
@@ -2678,6 +2890,9 @@ class DiscordCodexClient(discord.Client):
             "routed_spares": route_plan.spares,
             "history": route_plan.history,
             "spare_history": route_plan.replay,
+            # A move to another backend resumes nothing; the conversation's earlier threads
+            # still tell whether it is a wish conversation.
+            "earlier_threads": route_plan.route.earlier,
         }
 
     def _log_route(self, route_plan: RoutePlan, result: CodexResult) -> None:
@@ -3071,8 +3286,10 @@ class DiscordCodexClient(discord.Client):
         user_id: int,
         asked: str = "",
         thread_id: str = "",
+        wish_mode: bool = False,
+        message_id: int | None = None,
     ) -> tuple[str, list[str], list[str]]:
-        """Carry out the memory, reminder, tracking and image tags in `text`: (the text without
+        """Carry out memory, reminder, tracking, wish and image tags in `text`: (the text without
         them, confirmations appended; each tag that could not be read, with the reason; each one
         read but refused for a reason the model can fix — a time, an id, a missing value)."""
         text, facts = extract_memory_tags(text)
@@ -3085,6 +3302,17 @@ class DiscordCodexClient(discord.Client):
         refused: list[str] = []
         text = self._apply_reminder_tags(text, guild_id, channel_id, user_id, notes, refused)
         text = await self._apply_tracking_tags(text, guild_id, channel_id, user_id, notes, refused)
+        text = self._apply_wish_tags(
+            text,
+            guild_id,
+            channel_id,
+            user_id,
+            notes,
+            refused,
+            wish_mode,
+            message_id,
+            asked,
+        )
         text = await self._apply_image_tags(
             text, guild_id, channel_id, user_id, notes, refused, asked, thread_id
         )
@@ -3099,6 +3327,96 @@ class DiscordCodexClient(discord.Client):
         if notes:
             text = f"{text.strip()}\n\n" + "\n".join(notes)
         return text.strip(), problems, refused
+
+    def _apply_wish_tags(
+        self,
+        text: str,
+        guild_id: int | None,
+        channel_id: int | None,
+        user_id: int,
+        notes: list[str],
+        refused: list[str],
+        wish_mode: bool = False,
+        message_id: int | None = None,
+        asked: str = "",
+    ) -> str:
+        creates = tags.findall(WISH_TAG, text)
+        cancels = tags.findall(CANCEL_WISH_TAG, text)
+        clean = tags.strip(CANCEL_WISH_TAG, tags.strip(WISH_TAG, text))
+        if not creates and not cancels:
+            return text
+        if not wish_mode or guild_id is None or channel_id is None:
+            # No retry can turn this into a wish conversation, so the member is told and the
+            # model is not asked.
+            notes.append(
+                "（這段對話不是許願對話，願望沒有記下，也沒有撤回；"
+                f"請用 /{self.config.command_prefix}-wish 開始許願）"
+            )
+            return clean
+        for body in creates:
+            attrs = dict(WISH_ATTR.findall(body))
+            missing = [
+                key for key in ("title", "original", "need", "feasibility") if key not in attrs
+            ]
+            if missing:
+                refused.append(f"<wish>: missing attribute {', '.join(missing)}")
+                notes.append("（願望的格式不對，沒有記下）")
+                continue
+            try:
+                wish, created = self.wishes.add(
+                    guild_id,
+                    channel_id,
+                    message_id,
+                    user_id,
+                    **{key: attrs[key] for key in ("title", "original", "need", "feasibility")},
+                    alternatives=attrs.get("alternatives", ""),
+                    asked=asked,
+                )
+            except ValueError as error:
+                refused.append(f"<wish>: {error}")
+                notes.append("（願望的內容超出長度限制，沒有記下）")
+                continue
+            title = discord.utils.escape_markdown(discord.utils.escape_mentions(wish.title))
+            notes.append(
+                f"📝 已記下願望 #{wish.id}「{title}」；開發者更新進度時會在這裡通知你。"
+                if created
+                else f"📝 這個願望已經記過了：#{wish.id}「{title}」"
+                f"（{STATUS_LABELS[wish.status]}）。"
+            )
+            LOGGER.info(
+                "Wish add id=%s guild=%s user=%s created=%s", wish.id, guild_id, user_id, created
+            )
+        for body in cancels:
+            value = dict(WISH_ATTR.findall(body)).get("id", "")
+            if not re.fullmatch(r"[0-9]{1,9}", value):
+                refused.append("<cancel_wish>: id must be digits (1–9 characters)")
+                notes.append("（撤回願望的格式不對，沒有撤回）")
+                continue
+            wish_id = int(value)
+            existing = self.wishes.get(wish_id)
+            wish = (
+                self.wishes.withdraw(wish_id, user_id)
+                if existing is not None and existing.guild_id == guild_id
+                else None
+            )
+            notes.append(
+                f"⛔ 已撤回願望 #{wish_id}。" if wish else f"（找不到你的願望 #{wish_id}）"
+            )
+            LOGGER.info(
+                "Wish withdraw id=%s guild=%s user=%s found=%s",
+                wish_id,
+                guild_id,
+                user_id,
+                wish is not None,
+            )
+        return clean
+
+    def _wish_section(self, guild_id: int, user_id: int) -> str:
+        wishes = self.wishes.list(guild_id=guild_id, statuses=OPEN_STATUSES, user_id=user_id)
+        lines = [f"#{wish.id} 「{wish.title}」（{STATUS_LABELS[wish.status]}）" for wish in wishes]
+        return "[許願池]\n這段對話由成員以許願指令開啟。\n" + (
+            "\n".join(lines) if lines else "你目前沒有還沒結案的願望。"
+        )
 
     def _apply_reminder_tags(
         self,
@@ -3558,6 +3876,37 @@ class DiscordCodexClient(discord.Client):
             times=slots,
         )
         await interaction.followup.send(text, ephemeral=True)
+
+    @app_commands.rename(mine="只看我的")
+    @app_commands.describe(mine="只列出你自己的尚未結案願望")
+    async def wishes_command(self, interaction: discord.Interaction, mine: bool = False) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason:
+            await interaction.response.send_message(
+                "只能在伺服器中使用。" if interaction.guild_id is None else reason, ephemeral=True
+            )
+            return
+        if interaction.guild_id is None:
+            await interaction.response.send_message("只能在伺服器中使用。", ephemeral=True)
+            return
+        wishes = self.wishes.list(
+            guild_id=interaction.guild_id,
+            statuses=OPEN_STATUSES,
+            user_id=interaction.user.id if mine else None,
+        )
+        lines = []
+        for wish in wishes:
+            title = discord.utils.escape_markdown(discord.utils.escape_mentions(wish.title))
+            lines.append(f"#{wish.id}「{title}」・{STATUS_LABELS[wish.status]}・<@{wish.user_id}>")
+        text = (
+            f"許願池（{len(wishes)} 個還沒結案）：\n" + "\n".join(lines)
+            if wishes
+            else "目前沒有還沒結案的願望。"
+        )
+        text = truncate(text, 1800) + f"\n用 /{self.config.command_prefix}-wish 許願。"
+        await interaction.response.send_message(
+            truncate(text, 1900), ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+        )
 
     async def export_command(self, interaction: discord.Interaction) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
@@ -4887,19 +5236,48 @@ class DiscordCodexClient(discord.Client):
     ) -> None:
         attachments = [image] if image is not None else []
         prompt = prompt.strip()
-        # Unset means the member's own /model effort (or DEFAULT_MODEL's), not Codex's default.
-        effort_value = (
-            effort.value
-            if effort is not None
-            else self._member_effort(interaction.guild_id, interaction.user.id)
-        )
         reason = self._access(
             interaction.guild_id, interaction.channel, interaction.channel_id
         ) or self._validate(prompt, attachments)
         if reason:
             await interaction.response.send_message(reason, ephemeral=True)
             return
+        await self._slash_ask(
+            interaction, prompt, attachments, effort.value if effort is not None else "", new
+        )
 
+    @app_commands.rename(request="需求")
+    @app_commands.describe(request="想要 Bot 做到的功能或改進；Bot 會追問細節並評估可行性")
+    async def wish_command(self, interaction: discord.Interaction, request: str) -> None:
+        reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
+        if reason or interaction.guild_id is None:
+            await interaction.response.send_message(
+                "只能在伺服器中使用。" if interaction.guild_id is None else reason, ephemeral=True
+            )
+            return
+        request = request.strip()
+        reason = self._validate(request, [])
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        # Always a new conversation: the wish mode belongs to the thread this answer starts, and
+        # replying to the answer (or @mentioning the Bot here afterwards) continues it.
+        await self._slash_ask(interaction, request, [], "", new=True, wish=True)
+
+    async def _slash_ask(
+        self,
+        interaction: discord.Interaction,
+        prompt: str,
+        attachments: Sequence[discord.Attachment],
+        effort: str,
+        new: bool,
+        wish: bool = False,
+    ) -> None:
+        """Answer a validated slash question in public, as the deferred interaction response;
+        `effort` is the one the member chose for this message ("" for none), `wish` opens a
+        wish conversation."""
+        # Unset means the member's own /model effort (or DEFAULT_MODEL's), not Codex's default.
+        effort_value = effort or self._member_effort(interaction.guild_id, interaction.user.id)
         key = ThreadStore.key(interaction.guild_id, interaction.channel_id, interaction.user.id)
         plain = self.memory.get_persona_off(interaction.guild_id, interaction.user.id)
         model = self._model(interaction.guild_id, interaction.user.id)
@@ -4916,7 +5294,7 @@ class DiscordCodexClient(discord.Client):
             attachments,
             plain,
             fresh=new,
-            effort=effort.value if effort is not None else "",
+            effort=effort,
         )
         if routed is not None:
             resume = routed.resume
@@ -4940,6 +5318,7 @@ class DiscordCodexClient(discord.Client):
                     channel_id=interaction.channel_id,
                     conversation_channel=interaction.channel,
                     fresh=new,
+                    wish=wish,
                     **self._routed_kw(routed),
                 ),
             )
@@ -4955,6 +5334,8 @@ class DiscordCodexClient(discord.Client):
         # Discord does not echo slash command inputs, so quote the question above the answer.
         # The model named is the one that answered, a fallback spare included.
         tag = self._slash_tag(routed, result, model, effort_value)
+        if wish:
+            tag = "、".join(part for part in ("許願", tag) if part)
         target = result.via
         answer = result.text
         if routed is not None and routed.no_x and target is not None and target.backend != GROK:
@@ -5104,6 +5485,7 @@ class DiscordCodexClient(discord.Client):
                     on_delta=on_delta,
                     channel_id=message.channel.id,
                     conversation_channel=message.channel,
+                    message_id=message.id,
                     replied_to=replied_to,
                     **self._routed_kw(routed),
                 ),

@@ -135,6 +135,7 @@ Discord 有關的部分。任何一項不通過，請求就被拒絕，什麼都
 | `status` | 成員會在 `/status` 看到的內容 | `/status` |
 | `track add／list／cancel／every／at／log` | 社群追蹤 | `/track` 與 `<track>` 標籤 |
 | `tracking outbox` | 還沒送出的追蹤通知 | （只有 CLI） |
+| `wish list／show／status` | 許願池需求與狀態通知 | `/wish`、`/wishes` 與 `<wish>` 標籤 |
 | `linkclean get／set` | 伺服器的連結洗參數模式 | `/linkclean` |
 | `embedfix get／set` | 伺服器的預覽修正開關 | `/embedfix` |
 | `image get／set` | 伺服器的圖片生成開關與暴雷隱藏設定 | （只有 CLI；`/image` 與 `<image_gen>` 標籤照它限制） |
@@ -268,6 +269,29 @@ $ python -m discord_codex_bot.admin tracking outbox --failed
 
 $ python -m discord_codex_bot.admin tracking outbox --all-guilds --limit 100
 ```
+
+### wish：許願池
+
+成員以 `/{prefix}-wish` 開始許願對話，任何開放的頻道都可使用；回覆該回答或之後在同一頻道
+@ Bot 即接續同一段對話。Bot 會訪談需求、評估技術可行性並提出替代方案，成員確認摘要後才記錄
+願望；原始需求與確認後的需求分別保留。許願對話以外的回答不會記錄或撤回願望。
+
+```console
+$ python -m discord_codex_bot.admin wish list
+$ python -m discord_codex_bot.admin wish list --guild 123456789012345678 --status open_all --limit 50
+$ python -m discord_codex_bot.admin wish show --id 7 --json
+$ python -m discord_codex_bot.admin wish status --id 7 --status accepted --note "已排入開發計畫"
+$ python -m discord_codex_bot.admin wish status --id 7 --status in_progress --note "已完成資料來源驗證"
+```
+
+`wish list` 預設列出允許伺服器的前 50 個未結案願望；`open_all` 包含 `open`（待評估）、
+`accepted`（已排入）、`in_progress`（開發中）。另可篩選 `done`（已完成）、`rejected`（不做）、
+`withdrawn`（已撤回）。`wish show` 列出全部需求欄位、原訊息連結與通知紀錄。
+
+`wish status` 可設定除 `withdrawn` 以外的狀態；相同狀態也能補充進度。`--note` 最多 1500 字，
+`--note -` 可從標準輸入讀取。指令只更新資料並排入通知佇列，由 Bot 每 30 秒投遞一次，在原頻道
+@ 成員並回覆原訊息；有說明時一併附上。通知失敗累計 5 次後停止重試，`wish show` 可查看錯誤。
+成員以 `/{prefix}-wishes` 查看未結案願望，並可在許願對話中請 Bot 撤回自己的願望。
 
 ### linkclean、embedfix、persona：伺服器與人設
 

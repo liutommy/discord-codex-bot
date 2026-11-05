@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import discord
+import pytest
 
 from discord_codex_bot import embedfix
 from discord_codex_bot.backends import BackendUnavailable, Resolved
@@ -53,12 +54,307 @@ def test_registers_only_expected_slash_commands(config: Config, tmp_path) -> Non
         "inmu-king-style",
         "inmu-king-model",
         "inmu-king-track",
+        "inmu-king-wish",
+        "inmu-king-wishes",
         "inmu-king-linkclean",
         "inmu-king-embedfix",
         "inmu-king-image",
     }
     assert client.intents.guilds
     assert client.intents.message_content
+
+
+WISH = (
+    '<wish title="貼文搜尋" original="想搜尋舊貼文" need="搜尋頻道歷史" '
+    'feasibility="需要訊息權限與索引" alternatives="先做關鍵字搜尋"/>'
+)
+
+
+async def test_wish_tag_stores_and_deduplicates_with_member_message(client, backends):
+    codex, _ = backends
+    codex.replies = [f"記下了\n{WISH}"]
+    for _ in range(2):
+        result = await client._answer(
+            "確認", [], GUILD, USER, channel_id=ALLOWED, message_id=123, wish=True
+        )
+        assert "<wish" not in result.text
+    [wish] = client.wishes.list()
+    assert wish.original == "想搜尋舊貼文" and wish.need == "搜尋頻道歷史"
+    assert wish.asked == "確認" and wish.message_id == 123
+    assert wish.guild_id == GUILD and wish.channel_id == ALLOWED and wish.user_id == USER
+    assert "這個願望已經記過了：#1" in result.text
+
+
+async def test_wish_tag_outside_a_wish_conversation_is_refused(client):
+    # No retry can turn the conversation into a wish one, so the member is told and the model is
+    # not asked again.
+    text, unread, refused = await client._apply_action_tags(WISH, GUILD, ALLOWED, USER)
+    assert client.wishes.list() == [] and "<wish" not in text and unread == []
+    assert refused == [] and "這段對話不是許願對話，願望沒有記下" in text
+    assert "請用 /codex-wish 開始許願" in text
+    text, _, refused = await client._apply_action_tags(WISH, None, ALLOWED, USER, wish_mode=True)
+    assert client.wishes.list() == [] and refused == [] and "不是許願對話" in text
+
+
+async def test_a_bare_wish_name_in_prose_is_not_an_order(client):
+    # The summary answer may name the tag; without attributes it must not trigger a retry that
+    # could record the wish before the member confirms (Claude review on PR #89).
+    prose = "確認後我會用 <wish> 幫你記錄，要送出嗎？也可以 <cancel_wish/> 撤回。"
+    text, unread, refused = await client._apply_action_tags(
+        prose, GUILD, ALLOWED, USER, wish_mode=True
+    )
+    assert client.wishes.list() == [] and refused == [] and unread == []
+    assert "<wish>" in text and "<cancel_wish/>" in text
+
+
+async def test_wish_mode_follows_the_conversation_and_lists_only_speakers_open_wishes(
+    client, backends
+):
+    codex, _ = backends
+    client.wishes.add(GUILD, ALLOWED, None, USER + 1, "別人的", "另一原話", "需求", "可行")
+    closed, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "結案的", "結案原話", "需求", "可行")
+    client.wishes.set_status(closed.id, "done")
+    client.wishes.add(GUILD + 1, ALLOWED, None, USER, "別服的", "原話", "需求", "可行")
+    codex.replies = [WISH, "答案"]
+    result = await client._answer("確認", [], GUILD, USER, channel_id=555, wish=True)
+    assert (
+        "已記下願望" in result.text
+        and "這段對話由成員以許願指令開啟" in codex.calls[0][2]["memory"]
+    )
+    assert result.thread_id == "t1" and client.wishes.is_wish_thread("t1")
+    [wish] = client.wishes.list(guild_id=GUILD, statuses=("open",), user_id=USER)
+    assert wish.channel_id == 555 and wish.message_id is None
+    # A later turn resuming the marked thread is a wish turn, and the id it ends on (a backend
+    # may hand back a new one) is marked too, so the turn after that still is one.
+    result = await client._answer("進度", [], GUILD, USER, channel_id=ALLOWED, resume="t1")
+    section = codex.calls[-1][2]["memory"].split("[許願池]\n")[1]
+    assert f"#{wish.id} 「貼文搜尋」（待評估）" in section
+    assert all(title not in section for title in ("別人的", "結案的", "別服的"))
+    assert result.thread_id == "t2" and client.wishes.is_wish_thread("t2")
+    codex.replies = [WISH]
+    result = await client._answer("確認", [], GUILD, USER + 2, channel_id=ALLOWED, resume="t2")
+    assert "你目前沒有還沒結案的願望" in codex.calls[-1][2]["memory"]
+    assert "已記下願望" in result.text and len(client.wishes.list(user_id=USER + 2)) == 1
+    # A routed conversation moved to another backend resumes nothing; its earlier threads still
+    # make it a wish conversation.
+    await client._answer("進度", [], GUILD, USER, channel_id=ALLOWED, earlier_threads=("t1",))
+    assert "[許願池]" in codex.calls[-1][2]["memory"]
+    # An ordinary conversation is not: no section, and a wish tag is only noted, never retried.
+    calls = len(codex.calls)
+    codex.replies = [WISH]
+    result = await client._answer("確認", [], GUILD, USER, channel_id=ALLOWED, resume="t-plain")
+    assert len(codex.calls) == calls + 1 and "[許願池]" not in codex.calls[-1][2]["memory"]
+    assert "這段對話不是許願對話" in result.text and not client.wishes.is_wish_thread(
+        result.thread_id
+    )
+    assert len(client.wishes.list(guild_id=GUILD, user_id=USER)) == 2  # 貼文搜尋 and 結案的
+    # Outside a guild there is no wish mode, even when asked for.
+    await client._answer("進度", [], None, USER, wish=True)
+    assert "[許願池]" not in codex.calls[-1][2]["memory"]
+
+
+async def test_wish_cancel_is_owned_and_guild_scoped(client):
+    wish, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "標題", "原話", "需求", "可行")
+    tag = f'<cancel_wish id="{wish.id}"/>'
+    for guild, user in ((GUILD, USER + 1), (GUILD + 1, USER)):
+        text, unread, refused = await client._apply_action_tags(
+            tag, guild, ALLOWED, user, wish_mode=True
+        )
+        assert "找不到你的願望 #1" in text and unread == refused == []
+        assert client.wishes.get(wish.id).status == "open"
+    text, unread, refused = await client._apply_action_tags(
+        tag, GUILD, ALLOWED, USER, wish_mode=True
+    )
+    assert "已撤回願望 #1" in text and unread == refused == []
+    assert client.wishes.get(wish.id).status == "withdrawn"
+    assert client.wishes.pending_notices() == []
+
+
+@pytest.mark.parametrize("wrapped", [f"```\n{WISH}\n```", f"> {WISH}", f"`{WISH}`"])
+async def test_shown_wishes_are_not_stored(client, wrapped):
+    text, unread, refused = await client._apply_action_tags(
+        wrapped, GUILD, ALLOWED, USER, wish_mode=True
+    )
+    assert text == wrapped and unread == refused == [] and client.wishes.list() == []
+
+
+async def test_wish_attribute_refusal_is_retried_once(client, backends):
+    codex, _ = backends
+    codex.replies = [WISH.replace('title="貼文搜尋"', 'title=""'), WISH]
+    result = await client._answer(
+        "確認", [], GUILD, USER, channel_id=ALLOWED, message_id=123, wish=True
+    )
+    assert len(codex.calls) == 2 and "<TAG_ERRORS>" in codex.calls[1][0]
+    assert "title" in codex.calls[1][0] and "已記下願望 #1" in result.text
+    assert client.wishes.list()[0].message_id == 123
+
+
+async def test_wish_refusals_are_told_to_the_member_and_sent_back_to_the_model(client):
+    for tag, attribute, note in (
+        ('<wish title="x"/>', "original", "願望的格式不對，沒有記下"),
+        ('<cancel_wish id="abc"/>', "id", "撤回願望的格式不對"),
+        (WISH.replace("貼文搜尋", "長" * 61), "title", "超出長度限制"),
+    ):
+        text, unread, refused = await client._apply_action_tags(
+            tag, GUILD, ALLOWED, USER, wish_mode=True
+        )
+        assert attribute in refused[0] and unread == [] and tag not in text and note in text
+    assert client.wishes.list() == []
+
+
+async def test_alternatives_may_be_left_out_and_any_number_of_wishes_is_recorded(client):
+    bare = WISH.replace(' alternatives="先做關鍵字搜尋"', "")
+    four = "\n".join(
+        bare.replace("貼文搜尋", f"標題{i}").replace("想搜尋舊貼文", f"原話{i}") for i in range(4)
+    )
+    _, _, refused = await client._apply_action_tags(four, GUILD, ALLOWED, USER, wish_mode=True)
+    wishes = client.wishes.list()
+    assert refused == [] and len(wishes) == 4 and {w.alternatives for w in wishes} == {""}
+
+
+async def test_wish_notice_loop_replies_and_pings_only_owner(client, monkeypatch):
+    from discord_codex_bot import wishes
+
+    title = "**通知** @everyone"
+    wish, _ = client.wishes.add(GUILD, ALLOWED, 123, USER, title, "原話", "需求", "可行")
+    note = "*" * 1500
+    client.wishes.set_status(wish.id, "accepted", note)
+    sent = []
+
+    async def send(text, **kw):
+        assert len(text) < 2000
+        sent.append((text, kw))
+
+    channel = types.SimpleNamespace(id=ALLOWED, guild=types.SimpleNamespace(id=GUILD), send=send)
+    monkeypatch.setattr(client, "get_channel", lambda _: channel)
+
+    async def stop(seconds):
+        assert seconds == 30
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(wishes.asyncio, "sleep", stop)
+    with pytest.raises(asyncio.CancelledError):
+        await wishes.notice_loop(client.wishes, client._deliver_wish_notice)
+    [(text, kw)] = sent
+    assert text.startswith(
+        f"<@{USER}> 你的願望 #1「\\*\\*通知\\*\\* @\u200beveryone」狀態更新：已排入"
+    )
+    assert "\n開發者說明：" in text and "[輸出已截斷]" in text
+    reference = kw["reference"]
+    assert reference.message_id == 123 and reference.channel_id == ALLOWED
+    assert reference.guild_id == GUILD and reference.fail_if_not_exists is False
+    mentions = kw["allowed_mentions"].to_dict()
+    assert mentions == {"users": [USER], "parse": []}
+    assert kw["allowed_mentions"].replied_user is False
+    assert client.wishes.pending_notices() == []
+
+
+async def test_wish_notice_wrong_guild_or_disallowed_channel_is_not_posted(client, monkeypatch):
+    from discord_codex_bot.wishes import deliver_notices
+
+    wish, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "標題", "原話", "需求", "可行")
+    client.wishes.set_status(wish.id, "done", "完成")
+    channel = types.SimpleNamespace(id=ALLOWED, guild=types.SimpleNamespace(id=GUILD + 1))
+
+    async def fetch(channel_id):
+        assert channel_id == ALLOWED
+        return channel
+
+    monkeypatch.setattr(client, "get_channel", lambda _: None)
+    monkeypatch.setattr(client, "fetch_channel", fetch)
+    await deliver_notices(client.wishes, client._deliver_wish_notice)
+    assert client.wishes.pending_notices()[0].attempts == 1
+    channel.guild.id = GUILD
+    monkeypatch.setattr(client, "_access", lambda *args: "denied")
+    await deliver_notices(client.wishes, client._deliver_wish_notice)
+    assert client.wishes.pending_notices()[0].attempts == 2
+
+
+async def test_wishes_command_filters_and_suppresses_mentions(client):
+    sent = []
+
+    async def send(text, **kw):
+        sent.append((text, kw))
+
+    interaction = types.SimpleNamespace(
+        guild_id=GUILD,
+        channel_id=ALLOWED,
+        channel=types.SimpleNamespace(id=ALLOWED),
+        user=types.SimpleNamespace(id=USER),
+        response=types.SimpleNamespace(send_message=send),
+    )
+    await client.wishes_command(interaction)
+    assert sent[-1][0] == "目前沒有還沒結案的願望。\n用 /codex-wish 許願。"
+    client.wishes.add(GUILD, ALLOWED, None, USER, "**我的**", "原話", "需求", "可行")
+    client.wishes.add(GUILD, ALLOWED, None, USER + 1, "別人的", "原話", "需求", "可行")
+    closed, _ = client.wishes.add(GUILD, ALLOWED, None, USER, "結案", "不同原話", "需求", "可行")
+    client.wishes.set_status(closed.id, "done")
+    await client.wishes_command(interaction)
+    text, kw = sent[-1]
+    assert "2 個還沒結案" in text and "別人的" in text and "結案」" not in text
+    assert kw["ephemeral"] and kw["allowed_mentions"].to_dict()["parse"] == []
+    await client.wishes_command(interaction, mine=True)
+    text, kw = sent[-1]
+    assert f"#1「\\*\\*我的\\*\\*」・待評估・<@{USER}>" in text
+    assert "別人的" not in text and text.endswith("用 /codex-wish 許願。")
+    command = client.tree.get_command("codex-wishes")
+    assert command.parameters[0].display_name == "只看我的"
+    interaction.guild_id = None
+    await client.wishes_command(interaction)
+    assert sent[-1][0] == "只能在伺服器中使用。"
+
+
+async def test_wish_command_opens_a_wish_conversation_that_replies_continue(
+    client, backends, monkeypatch
+):
+    codex, _ = backends
+    codex.replies = ["請問要搜尋哪些頻道？" + "長" * 2000]
+    key = client.threads.key(GUILD, ALLOWED, USER)
+    model = client._model(GUILD, USER)
+    client.threads.remember(key, "t-old", 100, plain=False, model=model)
+    edits, followups, refusals, deferred = [], [], [], []
+
+    async def defer(thinking=False):
+        deferred.append(thinking)
+
+    async def send_message(text, ephemeral=False):
+        refusals.append((text, ephemeral))
+
+    async def edit_original_response(content=None, view=None, attachments=None):
+        edits.append(content)
+        return types.SimpleNamespace(id=999)
+
+    async def send(text, **kw):
+        followups.append(text)
+
+    async def run_tracked(key, owner, show, start):
+        return await start(None, None)
+
+    monkeypatch.setattr(client, "_run_tracked", run_tracked)
+    interaction = types.SimpleNamespace(
+        guild_id=GUILD,
+        channel_id=ALLOWED,
+        channel=types.SimpleNamespace(id=ALLOWED),
+        user=types.SimpleNamespace(id=USER),
+        response=types.SimpleNamespace(defer=defer, send_message=send_message),
+        followup=types.SimpleNamespace(send=send),
+        edit_original_response=edit_original_response,
+    )
+    await client.wish_command(interaction, "  想搜尋 @everyone 的舊貼文  ")
+    _, _, kw = codex.calls[0]
+    # A new conversation in wish mode, never the member's ongoing one.
+    assert kw["resume"] == "" and "[許願池]" in kw["memory"] and deferred == [True]
+    assert edits[-1].startswith("**問**（許願") and "\n> 想搜尋 @everyone 的舊貼文\n" in edits[-1]
+    assert followups and all(len(chunk) <= 2000 for chunk in [edits[-1], *followups])
+    # Replying to the answer, or asking again in the channel, continues the marked thread.
+    assert client.threads.by_message(999, plain=False, model=model) == "t1"
+    assert client.threads.current(key, plain=False, model=model) == "t1"
+    assert client.wishes.is_wish_thread("t1") and not client.wishes.is_wish_thread("t-old")
+    command = client.tree.get_command("codex-wish")
+    assert command.parameters[0].display_name == "需求" and command.parameters[0].required
+    interaction.guild_id = None
+    await client.wish_command(interaction, "想要")
+    assert refusals[-1] == ("只能在伺服器中使用。", True) and len(codex.calls) == 1
 
 
 class _FakeChannel:
@@ -331,8 +627,6 @@ def test_with_quoted_message_folds_reply_target_into_prompt() -> None:
 # ----- _answer: backend dispatch, recall loop, memory tags ---------------------------------------
 
 from dataclasses import replace  # noqa: E402
-
-import pytest  # noqa: E402
 
 from discord_codex_bot import bot as bot_module  # noqa: E402
 from discord_codex_bot.bot import QUEUE_FULL_MESSAGE  # noqa: E402
@@ -1944,6 +2238,170 @@ async def test_recall_loop_runs_web_searches_from_a_tag_only_reply(client, monke
     assert "1. 士林夜市 — https://s.example" in calls[1]
 
 
+async def test_recall_loop_runs_x_searches_for_a_model_that_cannot_search_x(
+    client, monkeypatch
+) -> None:
+    # 2026-11-04: Jev sends "最近遊戲王上位牌組" to live-web (Codex), which had no way to read X.
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+    from discord_codex_bot.bot import request_only
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+    assert request_only('<xsearch query="遊戲王 上位牌組"/>')
+    replies = iter(
+        [
+            CodexResult('<xsearch query="遊戲王 上位牌組"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls, asked = [], []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    async def fake_search(config, query, limit=8):
+        asked.append(query)
+        return [
+            {
+                "id": "2105070184717262858",
+                "author_handle": "ygo_news",
+                "author_name": "YGO",
+                "created_at": "2026-09-29T23:00:17Z",
+                "text": "冠軍牌組是 <@&1> 某某",
+            }
+        ]
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(xsearch_module, "search_posts", fake_search)
+    result = await client._answer("最近遊戲王上位牌組", [], GUILD, USER)
+    assert result.text == "答案" and asked == ["遊戲王 上位牌組"]
+    assert '<RESULT kind="xsearch" query="遊戲王 上位牌組">' in calls[1]
+    assert "https://x.com/ygo_news/status/2105070184717262858" in calls[1]
+    assert "未經驗證" in calls[1]
+
+
+async def test_a_repeated_x_search_in_one_answer_reuses_the_first_result(
+    client, monkeypatch
+) -> None:
+    # Each search is a Grok session on the operator's plan; a resent query must not start another.
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+    replies = iter(
+        [
+            CodexResult('<xsearch query="q"/>', (), None, "t1", False),
+            CodexResult('<xsearch query="q"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls, asked = [], []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    async def fake_search(config, query, limit=8):
+        asked.append(query)
+        return []
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(xsearch_module, "search_posts", fake_search)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案" and asked == ["q"]
+    assert "沿用當時的結果" in calls[2] and "沿用當時的結果" not in calls[1]
+
+
+async def test_x_searches_in_one_answer_stop_at_the_answer_budget(client, monkeypatch) -> None:
+    # A fetched page can tell the model to send hundreds of searches; each is a Grok session.
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+    monkeypatch.setattr(xsearch_module, "MAX_SEARCHES_PER_ANSWER", 3)
+    many = "\n".join(f'<xsearch query="q{i}"/>' for i in range(5))
+    replies = iter(
+        [
+            CodexResult(many, (), None, "t1", False),
+            CodexResult('<xsearch query="q0"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls, asked = [], []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    async def fake_search(config, query, limit=8):
+        asked.append(query)
+        return []
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    monkeypatch.setattr(xsearch_module, "search_posts", fake_search)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案" and asked == ["q0", "q1", "q2"]
+    assert calls[1].count("已達 3 次上限") == 2  # q3 and q4 told why, not silently dropped
+    assert "沿用當時的結果" in calls[2]  # a repeat of a served query still costs nothing
+
+
+async def test_x_search_without_a_sidecar_is_answered_with_the_reason(client, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+    from discord_codex_bot.bot import unserved_reads
+
+    client.config = replace(client.config, xsearch_url="")
+    assert unserved_reads('<xsearch query="q"/>', client.config, False) == [
+        "<xsearch>: X search is not available here; use <web> instead"
+    ]
+    on = replace(client.config, xsearch_url="http://xsearch:8080")
+    two = '<xsearch query="a"/>\n<xsearch query="b"/>'
+    assert unserved_reads(two, on, False) == []  # every search asked for is carried out
+
+    async def never(*args, **kw):  # pragma: no cover - must not run without a sidecar
+        raise AssertionError("searched X without a sidecar")
+
+    monkeypatch.setattr(xsearch_module, "search_posts", never)
+    replies = iter(
+        [
+            CodexResult('<xsearch query="q"/>', (), None, "t1", False),
+            CodexResult("答案", (), None, "t1", True),
+        ]
+    )
+    calls = []
+
+    async def fake_codex(text, config, **kw):
+        calls.append(text)
+        return next(replies)
+
+    monkeypatch.setattr(bot_module, "run_codex", fake_codex)
+    result = await client._answer("q", [], GUILD, USER)
+    assert result.text == "答案" and "X search is not available here" in calls[1]
+
+
+async def test_a_failed_x_search_tells_the_model_instead_of_ending_the_answer(
+    client, monkeypatch
+) -> None:
+    from dataclasses import replace
+
+    from discord_codex_bot import xsearch as xsearch_module
+
+    client.config = replace(client.config, xsearch_url="http://xsearch:8080")
+
+    async def failing(config, query, limit=8):
+        raise xsearch_module.XSearchError("X lookup search failed: HTTP 402")
+
+    monkeypatch.setattr(xsearch_module, "search_posts", failing)
+    block = await client._x_search("q", GUILD, USER)
+    assert block.startswith('<RESULT kind="xsearch" query="q">')
+    assert "X 搜尋無法使用：X lookup search failed: HTTP 402" in block
+
+
 def test_remember_button_uses_the_guild_custom_emoji_when_present(client, monkeypatch) -> None:
     from types import SimpleNamespace as NS
 
@@ -2193,7 +2651,7 @@ async def test_unserved_reads_go_back_as_results_not_to_the_member(
     assert result.text == "答案"
     second = codex.calls[1][0]
     assert f"{broken}: not in the documented form" in second and "no sandbox here" in second
-    assert queries == ["q0", "q1"] and "only the first 2" in codex.calls[2][0]
+    assert queries == ["q0", "q1", "q2"] and "only the first" not in codex.calls[2][0]
 
 
 async def test_read_requests_past_a_limit_or_written_as_a_body_are_answered(
