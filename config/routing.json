@@ -34,6 +34,13 @@
           "not_for": "quick replies, live information, hard code",
           "cost": "medium"
       },
+      "hydrogen-xhigh": {
+          "target": "agy:gemini-4-hydrogen|xhigh",
+          "strength": 6,
+          "what": "general model thinking longest: hard explanations, long careful writing, complex planning or advice with many factors",
+          "not_for": "quick replies, live information, everyday questions a lighter setting handles",
+          "cost": "high"
+      },
       "sonnet-high": {
           "target": "agy:claude-sonnet-5-5|high",
           "strength": 5,
