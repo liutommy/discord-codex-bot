@@ -2702,10 +2702,26 @@ class DiscordCodexClient(discord.Client):
         elif not own:
             verdict = Verdict("no-text")
         else:
-            verdict = await routing.judge(own, said[-CONTEXT_TURNS:], self.config)
+            asked = routing.questions(table, self.config.jev_pick != "off")
+            verdict = await routing.judge(own, said[-CONTEXT_TURNS:], self.config, asked)
         image_turn = verdict.status == "image"
+        picked: Route | None = None  # where Jev's pick would send it (logged in shadow mode)
         if verdict.status == "ok":
-            route, why = routing.decide(table, verdict.kind, routing.band(verdict.score), route)
+            level = routing.band(verdict.score)
+            sure = verdict.pick_probability >= self.config.jev_pick_min_probability
+            pick = verdict.pick if sure else ""
+            if pick:
+                picked, pick_why = routing.pick_route(table, verdict.kind, level, route, pick)
+            if self.config.jev_pick == "on":
+                # An unsure pick still goes through pick_route: a conversation a pick moved
+                # must not drop to a weaker table cell.
+                route, why = (
+                    (picked, pick_why)
+                    if picked
+                    else routing.pick_route(table, verdict.kind, level, route, "")
+                )
+            else:
+                route, why = routing.decide(table, verdict.kind, level, route)
         elif image_turn:
             route, why = route or Route(table.image[0], "M", ""), "image"
         elif route is not None:
@@ -2834,6 +2850,12 @@ class DiscordCodexClient(discord.Client):
                 "why": why,
                 "cell": route.entry,
                 "target": entry,
+                # Jev's model pick, its probability and where it sends the message (in shadow mode
+                # the table's cell answered instead): the holdout compares the two.
+                "pick": verdict.pick or None,
+                "pick_p": round(verdict.pick_probability, 3) if verdict.pick else None,
+                "pick_cell": picked.entry if picked else None,
+                "jev_pick": self.config.jev_pick,
                 "degraded": degraded,
                 "replayed": bool(history),
                 "jev_ms": verdict.ms,

@@ -314,6 +314,11 @@ hour — the agy list follows `agy models`; Gemini 4 Hydrogen replaced Gemini 3.
 has its own small weekly pool (no 5-hour window) and answers the hardest band of every routed
 type but quick (Codex) and live-x (Grok) (`config/routing.json`); when it is spent (`credits
 balance is too low`), `argon_failed` sends the question back to the cell it replaced.
+With `JEV_PICK` (`shadow` by default) the same Jev call also picks the answering model from
+`routing.json`'s `candidates` (each a routing entry, a strength rank and the option text Jev
+reads; every table cell must be one). `shadow` only logs the pick next to the table's cell;
+`on` routes by it, never to a candidate weaker than the conversation's current one and only on
+the backend a type needs.
 OpenRouter is stateless, so the Bot keeps those conversations itself (`OPENROUTER_DIR`,
 replayed within `OPENROUTER_HISTORY_CHARS`), sends the persona as the system message, inlines
 images for models the catalog marks image-capable and `reasoning.effort` for models that take it;

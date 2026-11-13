@@ -151,7 +151,10 @@ def test_env_example_does_not_promise_a_shadow_mode() -> None:
     from pathlib import Path
 
     text = (Path(__file__).resolve().parents[1] / ".env.example").read_text("utf-8")
-    assert "shadow" not in text.lower() and "live:" not in text
+    # JEV_PICK's shadow mode is real (the Jev pick is logged, the table routes); only it may
+    # say "shadow".
+    shadows = [line for line in text.lower().splitlines() if "shadow" in line]
+    assert all("pick" in line for line in shadows) and "live:" not in text
 
 
 def test_the_sidecar_reservation_fits_in_the_lookup_deadline() -> None:

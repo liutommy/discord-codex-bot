@@ -94,6 +94,8 @@ def config() -> Config:
         jev_model="jev-1.13.0",
         jev_timeout_seconds=1.0,
         jev_min_confidence=0.3,
+        jev_pick="shadow",
+        jev_pick_min_probability=0.3,
         routing_path=Path(__file__).resolve().parent.parent / "config" / "routing.json",
         typesafe_api_key="ts-test-SECRET-key-0123456789",
         apis_path=None,
