@@ -34,7 +34,9 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "→ model（打字會自動篩選；OpenRouter、OrcaRouter 只列免費模型）→ effort（這個模型的預設"
         "強度）。只選 provider 就用它的預設模型（OpenRouter、OrcaRouter、地端模型要選 model）；"
         "全部留空＝"
-        "查看目前設定；clear 回到伺服器預設（{default}）。換模型後下一題會新開對話。",
+        "查看目前設定；clear 回到伺服器預設（{default}）。換模型後下一題會新開對話。"
+        "Antigravity 的模型強度最高到 High（GPT-OSS 固定 Medium），"
+        "Gemini 4 Hydrogen 可到 Extra high；選超過上限的強度時用該模型的最高強度。",
         [
             "/{p}-model provider:Codex（只選來源：用 Codex 的模型）",
             "/{p}-model provider:Antigravity model:gemini-4-hydrogen effort:Medium",
