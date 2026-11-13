@@ -301,3 +301,23 @@ def test_a_stronger_target_without_a_stand_in_for_the_new_type_is_not_kept(
     route, why = routing.pick_route(t, kind, "L", running, pick)
     assert route.entry == t.candidates[pick].target and why == "picked"
     assert routing.has_stand_in(t, kind, route.entry)
+
+
+def test_an_unsure_pick_moves_a_target_without_a_stand_in_to_the_table() -> None:
+    t = table()
+    running = Route("agy:claude-sonnet-5-5|high", "L", "text")
+    route, _ = routing.pick_route(t, "code", "L", running, "")
+    assert route.entry == routing.decide(t, "code", "L", running)[0].entry == "codex|low"
+
+
+def test_a_stronger_target_with_its_stand_in_is_still_kept() -> None:
+    # The positive control for the two cases above: create has claude_failed, so Sonnet stays.
+    running = Route("agy:claude-sonnet-5-5|high", "L", "text")
+    route, why = routing.pick_route(table(), "create", "L", running, "hydrogen-low")
+    assert route.entry == "agy:claude-sonnet-5-5|high" and why == "pick-weaker"
+
+
+def test_a_claude_cell_without_its_stand_in_stops_start_up(tmp_path: Path) -> None:
+    path = write_table(tmp_path, lambda d: d["degrade"]["claude_failed"].pop("create"))
+    with pytest.raises(ValueError, match="claude_failed has no stand-in for 'create'"):
+        routing.load_table(path)

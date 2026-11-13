@@ -264,6 +264,10 @@ def load_table(path: Path) -> Table:
             raise ValueError(
                 f"routing: argon_failed has no stand-in for {kind!r}, which uses Argon"
             )
+        if any(is_claude(cell) for cell in row) and kind not in table.claude_failed:
+            raise ValueError(
+                f"routing: claude_failed has no stand-in for {kind!r}, which uses Claude"
+            )
     cells = [cell for row in table.types.values() for cell in row]
     if table.candidates:
         targets = {c.target for c in table.candidates.values()}
@@ -424,8 +428,8 @@ def pick_route(
     is Argon or Claude without that type's stand-in; then the table's cell stands in for it.
     Either way the conversation never moves to a weaker target than its current one, unless
     its current one is not on the backend the type needs or has no stand-in for the type.
-    chat keeps a running conversation
-    where it is, as in decide; the band recorded is decide's."""
+    chat keeps a running conversation where it is, as in decide; the band recorded is
+    decide's."""
     tabled, why = decide(table, kind, level, current_route)
     candidate = table.candidates.get(pick)
     needed = table.needs.get(kind)
