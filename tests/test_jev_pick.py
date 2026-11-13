@@ -283,3 +283,21 @@ async def test_on_keeps_a_picked_conversation_when_the_next_pick_is_unsure(
     second, result = await ask(client)
     assert second.route.entry == "agy:claude-sonnet-5-5|high"
     assert result.via == Resolved("agy", "claude-sonnet-5-5-high", "high")
+
+
+@pytest.mark.parametrize(
+    ("running", "kind", "pick"),
+    [
+        # Codex on PR #99: the floor kept Sonnet for `code` and Argon for `quick`, types with no
+        # claude_failed / argon_failed cell, so a short pool had no stand-in.
+        (Route("agy:claude-sonnet-5-5|high", "L", "text"), "code", "codex-low"),
+        (Route("agy:gemini-4-argon|medium", "X", "reason"), "quick", "hydrogen-low"),
+    ],
+)
+def test_a_stronger_target_without_a_stand_in_for_the_new_type_is_not_kept(
+    running, kind, pick
+) -> None:
+    t = table()
+    route, why = routing.pick_route(t, kind, "L", running, pick)
+    assert route.entry == t.candidates[pick].target and why == "picked"
+    assert routing.has_stand_in(t, kind, route.entry)

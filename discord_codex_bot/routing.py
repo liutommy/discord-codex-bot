@@ -423,7 +423,8 @@ def pick_route(
     or unsure. A pick is used unless the type needs another backend (live-x: Grok) or the pick
     is Argon or Claude without that type's stand-in; then the table's cell stands in for it.
     Either way the conversation never moves to a weaker target than its current one, unless
-    its current one is not on the backend the type needs. chat keeps a running conversation
+    its current one is not on the backend the type needs or has no stand-in for the type.
+    chat keeps a running conversation
     where it is, as in decide; the band recorded is decide's."""
     tabled, why = decide(table, kind, level, current_route)
     candidate = table.candidates.get(pick)
@@ -441,8 +442,13 @@ def pick_route(
         return current_route, "kept"
     chosen, reason = (candidate.target, "picked") if candidate else (tabled.entry, why)
     floor, strength = table.strength(current_route.entry), table.strength(chosen)
-    on_needed = not needed or backend_of(current_route.entry) == needed
-    if on_needed and floor is not None and strength is not None and strength < floor:
+    # The current target may stay only where this type could have picked it: on the backend the
+    # type needs, and with its stand-in for the type (a stronger Claude target kept for `code`
+    # would have no claude_failed cell to fall back to).
+    keepable = (not needed or backend_of(current_route.entry) == needed) and has_stand_in(
+        table, kind, current_route.entry
+    )
+    if keepable and floor is not None and strength is not None and strength < floor:
         stay = Route(current_route.entry, tabled.band, kind, current_route.earlier)
         return stay, "pick-weaker"
     moved = Route(chosen, tabled.band, kind, current_route.earlier)
