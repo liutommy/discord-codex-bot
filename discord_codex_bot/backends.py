@@ -25,7 +25,8 @@ BACKEND_LABELS = {CODEX: "Codex", GROK: "Grok", AGY: "Antigravity", **ROUTER_LAB
 # accepted when it repeats that suffix, and gpt-oss takes no effort at all. Members therefore
 # pick a *family* here and the shared `effort` option is mapped onto a legal slug per family.
 # family value -> (label, {effort: slug})  — an effort missing from the map falls back to the
-# family's strongest listed level (xhigh/max become high). The list follows `agy models`
+# family's strongest listed level (xhigh/max become high; Hydrogen has xhigh, so max becomes
+# xhigh there). The list follows `agy models`
 # (2026-10-16: Argon, 3.8 Flash, Claude Sonnet / Opus 5.5, gpt-oss; 2026-11-13: Gemini 4
 # Hydrogen replaces 3.8 Flash, see RENAMED).
 AGY_FAMILIES: dict[str, tuple[str, dict[str, str]]] = {
@@ -37,7 +38,7 @@ AGY_FAMILIES: dict[str, tuple[str, dict[str, str]]] = {
     ),
     "gemini-4-hydrogen": (
         "Gemini 4 Hydrogen",
-        {lvl: f"gemini-4-hydrogen-{lvl}" for lvl in ("low", "medium", "high")},
+        {lvl: f"gemini-4-hydrogen-{lvl}" for lvl in ("low", "medium", "high", "xhigh")},
     ),
     "claude-sonnet-5-5": (
         "Claude Sonnet 5.5",

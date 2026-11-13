@@ -324,7 +324,7 @@ container can reach (e.g. `http://<gateway>:<port>/v1`; `LOCAL_LLM_API_KEY` opti
 lists is offered, transcripts use the same `OPENROUTER_DIR` and budget, and a leading
 `<think>…</think>` block is dropped from the answer and from the streamed display. The shared `effort`
 option is mapped onto what each family can run
-— agy bakes the effort into the model slug (Argon, Hydrogen and Claude: low/medium/high; gpt-oss
+— agy bakes the effort into the model slug (Argon and Claude: low/medium/high; Hydrogen: low/medium/high/xhigh; gpt-oss
 fixed). `agy` runs headless
 (`--input-format stream-json`, `--conversation` to resume, `--json-schema` for structured output,
 `--add-dir` + `view_file` for images), inside a registered project so `AGENTS.md` (the persona)

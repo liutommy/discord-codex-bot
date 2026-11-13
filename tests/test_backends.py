@@ -204,9 +204,10 @@ def test_choices_cover_codex_and_every_agy_slug() -> None:
 
 
 def test_effort_maps_onto_legal_agy_slugs() -> None:
-    flash = parse_choice("agy:gemini-4-hydrogen", "gpt-5.6-luna")
-    assert resolve(flash, "medium").model == "gemini-4-hydrogen-medium"
-    assert resolve(flash, "max").model == "gemini-4-hydrogen-high"  # capped at the family's top
+    hydrogen = parse_choice("agy:gemini-4-hydrogen", "gpt-5.6-luna")
+    assert resolve(hydrogen, "medium").model == "gemini-4-hydrogen-medium"
+    assert resolve(hydrogen, "xhigh").model == "gemini-4-hydrogen-xhigh"
+    assert resolve(hydrogen, "max") == resolve(hydrogen, "xhigh")  # capped at the family's top
     argon = parse_choice("agy:gemini-4-argon", "gpt-5.6-luna")
     assert argon.backend == AGY and argon.label == "Gemini 4 Argon"
     assert resolve(argon, "low").model == "gemini-4-argon-low"

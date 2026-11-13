@@ -932,7 +932,7 @@ async def test_answer_dispatches_to_agy_from_the_stored_model(client, backends) 
     prompt, args, kw = agy.calls[0]
     assert args == ("gemini-4-hydrogen-low",) and "effort" not in kw
     await client._answer("q", [], GUILD, USER, effort="max")
-    assert agy.calls[-1][1] == ("gemini-4-hydrogen-high",)  # capped at the family's top level
+    assert agy.calls[-1][1] == ("gemini-4-hydrogen-xhigh",)  # capped at the family's top level
     client.memory.set_model(GUILD, USER, "agy:claude-opus-5-5")
     await client._answer("q", [], GUILD, USER, effort="low")
     assert agy.calls[-1][1] == ("claude-opus-5-5-low",)
