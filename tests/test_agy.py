@@ -98,7 +98,7 @@ async def test_ensure_project_passes_probe_arguments(agy_config: Config, monkeyp
     monkeypatch.setattr(agy, "_run", fake)
     assert await ensure_project(agy_config, agy_config.codex_workspace) == ""
     args = fake.calls[0]["args"]
-    assert "--new-project" in args and args[args.index("--model") + 1] == "gemini-3.8-flash-low"
+    assert "--new-project" in args and args[args.index("--model") + 1] == "gemini-4-hydrogen-low"
     assert fake.calls[0]["cwd"] == agy_config.codex_workspace
 
 
@@ -119,12 +119,12 @@ async def test_run_agy_builds_stream_json_arguments(
 ) -> None:
     fake = FakeRun((0, _stream("conv-1", "  答案  \n"), ""))
     monkeypatch.setattr(agy, "_run", fake)
-    result = await run_agy("問題", agy_config, "gemini-3.8-flash-high", memory="- [a](a.md) — x")
+    result = await run_agy("問題", agy_config, "gemini-4-hydrogen-high", memory="- [a](a.md) — x")
     assert result.text == "答案" and result.thread_id == "conv-1" and result.resumed is False
     assert result.images == () and result.generated_dir is None
     call = fake.calls[0]
     args = call["args"]
-    assert args[:4] == ["--project", "proj-1", "--model", "gemini-3.8-flash-high"]
+    assert args[:4] == ["--project", "proj-1", "--model", "gemini-4-hydrogen-high"]
     assert args[args.index("--output-format") + 1] == "stream-json"
     assert args[args.index("--input-format") + 1] == "stream-json"
     assert args[args.index("--print-timeout") + 1] == "600s"
@@ -290,7 +290,7 @@ async def test_run_agy_marks_only_availability_failures_for_fallback(
     # instead of being answered quietly by a spare (Codex on PR #33).
     monkeypatch.setattr(agy, "_run", FakeRun(reply))
     with pytest.raises(RuntimeError) as raised:
-        await run_agy("q", agy_config, "gemini-3.8-flash-high")
+        await run_agy("q", agy_config, "gemini-4-hydrogen-high")
     assert isinstance(raised.value, agy.AgyUnavailable) is unavailable
 
 
@@ -302,10 +302,10 @@ async def test_a_dropped_connection_is_its_own_kind_of_unavailable(
     reply = (3, "", "ERROR: There was a network issue connecting to the server, please try again.")
     monkeypatch.setattr(agy, "_run", FakeRun(reply))
     with pytest.raises(agy.AgyNetworkError):
-        await run_agy("q", agy_config, "gemini-3.8-flash-high")
+        await run_agy("q", agy_config, "gemini-4-hydrogen-high")
     monkeypatch.setattr(agy, "_run", FakeRun((1, "", "HTTP 503 Service Unavailable")))
     with pytest.raises(agy.AgyUnavailable) as other:
-        await run_agy("q", agy_config, "gemini-3.8-flash-high")
+        await run_agy("q", agy_config, "gemini-4-hydrogen-high")
     assert not isinstance(other.value, agy.AgyNetworkError)
 
 

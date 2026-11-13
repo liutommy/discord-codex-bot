@@ -43,8 +43,8 @@ def test_format_reply_lists_every_tag_and_handles_empty_prompt() -> None:
     reply = format_reply("q", "a", has_image=True, effort="Medium", resumed=True)
     assert reply == "**問**（Medium、附圖、續接）：\n> q\n\na"
     assert format_reply("", "a") == "**問**：\n> \n\na"
-    assert format_reply("q", "a", effort="gemini-3.8-flash-high · High") == (
-        "**問**（gemini-3.8-flash-high · High）：\n> q\n\na"
+    assert format_reply("q", "a", effort="gemini-4-hydrogen-high · High") == (
+        "**問**（gemini-4-hydrogen-high · High）：\n> q\n\na"
     )
 
 

@@ -37,7 +37,7 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
         "查看目前設定；clear 回到伺服器預設（{default}）。換模型後下一題會新開對話。",
         [
             "/{p}-model provider:Codex（只選來源：用 Codex 的模型）",
-            "/{p}-model provider:Antigravity model:gemini-3.8-flash effort:Medium",
+            "/{p}-model provider:Antigravity model:gemini-4-hydrogen effort:Medium",
             "/{p}-model provider:OpenRouter model:gemma（打幾個字就會出現候選）",
             "/{p}-model（留空：看目前用什麼）",
             "/{p}-model clear:True",

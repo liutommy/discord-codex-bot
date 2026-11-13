@@ -475,7 +475,7 @@ async def test_bot_status_shows_what_only_the_running_bot_knows(client, run, mon
         time.time() - 120,
         CodexUsageLimit("spent", "usage_limit_exceeded"),
         "codex",
-        Resolved("agy", "gemini-3.8-flash-medium", "medium"),
+        Resolved("agy", "gemini-4-hydrogen-medium", "medium"),
     )
     client.agy_quota.update(_agy_reading())
     client.agy_quota.mark_spent("3p")
@@ -490,14 +490,14 @@ async def test_bot_status_shows_what_only_the_running_bot_knows(client, run, mon
         client._reminder_loop.cancel()
     text = result["text"]
     assert "Codex：ChatGPT 訂閱登入有效 · 額度 5h 12% / 7d 3%" in text
-    assert "Codex 額度用完，改用 Antigravity（gemini-3.8-flash-medium）回答" in text
+    assert "Codex 額度用完，改用 Antigravity（gemini-4-hydrogen-medium）回答" in text
     assert "agy 額度（剩餘）：3p-weekly 50% · gemini-5h 80%" in text
     assert "3p 用完，到 " in text and "gemini 可用" in text
     assert "Grok：未設定" in text and "自動挑選：關" in text
     assert "\n　⚠️ 備份：已停止（OSError）" in text and "\n　提醒：執行中" in text
     assert result["loops"]["_backup_loop"] == "已停止（OSError）"
     assert result["loops"]["_harvester"] == "沒有啟動"
-    assert result["fallback"]["spare"] == "agy:gemini-3.8-flash-medium"
+    assert result["fallback"]["spare"] == "agy:gemini-4-hydrogen-medium"
     assert result["codex"] == {"login": "ChatGPT 訂閱登入有效", "five_hour": 12.0, "seven_day": 3.0}
     assert "自動挑選：開" in routed and "\n　chat：L " in routed and "\n　圖片：" in routed
 

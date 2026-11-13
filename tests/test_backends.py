@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from discord_codex_bot import backends
 from discord_codex_bot.agy import parse_stream
 from discord_codex_bot.backends import (
     AGY,
@@ -39,7 +40,7 @@ async def test_run_batch_moves_to_the_spare_backend_when_the_quota_is_spent(
     monkeypatch.setattr(agy_module, "run_agy", spare)
     assert await run_batch("classify", config, schema=Path("/s.json")) == "備援結果"
     # The batch keeps its structured-output contract on the spare backend, in its own workspace.
-    assert seen["model"] == "gemini-3.8-flash-medium"
+    assert seen["model"] == "gemini-4-hydrogen-medium"
     assert seen["schema"] == Path("/s.json") and seen["plain"] is True
 
 
@@ -63,7 +64,7 @@ async def test_run_batch_moves_to_the_spare_backend_when_codex_is_overloaded(
     monkeypatch.setattr(codex_module, "run_codex", overloaded)
     monkeypatch.setattr(agy_module, "run_agy", spare)
     assert await run_batch("classify", config, isolated=True) == "滿載備援結果"
-    assert seen == {"model": "gemini-3.8-flash-medium", "plain": True}
+    assert seen == {"model": "gemini-4-hydrogen-medium", "plain": True}
 
 
 async def test_run_batch_tries_the_spares_in_order(config, monkeypatch) -> None:
@@ -175,11 +176,11 @@ async def test_run_batch_reports_the_failure_when_there_is_no_spare(config, monk
 
 
 def test_fallback_target_refuses_codex_and_carries_its_own_effort() -> None:
-    spare = fallback_target("agy:gemini-3.8-flash|medium", "gpt-5.6-luna", "high")
-    assert spare.backend == AGY and spare.model == "gemini-3.8-flash-medium"
+    spare = fallback_target("agy:gemini-4-hydrogen|medium", "gpt-5.6-luna", "high")
+    assert spare.backend == AGY and spare.model == "gemini-4-hydrogen-medium"
     # No stored effort: the operator default applies.
-    assert fallback_target("agy:gemini-3.8-flash", "gpt-5.6-luna", "low").model == (
-        "gemini-3.8-flash-low"
+    assert fallback_target("agy:gemini-4-hydrogen", "gpt-5.6-luna", "low").model == (
+        "gemini-4-hydrogen-low"
     )
     assert fallback_target("", "gpt-5.6-luna", "high") is None
     # Codex cannot stand in for its own outage — including via an unknown value, which
@@ -197,15 +198,15 @@ def test_choices_cover_codex_and_every_agy_slug() -> None:
     # gone from agy: a stored choice of one means the default, never an invalid model
     for gone in ("claude-opus-4-6", "claude-sonnet-4-6", "gemini-3.7-flash", "gemini-3.1-pro"):
         assert parse_choice(f"agy:{gone}", "gpt-5.6-luna").value == "codex:gpt-5.6-luna"
-    assert parse_choice("agy:gemini-3.8-flash-high", "gpt-5.6-luna").family == "gemini-3.8-flash"
+    assert parse_choice("agy:gemini-4-hydrogen-high", "gpt-5.6-luna").family == "gemini-4-hydrogen"
     assert parse_choice("agy:no-such-model", "gpt-5.6-luna").value == "codex:gpt-5.6-luna"
     assert parse_choice("", "gpt-5.6-luna").backend == CODEX
 
 
 def test_effort_maps_onto_legal_agy_slugs() -> None:
-    flash = parse_choice("agy:gemini-3.8-flash", "gpt-5.6-luna")
-    assert resolve(flash, "medium").model == "gemini-3.8-flash-medium"
-    assert resolve(flash, "max").model == "gemini-3.8-flash-high"  # capped at the family's top
+    flash = parse_choice("agy:gemini-4-hydrogen", "gpt-5.6-luna")
+    assert resolve(flash, "medium").model == "gemini-4-hydrogen-medium"
+    assert resolve(flash, "max").model == "gemini-4-hydrogen-high"  # capped at the family's top
     argon = parse_choice("agy:gemini-4-argon", "gpt-5.6-luna")
     assert argon.backend == AGY and argon.label == "Gemini 4 Argon"
     assert resolve(argon, "low").model == "gemini-4-argon-low"
@@ -224,8 +225,8 @@ def test_effort_maps_onto_legal_agy_slugs() -> None:
 def test_member_model_choice_is_stored_per_guild(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path, LIMITS)
     assert store.get_model(1, 2) == ""
-    store.set_model(1, 2, "agy:gemini-3.8-flash-high")
-    assert store.get_model(1, 2) == "agy:gemini-3.8-flash-high" and store.get_model(2, 2) == ""
+    store.set_model(1, 2, "agy:gemini-4-hydrogen-high")
+    assert store.get_model(1, 2) == "agy:gemini-4-hydrogen-high" and store.get_model(2, 2) == ""
     assert store.clear_model(1, 2) and not store.clear_model(1, 2)
 
 
@@ -249,3 +250,52 @@ def test_parse_stream_reads_result_event() -> None:
     assert parse_stream(out) == ("abc", "OK\n", "")
     failed = '{"event":"result","result":{"conversation_id":"abc","status":"ERROR","error":"boom"}}'
     assert parse_stream(failed)[2] == "ERROR: boom"
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("agy:gemini-3.8-flash", ("agy:gemini-4-hydrogen", "")),
+        ("agy:gemini-3.8-flash|low", ("agy:gemini-4-hydrogen", "low")),
+        ("agy:gemini-3.8-flash-high", ("agy:gemini-4-hydrogen-high", "")),
+        ("agy:gemini-4-argon|medium", ("agy:gemini-4-argon", "medium")),
+    ],
+)
+def test_split_stored_reads_a_replaced_family_as_its_successor(stored, expected):
+    assert backends.split_stored(stored) == expected
+
+
+def test_a_setting_saved_as_flash_runs_on_hydrogen():
+    choice = backends.parse_choice("agy:gemini-3.8-flash|medium", "gpt-x")
+    assert choice.value == "agy:gemini-4-hydrogen"
+    assert backends.resolve(choice, "medium").model == "gemini-4-hydrogen-medium"
+    slug = backends.parse_choice("agy:gemini-3.8-flash-high", "gpt-x")
+    assert slug.value == "agy:gemini-4-hydrogen"
+
+
+def test_a_route_saved_as_flash_is_not_retired():
+    from discord_codex_bot import routing
+
+    assert not routing.retired("agy:gemini-3.8-flash|low")
+    assert routing.resolved("agy:gemini-3.8-flash|low", "gpt-x").model == "gemini-4-hydrogen-low"
+
+
+def test_a_conversation_routed_to_flash_keeps_its_hydrogen_cell():
+    from discord_codex_bot import routing
+
+    route = routing.Route.from_dict(
+        {"entry": "agy:gemini-3.8-flash|low", "band": "L", "kind": "text"}
+    )
+    assert route.entry == "agy:gemini-4-hydrogen|low"
+
+
+def test_a_thread_saved_on_flash_resumes_on_hydrogen(tmp_path: Path) -> None:
+    path = tmp_path / "t.json"
+    key = ThreadStore.key(1, 2, 3)
+    ThreadStore(path, ttl_seconds=600, version="v1").remember(
+        key, "agy-thread", message_id=5, model="agy:gemini-3.8-flash"
+    )
+    store = ThreadStore(path, ttl_seconds=600, version="v1")
+    assert store.current(key, model="agy:gemini-4-hydrogen") == "agy-thread"
+    assert store.by_message(5, model="agy:gemini-4-hydrogen") == "agy-thread"
+    assert store.current(key, model="agy:gemini-4-argon") == ""
