@@ -1,5 +1,5 @@
 {
-  "_comment": "Jev routing table v3, chosen by evaluating Jev's verdicts against answers from every target; the X column (Gemini 4 Argon, Codex for quick) and create's H cell (Claude Sonnet 5.5) were set on 2026-10-16 without a new evaluation; on 2026-11-13 every Gemini 3.8 Flash cell moved to Gemini 4 Hydrogen at the same effort, also without a new evaluation. Each type has one target per difficulty band L/M/H/X (Jev's 10-level score: 1-3 L, 4-6 M, 7-8 H, 9-10 X), written like a stored model with its effort; 'codex' is CODEX_MODEL. Every cell is checked at start-up and a bad one stops the Bot.",
+  "_comment": "Jev routing table v3, designed by hand from published model rankings (Jev itself was evaluated only on type and difficulty, against labelled messages, not on the answers of each target); the X column (Gemini 4 Argon, Codex for quick) and create's H cell (Claude Sonnet 5.5) were set on 2026-10-16 without a new evaluation; on 2026-11-13 every Gemini 3.8 Flash cell moved to Gemini 4 Hydrogen at the same effort, also without a new evaluation. Each type has one target per difficulty band L/M/H/X (Jev's 10-level score: 1-3 L, 4-6 M, 7-8 H, 9-10 X), written like a stored model with its effort; 'codex' is CODEX_MODEL. Every cell is checked at start-up and a bad one stops the Bot.",
   "types": {
     "chat":     ["agy:gemini-4-hydrogen|low",    "agy:gemini-4-hydrogen|low",    "agy:gemini-4-hydrogen|medium", "agy:gemini-4-argon|medium"],
     "quick":    ["agy:gemini-4-hydrogen|low",    "agy:gemini-4-hydrogen|medium", "agy:gemini-4-hydrogen|high",   "codex|high"],
@@ -10,6 +10,93 @@
     "reason":   ["agy:gemini-4-hydrogen|medium", "codex|medium",                "codex|high",                  "agy:gemini-4-argon|medium"],
     "create":   ["agy:gemini-4-hydrogen|medium", "grok:grok-4.7|medium",        "agy:claude-sonnet-5-5|high",  "agy:gemini-4-argon|medium"],
     "advice":   ["agy:gemini-4-hydrogen|medium", "grok:grok-4.7|medium",        "grok:grok-4.7|high",          "agy:gemini-4-argon|medium"]
+  },
+  "candidates": {
+      "_comment": "Models Jev may pick when JEV_PICK is shadow or on (routing.pick_route). target is a routing entry; strength ranks them (a conversation never moves to a lower one). Owner anchor 2026-11-13: Gemini 4 Hydrogen is about Claude Sonnet 5.5; the other ranks are estimates until an answer-quality evaluation replaces them. Every other string field is the option Jev reads. Every table cell must be one of these targets.",
+      "hydrogen-low": {
+          "target": "agy:gemini-4-hydrogen|low",
+          "strength": 3,
+          "what": "fast general model: greetings, small talk, short factual answers, simple rewrites or translations of a sentence or two",
+          "not_for": "multi-step reasoning, long writing, code, anything that must be looked up live",
+          "cost": "low"
+      },
+      "hydrogen-medium": {
+          "target": "agy:gemini-4-hydrogen|medium",
+          "strength": 4,
+          "what": "general model at moderate effort: everyday explanations, recommendations, translations and edits of a few paragraphs",
+          "not_for": "hard math or code, long creative writing, live information",
+          "cost": "low"
+      },
+      "hydrogen-high": {
+          "target": "agy:gemini-4-hydrogen|high",
+          "strength": 5,
+          "what": "general model thinking longer: careful explanations, longer writing, planning and personal advice that needs judgment",
+          "not_for": "quick replies, live information, hard code",
+          "cost": "medium"
+      },
+      "sonnet-high": {
+          "target": "agy:claude-sonnet-5-5|high",
+          "strength": 5,
+          "what": "strong writer: long or stylistic creative writing, fiction, role-play scenes, polished prose",
+          "not_for": "short replies, facts, code, live information",
+          "cost": "high, scarce quota"
+      },
+      "opus-high": {
+          "target": "agy:claude-opus-5-5|high",
+          "strength": 7,
+          "what": "strongest writer and analyst: the hardest creative or analytical requests where quality matters most",
+          "not_for": "anything a smaller model handles; live information",
+          "cost": "very high, very scarce quota"
+      },
+      "argon-medium": {
+          "target": "agy:gemini-4-argon|medium",
+          "strength": 7,
+          "what": "strongest reasoner: the hardest problems, such as research-level math, complex system or code design, long multi-step analysis",
+          "not_for": "anything a smaller model handles",
+          "cost": "very high, very scarce quota"
+      },
+      "codex-low": {
+          "target": "codex|low",
+          "strength": 2,
+          "what": "web search and code assistant at low effort: a quick lookup on websites, a one-line code question",
+          "not_for": "X (Twitter) posts, chat, writing",
+          "cost": "low"
+      },
+      "codex-medium": {
+          "target": "codex|medium",
+          "strength": 3,
+          "what": "web search and coding: current information from websites (news, prices, schedules), ordinary coding tasks, math",
+          "not_for": "X (Twitter) posts, chat, creative writing",
+          "cost": "medium"
+      },
+      "codex-high": {
+          "target": "codex|high",
+          "strength": 5,
+          "what": "web search and coding thinking longer: debugging, multi-file code, tricky math, research across several websites",
+          "not_for": "X (Twitter) posts, chat, simple questions",
+          "cost": "high"
+      },
+      "grok-low": {
+          "target": "grok:grok-4.7|low",
+          "strength": 3,
+          "what": "the only model with live X (Twitter) search, quick: what is being said on X now, a post or account; also casual chat",
+          "not_for": "careful writing, code, hard reasoning",
+          "cost": "low"
+      },
+      "grok-medium": {
+          "target": "grok:grok-4.7|medium",
+          "strength": 4,
+          "what": "live X (Twitter) search with more care: summarising X discussion and trends; also opinionated conversation and advice",
+          "not_for": "code, hard math",
+          "cost": "medium"
+      },
+      "grok-high": {
+          "target": "grok:grok-4.7|high",
+          "strength": 5,
+          "what": "live X (Twitter) search thinking longer: careful analysis of X discussion, harder advice and creative requests",
+          "not_for": "quick replies, code",
+          "cost": "high"
+      }
   },
   "_comment_needs": "A type that only these backends can answer (live X posts need Grok's X search; the Bot's own <web>, <fetch> and <run> work for every model). Every cell of it must be on that backend.",
   "needs": {"live-x": "grok"},

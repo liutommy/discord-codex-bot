@@ -85,7 +85,7 @@ def verdicts(monkeypatch, *answers: Verdict) -> list[tuple[str, list[str]]]:
     asked: list[tuple[str, list[str]]] = []
     queue = list(answers)
 
-    async def judge(message, context, config):
+    async def judge(message, context, config, questions=None):
         asked.append((message, list(context)))
         return queue.pop(0) if len(queue) > 1 else queue[0]
 

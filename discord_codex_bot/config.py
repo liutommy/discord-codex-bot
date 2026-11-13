@@ -145,6 +145,13 @@ def _boolean(env: Mapping[str, str], name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be true or false")
 
 
+def _jev_pick(env: Mapping[str, str]) -> str:
+    value = env.get("JEV_PICK", "").strip().lower() or "shadow"
+    if value not in ("off", "shadow", "on"):
+        raise ValueError("JEV_PICK must be off, shadow or on")
+    return value
+
+
 def _bounded_float(
     env: Mapping[str, str], name: str, default: float, low: float, high: float
 ) -> float:
@@ -250,6 +257,8 @@ class Config:
     jev_model: str
     jev_timeout_seconds: float
     jev_min_confidence: float
+    jev_pick: str  # off | shadow | on: whether Jev also picks the model (routing.JEV_PICK_MODES)
+    jev_pick_min_probability: float
     routing_path: Path
     # Never in a repr, a log line or an error message; no child process is given it either
     # (codex._safe_environment and agy._environment are allowlists).
@@ -511,6 +520,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         jev_model=values.get("JEV_MODEL", "").strip() or "jev-1.13.0",
         jev_timeout_seconds=_bounded_float(values, "JEV_TIMEOUT_SECONDS", 1.0, 0.1, 30.0),
         jev_min_confidence=_bounded_float(values, "JEV_MIN_CONFIDENCE", 0.3, 0.0, 1.0),
+        # Jev also picks the answering model from routing.json's candidates: off asks nothing,
+        # shadow asks and logs the pick while the table still routes, on routes by the pick.
+        jev_pick=_jev_pick(values),
+        jev_pick_min_probability=_bounded_float(values, "JEV_PICK_MIN_PROBABILITY", 0.3, 0.0, 1.0),
         routing_path=Path(values.get("ROUTING_FILE", "/opt/discord-codex/routing.json")),
         typesafe_api_key=values.get("TYPESAFE_API_KEY", "").strip(),
         # Registered data APIs the model may call with <api/> (config/apis.json baked in).

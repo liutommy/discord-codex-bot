@@ -5,14 +5,19 @@ the state is {message, recent_context}, types are offered as objects (what / not
 examples), difficulty is the 10-level degree scale, and no yes/no gate questions are asked.
 
 A conversation never drops a band: it moves to the cell of its latest message of substance at the
-higher of that message's band and its own (routing.decide)."""
+higher of that message's band and its own (routing.decide).
+
+With JEV_PICK (shadow by default) the same call also asks Jev which of routing.json's
+`candidates` should answer. Shadow logs that pick beside the table's cell; on routes by it
+(routing.pick_route): a pick never weaker than the conversation's current target, and only on
+the backend a type needs (live-x: Grok)."""
 
 from __future__ import annotations
 
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiohttp
@@ -123,6 +128,11 @@ LEVELS = [
     "extremely hard, long multi-step work",
     "hardest, needs the strongest model available",
 ]
+MODEL_INSTRUCTIONS = (
+    "Which of these AI models should answer `message`? Each option describes one model the bot"
+    " can use. Pick the cheapest model that will still answer it well: stronger models are"
+    " slower and spend scarcer quota."
+)
 QUESTIONS = {
     "type": {
         "type": "choice",
@@ -143,6 +153,16 @@ QUESTIONS = {
 
 
 @dataclass(frozen=True, slots=True)
+class Candidate:
+    """A model Jev may pick: its routing entry, its strength rank (higher answers harder
+    questions; a conversation never moves to a lower one) and the option Jev reads."""
+
+    target: str
+    strength: int
+    option: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
 class Table:
     types: dict[str, tuple[str, ...]]  # type -> one stored-model entry per band
     needs: dict[str, str]  # type -> the only backend that can answer it
@@ -153,6 +173,27 @@ class Table:
     argon_failed: dict[str, str]  # type -> the cell Argon replaced, for when its pool is spent
     codex_five_hour: float
     codex_seven_day: float
+    candidates: dict[str, Candidate] = field(default_factory=dict)  # option key -> candidate
+
+    def strength(self, entry: str) -> int | None:
+        """The strength of the candidate routing to `entry`; None when no candidate does."""
+        for candidate in self.candidates.values():
+            if candidate.target == current(entry):
+                return candidate.strength
+        return None
+
+
+def questions(table: Table, pick: bool) -> dict:
+    """The Jev questions for one call: type and difficulty, plus `model` over the table's
+    candidates when `pick` (JEV_PICK shadow or on) and the table has any."""
+    if not pick or not table.candidates:
+        return QUESTIONS
+    model = {
+        "type": "choice",
+        "instructions": MODEL_INSTRUCTIONS,
+        "criteria": {key: dict(c.option) for key, c in table.candidates.items()},
+    }
+    return {**QUESTIONS, "model": model}
 
 
 def check_entry(entry: str) -> None:
@@ -193,6 +234,7 @@ def load_table(path: Path) -> Table:
             argon_failed={str(k): str(v) for k, v in degrade["argon_failed"].items()},
             codex_five_hour=float(degrade["codex_quota"]["five_hour_percent"]),
             codex_seven_day=float(degrade["codex_quota"]["seven_day_percent"]),
+            candidates=_candidates(data.get("candidates", {})),
         )
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         raise ValueError(f"routing: cannot load {path}: {error}") from None
@@ -223,8 +265,15 @@ def load_table(path: Path) -> Table:
                 f"routing: argon_failed has no stand-in for {kind!r}, which uses Argon"
             )
     cells = [cell for row in table.types.values() for cell in row]
+    if table.candidates:
+        targets = {c.target for c in table.candidates.values()}
+        missing = sorted({cell for cell in cells if current(cell) not in targets})
+        if missing:
+            # A conversation's current target needs a strength for "never weaker" to hold.
+            raise ValueError(f"routing: cells without a candidate: {', '.join(missing)}")
     for entry in [
         *cells,
+        *(c.target for c in table.candidates.values()),
         table.grok_spent,
         table.live_x_without_grok,
         *table.claude_failed.values(),
@@ -233,6 +282,29 @@ def load_table(path: Path) -> Table:
     ]:
         check_entry(entry)
     return table
+
+
+MAX_CANDIDATES = 255  # Jev's limit on a choice question's options (a 256th answers 422)
+
+
+def _candidates(data: object) -> dict[str, Candidate]:
+    """routing.json's `candidates`: key -> {target, strength, what, not_for, ...}; every other
+    string field goes to Jev as part of the option."""
+    if not isinstance(data, dict) or len(data) > MAX_CANDIDATES:
+        raise ValueError(f"candidates must be an object of at most {MAX_CANDIDATES} entries")
+    out = {}
+    for key, spec in data.items():
+        if key.startswith("_"):
+            continue  # a comment
+        target, strength = spec["target"], spec["strength"]
+        integer = isinstance(strength, int) and not isinstance(strength, bool)
+        if not isinstance(target, str) or not integer:
+            raise ValueError(f"candidate {key!r} needs a target string and an integer strength")
+        option = {k: v for k, v in spec.items() if k not in ("target", "strength")}
+        if not option.get("what") or not all(isinstance(v, str) for v in option.values()):
+            raise ValueError(f"candidate {key!r} needs a `what` and only string fields")
+        out[str(key)] = Candidate(target, strength, option)
+    return out
 
 
 def retired(entry: str) -> bool:
@@ -334,6 +406,29 @@ def decide(table: Table, kind: str, level: str, current: Route | None) -> tuple[
     return moved, "harder" if BANDS.index(level) > BANDS.index(current.band) else "type"
 
 
+def pick_route(
+    table: Table, kind: str, level: str, current_route: Route | None, pick: str
+) -> tuple[Route, str]:
+    """(where this message goes, why) when Jev's pick routes it (JEV_PICK=on). A pick is used
+    unless the type needs another backend (then the table decides) or it is weaker than the
+    conversation's current target (then the conversation stays). chat keeps a running
+    conversation where it is, as in decide; the band recorded is decide's."""
+    tabled, why = decide(table, kind, level, current_route)
+    candidate = table.candidates.get(pick)
+    needed = table.needs.get(kind)
+    if candidate is None or (needed and backend_of(candidate.target) != needed):
+        return tabled, why
+    if current_route is None:
+        return Route(candidate.target, level, kind), "picked"
+    if kind == "chat":
+        return current_route, "kept"
+    floor = table.strength(current_route.entry)
+    if floor is not None and candidate.strength < floor:
+        return Route(current_route.entry, tabled.band, kind, current_route.earlier), "pick-weaker"
+    moved = Route(candidate.target, tabled.band, kind, current_route.earlier)
+    return moved, "kept" if candidate.target == current_route.entry else "picked"
+
+
 # --------------------------------------------------------------------------- the call
 
 
@@ -347,6 +442,8 @@ class Verdict:
     confidence: float = 0.0
     ms: float = 0.0
     input_tokens: int | None = None
+    pick: str = ""  # Jev's model pick (a candidate key), "" when not asked or unusable
+    pick_probability: float = 0.0
 
 
 def _confidence(answer: dict) -> float:
@@ -376,14 +473,33 @@ def parse_answer(data: object) -> tuple[str, float, float]:
     return kind, score, confidence
 
 
-async def judge(message: str, recent_context: list[str], config: Config) -> Verdict:
+def parse_pick(data: object, keys: frozenset[str]) -> tuple[str, float]:
+    """(candidate key, its probability) from the `model` answer; ("", 0.0) when it is missing
+    or not one of `keys`. A bad pick never spoils the type and difficulty answers."""
+    try:
+        answer = data["answers"]["model"]  # type: ignore[index]
+        pick = answer["choice"]
+        probability = float((answer.get("probabilities") or {}).get(pick, 0.0))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return "", 0.0
+    if pick not in keys or not 0.0 <= probability <= 1.0:
+        return "", 0.0
+    return pick, probability
+
+
+async def judge(
+    message: str,
+    recent_context: list[str],
+    config: Config,
+    asked: dict | None = None,
+) -> Verdict:
     """One Jev call, never retried: on a timeout, an error status (429 and 5xx included), a
     malformed answer or low confidence the caller answers with DEFAULT_MODEL instead. Nothing
     here logs or raises with the request: the key is in its headers."""
     body = {
         "model": config.jev_model,
         "state": {"message": message, "recent_context": recent_context},
-        "questions": QUESTIONS,
+        "questions": asked or QUESTIONS,
     }
     headers = {
         "Authorization": f"Bearer {config.typesafe_api_key}",
@@ -413,6 +529,15 @@ async def judge(message: str, recent_context: list[str], config: Config) -> Verd
     usage = payload.get("usage") if isinstance(payload, dict) else None
     tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
     status = "ok" if confidence >= config.jev_min_confidence else "low-confidence"
+    keys = frozenset((asked or {}).get("model", {}).get("criteria", {}))
+    pick, probability = parse_pick(payload, keys) if keys else ("", 0.0)
     return Verdict(
-        status, kind, score, confidence, elapsed(), tokens if isinstance(tokens, int) else None
+        status,
+        kind,
+        score,
+        confidence,
+        elapsed(),
+        tokens if isinstance(tokens, int) else None,
+        pick,
+        probability,
     )
