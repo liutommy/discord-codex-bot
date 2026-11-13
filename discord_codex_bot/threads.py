@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 
+from .backends import current
 from .memory import atomic_write
 
 MAX_MESSAGE_LINKS = 1000
@@ -296,6 +297,11 @@ class ThreadStore:
             k: v if isinstance(v, dict) else {"thread_id": str(v), "version": ""}
             for k, v in data.get("by_message", {}).items()
         }
+        # A thread saved on a replaced model family resumes on its successor: lookups compare
+        # the model literally against the member's current choice.
+        for entry in (*self._by_key.values(), *self._by_message.values()):
+            if isinstance(entry, dict) and isinstance(entry.get("model"), str):
+                entry["model"] = current(entry["model"])
         self._pending = list(data.get("pending", []))
         self._resets = {
             str(k): int(v) for k, v in data.get("resets", {}).items() if str(v).isdigit()

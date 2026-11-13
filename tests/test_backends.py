@@ -287,3 +287,15 @@ def test_a_conversation_routed_to_flash_keeps_its_hydrogen_cell():
         {"entry": "agy:gemini-3.8-flash|low", "band": "L", "kind": "text"}
     )
     assert route.entry == "agy:gemini-4-hydrogen|low"
+
+
+def test_a_thread_saved_on_flash_resumes_on_hydrogen(tmp_path: Path) -> None:
+    path = tmp_path / "t.json"
+    key = ThreadStore.key(1, 2, 3)
+    ThreadStore(path, ttl_seconds=600, version="v1").remember(
+        key, "agy-thread", message_id=5, model="agy:gemini-3.8-flash"
+    )
+    store = ThreadStore(path, ttl_seconds=600, version="v1")
+    assert store.current(key, model="agy:gemini-4-hydrogen") == "agy-thread"
+    assert store.by_message(5, model="agy:gemini-4-hydrogen") == "agy-thread"
+    assert store.current(key, model="agy:gemini-4-argon") == ""
