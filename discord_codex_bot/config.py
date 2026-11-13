@@ -346,7 +346,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Spare backend for spent ChatGPT quota or temporary Codex model capacity, written like a
         # stored model ("<backend>:<family>|<effort>"). Empty = report the failure instead.
         codex_fallback_model=values.get(
-            "CODEX_FALLBACK_MODEL", "agy:gemini-3.8-flash|medium"
+            "CODEX_FALLBACK_MODEL", "agy:gemini-4-hydrogen|medium"
         ).strip(),
         codex_home=Path(values.get("CODEX_HOME", "/var/lib/codex")),
         codex_workspace=Path(values.get("CODEX_WORKSPACE", "/workspace")),
@@ -392,7 +392,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         persona_dir=Path(values.get("PERSONA_DIR", "/opt/discord-codex/persona")),
         # Antigravity CLI backend (second backend; members pick it per user with /<prefix>-model).
         agy_home=Path(values.get("AGY_HOME", "/home/node")),
-        agy_probe_model=values.get("AGY_PROBE_MODEL", "").strip() or "gemini-3.8-flash-low",
+        agy_probe_model=values.get("AGY_PROBE_MODEL", "").strip() or "gemini-4-hydrogen-low",
         agy_settings_path=Path(
             values.get("AGY_SETTINGS_FILE", "/opt/discord-codex/agy-settings.json")
         ),

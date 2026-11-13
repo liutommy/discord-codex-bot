@@ -283,13 +283,13 @@ async def test_model_set_checks_values_like_the_slash_command(bot, server, monke
     await _ok(server, "model.set", **member, effort="high")
     assert bot.memory.get_model(GUILD, MEMBER) == "codex:gpt-5.6-luna|high"
     # Another provider without an effort starts at its default effort.
-    await _ok(server, "model.set", **member, value="agy:gemini-3.8-flash")
-    assert bot.memory.get_model(GUILD, MEMBER) == "agy:gemini-3.8-flash"
+    await _ok(server, "model.set", **member, value="agy:gemini-4-hydrogen")
+    assert bot.memory.get_model(GUILD, MEMBER) == "agy:gemini-4-hydrogen"
 
     assert "沒有這個模型" in await _refused(server, "model.set", **member, value="agy:nope")
     assert "至少一個" in await _refused(server, "model.set", **member)
     assert "免費模型會變動" in await _refused(server, "model.set", **member, provider="openrouter")
-    assert bot.memory.get_model(GUILD, MEMBER) == "agy:gemini-3.8-flash"
+    assert bot.memory.get_model(GUILD, MEMBER) == "agy:gemini-4-hydrogen"
 
     # A router model is checked against that router's live list, loaded on the spot even
     # though the member is on Antigravity now.

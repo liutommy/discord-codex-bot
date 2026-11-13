@@ -25,6 +25,7 @@ from .backends import (
     GROK,
     ModelChoice,
     Resolved,
+    current,
     parse_choice,
     resolve,
     split_stored,
@@ -310,7 +311,8 @@ class Route:
         if not isinstance(entry, str) or not entry or not isinstance(kind, str):
             return None
         threads = tuple(str(t) for t in earlier) if isinstance(earlier, list) else ()
-        return cls(entry, str(data["band"]), kind, threads[-MAX_EARLIER:])
+        # A route saved on a replaced family compares equal to the table cell that replaced it.
+        return cls(current(entry), str(data["band"]), kind, threads[-MAX_EARLIER:])
 
 
 def decide(table: Table, kind: str, level: str, current: Route | None) -> tuple[Route, str]:

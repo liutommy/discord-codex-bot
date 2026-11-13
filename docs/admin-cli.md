@@ -190,7 +190,7 @@ $ python -m discord_codex_bot.admin memory forget --scope user --guild 123456789
 ### model、style、reset、stop、export、status：成員的設定
 
 `model set` 和 `/model` 的選單走同一個檢查：只能選它提供的模型。
-`--value` 寫模型（例如 `agy:gemini-3.8-flash`、`openrouter:<id>`，或配合 `--provider` 只寫 id），
+`--value` 寫模型（例如 `agy:gemini-4-hydrogen`、`openrouter:<id>`，或配合 `--provider` 只寫 id），
 只給 `--provider` 則改用它的預設模型（他已經在用這個來源時不變），`--effort` 設預設推理強度（`low`／`medium`／`high`／
 `xhigh`／`max` 之一，和 `/model` 一樣不對照模型檢查）；三者至少給一個。`--value` 的模型不合時
 會被拒絕，並列出可選的模型（最多 10 個）；只給 `--provider` 而它沒有預設模型時，會被拒絕並請你改用 `--value`
@@ -200,7 +200,7 @@ $ python -m discord_codex_bot.admin memory forget --scope user --guild 123456789
 $ python -m discord_codex_bot.admin model get --guild 123456789012345678 --user 345678901234567890
 目前（預設）：…
 
-$ python -m discord_codex_bot.admin model set --guild 123456789012345678 --user 345678901234567890 --value agy:gemini-3.8-flash
+$ python -m discord_codex_bot.admin model set --guild 123456789012345678 --user 345678901234567890 --value agy:gemini-4-hydrogen
 $ python -m discord_codex_bot.admin model set --guild 123456789012345678 --user 345678901234567890 --effort high
 $ python -m discord_codex_bot.admin model clear --guild 123456789012345678 --user 345678901234567890
 

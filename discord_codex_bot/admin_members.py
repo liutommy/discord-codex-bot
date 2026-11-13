@@ -478,7 +478,7 @@ SCHEMAS: dict[str, dict] = {
         "help": "設定成員用的模型（同 /model）",
         "description": (
             "和 /model 的選單走同一個檢查，只能選它提供的模型：\n"
-            "  --value     模型，例如 agy:gemini-3.8-flash、openrouter:<id>，"
+            "  --value     模型，例如 agy:gemini-4-hydrogen、openrouter:<id>，"
             "或配合 --provider 只寫 id\n"
             "  --provider  只給它＝改用這個來源的預設模型（他已經在用這個來源時不變）\n"
             "  --effort    預設推理強度，low／medium／high／xhigh／max 之一"
@@ -487,7 +487,7 @@ SCHEMAS: dict[str, dict] = {
             "只給 --provider 而它沒有預設模型時，\n會被拒絕並請你用 --value 指定。"
         ),
         "examples": [
-            f"model set {EG} {EGU} --value agy:gemini-3.8-flash",
+            f"model set {EG} {EGU} --value agy:gemini-4-hydrogen",
             f"model set {EG} {EGU} --effort high",
         ],
         "args": {

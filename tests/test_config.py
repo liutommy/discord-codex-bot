@@ -38,7 +38,7 @@ def test_loads_safe_operational_defaults() -> None:
     assert config.tracking_min_remaining_percent == 0
     assert config.consolidate_min_remaining_percent == 0
     assert config.tracking_reasoning_effort == "high"
-    assert config.codex_fallback_model == "agy:gemini-3.8-flash|medium"
+    assert config.codex_fallback_model == "agy:gemini-4-hydrogen|medium"
 
 
 def test_tracking_config_validates_switch_and_usage_gate() -> None:

@@ -52,7 +52,7 @@ JUDGE_SPARE = (
     "gemini-4-argon-medium",
     "claude-opus-5-5-medium",
     "claude-sonnet-5-5-medium",
-    "gemini-3.8-flash-medium",
+    "gemini-4-hydrogen-medium",
     "gpt-oss-120b-medium",
 )
 MAX_CANDIDATES = 3

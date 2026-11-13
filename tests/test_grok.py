@@ -29,7 +29,7 @@ from discord_codex_bot.backends import (
 from discord_codex_bot.codex import CodexResult, CodexUsageLimit
 from discord_codex_bot.config import Config
 
-CHAIN = ("grok:grok-4.7|medium", "codex", "agy:gemini-3.8-flash|medium")
+CHAIN = ("grok:grok-4.7|medium", "codex", "agy:gemini-4-hydrogen|medium")
 CATALOG = [
     grok.GrokModel("grok-4.7", "Grok 4.7", ("xhigh", "high", "medium", "low"), "high"),
     grok.GrokModel("grok-4.5", "Grok 4.5", ("high", "medium", "low"), "high"),
@@ -87,10 +87,10 @@ def test_fallback_goes_down_the_chain_never_up() -> None:
 
     assert chain_of(grok_choice("grok-4.5")) == [
         (CODEX, "gpt-x"),
-        (AGY, "gemini-3.8-flash-medium"),
+        (AGY, "gemini-4-hydrogen-medium"),
     ]
-    assert chain_of(parse_choice("codex:gpt-x", "gpt-x")) == [(AGY, "gemini-3.8-flash-medium")]
-    assert chain_of(parse_choice("agy:gemini-3.8-flash", "gpt-x")) == []
+    assert chain_of(parse_choice("codex:gpt-x", "gpt-x")) == [(AGY, "gemini-4-hydrogen-medium")]
+    assert chain_of(parse_choice("agy:gemini-4-hydrogen", "gpt-x")) == []
     assert chain_of(router_choice("openrouter", "some/free")) == []  # not in the chain
 
 
@@ -101,10 +101,10 @@ def test_a_routed_turn_falls_back_to_every_other_chain_entry_in_order() -> None:
         spares = fallback_chain(choice, CHAIN, "gpt-x", "high", routed=True)
         return [(t.backend, t.model) for t in spares]
 
-    agy = parse_choice("agy:gemini-3.8-flash", "gpt-x")
+    agy = parse_choice("agy:gemini-4-hydrogen", "gpt-x")
     codex = parse_choice("codex:gpt-x", "gpt-x")
     assert routed_chain(agy) == [(GROK, "grok-4.7"), (CODEX, "gpt-x")]
-    assert routed_chain(codex) == [(GROK, "grok-4.7"), (AGY, "gemini-3.8-flash-medium")]
+    assert routed_chain(codex) == [(GROK, "grok-4.7"), (AGY, "gemini-4-hydrogen-medium")]
     # A target whose backend is not in the chain at all (agy taken out of MODEL_CHAIN while the
     # routing table still has agy cells) gets the whole chain, not nothing (hub on PR #32).
     short = ("grok:grok-4.7|medium", "codex")
@@ -117,8 +117,8 @@ def test_a_routed_turn_falls_back_to_every_other_chain_entry_in_order() -> None:
 
 def test_without_a_chain_only_codex_keeps_its_single_spare() -> None:
     codex = parse_choice("codex:gpt-x", "gpt-x")
-    spare = fallback_chain(codex, (), "gpt-x", "high", "agy:gemini-3.8-flash|medium")
-    assert [t.model for t in spare] == ["gemini-3.8-flash-medium"]
+    spare = fallback_chain(codex, (), "gpt-x", "high", "agy:gemini-4-hydrogen|medium")
+    assert [t.model for t in spare] == ["gemini-4-hydrogen-medium"]
     assert fallback_chain(grok_choice("grok-4.7"), (), "gpt-x", "high", "agy:x") == []
 
 
@@ -320,7 +320,7 @@ async def test_grok_quota_falls_to_codex_then_agy(grok_client, monkeypatch) -> N
 
     monkeypatch.setattr(bot_module, "run_codex", spent)
     result = await bot._answer("q", [], GUILD, USER)
-    assert result.text == "agy 的答案" and agy.calls[-1][1] == ("gemini-3.8-flash-medium",)
+    assert result.text == "agy 的答案" and agy.calls[-1][1] == ("gemini-4-hydrogen-medium",)
 
 
 async def test_turns_past_the_reserve_skip_grok_but_turns_with_images_do_not(

@@ -307,9 +307,10 @@ the second; OpenRouter and OrcaRouter (free models only, one shared OpenAI-compa
 free tier is its `-free` ids (plus `orcarouter/free`); the account must have a GitHub login linked
 or the API answers `429 free_rate_limited`. Each member picks `provider` → `model`
 (autocomplete, typing filters; the OpenRouter list is the live free-model catalog, image-capable
-first) → default `effort` with `/<prefix>-model` (Codex Luna; Gemini 4 Argon; Gemini 3.8
-Flash; Claude Sonnet 5.5; Claude Opus 5.5; GPT-OSS 120B; whatever OpenRouter lists as free that
-hour — the agy list follows `agy models`, which as of 2026-10 offers only these). Gemini 4 Argon
+first) → default `effort` with `/<prefix>-model` (Codex Luna; Gemini 4 Argon; Gemini 4
+Hydrogen; Claude Sonnet 5.5; Claude Opus 5.5; GPT-OSS 120B; whatever OpenRouter lists as free that
+hour — the agy list follows `agy models`; Gemini 4 Hydrogen replaced Gemini 3.8 Flash on
+2026-11-13, and settings saved as `agy:gemini-3.8-flash` are read as Hydrogen). Gemini 4 Argon
 has its own small weekly pool (no 5-hour window) and answers the hardest band of every routed
 type but quick (Codex) and live-x (Grok) (`config/routing.json`); when it is spent (`credits
 balance is too low`), `argon_failed` sends the question back to the cell it replaced.
@@ -323,7 +324,7 @@ container can reach (e.g. `http://<gateway>:<port>/v1`; `LOCAL_LLM_API_KEY` opti
 lists is offered, transcripts use the same `OPENROUTER_DIR` and budget, and a leading
 `<think>…</think>` block is dropped from the answer and from the streamed display. The shared `effort`
 option is mapped onto what each family can run
-— agy bakes the effort into the model slug (Argon, Flash and Claude: low/medium/high; gpt-oss
+— agy bakes the effort into the model slug (Argon, Hydrogen and Claude: low/medium/high; gpt-oss
 fixed). `agy` runs headless
 (`--input-format stream-json`, `--conversation` to resume, `--json-schema` for structured output,
 `--add-dir` + `view_file` for images), inside a registered project so `AGENTS.md` (the persona)
@@ -353,7 +354,7 @@ When the ChatGPT subscription quota runs out or the selected model is temporaril
 Codex reports it *inside* its JSONL stream (`codex_error_info: usage_limit_exceeded` or
 `server_overloaded`, often with an empty stderr), so the exit code alone cannot tell these remote
 conditions apart from a crash. The Bot recognises both and answers the rest of the request on
-`CODEX_FALLBACK_MODEL` (default `agy:gemini-3.8-flash|medium`, written like a member's stored
+`CODEX_FALLBACK_MODEL` (default `agy:gemini-4-hydrogen|medium`, written like a member's stored
 model; empty disables it and the member gets the usual failure message). The reply does not say
 that a spare answered — the member gains nothing from it; `/codex-status` shows the last fallback. That
 thread is not remembered as resumable — a Codex thread id means nothing to another backend —

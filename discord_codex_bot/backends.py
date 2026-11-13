@@ -26,7 +26,8 @@ BACKEND_LABELS = {CODEX: "Codex", GROK: "Grok", AGY: "Antigravity", **ROUTER_LAB
 # pick a *family* here and the shared `effort` option is mapped onto a legal slug per family.
 # family value -> (label, {effort: slug})  — an effort missing from the map falls back to the
 # family's strongest listed level (xhigh/max become high). The list follows `agy models`
-# (2026-10-16: Argon, 3.8 Flash, Claude Sonnet / Opus 5.5, gpt-oss).
+# (2026-10-16: Argon, 3.8 Flash, Claude Sonnet / Opus 5.5, gpt-oss; 2026-11-13: Gemini 4
+# Hydrogen replaces 3.8 Flash, see RENAMED).
 AGY_FAMILIES: dict[str, tuple[str, dict[str, str]]] = {
     # Its own small weekly pool (no 5h window), apart from the Gemini one; routing.json's
     # argon_failed says where a question goes when it is spent.
@@ -34,9 +35,9 @@ AGY_FAMILIES: dict[str, tuple[str, dict[str, str]]] = {
         "Gemini 4 Argon",
         {lvl: f"gemini-4-argon-{lvl}" for lvl in ("low", "medium", "high")},
     ),
-    "gemini-3.8-flash": (
-        "Gemini 3.8 Flash",
-        {lvl: f"gemini-3.8-flash-{lvl}" for lvl in ("low", "medium", "high")},
+    "gemini-4-hydrogen": (
+        "Gemini 4 Hydrogen",
+        {lvl: f"gemini-4-hydrogen-{lvl}" for lvl in ("low", "medium", "high")},
     ),
     "claude-sonnet-5-5": (
         "Claude Sonnet 5.5",
@@ -98,16 +99,32 @@ def openrouter_choice(model_id: str, name: str = "") -> ModelChoice:
     return router_choice(OPENROUTER, model_id, name)
 
 
+# Stored values name the family they were saved under: member and thread settings, routes in
+# conversation state, MODEL_CHAIN / CODEX_FALLBACK_MODEL. A replaced family is read as its
+# successor here, so those values keep working without a data migration.
+RENAMED = {f"{AGY}:gemini-3.8-flash": f"{AGY}:gemini-4-hydrogen"}
+
+
+def current(value: str) -> str:
+    """`value` ("<backend>:<family>|<effort>" or a slug) with a family in RENAMED, or one of its
+    slugs ("agy:gemini-3.8-flash-high"), replaced by its successor; anything else unchanged."""
+    for old, new in RENAMED.items():
+        if value == old or value.startswith((f"{old}-", f"{old}|")):
+            return new + value[len(old) :]
+    return value
+
+
 def split_stored(value: str) -> tuple[str, str]:
-    """Stored per-member value "<backend>:<family>|<effort>" -> (choice value, effort or "")."""
-    choice, _, effort = value.partition("|")
+    """Stored per-member value "<backend>:<family>|<effort>" -> (choice value, effort or ""),
+    a replaced family read as its successor (`current`)."""
+    choice, _, effort = current(value).partition("|")
     return choice, effort.strip()
 
 
 def parse_choice(value: str, codex_model: str, default: str = "") -> ModelChoice:
     """Resolve a stored value; empty, unknown or stale values fall back to `default` (the
     DEFAULT_MODEL setting, itself a stored value) and then to Codex. Values stored by the
-    earlier slug-based command ("agy:gemini-3.8-flash-high") still map."""
+    earlier slug-based command ("agy:gemini-4-hydrogen-high") still map."""
     value = split_stored(value)[0]
     if not value and default:
         return parse_choice(default, codex_model)

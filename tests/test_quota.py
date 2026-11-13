@@ -61,7 +61,7 @@ USAGE = {
 def test_groups_follow_the_model_family() -> None:
     assert group_of("gemini-4-argon-medium") == "gemini-argon-wtu"
     assert group_of("claude-opus-5-5-high") == group_of("gpt-oss-120b-medium") == "3p"
-    assert group_of("gemini-3.8-flash-low") == "gemini"
+    assert group_of("gemini-4-hydrogen-low") == "gemini"
 
 
 def test_a_usage_reading_says_which_pools_the_bot_may_spend() -> None:

@@ -28,7 +28,7 @@ from discord_codex_bot.usage import RateLimits
 GUILD, USER = 111111111111111111, 5
 KEY = f"{GUILD}:None:{USER}"
 TABLE_PATH = Path(__file__).resolve().parent.parent / "config" / "routing.json"
-CHAIN = ("grok:grok-4.7|medium", "codex", "agy:gemini-3.8-flash|medium")
+CHAIN = ("grok:grok-4.7|medium", "codex", "agy:gemini-4-hydrogen|medium")
 SECRET = "ts-test-SECRET-key-0123456789"
 
 
@@ -130,7 +130,7 @@ def test_the_shipped_table_loads_and_every_cell_is_checked() -> None:
     "cell",
     [
         "agy:gpt-oss-120b|high",  # a fixed-level model takes no effort
-        "agy:gemini-3.8-flash",  # Gemini needs one
+        "agy:gemini-4-hydrogen",  # Gemini needs one
         "agy:claude-sonnet-5-5",  # so does Claude now
         "agy:claude-sonnet-4-6",  # gone from agy
         "grok:grok-4.7",  # no effort
@@ -175,7 +175,7 @@ def test_the_image_list_is_checked_too(tmp_path) -> None:
     # conversation's cell for its image is only simple on Codex, which has no type stand-ins).
     for bad in (
         ["grok:grok-4.7|medium", "codex|medium"],
-        ["agy:gemini-3.8-flash|medium", "codex|medium"],
+        ["agy:gemini-4-hydrogen|medium", "codex|medium"],
         ["agy:claude-sonnet-5-5|high"],
     ):
         data["image"] = bad
@@ -189,7 +189,7 @@ def test_the_image_list_is_checked_too(tmp_path) -> None:
 
 def test_a_needs_type_must_stay_on_its_backend(tmp_path) -> None:
     data = json.loads(TABLE_PATH.read_text("utf-8"))
-    data["types"]["live-x"][0] = "agy:gemini-3.8-flash|low"
+    data["types"]["live-x"][0] = "agy:gemini-4-hydrogen|low"
     bad = tmp_path / "routing.json"
     bad.write_text(json.dumps(data), "utf-8")
     with pytest.raises(ValueError, match="every live-x cell"):
@@ -206,7 +206,7 @@ def test_bands_follow_the_ten_level_scale(score: float, band: str) -> None:
 def test_only_up() -> None:
     table = routing.load_table(TABLE_PATH)
     first, why = routing.decide(table, "chat", "L", None)
-    assert (first.entry, why) == ("agy:gemini-3.8-flash|low", "new")
+    assert (first.entry, why) == ("agy:gemini-4-hydrogen|low", "new")
     same, why = routing.decide(table, "quick", "L", first)
     assert same.entry == first.entry and why == "kept" and same.kind == "quick"
     harder, why = routing.decide(table, "reason", "H", first)
@@ -225,7 +225,7 @@ def test_a_hard_question_does_not_stay_on_the_cell_an_easier_type_left(  # hub o
     table = routing.load_table(TABLE_PATH)
     route, _ = routing.decide(table, "reason", "M", None)
     route, _ = routing.decide(table, "text", "H", route)
-    assert route.entry == "agy:gemini-3.8-flash|high"
+    assert route.entry == "agy:gemini-4-hydrogen|high"
     route, why = routing.decide(table, "reason", "H", route)
     assert (route.entry, route.band, why) == ("codex|high", "H", "type")
 
@@ -296,8 +296,8 @@ async def test_recent_context_is_the_members_last_three_own_messages(client, mon
 @pytest.mark.parametrize(
     ("kind", "degree", "backend", "model", "effort"),
     [
-        ("chat", 1, "agy", "gemini-3.8-flash-low", "low"),
-        ("quick", 5, "agy", "gemini-3.8-flash-medium", "medium"),
+        ("chat", 1, "agy", "gemini-4-hydrogen-low", "low"),
+        ("quick", 5, "agy", "gemini-4-hydrogen-medium", "medium"),
         ("live-x", 5, "grok", "grok-4.7", "medium"),
         ("live-web", 8, "codex", "gpt-5.6-luna", "high"),
         ("live-web", 10, "agy", "gemini-4-argon-medium", "medium"),
@@ -305,7 +305,7 @@ async def test_recent_context_is_the_members_last_three_own_messages(client, mon
         ("text", 10, "agy", "gemini-4-argon-medium", "medium"),
         ("code", 9, "agy", "gemini-4-argon-medium", "medium"),
         ("code", 8, "codex", "gpt-5.6-luna", "high"),
-        ("reason", 2, "agy", "gemini-3.8-flash-medium", "medium"),
+        ("reason", 2, "agy", "gemini-4-hydrogen-medium", "medium"),
         ("create", 7, "agy", "claude-sonnet-5-5-high", "high"),
         ("advice", 4, "grok", "grok-4.7", "medium"),
     ],
@@ -329,7 +329,7 @@ async def test_two_turns_on_agy_resume_the_same_thread(client, backends, monkeyp
     plan, _ = await ask(client, "富士山多高")
     agy = backends["agy"]
     assert agy.calls[1][2]["resume"] == "agy-t1" and "history" not in agy.calls[1][2]
-    assert plan.route.entry == "agy:gemini-3.8-flash|low"  # quick L on chat L: kept
+    assert plan.route.entry == "agy:gemini-4-hydrogen|low"  # quick L on chat L: kept
 
 
 async def test_moving_up_to_another_backend_replays_instead_of_resuming(
@@ -406,15 +406,15 @@ async def test_an_x_conversation_without_a_verdict_keeps_its_x_handling(
     client._grok_off_until = 9e18  # breaker open
     plan, result = await ask(client, "那他昨天呢")
     assert plan.log["type"] == "" and plan.log["degraded"] == ["grok-off"]
-    assert plan.target == Resolved("agy", "gemini-3.8-flash-medium", "medium") and plan.no_x
+    assert plan.target == Resolved("agy", "gemini-4-hydrogen-medium", "medium") and plan.no_x
     assert NO_X_NOTE in client._routed_text(plan, result)
 
 
 def test_the_threadstore_keeps_the_backend_that_made_the_thread(client) -> None:
-    route = Route("agy:gemini-3.8-flash|low", "L", "chat")
-    client._remember(KEY, "agy-t1", 42, False, "agy:gemini-3.8-flash", route)
+    route = Route("agy:gemini-4-hydrogen|low", "L", "chat")
+    client._remember(KEY, "agy-t1", 42, False, "agy:gemini-4-hydrogen", route)
     found = client.threads.routed(KEY, 42, False)
-    assert found["model"] == "agy:gemini-3.8-flash" and Route.from_dict(found["route"]) == route
+    assert found["model"] == "agy:gemini-4-hydrogen" and Route.from_dict(found["route"]) == route
     assert client.threads.backend_of("agy-t1") == "agy"
     assert client.threads.routed(KEY, 42, True) is None  # other workspace
 
@@ -471,7 +471,7 @@ async def test_an_image_is_not_judged_and_goes_codex_grok_agy(
     assert plan.log["files"] == 1 and result.via.backend == "codex"
     assert plan.spares == (
         Resolved("grok", "grok-4.7", "medium"),
-        Resolved("agy", "gemini-3.8-flash-medium", "medium"),
+        Resolved("agy", "gemini-4-hydrogen-medium", "medium"),
     )
     client.threads = type(client.threads)(client.threads._path.with_name("t2.json"), 3600)
     backends["codex"].error = BackendUnavailable("codex out")
@@ -479,7 +479,7 @@ async def test_an_image_is_not_judged_and_goes_codex_grok_agy(
     assert result.via == Resolved("grok", "grok-4.7", "medium")
     backends["grok"].error = BackendUnavailable("grok out")
     _, result = await ask_with_image(client)
-    assert result.via == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+    assert result.via == Resolved("agy", "gemini-4-hydrogen-medium", "medium")
 
 
 async def test_an_image_skips_grok_when_grok_is_not_usable(client, backends, monkeypatch) -> None:
@@ -490,7 +490,7 @@ async def test_an_image_skips_grok_when_grok_is_not_usable(client, backends, mon
     backends["codex"].error = BackendUnavailable("codex out")
     plan, result = await ask_with_image(client)
     assert len(backends["codex"].calls) == 1 and backends["grok"].calls == []
-    assert result.via == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+    assert result.via == Resolved("agy", "gemini-4-hydrogen-medium", "medium")
 
 
 async def test_an_image_mid_conversation_goes_to_codex_and_leaves_the_route(
@@ -502,7 +502,7 @@ async def test_an_image_mid_conversation_goes_to_codex_and_leaves_the_route(
     await ask(client, "嗨")
     plan, result = await ask_with_image(client, "這張圖是什麼")
     assert result.via == Resolved("codex", "gpt-5.6-luna", "medium")
-    assert plan.route.entry == "agy:gemini-3.8-flash|low" and plan.resume == ""
+    assert plan.route.entry == "agy:gemini-4-hydrogen|low" and plan.resume == ""
     turns = {"codex-t1": [Turn("user", "這張圖是什麼", USER), Turn("assistant", "是一隻貓")]}
     monkeypatch.setattr(bot_module, "transcript_turns", lambda c, t: turns.get(t, []))
     plan, result = await ask(client, "謝謝")
@@ -517,7 +517,7 @@ async def test_an_image_in_an_x_or_claude_conversation_takes_only_the_image_orde
     # image list. An image turn has no type: Codex, then the list, then MODEL_CHAIN.
     image_spares = (
         Resolved("grok", "grok-4.7", "medium"),
-        Resolved("agy", "gemini-3.8-flash-medium", "medium"),
+        Resolved("agy", "gemini-4-hydrogen-medium", "medium"),
     )
     for kind, degree in (("live-x", 5), ("create", 8)):
         client.threads = type(client.threads)(client.threads._path.with_name(f"{kind}.json"), 3600)
@@ -534,7 +534,7 @@ async def test_an_image_in_an_x_or_claude_conversation_takes_only_the_image_orde
     backends["codex"].error = BackendUnavailable("codex out")
     before = len(backends["grok"].calls)
     plan, result = await ask_with_image(client, "這張圖呢")
-    assert result.via == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+    assert result.via == Resolved("agy", "gemini-4-hydrogen-medium", "medium")
     assert len(backends["grok"].calls) == before  # the ordinary weekly-share gate applies
 
 
@@ -581,10 +581,10 @@ async def test_a_document_is_judged_from_the_words_and_counted_in_the_log(
 
 async def test_a_member_with_their_own_model_is_not_routed(client, backends, monkeypatch) -> None:
     asked = verdicts(monkeypatch, ok("code", 9))
-    client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|high")
     assert await client._route(KEY, None, GUILD, USER, "寫程式", [], False) is None
     result = await client._answer("寫程式", [], GUILD, USER)
-    assert asked == [] and backends["agy"].calls[0][1] == ("gemini-3.8-flash-high",)
+    assert asked == [] and backends["agy"].calls[0][1] == ("gemini-4-hydrogen-high",)
     assert "自動選擇" not in result.text
 
 
@@ -606,14 +606,14 @@ async def test_a_slash_effort_keeps_the_routed_conversation_and_only_sets_its_ef
 
 
 async def test_an_effortless_default_takes_the_configured_effort(client, monkeypatch) -> None:
-    # Codex on #33: "agy:gemini-3.8-flash" with no effort resolved to its strongest slug on the
+    # Codex on #33: "agy:gemini-4-hydrogen" with no effort resolved to its strongest slug on the
     # no-judgement path, unlike _answer, which applies CODEX_REASONING_EFFORT.
     client.config = replace(
-        client.config, default_model="agy:gemini-3.8-flash", codex_reasoning_effort="medium"
+        client.config, default_model="agy:gemini-4-hydrogen", codex_reasoning_effort="medium"
     )
     verdicts(monkeypatch, Verdict("timeout"))
     plan = await client._route(KEY, None, GUILD, USER, "問題", [], False)
-    assert plan.target == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+    assert plan.target == Resolved("agy", "gemini-4-hydrogen-medium", "medium")
     client.config = replace(client.config, default_model="")
     plan = await client._route(KEY, None, GUILD, USER, "問題", [], False)
     assert plan.target == Resolved("codex", "gpt-5.6-luna", "medium")
@@ -670,7 +670,7 @@ async def test_past_the_weekly_share_only_x_questions_keep_grok(client, monkeypa
     assert result.via == plan.target  # _answer does not skip it for the weekly share either
     verdicts(monkeypatch, ok("advice", 5))
     plan = await client._route(KEY, None, GUILD, USER, "買哪台", [], False)
-    assert plan.target == Resolved("agy", "gemini-3.8-flash-high", "high")
+    assert plan.target == Resolved("agy", "gemini-4-hydrogen-high", "high")
     assert plan.log["degraded"] == ["grok-spent"]
 
 
@@ -680,7 +680,7 @@ async def test_an_x_question_without_grok_says_it_had_no_x_search(
     client._grok_off_until = 9e18  # breaker open
     verdicts(monkeypatch, ok("live-x", 5))
     plan, result = await ask(client, "馬斯克發了什麼")
-    assert result.via == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+    assert result.via == Resolved("agy", "gemini-4-hydrogen-medium", "medium")
     assert plan.log["degraded"] == ["grok-off"]
     assert NO_X_NOTE in client._routed_text(plan, result)
 
@@ -691,10 +691,10 @@ async def test_grok_refusing_an_x_question_falls_to_flash_medium_with_the_note(
     backends["grok"].error = BackendUnavailable("quota")
     verdicts(monkeypatch, ok("live-x", 8))
     plan, result = await ask(client, "馬斯克發了什麼")
-    assert result.via == Resolved("agy", "gemini-3.8-flash-medium", "medium")
+    assert result.via == Resolved("agy", "gemini-4-hydrogen-medium", "medium")
     assert backends["codex"].calls == []  # the stand-in comes before the chain
     text = client._routed_text(plan, result)
-    assert NO_X_NOTE in text and text.endswith("-# 自動選擇：Gemini 3.8 Flash · Medium")
+    assert NO_X_NOTE in text and text.endswith("-# 自動選擇：Gemini 4 Hydrogen · Medium")
 
 
 @pytest.mark.parametrize(
@@ -739,7 +739,7 @@ async def test_a_plain_agy_failure_still_ends_a_members_own_agy_turn(
     client, backends, monkeypatch
 ) -> None:
     backends["agy"].error = RuntimeError("agy request timed out")
-    client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|high")
     result = await client._answer("q", [], GUILD, USER)
     assert result.text == "Antigravity 執行失敗。請通知 Bot 管理者查看 container log。"
     assert backends["grok"].calls == [] and backends["codex"].calls == []
@@ -982,10 +982,10 @@ async def test_a_routed_mention_names_the_model_that_answered(
     monkeypatch.setattr(client, "_run_tracked", direct)
     monkeypatch.setattr(client, "_access", lambda *args: "")
     await client.on_message(message)
-    assert sent[-1].endswith("\n-# 自動選擇：Gemini 3.8 Flash · Low")
+    assert sent[-1].endswith("\n-# 自動選擇：Gemini 4 Hydrogen · Low")
     key = f"{GUILD}:{Channel.id}:{USER}"
-    assert client.threads.routed(key, 777, False)["model"] == "agy:gemini-3.8-flash"
-    client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
+    assert client.threads.routed(key, 777, False)["model"] == "agy:gemini-4-hydrogen"
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|high")
     await client.on_message(message)
     assert "自動選擇" not in sent[-1]  # their own model: as before
 
@@ -1051,7 +1051,7 @@ def test_help_tells_members_and_the_model_about_routing(client) -> None:
     assert "自動挑模型" in client.help_guide() and "自動挑模型" in client.help_sheet()
     assert "/codex-model" in client.help_sheet().split("自動挑模型")[1]
     assert "進行中的對話維持原本的模型" in client.help_sheet()
-    assert "附圖片時依序用 Codex、Grok、Gemini 3.8 Flash 看圖" in client.help_sheet()
+    assert "附圖片時依序用 Codex、Grok、Gemini 4 Hydrogen 看圖" in client.help_sheet()
     # From the table, never hard-coded (Codex on #35).
     client.routing = replace(client.routing, image=("codex|medium", "agy:claude-sonnet-5-5|high"))
     assert "附圖片時依序用 Codex、Claude Sonnet 5.5 看圖" in client.help_guide()
@@ -1127,7 +1127,7 @@ ARGON_SPENT = agy_module.AgyUnavailable(
 @pytest.mark.parametrize(
     ("kind", "before"),
     [
-        ("chat", Resolved("agy", "gemini-3.8-flash-medium", "medium")),
+        ("chat", Resolved("agy", "gemini-4-hydrogen-medium", "medium")),
         ("live-web", Resolved("codex", "gpt-5.6-luna", "high")),
         ("text", Resolved("agy", "claude-sonnet-5-5-high", "high")),
         ("code", Resolved("codex", "gpt-5.6-luna", "xhigh")),
@@ -1173,7 +1173,7 @@ async def test_a_spent_argon_then_a_failed_claude_still_finds_the_claude_stand_i
     verdicts(monkeypatch, ok("text", 10))
     plan, result = await ask(client)
     assert calls[:2] == ["gemini-4-argon-medium", "claude-sonnet-5-5-high"]
-    assert result.via == Resolved("agy", "gemini-3.8-flash-high", "high")
+    assert result.via == Resolved("agy", "gemini-4-hydrogen-high", "high")
 
 
 async def test_a_stored_route_on_a_model_agy_no_longer_offers_starts_over(
@@ -1259,7 +1259,7 @@ async def test_argon_under_its_reserve_is_skipped_until_the_reset_is_near(
     client.agy_quota.update(_quota(15.0, 144))
     verdicts(monkeypatch, ok("chat", 10))
     plan, result = await ask(client)
-    assert calls == ["gemini-3.8-flash-medium"] and "argon-reserve" in plan.log["degraded"]
+    assert calls == ["gemini-4-hydrogen-medium"] and "argon-reserve" in plan.log["degraded"]
     client.agy_quota.update(_quota(15.0, 12))  # a day from the reset: spend it
     calls.clear()
     await ask(client, "再問一次")

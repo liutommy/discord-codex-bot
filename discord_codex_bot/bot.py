@@ -364,7 +364,7 @@ FREE_MODEL_NOTE = "免費模型可能隨時不穩或下架，失敗時請換一�
 
 # What /model with only provider Antigravity picks; checked against AGY_FAMILIES at use, so a
 # renamed family asks the member to pick instead of quietly saving the server default.
-AGY_DEFAULT_FAMILY = "gemini-3.8-flash"
+AGY_DEFAULT_FAMILY = "gemini-4-hydrogen"
 
 
 X_ITEM_KINDS = ("post", "reply", "repost")  # what XFetcher produces
@@ -1739,7 +1739,7 @@ class DiscordCodexClient(discord.Client):
         )
 
     def _image_order(self) -> str:
-        """The routing table's image list as members read it ("Codex、Grok、Gemini 3.8 Flash");
+        """The routing table's image list as members read it ("Codex、Grok、Gemini 4 Hydrogen");
         "" while routing is off. From the table, so help never drifts from what runs."""
         if self.routing is None:
             return ""
@@ -2909,7 +2909,7 @@ class DiscordCodexClient(discord.Client):
         LOGGER.info("Route %s", json.dumps(record, ensure_ascii=False))
 
     def _via_label(self, via: Resolved) -> str:
-        """What answered, as a member reads it: "Gemini 3.8 Flash · 低"."""
+        """What answered, as a member reads it: "Gemini 4 Hydrogen · 低"."""
         if via.backend == AGY:
             name = next(
                 (label for label, by in AGY_FAMILIES.values() if via.model in by.values()),

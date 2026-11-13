@@ -869,10 +869,10 @@ async def test_answer_falls_back_to_the_spare_backend_when_codex_quota_is_spent(
     monkeypatch.setattr(bot_module, "run_agy", agy)
     result = await client._answer("q", [], GUILD, USER, resume="t-old")
     assert result.text == "備援答案"  # no notice: the member gains nothing from it (owner ruling)
-    assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)  # CODEX_FALLBACK_MODEL default
+    assert agy.calls[0][1] == ("gemini-4-hydrogen-medium",)  # CODEX_FALLBACK_MODEL default
     when, why, failed, spare = client._last_fallback  # /status is where the fallback shows
     assert isinstance(why, CodexUsageLimit) and failed == "codex"
-    assert (spare.backend, spare.model) == ("agy", "gemini-3.8-flash-medium")
+    assert (spare.backend, spare.model) == ("agy", "gemini-4-hydrogen-medium")
     assert "resume" not in agy.calls[0][2]  # a Codex thread id means nothing to agy
     assert result.thread_id == "" and not result.resumed  # nothing to resume back on Codex
 
@@ -888,7 +888,7 @@ async def test_answer_falls_back_silently_when_codex_is_overloaded(client, monke
     result = await client._answer("q", [], GUILD, USER, resume="t-old")
     assert result.text == "滿載備援答案"
     assert isinstance(client._last_fallback[1], CodexServerOverloaded)
-    assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)
+    assert agy.calls[0][1] == ("gemini-4-hydrogen-medium",)
     assert "resume" not in agy.calls[0][2]
     assert result.thread_id == "" and not result.resumed
 
@@ -926,13 +926,13 @@ async def test_answer_without_a_spare_backend_reports_the_failure(client, monkey
 
 async def test_answer_dispatches_to_agy_from_the_stored_model(client, backends) -> None:
     codex, agy = backends
-    client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|low")
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|low")
     result = await client._answer("q", [], GUILD, USER)
     assert result.text == "OK" and codex.calls == []
     prompt, args, kw = agy.calls[0]
-    assert args == ("gemini-3.8-flash-low",) and "effort" not in kw
+    assert args == ("gemini-4-hydrogen-low",) and "effort" not in kw
     await client._answer("q", [], GUILD, USER, effort="max")
-    assert agy.calls[-1][1] == ("gemini-3.8-flash-high",)  # capped at the family's top level
+    assert agy.calls[-1][1] == ("gemini-4-hydrogen-high",)  # capped at the family's top level
     client.memory.set_model(GUILD, USER, "agy:claude-opus-5-5")
     await client._answer("q", [], GUILD, USER, effort="low")
     assert agy.calls[-1][1] == ("claude-opus-5-5-low",)
@@ -1256,7 +1256,7 @@ async def test_model_command_autocomplete_and_openrouter_reminder(client, monkey
     assert client._chosen_model("openrouter", "g/vision:free").value == "openrouter:g/vision:free"
     assert client._chosen_model("openrouter", "openrouter:t/text:free").family == "t/text:free"
     assert client._chosen_model("openrouter", "gone/model") is None
-    assert client._chosen_model("agy", "gemini-3.8-flash").value == "agy:gemini-3.8-flash"
+    assert client._chosen_model("agy", "gemini-4-hydrogen").value == "agy:gemini-4-hydrogen"
     assert client._chosen_model("agy", "nope") is None
     described = client._describe("openrouter:g/vision:free", "high")
     assert "OpenRouter · g/vision:free · 無" in described and "看得到圖片" in described
@@ -1297,15 +1297,15 @@ async def test_picking_only_a_provider_sets_its_default_model(client, caplog) ->
     # saved onto Gemini read differently from /status).
     agy = Choice(name="Antigravity", value="agy")
     await client.model_command(interaction, provider=agy)
-    assert client.memory.get_model(GUILD, USER) == "agy:gemini-3.8-flash"
+    assert client.memory.get_model(GUILD, USER) == "agy:gemini-4-hydrogen"
     await client.model_command(interaction, provider=agy, effort=high)
     # Free router models come and go: the member has to pick one; nothing changes.
     await client.model_command(interaction, provider=Choice(name="OpenRouter", value="openrouter"))
     assert "免費模型會變動" in responses[-1] and "請在 model 欄從清單選" in responses[-1]
-    assert client.memory.get_model(GUILD, USER) == "agy:gemini-3.8-flash|high"
+    assert client.memory.get_model(GUILD, USER) == "agy:gemini-4-hydrogen|high"
     # The same provider again keeps the member's model and effort; nothing at all only shows it.
     await client.model_command(interaction, provider=agy)
-    assert client.memory.get_model(GUILD, USER) == "agy:gemini-3.8-flash|high"
+    assert client.memory.get_model(GUILD, USER) == "agy:gemini-4-hydrogen|high"
     await client.model_command(interaction)
     assert responses[-1].startswith("目前：")
     assert bot_module.AGY_DEFAULT_FAMILY in bot_module.AGY_FAMILIES
@@ -1367,7 +1367,7 @@ async def test_a_typed_router_model_is_checked_against_that_routers_list(
     interaction.channel = _FakeChannel(True)
     interaction.channel_id = interaction.channel.id
     interaction.response = types.SimpleNamespace(send_message=send)
-    client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|high")
     client.openrouter.models = []
 
     async def free_models():
@@ -1679,15 +1679,15 @@ async def test_status_shows_the_live_quota_and_the_last_fallback(client, monkeyp
         time.time() - 120,
         CodexUsageLimit("spent", "usage_limit_exceeded"),
         "codex",
-        Resolved("agy", "gemini-3.8-flash-medium", "medium"),
+        Resolved("agy", "gemini-4-hydrogen-medium", "medium"),
     )
     text = await client._status_text(GUILD, 555, USER)
     assert "額度 5h 100% / 7d 40%" in text
     # "right now" comes from the probe alone, so a fresh process (no _last_fallback yet) and
     # batch-only fallbacks still show it; the last-fallback line is the evidence trail.
-    assert "額度已達上限，現在的請求改用 gemini-3.8-flash-medium 回答" in text
+    assert "額度已達上限，現在的請求改用 gemini-4-hydrogen-medium 回答" in text
     assert (
-        "最近一次備援：2 分鐘前 Codex 額度用完，改用 Antigravity（gemini-3.8-flash-medium）回答"
+        "最近一次備援：2 分鐘前 Codex 額度用完，改用 Antigravity（gemini-4-hydrogen-medium）回答"
         in text
     )
     assert "　└ 最近一次備援" not in text  # its own line now, not hung under Codex
@@ -1713,12 +1713,12 @@ async def test_status_names_the_spare_from_model_chain(client, monkeypatch) -> N
         orcarouter_api_key="",
         gemini_api_key="",
         codex_fallback_model="",
-        model_chain=("grok:grok-4.7|medium", "codex", "agy:gemini-3.8-flash|high"),
+        model_chain=("grok:grok-4.7|medium", "codex", "agy:gemini-4-hydrogen|high"),
     )
     monkeypatch.setattr(bot_module, "codex_login_status", login)
     monkeypatch.setattr(bot_module, "probe_rate_limits", usage)
     text = await client._status_text(GUILD, 555, USER)
-    assert "額度已達上限，現在的請求改用 gemini-3.8-flash-high 回答" in text
+    assert "額度已達上限，現在的請求改用 gemini-4-hydrogen-high 回答" in text
     client.config = replace(client.config, model_chain=("codex", "grok:grok-4.7|medium"))
     # Codex never falls *into* Grok, so this chain has no spare for it.
     assert "額度已達上限，且沒有設定備援模型" in await client._status_text(GUILD, 555, USER)
@@ -3679,7 +3679,7 @@ async def test_skipping_grok_before_the_turn_is_a_fallback_too(client, monkeypat
 
     monkeypatch.setattr(client, "_grok_usable", not_now)
     client.config = replace(
-        client.config, model_chain=("grok:grok-4.7|medium", "agy:gemini-3.8-flash|medium")
+        client.config, model_chain=("grok:grok-4.7|medium", "agy:gemini-4-hydrogen|medium")
     )
     client.memory.set_model(GUILD, USER, "grok:grok-4.7|medium")
     result = await client._answer("q", [], GUILD, USER, resume="gk-old")
@@ -3692,7 +3692,7 @@ async def test_skipping_grok_before_the_turn_is_a_fallback_too(client, monkeypat
     assert "resume" not in agy.calls[1][2] and agy.calls[2][2]["resume"] == "t2"
 
 
-ROUTED_CHAIN = ("grok:grok-4.7|medium", "codex", "agy:gemini-3.8-flash|medium")
+ROUTED_CHAIN = ("grok:grok-4.7|medium", "codex", "agy:gemini-4-hydrogen|medium")
 
 
 async def test_a_routed_agy_turn_falls_back_to_grok_then_codex(client, monkeypatch) -> None:
@@ -3724,7 +3724,7 @@ async def test_a_routed_agy_turn_falls_back_to_grok_then_codex(client, monkeypat
     result = await client._answer("q", [], GUILD, USER, routed=routed)
     assert result.text == "Codex 備援" and len(codex.calls) == 1
 
-    client.memory.set_model(GUILD, USER, "agy:gemini-3.8-flash|high")
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|high")
     result = await client._answer("q", [], GUILD, USER)
     assert result.text == "Antigravity 執行失敗。請通知 Bot 管理者查看 container log。"
     assert len(codex.calls) == 1  # the member chose agy: no spare, as before
@@ -3750,7 +3750,7 @@ async def test_a_routed_turn_skips_grok_as_a_spare_when_grok_is_not_usable(
     client.config = replace(client.config, model_chain=ROUTED_CHAIN)
     result = await client._answer("q", [], GUILD, USER, routed=Resolved("codex", "gpt-x", "high"))
     assert result.text == "agy 備援" and grok_spare.calls == []
-    assert agy.calls[0][1] == ("gemini-3.8-flash-medium",)
+    assert agy.calls[0][1] == ("gemini-4-hydrogen-medium",)
 
 
 async def test_a_routed_turn_resumes_only_a_thread_of_its_own_backend(client, backends) -> None:
@@ -3758,8 +3758,8 @@ async def test_a_routed_turn_resumes_only_a_thread_of_its_own_backend(client, ba
     # agy (AGENTS.md: a thread id belongs to the backend that created it; Codex on PR #32).
     codex, agy = backends
     client.threads.remember("k", "codex-thread", plain=False, model="codex:gpt-5.6-luna")
-    client.threads.remember("k2", "agy-thread", plain=False, model="agy:gemini-3.8-flash")
-    flash = Resolved("agy", "gemini-3.8-flash-low", "low")
+    client.threads.remember("k2", "agy-thread", plain=False, model="agy:gemini-4-hydrogen")
+    flash = Resolved("agy", "gemini-4-hydrogen-low", "low")
     await client._answer("q", [], GUILD, USER, resume="codex-thread", routed=flash)
     assert "resume" not in agy.calls[0][2] or agy.calls[0][2]["resume"] == ""
     await client._answer("q", [], GUILD, USER, resume="agy-thread", routed=flash)
@@ -4104,7 +4104,7 @@ def earlier_conversation(client, monkeypatch, tmp_path):
     message(21, bot.id, "第二次回答", reply=20)
     key = bot_module.ThreadStore.key(GUILD, ALLOWED, USER)
     for mid in (12, 21):
-        client.threads.remember(key, "agy-old", mid, model="agy:gemini-3.8-flash")
+        client.threads.remember(key, "agy-old", mid, model="agy:gemini-4-hydrogen")
     monkeypatch.setattr(client, "get_channel", lambda cid: channel if cid == ALLOWED else None)
     return types.SimpleNamespace(
         channel=channel, key=key, message=message, fetched=fetched, saved=saved, image=image
@@ -4201,7 +4201,7 @@ async def test_earlier_reads_a_slash_answer_without_a_reference(
     """A slash command's answer replies to no message; recorded for this member, it counts."""
     scene = earlier_conversation
     scene.message(70, 123, "> 斜線指令的問題\n斜線指令的回答")
-    client.threads.remember(scene.key, "agy-old", 70, model="agy:gemini-3.8-flash")
+    client.threads.remember(scene.key, "agy-old", 70, model="agy:gemini-4-hydrogen")
     # Negative control: an answer without a reference that was never recorded for this member.
     scene.message(71, 123, "別處的回答")
     codex, _ = backends
@@ -4277,7 +4277,7 @@ async def test_earlier_gives_the_newest_images_and_the_bots_own(
     made = types.SimpleNamespace(**{**vars(scene.image), "id": 950, "save": save_made})
     scene.message(30, USER, "畫一張")
     scene.message(31, 123, "畫好了", reply=30, attachments=[made])
-    client.threads.remember(scene.key, "agy-old", 31, model="agy:gemini-3.8-flash")
+    client.threads.remember(scene.key, "agy-old", 31, model="agy:gemini-4-hydrogen")
     codex, _ = backends
     codex.replies = ["<earlier/>", "好"]
     await client._answer("剛剛那張圖", [], GUILD, USER, channel_id=ALLOWED)
