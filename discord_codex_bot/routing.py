@@ -9,8 +9,8 @@ higher of that message's band and its own (routing.decide).
 
 With JEV_PICK (shadow by default) the same call also asks Jev which of routing.json's
 `candidates` should answer. Shadow logs that pick beside the table's cell; on routes by it
-(routing.pick_route): a pick never weaker than the conversation's current target, and only on
-the backend a type needs (live-x: Grok)."""
+(routing.pick_route): never to a target weaker than the conversation's current one, only on
+the backend a type needs (live-x: Grok), and Argon or Claude only for a type with their stand-in."""
 
 from __future__ import annotations
 
@@ -406,27 +406,47 @@ def decide(table: Table, kind: str, level: str, current: Route | None) -> tuple[
     return moved, "harder" if BANDS.index(level) > BANDS.index(current.band) else "type"
 
 
+def has_stand_in(table: Table, kind: str, target: str) -> bool:
+    """Whether a target of this type has its quota stand-in: an Argon target needs
+    argon_failed[kind], a Claude target claude_failed[kind]; any other target needs none."""
+    if is_argon(target):
+        return kind in table.argon_failed
+    if is_claude(target):
+        return kind in table.claude_failed
+    return True
+
+
 def pick_route(
     table: Table, kind: str, level: str, current_route: Route | None, pick: str
 ) -> tuple[Route, str]:
-    """(where this message goes, why) when Jev's pick routes it (JEV_PICK=on). A pick is used
-    unless the type needs another backend (then the table decides) or it is weaker than the
-    conversation's current target (then the conversation stays). chat keeps a running
-    conversation where it is, as in decide; the band recorded is decide's."""
+    """(where this message goes, why) with JEV_PICK=on; `pick` is "" when Jev's pick is missing
+    or unsure. A pick is used unless the type needs another backend (live-x: Grok) or the pick
+    is Argon or Claude without that type's stand-in; then the table's cell stands in for it.
+    Either way the conversation never moves to a weaker target than its current one, unless
+    its current one is not on the backend the type needs. chat keeps a running conversation
+    where it is, as in decide; the band recorded is decide's."""
     tabled, why = decide(table, kind, level, current_route)
     candidate = table.candidates.get(pick)
     needed = table.needs.get(kind)
-    if candidate is None or (needed and backend_of(candidate.target) != needed):
-        return tabled, why
+    if candidate is not None and (
+        (needed and backend_of(candidate.target) != needed)
+        or not has_stand_in(table, kind, candidate.target)
+    ):
+        candidate = None
     if current_route is None:
+        if candidate is None:
+            return tabled, why
         return Route(candidate.target, level, kind), "picked"
     if kind == "chat":
         return current_route, "kept"
-    floor = table.strength(current_route.entry)
-    if floor is not None and candidate.strength < floor:
-        return Route(current_route.entry, tabled.band, kind, current_route.earlier), "pick-weaker"
-    moved = Route(candidate.target, tabled.band, kind, current_route.earlier)
-    return moved, "kept" if candidate.target == current_route.entry else "picked"
+    chosen, reason = (candidate.target, "picked") if candidate else (tabled.entry, why)
+    floor, strength = table.strength(current_route.entry), table.strength(chosen)
+    on_needed = not needed or backend_of(current_route.entry) == needed
+    if on_needed and floor is not None and strength is not None and strength < floor:
+        stay = Route(current_route.entry, tabled.band, kind, current_route.earlier)
+        return stay, "pick-weaker"
+    moved = Route(chosen, tabled.band, kind, current_route.earlier)
+    return moved, "kept" if chosen == current_route.entry else reason
 
 
 # --------------------------------------------------------------------------- the call

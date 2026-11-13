@@ -231,3 +231,55 @@ async def test_off_asks_no_model_question(client, backends, monkeypatch) -> None
     monkeypatch.setattr(routing, "judge", judge)
     plan, _ = await ask(client)
     assert seen == [routing.QUESTIONS] and plan.log["pick"] is None
+
+
+def test_an_x_question_leaves_a_stronger_model_for_grok() -> None:
+    # Codex on the pre-PR review: the strength floor kept an X question on Argon, which has no
+    # X search. The backend a type needs comes before the floor.
+    running = Route("agy:gemini-4-argon|medium", "X", "reason", ("t1",))
+    route, why = routing.pick_route(table(), "live-x", "M", running, "grok-high")
+    assert route.entry == "grok:grok-4.7|high" and why == "picked"
+    route, _ = routing.pick_route(table(), "live-x", "M", running, "codex-high")
+    assert routing.backend_of(route.entry) == "grok"  # the table's live-x cell
+    route, _ = routing.pick_route(table(), "live-x", "M", running, "")
+    assert routing.backend_of(route.entry) == "grok"
+
+
+@pytest.mark.parametrize(
+    ("kind", "pick", "used"),
+    [
+        ("text", "sonnet-high", True),  # claude_failed has text
+        ("code", "sonnet-high", False),  # ...but not code: no stand-in when 3p is short
+        ("create", "opus-high", True),
+        ("advice", "opus-high", False),
+        ("reason", "argon-medium", True),  # argon_failed has reason
+        ("quick", "argon-medium", False),  # ...but not quick
+    ],
+)
+def test_argon_and_claude_are_picked_only_with_their_stand_in(kind, pick, used) -> None:
+    t = table()
+    route, why = routing.pick_route(t, kind, "M", None, pick)
+    if used:
+        assert route.entry == t.candidates[pick].target and why == "picked"
+    else:
+        assert route == routing.decide(t, kind, "M", None)[0]
+
+
+def test_an_unsure_pick_never_drops_a_conversation_a_pick_moved() -> None:
+    # Codex on the pre-PR review: with no usable pick the table's L cell (strength 3) replaced
+    # the Sonnet target (strength 5) an earlier pick had chosen.
+    running = Route("agy:claude-sonnet-5-5|high", "L", "text", ("t1",))
+    route, why = routing.pick_route(table(), "text", "L", running, "")
+    assert route.entry == "agy:claude-sonnet-5-5|high" and why == "pick-weaker"
+
+
+async def test_on_keeps_a_picked_conversation_when_the_next_pick_is_unsure(
+    client, backends, monkeypatch
+) -> None:
+    client.config = replace(client.config, jev_pick="on")
+    verdicts(monkeypatch, picked("text", 2, "sonnet-high"), picked("text", 2, "hydrogen-low", 0.2))
+    first, _ = await ask(client)
+    assert first.route.entry == "agy:claude-sonnet-5-5|high"
+    second, result = await ask(client)
+    assert second.route.entry == "agy:claude-sonnet-5-5|high"
+    assert result.via == Resolved("agy", "claude-sonnet-5-5-high", "high")

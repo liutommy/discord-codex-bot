@@ -2709,12 +2709,17 @@ class DiscordCodexClient(discord.Client):
         if verdict.status == "ok":
             level = routing.band(verdict.score)
             sure = verdict.pick_probability >= self.config.jev_pick_min_probability
-            if verdict.pick and sure:
-                picked, pick_why = routing.pick_route(
-                    table, verdict.kind, level, route, verdict.pick
+            pick = verdict.pick if sure else ""
+            if pick:
+                picked, pick_why = routing.pick_route(table, verdict.kind, level, route, pick)
+            if self.config.jev_pick == "on":
+                # An unsure pick still goes through pick_route: a conversation a pick moved
+                # must not drop to a weaker table cell.
+                route, why = (
+                    (picked, pick_why)
+                    if picked
+                    else routing.pick_route(table, verdict.kind, level, route, "")
                 )
-            if self.config.jev_pick == "on" and picked is not None:
-                route, why = picked, pick_why
             else:
                 route, why = routing.decide(table, verdict.kind, level, route)
         elif image_turn:
