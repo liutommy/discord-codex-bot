@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -54,6 +55,19 @@ _PIXIV_ID = re.compile(r"^/(?:en/)?artworks/(\d+)")
 # generic User-Agent with 403 and the crawler's with 200, hence CRAWLER_HEADERS on that call.
 X_API = "https://api.vxtwitter.com{path}"
 _X_STATUS = re.compile(r"^/[A-Za-z0-9_]{1,20}/status/\d+")
+# Hosts whose status paths the vxtwitter API answers: X itself, and the vxtwitter service under
+# both of its names (fixvx.com 302-redirects to vxtwitter.com; checked 2026-11-14).
+X_API_HOSTS = frozenset({"x.com", "twitter.com", "vxtwitter.com", "fixvx.com"})
+# vxtwitter shows Discord at most PAGE_SIZE media of a post per card; /p<N> after the status
+# path selects page N, and the page count covers every media item (photos, videos and gifs
+# alike). fixupx ignores /pN, so only vxtwitter links are paged (all checked 2026-11-14).
+PAGE_SIZE = 10
+PAGED_PROXY = "vxtwitter.com"
+# The member-posted links whose missing pages the Bot can add (`fill`).
+FILL_HOSTS = frozenset({"vxtwitter.com", "fixvx.com"})
+# Only a plain post link is paged: /photo/N already picks a single item, and the page links
+# are built from this path alone, so a query such as ?s=20 never reaches them.
+_PLAIN_STATUS = re.compile(r"^/([A-Za-z0-9_]{1,20})/status/(\d+)/?$")
 
 
 @dataclass(frozen=True)
@@ -194,25 +208,69 @@ Fetch = Callable[[str, dict[str, str]], Awaitable[str | None]]
 class Fix:
     url: str
     spoiler: bool  # deliver as ||url|| so Discord blurs the preview
+    # The further page links (/p2 ...) of a post whose media do not fit one card; they are
+    # delivered after `url`, which is then page 1.
+    more: tuple[str, ...] = ()
 
 
 async def rating(url: str, fetch: Fetch) -> bool | None:
     """Whether the work behind `url` is age-restricted: False for sites without a rating,
     None when the site has one but it could not be read."""
+    restricted, _ = await _rating(url, fetch)
+    return restricted
+
+
+async def _rating(url: str, fetch: Fetch) -> tuple[bool | None, int | None]:
+    """The rating, plus how many media items the post carries when the same answer says so
+    (X only: the vxtwitter API's `media_extended`); paging needs no request of its own."""
     host, path = _host(url)
+    media = None
     if host == "pixiv.net" and (match := _PIXIV_ID.match(path)):
         text = await fetch(PIXIV_AJAX.format(id=match.group(1)), PIXIV_HEADERS)
         value = _json_path(text, "body", "xRestrict")
         restricted = None if value is None else int(value) >= 1
-    elif host in ("x.com", "twitter.com") and (match := _X_STATUS.match(path)):
+    elif host in X_API_HOSTS and (match := _X_STATUS.match(path)):
         text = await fetch(X_API.format(path=match.group(0)), CRAWLER_HEADERS)
         value = _json_path(text, "possibly_sensitive")
         restricted = None if value is None else bool(value)
+        items = _json_path(text, "media_extended")
+        media = len(items) if isinstance(items, list) else None
     else:
-        return False
+        return False, None
     if restricted is None:
         LOGGER.info("embedfix: rating for %s unreadable; link left alone", url)
-    return restricted
+    return restricted, media
+
+
+def page_links(url: str, media: int | None) -> tuple[str, ...]:
+    """Every page link (/p1 ... /pN, on vxtwitter) of the post behind `url` when its media do
+    not fit one card; empty when they do, when the count is unknown, or when `url` is not a
+    plain post link."""
+    match = _PLAIN_STATUS.match(urlsplit(url).path)
+    if match is None or media is None or media <= PAGE_SIZE:
+        return ()
+    base = f"https://{PAGED_PROXY}/{match[1]}/status/{match[2]}"
+    return tuple(f"{base}/p{n}" for n in range(1, math.ceil(media / PAGE_SIZE) + 1))
+
+
+def fillable(url: str) -> bool:
+    """True for a member-posted vxtwitter / fixvx post link without a page suffix: the link
+    shows page 1 only, so `fill` may add the rest."""
+    host, path = _host(url)
+    return host in FILL_HOSTS and _PLAIN_STATUS.match(path) is not None
+
+
+async def fill(url: str, fetch: Fetch) -> Fix | None:
+    """The page links a member's own vxtwitter / fixvx link lacks (`url` itself stays as the
+    first page); None when there is nothing to add: not such a link, one page of media, or a
+    count or rating that could not be read."""
+    if not fillable(url):
+        return None
+    restricted, media = await _rating(url, fetch)
+    pages = page_links(url, media)
+    if restricted is None or not pages:
+        return None
+    return Fix(url, restricted, pages[1:])
 
 
 def _json_path(text: str | None, *keys: str):
@@ -225,9 +283,11 @@ def _json_path(text: str | None, *keys: str):
         return None
 
 
-async def pick(url: str, fetch: Fetch) -> Fix | None:
+async def pick(url: str, fetch: Fetch, paging: bool = True) -> Fix | None:
     """The first candidate proxy whose page (as the crawler sees it) carries a card, with
-    the spoiler flag from the site's rating; None when the caller should keep the link."""
+    the spoiler flag from the site's rating; None when the caller should keep the link.
+    With `paging`, a vxtwitter swap of a post with more media than one card shows becomes
+    page 1 plus the further page links."""
     rule = _rule(url)
     if rule is None:
         return None
@@ -236,9 +296,13 @@ async def pick(url: str, fetch: Fetch) -> Fix | None:
         if not html or not has_card(html, rule):
             LOGGER.info("embedfix: %s has no card for the crawler; not used", candidate)
             continue
-        restricted = await rating(url, fetch)
+        restricted, media = await _rating(url, fetch)
         if restricted is None:
             return None
+        paged = paging and urlsplit(candidate).hostname == PAGED_PROXY
+        pages = page_links(url, media) if paged else ()
+        if pages:
+            return Fix(pages[0], restricted, pages[1:])
         return Fix(candidate, restricted)
     return None
 

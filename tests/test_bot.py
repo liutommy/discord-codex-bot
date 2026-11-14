@@ -447,7 +447,7 @@ async def test_linkclean_stays_quiet_when_clean_disabled_or_not_our_guild(client
 
 
 async def test_embedfix_swaps_verified_post_links_and_keeps_the_rest(client, monkeypatch) -> None:
-    async def fake_pick(url, fetch):
+    async def fake_pick(url, fetch, paging=True):
         if url == "https://x.com/u/status/1":
             return embedfix.Fix("https://fixupx.com/u/status/1", spoiler=False)
         return None
@@ -469,7 +469,7 @@ async def test_embedfix_swaps_verified_post_links_and_keeps_the_rest(client, mon
 
 
 async def test_embedfix_spoilers_rated_works_and_keeps_member_spoilers(client, monkeypatch) -> None:
-    async def fake_pick(url, fetch):
+    async def fake_pick(url, fetch, paging=True):
         if url.startswith("https://www.pixiv.net/artworks/"):
             return embedfix.Fix(url.replace("www.pixiv.net", "phixiv.net"), spoiler=True)
         if url.startswith("https://x.com/"):
@@ -539,6 +539,190 @@ async def test_linkclean_links_mode_replaces_only_and_never_appends(client) -> N
     await client._linkclean(stuck)
     assert stuck.deleted == 0 and channel.sent == []
     client.linkclean.set(GUILD, "all")
+
+
+def _x_post(monkeypatch, media: int, sensitive: bool = False) -> None:
+    """Every X post answers the vxtwitter API with `media` items; vxtwitter has a card."""
+    import json
+
+    async def fetch_text(session, url, headers):
+        if url.startswith("https://api.vxtwitter.com/"):
+            items = [{"type": "image"}] * media
+            return json.dumps({"possibly_sensitive": sensitive, "media_extended": items})
+        if url.startswith("https://vxtwitter.com/"):
+            return '<meta property="og:image" content="https://i.example/a.jpg">'
+        return None
+
+    monkeypatch.setattr(embedfix, "fetch_text", fetch_text)
+
+
+def _page(n: int, post: int = 1) -> str:
+    return f"https://vxtwitter.com/u/status/{post}/p{n}"
+
+
+async def test_a_paged_post_is_reposted_with_every_page_link(client, monkeypatch) -> None:
+    _x_post(monkeypatch, 20)
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("https://x.com/u/status/1?s=20", channel)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [f"<@{USER}>\n{_page(1)} {_page(2)}"]
+    # Ten media fit one card: today's single link.
+    _x_post(monkeypatch, 10)
+    channel = _FakeChannel(manage_messages=True)
+    await client._linkclean(_fake_message("https://x.com/u/status/1", channel))
+    assert channel.sent == [f"<@{USER}>\nhttps://vxtwitter.com/u/status/1"]
+
+
+async def test_page_links_past_five_previews_go_to_at_most_two_more_messages(
+    client, monkeypatch
+) -> None:
+    _x_post(monkeypatch, 70)  # seven pages
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("https://x.com/u/status/1", channel)
+    message.id = 1
+    await client._linkclean(message)
+    assert channel.sent == [
+        f"<@{USER}>\n" + " ".join(_page(n) for n in range(1, 6)),
+        f"{_page(6)}\n{_page(7)}",
+    ]
+    assert all(client.linkclean.is_repost(i) for i in channel.ids)  # overflow too
+    # Twenty pages: three messages in all, pages 16-20 dropped.
+    _x_post(monkeypatch, 200)
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("看這個 https://x.com/u/status/1", channel)
+    message.id = 2
+    await client._linkclean(message)
+    assert message.deleted == 0
+    assert channel.sent == [
+        " ".join(_page(n) for n in range(1, 6)),
+        "\n".join(_page(n) for n in range(6, 11)),
+        "\n".join(_page(n) for n in range(11, 16)),
+    ]
+
+
+async def test_a_sensitive_paged_post_spoilers_every_page_link(client, monkeypatch) -> None:
+    _x_post(monkeypatch, 60, sensitive=True)  # six pages
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("https://x.com/u/status/1", channel)
+    message.id = 1
+    await client._linkclean(message)
+    assert channel.sent == [
+        f"<@{USER}>\n" + " ".join(f"||{_page(n)}||" for n in range(1, 6)),
+        f"||{_page(6)}||",
+    ]
+
+
+async def test_the_xpages_knob_off_keeps_one_link(client, monkeypatch) -> None:
+    _x_post(monkeypatch, 30)
+    client.linkclean.set_xpages(GUILD, "off")
+    channel = _FakeChannel(manage_messages=True)
+    await client._linkclean(_fake_message("https://x.com/u/status/1", channel))
+    assert channel.sent == [f"<@{USER}>\nhttps://vxtwitter.com/u/status/1"]
+    client.linkclean.set_xpages(GUILD, "on")
+
+
+async def test_a_members_fixvx_link_gets_its_missing_pages_only_at_the_all_level(
+    client, monkeypatch
+) -> None:
+    _x_post(monkeypatch, 25)
+    link = "https://fixvx.com/u/status/1"
+    for level in ("on", "off"):  # the default and off: member links are left alone
+        client.linkclean.set_xpages(GUILD, level)
+        channel = _FakeChannel(manage_messages=True)
+        message = _fake_message(link, channel)
+        await client._linkclean(message)
+        assert channel.sent == [] and message.deleted == 0
+    client.linkclean.set_xpages(GUILD, "all")
+    # Appended, never replaced: the member's own link stays as page 1.
+    for mode in ("all", "links"):
+        client.linkclean.set(GUILD, mode)
+        channel = _FakeChannel(manage_messages=True)
+        message = _fake_message(f"看 {link}", channel)
+        message.id = 1
+        await client._linkclean(message)
+        assert message.deleted == 0 and channel.sent == [f"{_page(2)} {_page(3)}"]
+    client.linkclean.set(GUILD, "all")
+    # A page already chosen, or a post that fits one card: nothing.
+    channel = _FakeChannel(manage_messages=True)
+    await client._linkclean(_fake_message(f"{link}/p2", channel))
+    _x_post(monkeypatch, 10)
+    await client._linkclean(_fake_message(link, channel))
+    assert channel.sent == []
+    client.linkclean.set_xpages(GUILD, "on")
+
+
+async def test_a_members_fixvx_link_with_tracking_gets_its_pages_in_links_mode(
+    client, monkeypatch
+) -> None:
+    _x_post(monkeypatch, 11)
+    client.linkclean.set_xpages(GUILD, "all")
+    link = "https://fixvx.com/u/status/1"
+    for mode, sent in (("links", [_page(2)]), ("all", [f"{link} {_page(2)}"])):
+        client.linkclean.set(GUILD, mode)
+        channel = _FakeChannel(manage_messages=True)
+        message = _fake_message(f"看 {link}?utm_source=mail", channel)
+        message.id = 1
+        await client._linkclean(message)
+        assert message.deleted == 0 and channel.sent == sent
+    client.linkclean.set(GUILD, "all")
+    client.linkclean.set_xpages(GUILD, "on")
+
+
+async def test_a_repost_keeps_a_longer_link_that_starts_with_a_paged_one(
+    client, monkeypatch
+) -> None:
+    _x_post(monkeypatch, 11)
+    channel = _FakeChannel(manage_messages=True)
+    post = "https://x.com/u/status/1"
+    message = _fake_message(f"{post} {post}/photo/3", channel)
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [
+        f"<@{USER}>\n{_page(1)} {_page(2)} https://vxtwitter.com/u/status/1/photo/3"
+    ]
+
+
+async def test_six_paged_posts_spread_all_twelve_pages_over_three_messages(
+    client, monkeypatch
+) -> None:
+    _x_post(monkeypatch, 11)
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message(" ".join(f"https://x.com/u/status/{n}" for n in range(1, 7)), channel)
+    message.id = 1
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [
+        f"<@{USER}>\n" + " ".join(_page(1, n) for n in range(1, 7)),
+        "\n".join(_page(2, n) for n in range(1, 6)),
+        f"{_page(1, 6)}\n{_page(2, 6)}",
+    ]
+
+
+async def test_bars_shared_by_several_links_blur_the_overflow_pages(client, monkeypatch) -> None:
+    _x_post(monkeypatch, 60)  # six pages
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("||https://x.com/u/status/1 https://a.example/other||", channel)
+    message.id = 1
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [
+        f"<@{USER}>\n||"
+        + "|| ||".join(_page(n) for n in range(1, 5))
+        + " https://a.example/other||",
+        f"||{_page(5)}||\n||{_page(6)}||",
+    ]
+
+
+async def test_a_members_link_under_shared_bars_gets_blurred_pages(client, monkeypatch) -> None:
+    _x_post(monkeypatch, 25)
+    client.linkclean.set_xpages(GUILD, "all")
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("看 ||https://fixvx.com/u/status/1 https://b.example/y||", channel)
+    message.id = 1
+    await client._linkclean(message)
+    assert message.deleted == 0 and channel.sent == [f"||{_page(2)}|| ||{_page(3)}||"]
+    client.linkclean.set_xpages(GUILD, "on")
 
 
 class _Member(discord.Member):
@@ -3304,11 +3488,19 @@ async def test_linkclean_command_checks_access_before_changing_state(client) -> 
     await client.linkclean_command(interaction, "links")
     assert client.linkclean.mode(GUILD) == "links"
     await client.linkclean_command(interaction)
-    assert responses[-1] == "連結洗參數：只清洗純連結"
+    assert responses[-1] == "連結洗參數：只清洗純連結\nx多圖分頁：補齊 Bot 換的連結"
     await client.linkclean_command(interaction, "off")
     assert client.linkclean.mode(GUILD) == "off"
     await client.linkclean_command(interaction)
-    assert responses[-1] == "連結洗參數：全關"
+    assert responses[-1] == "連結洗參數：全關\nx多圖分頁：補齊 Bot 換的連結"
+    # The pages option is set on its own or together with a mode, and reported back.
+    await client.linkclean_command(interaction, "status", "all")
+    assert client.linkclean.xpages(GUILD) == "all" and client.linkclean.mode(GUILD) == "off"
+    assert responses[-1] == "連結洗參數：全關\nx多圖分頁：也補成員貼的 vxtwitter／fixvx 連結"
+    await client.linkclean_command(interaction, "all", "off")
+    assert responses[-1] == "連結洗參數已設為「全部清洗」。\nx多圖分頁：關閉（每則貼文一個連結）"
+    await client.linkclean_command(interaction, "all", "bogus")
+    assert client.linkclean.xpages(GUILD) == "off" and responses[-1].startswith("action 請用")
 
 
 async def test_style_command_keeps_persona_separate_and_offers_the_file_route(client) -> None:

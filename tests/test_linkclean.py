@@ -9,10 +9,14 @@ from discord_codex_bot.linkclean import (
     DISCORD_EPOCH_MS,
     MAX_URLS,
     REPOST_RETENTION_DAYS,
+    Link,
     SwitchStore,
+    appended,
     deliver,
     is_link_only,
+    overflow_messages,
     plan,
+    replacement,
     snowflake_before,
     spoilered,
 )
@@ -132,3 +136,133 @@ def test_plan_splits_repost_from_append_and_is_none_when_clean() -> None:
         ["https://fixed.example/x"],
         True,
     )
+
+
+def test_xpages_defaults_on_and_persists_explicit_choices(tmp_path: Path) -> None:
+    path = tmp_path / "s.sqlite3"
+    store = SwitchStore(path)
+    assert store.xpages(1) == "on"
+    store.set_xpages(1, "all")
+    assert SwitchStore(path).xpages(1) == "all" and store.xpages(2) == "on"
+    store.set_xpages(1, "off")
+    assert store.xpages(1) == "off" and store.mode(1) == "all" and store.embedfix(1)
+    with pytest.raises(ValueError):
+        store.set_xpages(1, "sometimes")
+    with sqlite3.connect(path) as connection:  # a value no release wrote: the default
+        connection.execute("UPDATE guild_settings SET value='junk' WHERE key='xpages'")
+    assert store.xpages(1) == "on"
+
+
+def _paged(raw: str, count: int, spoiler: bool = False) -> Link:
+    pages = [f"https://vxtwitter.com/u/status/1/p{n}" for n in range(1, count + 1)]
+    return Link(raw, pages[0], spoiler, tuple(pages[1:]))
+
+
+P = [f"https://vxtwitter.com/u/status/1/p{n}" for n in range(0, 21)]  # P[n] is page n
+
+
+def test_replacement_fills_five_previews_and_overflows_the_rest() -> None:
+    raw = "https://x.com/u/status/1"
+    assert replacement(raw, [_paged(raw, 2)]) == (f"{P[1]} {P[2]}", [])
+    # Two member links: the second takes one of the five previews.
+    other = Link("https://a.example/x?utm_source=m", "https://a.example/x")
+    text, overflow = replacement(f"{raw} {other.raw}", [_paged(raw, 7), other])
+    assert text == f"{P[1]} {P[2]} {P[3]} {P[4]} https://a.example/x"
+    assert overflow == P[5:8]
+
+
+def test_every_page_link_is_spoilered_inside_or_outside_the_members_bars() -> None:
+    raw = "https://x.com/u/status/1"
+    assert replacement(raw, [_paged(raw, 7, spoiler=True)]) == (
+        " ".join(f"||{url}||" for url in P[1:6]),
+        [f"||{P[6]}||", f"||{P[7]}||"],
+    )
+    # The member's bars stay in the text; the separators close and reopen them.
+    assert replacement(f"||{raw}||", [_paged(raw, 7)]) == (
+        "||" + "|| ||".join(P[1:6]) + "||",
+        [f"||{P[6]}||", f"||{P[7]}||"],
+    )
+    messages, overflow = appended(f"看 ||{raw}||", [_paged(raw, 2)], copies=True)
+    assert messages == [f"||{P[1]}|| ||{P[2]}||"] and overflow == []
+
+
+def test_appended_sends_pages_with_their_link_and_a_members_link_its_missing_pages() -> None:
+    raw = "https://x.com/u/status/1"
+    member = Link(
+        "https://fixvx.com/u/status/1", "https://fixvx.com/u/status/1", more=(P[2],), own=True
+    )
+    plain = Link("https://b.example/y", "https://b.example/y")
+    content = f"看 {raw} {member.raw} {plain.raw}"
+    messages, overflow = appended(content, [_paged(raw, 7), member, plain], copies=True)
+    assert messages == [" ".join(P[1:6]), P[2]] and overflow == P[6:8]
+    # Without copies (mode `links`) a changed link and its pages are not posted, but a
+    # member's own link still gets the pages it lacks.
+    assert appended(content, [_paged(raw, 7), member, plain], copies=False) == ([P[2]], [])
+
+
+def test_a_members_own_link_with_tracking_gets_its_pages_without_a_copy() -> None:
+    member = Link(
+        "https://fixvx.com/u/status/1?utm_source=mail",
+        "https://fixvx.com/u/status/1",
+        more=(P[2],),
+        own=True,
+    )
+    content = f"看 {member.raw}"
+    assert appended(content, [member], copies=False) == ([P[2]], [])
+    assert appended(content, [member], copies=True) == ([f"{member.clean} {P[2]}"], [])
+
+
+def test_a_post_past_the_previews_sends_its_first_page_to_the_overflow() -> None:
+    raws = [f"https://x.com/u/status/{n}" for n in range(1, 7)]
+    pages = [
+        Link(raw, f"https://vxtwitter.com/u/status/{n}/p1", more=(f"{raw}/p2",))
+        for n, raw in enumerate(raws, 1)
+    ]
+    text, overflow = replacement(" ".join(raws), pages)
+    assert text == " ".join(link.clean for link in pages)
+    sixth = pages[5]
+    assert overflow == [link.more[0] for link in pages[:5]] + [sixth.clean, sixth.more[0]]
+    # Repost plus two overflow messages carry all twelve pages.
+    assert overflow_messages(overflow) == (["\n".join(overflow[:5]), "\n".join(overflow[5:])], 0)
+    # A plain link past the previews is not paged: it stays in the text only.
+    plain = [Link(f"https://a.example/{n}?s=m", f"https://a.example/{n}") for n in range(6)]
+    assert replacement(" ".join(link.raw for link in plain), plain)[1] == []
+
+
+def test_replacement_rewrites_each_link_by_its_span_not_inside_a_longer_link() -> None:
+    raw = "https://x.com/u/status/1"
+    photo = Link(f"{raw}/photo/3", "https://vxtwitter.com/u/status/1/photo/3")
+    text, overflow = replacement(f"{raw} {photo.raw}", [_paged(raw, 2), photo])
+    assert text == f"{P[1]} {P[2]} {photo.clean}" and overflow == []
+    # Reversed order, and a repeated link: every copy rewritten, the longer link intact.
+    text, _ = replacement(f"{photo.raw} {raw} {raw}", [photo, _paged(raw, 2)])
+    assert text == f"{photo.clean} {P[1]} {P[2]} {P[1]} {P[2]}"
+
+
+def test_bars_shared_by_several_links_blur_every_page_the_bot_adds() -> None:
+    raw = "https://x.com/u/status/1"
+    other = Link("https://a.example/other", "https://a.example/other")
+    content = f"||{raw} {other.raw}||"
+    assert spoilered(content, raw) and spoilered(content, other.raw)
+    text, overflow = replacement(content, [_paged(raw, 6), other])
+    assert text == "||" + "|| ||".join(P[1:5]) + f" {other.raw}||"
+    assert overflow == [f"||{P[5]}||", f"||{P[6]}||"]
+    # The appended path, a Bot swap and a member's own link alike.
+    messages, _ = appended(f"看 {content}", [_paged(raw, 2), other], copies=True)
+    assert messages == [f"||{P[1]}|| ||{P[2]}||"]
+    member = Link(
+        "https://fixvx.com/u/status/1", "https://fixvx.com/u/status/1", more=(P[2],), own=True
+    )
+    messages, _ = appended(f"看 ||{member.raw} {other.raw}||", [member, other], copies=False)
+    assert messages == [f"||{P[2]}||"]
+    # Bars before or after a link, or a last unpaired pair, hide nothing.
+    assert not spoilered(f"||前面|| {raw} ||後面||", raw)
+    assert not spoilered(f"|| {raw}", raw)
+
+
+def test_overflow_is_capped_at_three_messages_in_all() -> None:
+    assert overflow_messages(P[6:21]) == (["\n".join(P[6:11]), "\n".join(P[11:16])], 5)
+    assert overflow_messages(P[6:8]) == (["\n".join(P[6:8])], 0)
+    assert overflow_messages(P[6:8], first=2) == (["\n".join(P[6:8])], 0)
+    assert overflow_messages(P[6:8], first=3) == ([], 2)
+    assert overflow_messages([]) == ([], 0)
