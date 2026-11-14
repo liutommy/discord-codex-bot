@@ -7,7 +7,7 @@ import os
 import re
 import socket
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -296,13 +296,21 @@ def strip_tracking(url: str) -> str:
     return urlunsplit(parts._replace(query="&".join(kept)))
 
 
+def url_spans(text: str) -> Iterator[tuple[int, int, str]]:
+    """Each URL in `text` as written, with where it starts and ends, in order (duplicates
+    included). A caller rewriting links edits these spans, so a link never matches inside
+    another one the way a text search for it would (``.../status/1`` in ``.../status/1/p2``)."""
+    for match in URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,;:!?|。，、」』）")  # `|`: a ||spoilered|| link
+        yield match.start(), match.start() + len(url), url
+
+
 def find_urls(text: str, limit: int, clean: bool = True) -> list[str]:
     """The URLs in a message, in order. With clean (the default) tracking params are stripped so
     the Bot fetches, previews and stores the canonical link; clean=False returns them as
     written, for callers that must compare against the member's own text."""
     seen: list[str] = []
-    for match in URL_RE.findall(text):
-        url = match.rstrip(".,;:!?|。，、」』）")  # `|`: a ||spoilered|| link
+    for _, _, url in url_spans(text):
         if clean:
             url = strip_tracking(url)
         if url not in seen:

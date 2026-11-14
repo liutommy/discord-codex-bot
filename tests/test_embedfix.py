@@ -234,3 +234,104 @@ async def test_pick_swaps_a_facebook_post_but_not_the_login_wall():
         "https://facebed.com/share/p/TEXT/", spoiler=False
     )
     assert await pick("https://www.facebook.com/share/p/DEAD/", fetch) is None
+
+
+def _x_fetch(media: object, sensitive: bool = False, pages: dict[str, str] | None = None):
+    """A fetch for one X post: the vxtwitter API answers with `media` as media_extended (an
+    int is that many items), the proxy pages from `pages` (default: vxtwitter has a card)."""
+    import json
+
+    pages = {"https://vxtwitter.com/": MEDIA} if pages is None else pages
+    body: dict[str, object] = {"possibly_sensitive": sensitive}
+    if media is not None:
+        body["media_extended"] = [{"type": "image"}] * media if isinstance(media, int) else media
+
+    async def fetch(url: str, headers: dict[str, str]) -> str | None:
+        if url.startswith("https://api.vxtwitter.com/"):
+            return json.dumps(body)
+        return next((page for prefix, page in pages.items() if url.startswith(prefix)), None)
+
+    return fetch
+
+
+def _pages(user: str, post: int, count: int) -> tuple[str, ...]:
+    return tuple(f"https://vxtwitter.com/{user}/status/{post}/p{n}" for n in range(1, count + 1))
+
+
+async def test_a_post_pages_only_past_ten_media():
+    # Ten fit one vxtwitter card: today's single link. The eleventh opens page 2.
+    assert await pick("https://x.com/u/status/1", _x_fetch(10)) == Fix(
+        "https://vxtwitter.com/u/status/1", spoiler=False
+    )
+    p1, p2 = _pages("u", 1, 2)
+    assert await pick("https://x.com/u/status/1", _x_fetch(11)) == Fix(p1, False, (p2,))
+    assert await pick("https://x.com/u/status/1", _x_fetch(20)) == Fix(p1, False, (p2,))
+    p1, p2, p3 = _pages("u", 1, 3)
+    assert await pick("https://x.com/u/status/1", _x_fetch(21)) == Fix(p1, False, (p2, p3))
+
+
+async def test_videos_and_gifs_count_toward_the_pages():
+    mixed = [{"type": "video"}] * 4 + [{"type": "image"}] * 7 + [{"type": "gif"}]
+    p1, p2 = _pages("u", 1, 2)
+    assert await pick("https://x.com/u/status/1", _x_fetch(mixed)) == Fix(p1, False, (p2,))
+
+
+async def test_an_unknown_media_count_keeps_the_single_link():
+    single = Fix("https://vxtwitter.com/u/status/1", spoiler=False)
+    assert await pick("https://x.com/u/status/1", _x_fetch(None)) == single  # field missing
+    assert await pick("https://x.com/u/status/1", _x_fetch("many")) == single  # not a list
+
+
+async def test_the_fixupx_fallback_and_paging_off_keep_one_link():
+    fixupx = {"https://fixupx.com/": MEDIA}  # vxtwitter has no card: fixupx ignores /pN
+    assert await pick("https://x.com/u/status/1", _x_fetch(30, pages=fixupx)) == Fix(
+        "https://fixupx.com/u/status/1", spoiler=False
+    )
+    assert await pick("https://x.com/u/status/1", _x_fetch(30), paging=False) == Fix(
+        "https://vxtwitter.com/u/status/1", spoiler=False
+    )
+
+
+async def test_page_links_come_from_the_plain_status_path_only():
+    p1, p2 = _pages("u", 1, 2)
+    # The query is not part of the page links.
+    assert await pick("https://x.com/u/status/1?s=20", _x_fetch(15)) == Fix(p1, False, (p2,))
+    assert await pick("https://twitter.com/u/status/1/", _x_fetch(15)) == Fix(p1, False, (p2,))
+    # /photo/3 already selects one item: swapped as today, never paged.
+    assert await pick("https://x.com/u/status/1/photo/3", _x_fetch(15)) == Fix(
+        "https://vxtwitter.com/u/status/1/photo/3", spoiler=False
+    )
+
+
+async def test_a_sensitive_paged_post_keeps_its_spoiler_flag():
+    p1, p2 = _pages("u", 1, 2)
+    assert await pick("https://x.com/u/status/1", _x_fetch(12, sensitive=True)) == Fix(
+        p1, True, (p2,)
+    )
+
+
+async def test_fill_adds_the_pages_a_member_link_lacks():
+    p1, p2, p3 = _pages("u", 1, 3)
+    for url in ("https://fixvx.com/u/status/1", "https://vxtwitter.com/u/status/1?s=20"):
+        assert embedfix.fillable(url)
+        assert await embedfix.fill(url, _x_fetch(25)) == Fix(url, False, (p2, p3))
+    assert await embedfix.fill("https://fixvx.com/u/status/1", _x_fetch(25, True)) == Fix(
+        "https://fixvx.com/u/status/1", True, (p2, p3)
+    )
+    # Nothing to add: one page of media, an unreadable count, a page or item already chosen,
+    # a link that is not a vxtwitter / fixvx post.
+    assert await embedfix.fill("https://fixvx.com/u/status/1", _x_fetch(10)) is None
+    assert await embedfix.fill("https://fixvx.com/u/status/1", _x_fetch(None)) is None
+
+    async def down(url: str, headers: dict[str, str]) -> str | None:
+        return None
+
+    assert await embedfix.fill("https://fixvx.com/u/status/1", down) is None
+    for url in (
+        "https://fixvx.com/u/status/1/p2",
+        "https://fixvx.com/u/status/1/photo/3",
+        "https://fixupx.com/u/status/1",
+        "https://x.com/u/status/1",
+    ):
+        assert not embedfix.fillable(url)
+        assert await embedfix.fill(url, _x_fetch(25)) is None

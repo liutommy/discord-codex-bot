@@ -10,9 +10,14 @@ messages; ``links`` only replaces links-only messages and never appends, so a me
 text is left exactly as posted; ``off`` does nothing member-visible. Internal cleanup (prompt,
 tracking ingest) is not a mode: it always runs.
 
-The same store keeps the second per-guild knob, ``embedfix`` (embedfix.py): whether links
-are also swapped to embed-fixer proxies before delivery. It rides on the linkclean mode for
-delivery, so ``off`` silences both.
+The same store keeps two more per-guild knobs, both riding on the linkclean mode for
+delivery, so ``off`` silences them too. ``embedfix`` (embedfix.py): whether links are also
+swapped to embed-fixer proxies. ``xpages``: what happens to an X post with more media than
+one vxtwitter card shows -- ``on`` (default) delivers every page link of the links the Bot
+swaps to vxtwitter, ``all`` also adds the missing page links under the vxtwitter / fixvx
+links members post themselves, ``off`` keeps one link per post. One knob with three levels
+rather than two switches: adding pages to members' links without paging the Bot's own swaps
+is no useful setting, and one menu keeps the choice in one place.
 """
 
 from __future__ import annotations
@@ -20,9 +25,11 @@ from __future__ import annotations
 import re
 import sqlite3
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
-from .links import strip_tracking
+from .links import strip_tracking, url_spans
 
 # A Discord message is 2000 characters; ten URLs is far past anything a member will paste. This
 # is a loop bound, not a behaviour limit.
@@ -31,6 +38,11 @@ MAX_URLS = 10
 # _replies_to_repost), so the table only has to be exact for recent ones and never grows.
 REPOST_RETENTION_DAYS = 30
 DISCORD_EPOCH_MS = 1_420_070_400_000
+# Discord previews at most five links per message. Page links past that go into overflow
+# messages, and one member message gets at most MESSAGES_PER_POST from the Bot in all: the
+# repost (or the first appended message) plus overflow. Pages past the cap are dropped (logged).
+PREVIEWS_PER_MESSAGE = 5
+MESSAGES_PER_POST = 3
 
 
 def snowflake_before(days: float, now: float | None = None) -> int:
@@ -43,6 +55,12 @@ _WORD = re.compile(r"\w")
 
 MODES = {"all": "全部清洗", "links": "只清洗純連結", "off": "全關"}
 DEFAULT_MODE = "all"
+XPAGES = {
+    "on": "補齊 Bot 換的連結",
+    "all": "也補成員貼的 vxtwitter／fixvx 連結",
+    "off": "關閉（每則貼文一個連結）",
+}
+DEFAULT_XPAGES = "on"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guild_settings (
@@ -124,6 +142,15 @@ class SwitchStore:
     def set_embedfix(self, guild_id: int, enabled: bool) -> None:
         self._put(guild_id, "embedfix", "on" if enabled else "off")
 
+    def xpages(self, guild_id: int) -> str:
+        value = self._get(guild_id, "xpages")
+        return value if value in XPAGES else DEFAULT_XPAGES
+
+    def set_xpages(self, guild_id: int, value: str) -> None:
+        if value not in XPAGES:
+            raise ValueError(f"unknown xpages value {value!r}")
+        self._put(guild_id, "xpages", value)
+
     def remember_repost(self, message_id: int) -> None:
         """A message the Bot posted while cleaning links. Discord's "reply" pings the author,
         which puts the Bot in `mentions` exactly like an @; these ids let on_message tell a
@@ -156,6 +183,89 @@ def spoilered(content: str, url: str) -> bool:
 
 def deliver(url: str, spoiler: bool) -> str:
     return f"||{url}||" if spoiler else url
+
+
+@dataclass(frozen=True)
+class Link:
+    """One link of a member message and how the Bot delivers it."""
+
+    raw: str  # as the member wrote it
+    clean: str  # as delivered: tracking stripped, maybe embed-fixed (page 1 when paged)
+    spoiler: bool = False  # the site rates the work age-restricted: the Bot spoilers it
+    more: tuple[str, ...] = ()  # the further page links, delivered after `clean`
+    # `clean` is the member's own link, which already shows page 1 (embedfix.fill): `more`
+    # holds the pages it lacks, added even where no cleaned copy of the link is posted.
+    own: bool = False
+
+
+def run_of_links(urls: Sequence[str], spoiler: bool, inside_bars: bool = False) -> str:
+    """`urls` as one run of text, each link spoilered on its own when `spoiler`. Inside the
+    member's own ||bars|| (`inside_bars`, which wins: the bars are already there) the
+    separators close and reopen them, so every page link stays blurred and the member's
+    outer bars still close the run."""
+    if inside_bars:
+        return "|| ||".join(urls)
+    return " ".join(deliver(url, spoiler) for url in urls)
+
+
+def replacement(content: str, links: Sequence[Link]) -> tuple[str, list[str]]:
+    """The text that replaces a links-only message (before the author line), and the page
+    links that did not fit its previews, already spoilered as needed. The member's own links
+    keep their places; further pages follow each one while the message has previews left.
+    Inline pages exist only while the links alone leave previews free, so link i is then
+    preview i: a paged link past the previews sends its first page to the overflow too."""
+    runs: dict[str, str] = {}
+    room = PREVIEWS_PER_MESSAGE - len(links)
+    overflow: list[str] = []
+    for index, link in enumerate(links):
+        bars = spoilered(content, link.raw)
+        inline = link.more[: max(room, 0)]
+        room -= len(inline)
+        runs[link.raw] = run_of_links((link.clean, *inline), link.spoiler, bars)
+        late = (link.clean,) if link.more and index >= PREVIEWS_PER_MESSAGE else ()
+        rest = (*late, *link.more[len(inline) :])
+        overflow += [deliver(url, link.spoiler or bars) for url in rest]
+    return rewrite(content, runs), overflow
+
+
+def rewrite(content: str, runs: dict[str, str]) -> str:
+    """`content` with every link written as a key of `runs` replaced by its value, by the
+    link's own span: no text search, so no link is rewritten inside a longer one."""
+    parts: list[str] = []
+    cursor = 0
+    for start, end, url in url_spans(content):
+        if url in runs:
+            parts += [content[cursor:start], runs[url]]
+            cursor = end
+    return "".join(parts) + content[cursor:]
+
+
+def appended(content: str, links: Sequence[Link], copies: bool) -> tuple[list[str], list[str]]:
+    """The messages posted under a member message that is not replaced, one per link, and the
+    page links that did not fit them. `copies` (mode ``all``) posts every changed link with
+    its pages. A member's own link (`Link.own`) gets the pages it lacks with or without
+    `copies`: they are no copy of anything the member wrote."""
+    messages: list[str] = []
+    overflow: list[str] = []
+    for link in links:
+        copy = copies and link.clean != link.raw
+        group = ((link.clean,) if copy else ()) + (link.more if copy or link.own else ())
+        if not group:
+            continue
+        wrapped = [deliver(url, link.spoiler or spoilered(content, link.raw)) for url in group]
+        messages.append(" ".join(wrapped[:PREVIEWS_PER_MESSAGE]))
+        overflow += wrapped[PREVIEWS_PER_MESSAGE:]
+    return messages, overflow
+
+
+def overflow_messages(links: Sequence[str], first: int = 1) -> tuple[list[str], int]:
+    """`links` packed PREVIEWS_PER_MESSAGE to a message, within what MESSAGES_PER_POST leaves
+    after the `first` messages already posted; plus how many links did not fit."""
+    room = max(MESSAGES_PER_POST - first, 0) * PREVIEWS_PER_MESSAGE
+    kept = list(links[:room])
+    step = PREVIEWS_PER_MESSAGE
+    messages = ["\n".join(kept[i : i + step]) for i in range(0, len(kept), step)]
+    return messages, len(links) - len(kept)
 
 
 def is_link_only(content: str, urls: list[str]) -> bool:
