@@ -319,6 +319,16 @@ With `JEV_PICK` (`shadow` by default) the same Jev call also picks the answering
 reads; every table cell must be one). `shadow` only logs the pick next to the table's cell;
 `on` routes by it, never to a candidate weaker than the conversation's current one and only on
 the backend a type needs.
+A wish conversation (the `/codex-wish` turn and every later turn of that conversation) is not
+judged: it goes to `routing.json`'s `wish` target (default `codex|high`, also when the key is
+absent), checked like a table cell. It takes the same stand-ins as a cell, under the type name
+`wish` (`argon_failed` / `claude_failed` need a `wish` entry for an Argon or Claude target), the
+Codex effort drop near quota and then `MODEL_CHAIN`. A conversation already on a stronger
+target keeps it, and so does one whose target or the wish target has no candidate strength
+to compare (`"why": "wish-unranked"`). The wish target applies over a member's own
+`/codex-model` choice and with `JEV_ENABLED=false`, when the Bot reads `routing.json` only
+for this; a file that does not load is logged and the target is then `codex|high`. The
+`Route` log line carries `"status": "wish"` for these turns.
 OpenRouter is stateless, so the Bot keeps those conversations itself (`OPENROUTER_DIR`,
 replayed within `OPENROUTER_HISTORY_CHARS`), sends the persona as the system message, inlines
 images for models the catalog marks image-capable and `reasoning.effort` for models that take it;
@@ -367,6 +377,15 @@ except on a turn whose model the Bot picked (routing), which keeps the spare's t
 from there. The member's own model choice is untouched; the next request tries Codex again. Background classification and memory jobs use the same fallback while preserving their
 isolated/fresh-run settings. With `MODEL_CHAIN` set, member turns follow `MODEL_CHAIN` instead
 (below), and `CODEX_FALLBACK_MODEL` only backs those background jobs (an agy entry only).
+
+Every answered message carries an `<ENTRY>` block, written by the Bot outside `<USER_MESSAGE>`,
+that says how the message reached the Bot: for a slash command its full name and description
+and the option the text came from with that option's description, read from the registered
+command (the `@app_commands.describe` text is the only copy); for `/codex-summary`, that the
+Bot wrote the request from the command's options; otherwise an @mention, a reply to one of the
+Bot's messages, a reply to another message (then `<QUOTED_MESSAGE>`), or the 🔁 button. The
+model reads `<USER_MESSAGE>` as what that command and option are for. Member text, like every
+other block, is defanged so it cannot open or close an `ENTRY` tag.
 
 Links are read by the Bot itself, so both backends see the same thing: every http(s) URL in a
 member's message (up to `LINK_MAX_URLS`) is fetched, converted to text (`LINK_MAX_CHARS` per page)

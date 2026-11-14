@@ -217,12 +217,15 @@ async def summary(client: Any, args: dict) -> dict:
     )
     key = ThreadStore.key(guild_id, channel_id, user_id)
     # A fresh, unremembered turn, as /summary: it must not become the member's conversation.
+    entry = client._slash_entry(
+        client.summary_command, "focus" if args.get("focus") else "", composed=True
+    )
     result = await _as_member(
         client,
         key,
         user_id,
         lambda on_video_slow, on_delta: client._answer(
-            prompt, [], guild_id, user_id, resume="", on_delta=on_delta
+            prompt, [], guild_id, user_id, resume="", on_delta=on_delta, entry=entry
         ),
     )
     remove_dir(result.generated_dir)  # nothing is delivered from here
@@ -269,6 +272,7 @@ async def ask(client: Any, args: dict) -> dict:
             on_delta=on_delta,
             channel_id=channel_id,
             fresh=new,
+            entry=client._slash_entry(client.codex_command, "prompt"),  # the steps of /codex
             **client._routed_kw(routed),
         ),
     )

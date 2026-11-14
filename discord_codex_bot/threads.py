@@ -94,17 +94,26 @@ class ThreadStore:
         there is none, or it is the member's own model's (no route), or the workspace differs.
         Not filtered by model: the router may move it to another backend, and the caller
         resumes the id only on the backend that created it."""
+        found = self.continued(key, message_id, plain, now)
+        return found if found is not None and found["route"] is not None else None
+
+    def continued(
+        self, key: str, message_id: int | None = None, plain: bool = False, now: float | None = None
+    ) -> dict | None:
+        """The conversation a request continues, chosen as `routed` chooses it but with or
+        without a route (a member's own model's thread has none): {"thread_id", "model",
+        "route"}, "route" None when absent. None when there is none or the workspace differs."""
         entry = self._by_message.get(str(message_id)) if message_id is not None else None
         if entry is None or entry.get("version", "") != self._version:
             entry = self._by_key.get(key)
             if entry is None or not self._live(entry, time.time() if now is None else now):
                 return None
-        if entry.get("plain") is None or bool(entry["plain"]) != plain or "route" not in entry:
+        if entry.get("plain") is None or bool(entry["plain"]) != plain:
             return None
         return {
             "thread_id": str(entry["thread_id"]),
             "model": str(entry.get("model", "")),
-            "route": entry["route"],
+            "route": entry.get("route"),
         }
 
     def backend_of(self, thread_id: str) -> str:
