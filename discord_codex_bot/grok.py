@@ -232,6 +232,7 @@ async def run_grok(
     on_delta=None,
     speaker: int | None = None,
     history: str = "",
+    entry: str = "",
 ) -> CodexResult:
     """One turn on Grok with the same contract as run_codex."""
     encoded = await asyncio.to_thread(_encode_images, images) if images else []
@@ -251,6 +252,7 @@ async def run_grok(
             speaker,
             history=parts["history"],
             image_gen=imagegen.prompt_note(config),
+            entry=entry,
         )
 
     earlier = load_transcript(config, resume) if resume else []

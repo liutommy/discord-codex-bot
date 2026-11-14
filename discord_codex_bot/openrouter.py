@@ -376,6 +376,7 @@ async def run_router(
     on_delta=None,
     speaker: int | None = None,
     history: str = "",
+    entry: str = "",
 ) -> CodexResult:
     """One turn on an OpenAI-compatible router with the same contract as run_codex. The
     conversation lives in a Bot-kept transcript (thread id `<prefix>…`); `resume` replays it,
@@ -396,6 +397,7 @@ async def run_router(
             speaker,
             history=history,
             image_gen=imagegen.prompt_note(config),
+            entry=entry,
         )
     )
     history = load_transcript(config, resume) if resume else []
