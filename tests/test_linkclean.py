@@ -239,6 +239,27 @@ def test_replacement_rewrites_each_link_by_its_span_not_inside_a_longer_link() -
     assert text == f"{photo.clean} {P[1]} {P[2]} {P[1]} {P[2]}"
 
 
+def test_bars_shared_by_several_links_blur_every_page_the_bot_adds() -> None:
+    raw = "https://x.com/u/status/1"
+    other = Link("https://a.example/other", "https://a.example/other")
+    content = f"||{raw} {other.raw}||"
+    assert spoilered(content, raw) and spoilered(content, other.raw)
+    text, overflow = replacement(content, [_paged(raw, 6), other])
+    assert text == "||" + "|| ||".join(P[1:5]) + f" {other.raw}||"
+    assert overflow == [f"||{P[5]}||", f"||{P[6]}||"]
+    # The appended path, a Bot swap and a member's own link alike.
+    messages, _ = appended(f"看 {content}", [_paged(raw, 2), other], copies=True)
+    assert messages == [f"||{P[1]}|| ||{P[2]}||"]
+    member = Link(
+        "https://fixvx.com/u/status/1", "https://fixvx.com/u/status/1", more=(P[2],), own=True
+    )
+    messages, _ = appended(f"看 ||{member.raw} {other.raw}||", [member, other], copies=False)
+    assert messages == [f"||{P[2]}||"]
+    # Bars before or after a link, or a last unpaired pair, hide nothing.
+    assert not spoilered(f"||前面|| {raw} ||後面||", raw)
+    assert not spoilered(f"|| {raw}", raw)
+
+
 def test_overflow_is_capped_at_three_messages_in_all() -> None:
     assert overflow_messages(P[6:21]) == (["\n".join(P[6:11]), "\n".join(P[11:16])], 5)
     assert overflow_messages(P[6:8]) == (["\n".join(P[6:8])], 0)

@@ -176,9 +176,27 @@ class SwitchStore:
             )
 
 
+def link_spans(content: str) -> list[tuple[int, int, str, bool]]:
+    """Each link of `content` as written (links.url_spans) plus whether it lies inside the
+    member's ||spoiler bars||. Discord pairs the bars in order, so one pair may cover several
+    links; bars inside a link's own text are not bars, and a last unpaired one hides nothing."""
+    spans = list(url_spans(content))
+    marks: list[int] = []
+    cursor = 0
+    for start, end, _ in [*spans, (len(content), len(content), "")]:
+        marks += [cursor + m.start() for m in re.finditer(r"\|\|", content[cursor:start])]
+        cursor = end
+    pairs = list(zip(marks[::2], marks[1::2], strict=False))
+    return [
+        (start, end, url, any(left < start and end <= right for left, right in pairs))
+        for start, end, url in spans
+    ]
+
+
 def spoilered(content: str, url: str) -> bool:
-    """True when the member wrapped `url` in ||spoiler bars||; a clean copy must keep them."""
-    return re.search(r"\|\|\s*" + re.escape(url) + r"\s*\|\|", content) is not None
+    """True when the member put `url` (anywhere it occurs) inside ||spoiler bars||; every link
+    the Bot delivers for it must be blurred too."""
+    return any(inside for _, _, link, inside in link_spans(content) if link == url)
 
 
 def deliver(url: str, spoiler: bool) -> str:
@@ -214,28 +232,30 @@ def replacement(content: str, links: Sequence[Link]) -> tuple[str, list[str]]:
     keep their places; further pages follow each one while the message has previews left.
     Inline pages exist only while the links alone leave previews free, so link i is then
     preview i: a paged link past the previews sends its first page to the overflow too."""
-    runs: dict[str, str] = {}
+    runs: dict[tuple[str, bool], str] = {}
     room = PREVIEWS_PER_MESSAGE - len(links)
     overflow: list[str] = []
     for index, link in enumerate(links):
         bars = spoilered(content, link.raw)
         inline = link.more[: max(room, 0)]
         room -= len(inline)
-        runs[link.raw] = run_of_links((link.clean, *inline), link.spoiler, bars)
+        for inside in (False, True):  # per occurrence: inside the member's bars or not
+            runs[link.raw, inside] = run_of_links((link.clean, *inline), link.spoiler, inside)
         late = (link.clean,) if link.more and index >= PREVIEWS_PER_MESSAGE else ()
         rest = (*late, *link.more[len(inline) :])
         overflow += [deliver(url, link.spoiler or bars) for url in rest]
     return rewrite(content, runs), overflow
 
 
-def rewrite(content: str, runs: dict[str, str]) -> str:
-    """`content` with every link written as a key of `runs` replaced by its value, by the
-    link's own span: no text search, so no link is rewritten inside a longer one."""
+def rewrite(content: str, runs: dict[tuple[str, bool], str]) -> str:
+    """`content` with every link replaced by `runs[link, inside the member's bars]` when
+    present, by the link's own span: no text search, so no link is rewritten inside a longer
+    one."""
     parts: list[str] = []
     cursor = 0
-    for start, end, url in url_spans(content):
-        if url in runs:
-            parts += [content[cursor:start], runs[url]]
+    for start, end, url, inside in link_spans(content):
+        if (url, inside) in runs:
+            parts += [content[cursor:start], runs[url, inside]]
             cursor = end
     return "".join(parts) + content[cursor:]
 

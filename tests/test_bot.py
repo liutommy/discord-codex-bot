@@ -699,6 +699,32 @@ async def test_six_paged_posts_spread_all_twelve_pages_over_three_messages(
     ]
 
 
+async def test_bars_shared_by_several_links_blur_the_overflow_pages(client, monkeypatch) -> None:
+    _x_post(monkeypatch, 60)  # six pages
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("||https://x.com/u/status/1 https://a.example/other||", channel)
+    message.id = 1
+    await client._linkclean(message)
+    assert message.deleted == 1
+    assert channel.sent == [
+        f"<@{USER}>\n||"
+        + "|| ||".join(_page(n) for n in range(1, 5))
+        + " https://a.example/other||",
+        f"||{_page(5)}||\n||{_page(6)}||",
+    ]
+
+
+async def test_a_members_link_under_shared_bars_gets_blurred_pages(client, monkeypatch) -> None:
+    _x_post(monkeypatch, 25)
+    client.linkclean.set_xpages(GUILD, "all")
+    channel = _FakeChannel(manage_messages=True)
+    message = _fake_message("看 ||https://fixvx.com/u/status/1 https://b.example/y||", channel)
+    message.id = 1
+    await client._linkclean(message)
+    assert message.deleted == 0 and channel.sent == [f"||{_page(2)}|| ||{_page(3)}||"]
+    client.linkclean.set_xpages(GUILD, "on")
+
+
 class _Member(discord.Member):
     def __init__(self, administrator: bool, manage_guild: bool, user_id: int = 555) -> None:
         self._user = types.SimpleNamespace(id=user_id)  # Member.id is attrgetter("_user.id")
