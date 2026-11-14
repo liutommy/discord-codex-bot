@@ -108,7 +108,18 @@ from .imagegen import (
     extract_image_tags,
     request_from_tag,
 )
-from .linkclean import MAX_URLS, MODES, SwitchStore, deliver, is_link_only, plan, spoilered
+from .linkclean import (
+    MAX_URLS,
+    MODES,
+    XPAGES,
+    Link,
+    SwitchStore,
+    appended,
+    is_link_only,
+    overflow_messages,
+    plan,
+    replacement,
+)
 from .links import (
     FETCH_TAG,
     Preview,
@@ -279,6 +290,8 @@ SCOPE_CHOICES = [app_commands.Choice(name=label, value=value) for value, label i
 LINKCLEAN_CHOICES = [app_commands.Choice(name="查詢", value="status")] + [
     app_commands.Choice(name=label, value=value) for value, label in MODES.items()
 ]
+XPAGES_CHOICES = [app_commands.Choice(name=label, value=value) for value, label in XPAGES.items()]
+XPAGES_NAME = "x多圖分頁"  # what Discord shows for the option (lowercase, no spaces)
 INSTRUCTION_CHOICES = [
     app_commands.Choice(name=label, value=value)
     for value, label in (
@@ -2402,8 +2415,10 @@ class DiscordCodexClient(discord.Client):
         the author @'d); anything else keeps its text and only the changed links are appended
         below; a links-only message the Bot cannot delete degrades to the append. `links`:
         only the replacement, never an append -- a message with text, or one the Bot cannot
-        replace, is left exactly as posted. `off`: nothing. The caller contains failures so
-        mention handling continues."""
+        replace, is left exactly as posted. `off`: nothing. Page links of an X post with many
+        media (the `xpages` knob) travel with their link and spill into at most
+        MESSAGES_PER_POST messages in all. The caller contains failures so mention handling
+        continues."""
         guild = message.guild
         if guild is None:
             return
@@ -2421,58 +2436,79 @@ class DiscordCodexClient(discord.Client):
             return
         raw = find_urls(message.content, MAX_URLS, clean=False)
         clean = [strip_tracking(url) for url in raw]
-        spoil = [False] * len(raw)
-        if self.linkclean.embedfix(guild.id):
-            clean, spoil = await self._embedfix(clean)
-        outcome = plan(message.content, raw, clean)
-        if outcome is None:
+        fixes = await self._embedfix(guild.id, clean)
+        # A fix that keeps the link is a fill (the member's own vxtwitter / fixvx link); a
+        # swap always names a proxy host.
+        links = [
+            Link(r, fix.url, fix.spoiler, fix.more, own=fix.url == c) if fix else Link(r, c)
+            for r, c, fix in zip(raw, clean, fixes, strict=True)
+        ]
+        outcome = plan(message.content, raw, [link.clean for link in links])
+        if outcome is None and not any(link.more for link in links):
             return
-        _, _, links_only = outcome
-        if mode == "links" and not links_only:
+        links_only = outcome is not None and outcome[2]  # nothing changed: nothing to replace
+        if links_only and await self._repost(message, links):
             return
-        member = guild.me
-        replacement = message.content
-        for original, cleaned, spoiler in zip(raw, clean, spoil, strict=True):
-            # The member's own ||bars|| stay in the text; a rating-forced spoiler adds them.
-            wrapped = deliver(cleaned, spoiler and not spoilered(message.content, original))
-            replacement = replacement.replace(original, wrapped)
-        replacement = f"<@{message.author.id}>\n{replacement}"
+        # `links` never appends a cleaned copy; the pages a member's own link lacks are added
+        # in either mode (the `xpages` knob chose them).
+        messages, overflow = appended(message.content, links, copies=mode == "all")
+        # Individual URLs keep each send within Discord's limit. Oversized URLs remain
+        # in the untouched original instead of being truncated into broken links.
+        for text in messages:
+            if len(text) <= 2000:
+                posted = await message.channel.send(
+                    text, allowed_mentions=discord.AllowedMentions.none()
+                )
+                self._remember_repost(posted)
+        await self._overflow(message, overflow, first=len(messages))
+
+    async def _repost(self, message: discord.Message, links: list[Link]) -> bool:
+        """Replace a links-only message with its delivered links; False (nothing sent) when
+        the Bot cannot: no Manage Messages, content it would lose, or too long a result."""
+        member = message.guild.me if message.guild else None
+        text, overflow = replacement(message.content, links)
+        text = f"<@{message.author.id}>\n{text}"
         reply_to = _reply_reference(message)
         can_replace = (
-            links_only
-            and member is not None
+            member is not None
             and message.channel.permissions_for(member).manage_messages
             and not message.attachments
             and not message.stickers
             and (message.reference is None or reply_to is not None)
             and message.thread is None
-            and len(replacement) <= 2000
+            and len(text) <= 2000
         )
-        if can_replace:
-            # Never remove the only copy: delivery must succeed before deletion.
-            posted = await message.channel.send(
-                replacement,
-                allowed_mentions=discord.AllowedMentions(
-                    users=[message.author], everyone=False, roles=False, replied_user=True
-                ),
-                **({"reference": reply_to} if reply_to is not None else {}),
+        if not can_replace:
+            return False
+        # Never remove the only copy: delivery must succeed before deletion.
+        posted = await message.channel.send(
+            text,
+            allowed_mentions=discord.AllowedMentions(
+                users=[message.author], everyone=False, roles=False, replied_user=True
+            ),
+            **({"reference": reply_to} if reply_to is not None else {}),
+        )
+        self._remember_repost(posted)
+        await message.delete()
+        # After the deletion: a failed overflow send must not leave the original behind too.
+        await self._overflow(message, overflow, first=1)
+        return True
+
+    async def _overflow(self, message: discord.Message, links: list[str], first: int) -> None:
+        """The page links that did not fit the first messages, within the message cap."""
+        messages, dropped = overflow_messages(links, first)
+        if dropped:
+            LOGGER.info(
+                "linkclean: %d page link(s) past the message cap dropped message=%s",
+                dropped,
+                message.id,
             )
-            self._remember_repost(posted)
-            await message.delete()
-        elif mode == "links":
-            return  # nothing to replace means nothing to do: this mode never appends
-        else:
-            # Individual URLs keep each send within Discord's limit. Oversized URLs remain
-            # in the untouched original instead of being truncated into broken links.
-            for original, cleaned, spoiler in zip(raw, clean, spoil, strict=True):
-                if cleaned == original:
-                    continue
-                text = deliver(cleaned, spoiler or spoilered(message.content, original))
-                if len(text) <= 2000:
-                    posted = await message.channel.send(
-                        text, allowed_mentions=discord.AllowedMentions.none()
-                    )
-                    self._remember_repost(posted)
+        for text in messages:
+            if len(text) <= 2000:
+                posted = await message.channel.send(
+                    text, allowed_mentions=discord.AllowedMentions.none()
+                )
+                self._remember_repost(posted)
 
     def _remember_repost(self, posted: object) -> None:
         message_id = getattr(posted, "id", None)
@@ -2495,22 +2531,36 @@ class DiscordCodexClient(discord.Client):
         urls = find_urls(body, MAX_URLS, clean=False)
         return bool(urls) and is_link_only(body, urls)
 
-    async def _embedfix(self, urls: list[str]) -> tuple[list[str], list[bool]]:
-        """Each link in its embed-fixer proxy form when a proxy page verifiably carries
-        media for Discord's crawler (embedfix.pick), else as given; plus, per link, whether
-        it must be delivered spoilered (an age-restricted work)."""
-        if not any(embedfix.candidates(url) for url in urls):
-            return urls, [False] * len(urls)
+    async def _embedfix(self, guild_id: int, urls: list[str]) -> list[embedfix.Fix | None]:
+        """Per link, its embed-fixer proxy form when a proxy page verifiably carries media
+        for Discord's crawler (embedfix.pick), with the spoiler flag and, per the `xpages`
+        knob, the further page links; or, at the knob's `all` level, the pages a member's own
+        vxtwitter / fixvx link lacks (embedfix.fill). None keeps the link as given."""
+        swap = self.linkclean.embedfix(guild_id)
+        xpages = self.linkclean.xpages(guild_id)
+
+        def swapped(url: str) -> bool:
+            return swap and bool(embedfix.candidates(url))
+
+        def filled(url: str) -> bool:
+            return xpages == "all" and embedfix.fillable(url)
+
+        if not any(swapped(url) or filled(url) for url in urls):
+            return [None] * len(urls)
         async with _guarded_session(self.config) as session:
 
             async def fetch(url: str, headers: dict[str, str]) -> str | None:
                 return await embedfix.fetch_text(session, url, headers)
 
-            fixes = [await embedfix.pick(url, fetch) for url in urls]
-        return (
-            [fix.url if fix else url for fix, url in zip(fixes, urls, strict=True)],
-            [bool(fix and fix.spoiler) for fix in fixes],
-        )
+            fixes: list[embedfix.Fix | None] = []
+            for url in urls:
+                if swapped(url):
+                    fixes.append(await embedfix.pick(url, fetch, paging=xpages != "off"))
+                elif filled(url):
+                    fixes.append(await embedfix.fill(url, fetch))
+                else:
+                    fixes.append(None)
+        return fixes
 
     async def _previews(
         self, message: discord.Message, quoted: discord.Message | None
@@ -3970,10 +4020,14 @@ class DiscordCodexClient(discord.Client):
             text = "你在這個頻道沒有進行中的請求。"
         await interaction.response.send_message(text, ephemeral=True)
 
-    @app_commands.describe(action="查詢，或設為全部清洗／只清洗純連結／全關")
-    @app_commands.choices(action=LINKCLEAN_CHOICES)
+    @app_commands.describe(
+        action="查詢，或設為全部清洗／只清洗純連結／全關",
+        pages="選填：X 貼文超過 10 張圖或影片時，要不要補上每一頁的連結",
+    )
+    @app_commands.rename(pages=XPAGES_NAME)
+    @app_commands.choices(action=LINKCLEAN_CHOICES, pages=XPAGES_CHOICES)
     async def linkclean_command(
-        self, interaction: discord.Interaction, action: str = "status"
+        self, interaction: discord.Interaction, action: str = "status", pages: str | None = None
     ) -> None:
         reason = self._access(interaction.guild_id, interaction.channel, interaction.channel_id)
         if reason:
@@ -3989,18 +4043,24 @@ class DiscordCodexClient(discord.Client):
             )
             return
         action = action.strip().lower()
-        if action == "status":
-            label = MODES[self.linkclean.mode(interaction.guild.id)]
-            await interaction.response.send_message(f"連結洗參數：{label}", ephemeral=True)
-        elif action in MODES:
-            self.linkclean.set(interaction.guild.id, action)
+        pages = pages.strip().lower() if pages else None
+        if (action not in MODES and action != "status") or pages not in (None, *XPAGES):
             await interaction.response.send_message(
-                f"連結洗參數已設為「{MODES[action]}」。", ephemeral=True
+                f"action 請用 status、all、links 或 off；{XPAGES_NAME} 請用 on、all 或 off。",
+                ephemeral=True,
             )
+            return
+        guild_id = interaction.guild.id
+        if pages is not None:
+            self.linkclean.set_xpages(guild_id, pages)
+        if action in MODES:
+            self.linkclean.set(guild_id, action)
+            text = f"連結洗參數已設為「{MODES[action]}」。"
         else:
-            await interaction.response.send_message(
-                "action 請用 status、all、links 或 off。", ephemeral=True
-            )
+            text = f"連結洗參數：{MODES[self.linkclean.mode(guild_id)]}"
+        if action == "status" or pages is not None:
+            text += f"\n{XPAGES_NAME}：{XPAGES[self.linkclean.xpages(guild_id)]}"
+        await interaction.response.send_message(text, ephemeral=True)
 
     @app_commands.describe(action="查詢、開啟或關閉")
     @app_commands.choices(action=EMBEDFIX_CHOICES)

@@ -154,13 +154,24 @@ COMMAND_GUIDE: dict[str, tuple[str, list[str]]] = {
     "-linkclean": (
         "設定「連結洗參數」：全部清洗（預設；純連結訊息整則換成乾淨版、帶文字的在下面補乾淨連結）、"
         "只清洗純連結（只換純連結訊息，帶文字的不動也不補連結；Bot 沒有刪訊息權限時就什麼都不做）、"
-        "全關。查詢會顯示目前設定。只有伺服器主人、管理員或被特別列出的人能用。",
-        ["/{p}-linkclean 查詢", "/{p}-linkclean 只清洗純連結", "/{p}-linkclean 全關"],
+        "全關。選填的「x多圖分頁」管 X 貼文超過 10 張圖或影片時的連結"
+        "（Discord 一個預覽最多 10 張）："
+        "補齊 Bot 換的連結（預設；Bot 換成 vxtwitter 的連結會給每一頁 /p1、/p2…）、"
+        "也補成員貼的 vxtwitter／fixvx 連結（成員自己貼的連結不動，Bot 在下面補上第 2 頁之後）、"
+        "關閉（每則貼文一個連結）。一則訊息超過 5 個連結時多的頁移到下一則，"
+        "Bot 最多發 3 則，再多的頁不發。"
+        "查詢會顯示目前設定。只有伺服器主人、管理員或被特別列出的人能用。",
+        [
+            "/{p}-linkclean 查詢",
+            "/{p}-linkclean 只清洗純連結",
+            "/{p}-linkclean 全關",
+            "/{p}-linkclean x多圖分頁:也補成員貼的 vxtwitter／fixvx 連結",
+        ],
     ),
     "-embedfix": (
         "開關「預覽修正」：預設開啟。貼 X、Threads、TikTok、Pixiv、Tumblr、Facebook 的貼文連結時，"
         "Bot 會換成能讓 Discord 直接預覽影片和圖片的版本"
-        "（fixupx、vxthreads、tnktok、phixiv、tpmblr、facebed），點進去仍會回到原站；"
+        "（vxtwitter 或 fixupx、vxthreads、tnktok、phixiv、tpmblr、facebed），點進去仍會回到原站；"
         "換之前會先確認那個版本真的有影片或圖片，沒有就維持原連結；Pixiv 的 R-18 作品和 X 標為"
         "敏感的貼文會用 ||暴雷|| 包住讓預覽打碼。投遞方式跟著「連結洗參數」走。"
         "只有伺服器主人、管理員或被特別列出的人能用。",
@@ -250,7 +261,8 @@ FEATURES: list[str] = [
     "**預覽修正**：X、Threads、TikTok、Pixiv、Tumblr、Facebook 的貼文連結會換成 Discord 能直接"
     "播影片、看圖的版本"
     "（點進去仍回原站），確認過真的有內容才換；Pixiv R-18 與 X 敏感貼文會自動加 ||暴雷||。"
-    "伺服器主人或管理員可用 `/{p}-embedfix` 開關。",
+    "X 貼文超過 10 張圖或影片時，Bot 會給每一頁的連結（每頁 10 張）。"
+    "伺服器主人或管理員可用 `/{p}-embedfix` 開關，分頁在 `/{p}-linkclean` 的「x多圖分頁」設定。",
     "**貼影片連結**會看影片再回答：YouTube 直接看（長片也行），X、TikTok、Instagram、Bilibili、"
     "Reddit、Streamable 等會抓下來看；長片會先回「🎬 處理中」再改成正式答案。",
     "**模型來源**：Grok（會自己用 X 搜尋查貼文與帳號；看得到 PNG／JPEG 圖，"
