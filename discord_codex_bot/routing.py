@@ -10,13 +10,18 @@ higher of that message's band and its own (routing.decide).
 With JEV_PICK (shadow by default) the same call also asks Jev which of routing.json's
 `candidates` should answer. Shadow logs that pick beside the table's cell; on routes by it
 (routing.pick_route): never to a target weaker than the conversation's current one, only on
-the backend a type needs (live-x: Grok), and Argon or Claude only for a type with their stand-in."""
+the backend a type needs (live-x: Grok), and Argon or Claude only for a type with their stand-in.
+
+A wish conversation (the wish command's thread, and every later turn of it) is not judged: it goes
+to routing.json's `wish` target (routing.wish_route), with the same stand-ins and the same
+never-weaker rule, under the type name WISH."""
 
 from __future__ import annotations
 
 import json
 import logging
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +43,8 @@ from .backends import (
 from .config import REASONING_EFFORTS, Config
 
 LOGGER = logging.getLogger(__name__)
+WISH = "wish"  # the type a wish conversation is routed as; never one of Jev's TYPES
+DEFAULT_WISH = "codex|high"  # the wish target when routing.json names none
 TYPES = ("chat", "quick", "live-x", "live-web", "text", "code", "reason", "create", "advice")
 BANDS = "LMHX"
 CONTEXT_TURNS = 3  # earlier messages of the member's in recent_context, as in the evaluation
@@ -174,6 +181,7 @@ class Table:
     codex_five_hour: float
     codex_seven_day: float
     candidates: dict[str, Candidate] = field(default_factory=dict)  # option key -> candidate
+    wish: str = DEFAULT_WISH  # where a wish conversation goes instead of a type/band cell
 
     def strength(self, entry: str) -> int | None:
         """The strength of the candidate routing to `entry`; None when no candidate does."""
@@ -235,6 +243,7 @@ def load_table(path: Path) -> Table:
             codex_five_hour=float(degrade["codex_quota"]["five_hour_percent"]),
             codex_seven_day=float(degrade["codex_quota"]["seven_day_percent"]),
             candidates=_candidates(data.get("candidates", {})),
+            wish=str(data.get("wish", DEFAULT_WISH)),
         )
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         raise ValueError(f"routing: cannot load {path}: {error}") from None
@@ -257,26 +266,11 @@ def load_table(path: Path) -> Table:
         ("argon_failed", table.argon_failed),
     ):
         for kind in stand_ins:
-            if kind not in TYPES:
+            if kind not in (*TYPES, WISH):
                 raise ValueError(f"routing: {name} names an unknown type {kind!r}")
-    for kind, row in table.types.items():
-        if any(is_argon(cell) for cell in row) and kind not in table.argon_failed:
-            raise ValueError(
-                f"routing: argon_failed has no stand-in for {kind!r}, which uses Argon"
-            )
-        if any(is_claude(cell) for cell in row) and kind not in table.claude_failed:
-            raise ValueError(
-                f"routing: claude_failed has no stand-in for {kind!r}, which uses Claude"
-            )
-    cells = [cell for row in table.types.values() for cell in row]
-    if table.candidates:
-        targets = {c.target for c in table.candidates.values()}
-        missing = sorted({cell for cell in cells if current(cell) not in targets})
-        if missing:
-            # A conversation's current target needs a strength for "never weaker" to hold.
-            raise ValueError(f"routing: cells without a candidate: {', '.join(missing)}")
+    # The wish target is a cell too: it needs its stand-in and a strength.
+    _check_cells(table, [*table.types.items(), (WISH, (table.wish,))])
     for entry in [
-        *cells,
         *(c.target for c in table.candidates.values()),
         table.grok_spent,
         table.live_x_without_grok,
@@ -285,6 +279,55 @@ def load_table(path: Path) -> Table:
         *table.image,
     ]:
         check_entry(entry)
+    return table
+
+
+def _check_cells(table: Table, rows: Sequence[tuple[str, Sequence[str]]]) -> None:
+    """Each row's cells, by type: an Argon or Claude cell needs its stand-in for that type, every
+    cell a candidate's strength when the table has candidates, and a real target."""
+    for kind, row in rows:
+        if any(is_argon(cell) for cell in row) and kind not in table.argon_failed:
+            raise ValueError(
+                f"routing: argon_failed has no stand-in for {kind!r}, which uses Argon"
+            )
+        if any(is_claude(cell) for cell in row) and kind not in table.claude_failed:
+            raise ValueError(
+                f"routing: claude_failed has no stand-in for {kind!r}, which uses Claude"
+            )
+    cells = [cell for _, row in rows for cell in row]
+    if table.candidates:
+        targets = {c.target for c in table.candidates.values()}
+        missing = sorted({cell for cell in cells if current(cell) not in targets})
+        if missing:
+            # A conversation's current target needs a strength for "never weaker" to hold.
+            raise ValueError(f"routing: cells without a candidate: {', '.join(missing)}")
+    for cell in cells:
+        check_entry(cell)
+
+
+def wish_table(path: Path) -> Table:
+    """The table wish conversations are routed by while Jev is off (JEV_ENABLED=false):
+    routing.json as load_table reads it. One that cannot be loaded is logged, not fatal (with
+    Jev off the Bot never needed it): the table then knows only DEFAULT_WISH, checked as
+    load_table checks a wish target, with no candidates (wish_route keeps a running
+    conversation's target) and no Codex quota drop."""
+    try:
+        return load_table(path)
+    except ValueError as error:
+        LOGGER.warning("%s; wish conversations go to %s", error, DEFAULT_WISH)
+    table = Table(
+        types={},
+        needs={},
+        image=(),
+        grok_spent=DEFAULT_WISH,
+        live_x_without_grok=DEFAULT_WISH,
+        claude_failed={},
+        argon_failed={},
+        codex_five_hour=float("inf"),
+        codex_seven_day=float("inf"),
+        wish=DEFAULT_WISH,
+    )
+    _check_cells(table, [(WISH, (table.wish,))])
     return table
 
 
@@ -408,6 +451,28 @@ def decide(table: Table, kind: str, level: str, current: Route | None) -> tuple[
     if cell == current.entry:
         return moved, "kept"
     return moved, "harder" if BANDS.index(level) > BANDS.index(current.band) else "type"
+
+
+def wish_route(table: Table, current_route: Route | None) -> tuple[Route, str]:
+    """(where a wish turn goes, why): the table's wish target instead of a type/band cell, with
+    no Jev judgement. A running conversation still never moves to a weaker target: one already
+    on a stronger one (a wish target lowered since, a conversation routed before it was a wish
+    one) stays there, where that target has its stand-in for wish turns. When either strength
+    is unknown (no candidates, or a current target none of them routes to) the two cannot be
+    compared, and the conversation stays too: "wish-unranked". The band is kept, for a
+    conversation that is routed by type again later."""
+    if current_route is None:
+        return Route(table.wish, "M", WISH), WISH
+    band, earlier = current_route.band, current_route.earlier
+    if table.wish == current_route.entry:
+        return Route(table.wish, band, WISH, earlier), "kept"
+    if has_stand_in(table, WISH, current_route.entry):
+        floor, strength = table.strength(current_route.entry), table.strength(table.wish)
+        if floor is None or strength is None:
+            return Route(current_route.entry, band, WISH, earlier), "wish-unranked"
+        if strength < floor:
+            return Route(current_route.entry, band, WISH, earlier), "wish-weaker"
+    return Route(table.wish, band, WISH, earlier), WISH
 
 
 def has_stand_in(table: Table, kind: str, target: str) -> bool:

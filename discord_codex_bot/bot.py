@@ -474,6 +474,32 @@ def with_quoted_message(prompt: str, author: str, content: str, image_count: int
     return "\n".join([QUOTE_FENCE, *parts, QUOTE_FENCE, prompt or "請看這則訊息。"])
 
 
+# The prompt's ENTRY block for the ways of asking that are not a slash command (a slash command
+# describes itself: `_slash_entry`). Each says only how the text arrived; what to do with it is
+# the member's to say.
+MENTION_ENTRY = "The member @mentioned the Bot in a channel message."
+REPLY_TO_BOT_ENTRY = "The member replied to one of the Bot's own messages, which mentions the Bot."
+QUOTED_REPLY_ENTRY = (
+    "The member replied to another message and mentioned the Bot; that message is QUOTED_MESSAGE."
+)
+UNREAD_REPLY_ENTRY = "The member replied to a message the Bot could not read and mentioned the Bot."
+REDO_ENTRY = (
+    "The member pressed the redo button under one of the Bot's answers: USER_MESSAGE is the"
+    " question that answer was for, asked again for another answer."
+)
+
+
+def mention_entry(replied: bool, referenced: bool, folded: bool) -> str:
+    """ENTRY for an @mention (on_message): whether the message is a reply, whether the message it
+    replies to could be read, and whether that message was folded in as QUOTED_MESSAGE (anything
+    but one of the Bot's answers)."""
+    if folded:
+        return QUOTED_REPLY_ENTRY
+    if referenced:
+        return REPLY_TO_BOT_ENTRY
+    return UNREAD_REPLY_ENTRY if replied else MENTION_ENTRY
+
+
 READ_TAGS = (
     SEARCH_TAG,
     RECALL_TAG,
@@ -893,6 +919,10 @@ class DiscordCodexClient(discord.Client):
         # sending every member to DEFAULT_MODEL.
         self.routing: Table | None = (
             routing.load_table(config.routing_path) if config.jev_enabled else None
+        )
+        # Wish conversations go to routing.json's wish target with Jev off too (`_route`).
+        self.wish_routing: Table | None = (
+            None if config.jev_enabled else routing.wish_table(config.routing_path)
         )
         self._emoji_cache: dict[int, dict[str, discord.PartialEmoji]] = {}
         self.reminders = ReminderStore(config.codex_home / "reminders.json")
@@ -1702,6 +1732,28 @@ class DiscordCodexClient(discord.Client):
                 return detail
         return ""
 
+    def _slash_entry(self, callback, option: str = "", composed: bool = False) -> str:
+        """ENTRY for a slash command: its full name and description and the option the text came
+        from, with that option's description, all read from the registered command, so the
+        @app_commands.describe text is the only copy. `callback` is the command's method,
+        `option` its Python parameter name; `composed` is a request the Bot wrote from the
+        options (/summary), with `option`'s text inside it."""
+        # discord.py keeps the function and binds `self` itself, so match the method's function.
+        command = next(c for c in self.tree.get_commands() if c.callback is callback.__func__)
+        lines = [f"Slash command /{command.qualified_name}: {command.description}"]
+        about = ""
+        if option:
+            parameter = command.get_parameter(option)  # an unknown name fails below, loudly
+            about = f"option {parameter.display_name} ({parameter.description})"
+        if composed:
+            lines.append(
+                "USER_MESSAGE is a request the Bot wrote from this command's options"
+                + (f", with the text of {about} inside it." if about else ".")
+            )
+        elif about:
+            lines.append(f"USER_MESSAGE is the text of its {about}.")
+        return "\n".join(lines)
+
     def _command_rows(self) -> list[tuple[str, str, list[str]]]:
         return [
             # display_name: what Discord shows (app_commands.rename), which HELP must match
@@ -1817,6 +1869,7 @@ class DiscordCodexClient(discord.Client):
         message_id: int | None = None,
         wish: bool = False,
         earlier_threads: Sequence[str] = (),
+        entry: str = "",
     ) -> CodexResult:
         """Run one validated request through the member's backend; always returns text.
         `on_delta` receives the accumulated answer while a backend streams it (agy, routers).
@@ -1829,7 +1882,9 @@ class DiscordCodexClient(discord.Client):
         the chosen backend cannot resume that conversation; `fresh` suppresses those reads.
         `wish` opens a wish conversation (the wish command); a later turn is one when the thread
         it resumes, or an earlier thread of its routed conversation (`earlier_threads`, set when
-        the router moved it to another backend), was marked by a wish-mode answer."""
+        the router moved it to another backend), was marked by a wish-mode answer. `entry` says
+        how the message reached the Bot (`_slash_entry`, `mention_entry`, `REDO_ENTRY`): the
+        prompt's ENTRY block, so the model reads the text as what that way of asking is for."""
         wish_mode = guild_id is not None and (
             wish or any(self.wishes.is_wish_thread(thread) for thread in (resume, *earlier_threads))
         )
@@ -2077,6 +2132,7 @@ class DiscordCodexClient(discord.Client):
                 help=self.help_sheet(),
                 files=files,
                 speaker=user_id,  # shared reply threads: who said it (harvest, digest)
+                entry=entry,
             )
             # On-demand reads (search snippets / paged recall): the Bot executes the request and
             # feeds the result back into the same thread. Bounded by MEMORY_RECALL_ROUNDS.
@@ -2666,18 +2722,20 @@ class DiscordCodexClient(discord.Client):
         plain: bool,
         fresh: bool = False,
         effort: str = "",
+        wish: bool = False,
     ) -> RoutePlan | None:
         """Where this request goes when the router picks the model; None when it does not (Jev
-        off, or the member chose a model with /model). Every message is judged; a conversation
-        never drops a band and follows its latest message of substance (routing.decide). An
-        image is not judged (Jev reads text only): that message goes down the table's `image`
-        list (Codex → Grok → agy; a conversation already on a Codex cell keeps it), and the
-        conversation's route is left for the next message. No judgement otherwise — a Jev
+        off, or the member chose a model with /model), except for a wish turn (below), which
+        is routed either way. Every message is judged; a conversation never drops a band and
+        follows its latest message of substance (routing.decide). An image is not judged (Jev
+        reads text only): that message goes down the table's `image` list (Codex → Grok → agy;
+        a conversation already on a Codex cell keeps it), and the conversation's route is left
+        for the next message. No judgement otherwise — a Jev
         timeout, error, odd answer or low confidence — keeps a routed conversation where it is
-        and sends a new one to DEFAULT_MODEL, without retrying Jev."""
-        table = self.routing
-        if table is None or self._own_model(guild_id, user_id):
-            return None
+        and sends a new one to DEFAULT_MODEL, without retrying Jev. A wish turn (`wish`: the wish
+        command opening one; or a conversation whose threads were marked by a wish-mode answer,
+        as `_answer` tells) is not judged either: it goes to the table's wish target, with Jev
+        off (`wish_routing`) and over the member's own /model too."""
         current = None if fresh else self.threads.routed(key, replied_to, plain)
         route = Route.from_dict(current["route"]) if current else None
         if route is not None and routing.retired(route.entry):
@@ -2686,6 +2744,12 @@ class DiscordCodexClient(discord.Client):
             LOGGER.info("Stored route %s is on a retired model; starting over", route.entry)
             current = route = None
         sources = [*route.earlier, current["thread_id"]] if current and route else []
+        wish_turn = guild_id is not None and (
+            wish or any(self.wishes.is_wish_thread(thread) for thread in sources)
+        )
+        table = self.routing or (self.wish_routing if wish_turn else None)
+        if table is None or (not wish_turn and self._own_model(guild_id, user_id)):
+            return None
         turns = await asyncio.to_thread(
             lambda: [turn for thread in sources for turn in transcript_turns(self.config, thread)]
         )
@@ -2693,7 +2757,11 @@ class DiscordCodexClient(discord.Client):
         own = own.strip()
         said = [t.text for t in turns if t.role == "user" and t.speaker in (None, user_id)]
         images = any((a.content_type or "").startswith("image/") for a in attachments)
-        if images:
+        if wish_turn:
+            # First: a wish conversation stays on its target for an image too (it reads images)
+            # and for a slash effort, which then only sets the strength there, as on any cell.
+            verdict = Verdict(routing.WISH)
+        elif images:
             # Before the effort check: an image always takes the image list (a member's effort
             # then only sets the strength there, below).
             verdict = Verdict("image")
@@ -2722,6 +2790,8 @@ class DiscordCodexClient(discord.Client):
                 )
             else:
                 route, why = routing.decide(table, verdict.kind, level, route)
+        elif wish_turn:
+            route, why = routing.wish_route(table, route)
         elif image_turn:
             route, why = route or Route(table.image[0], "M", ""), "image"
         elif route is not None:
@@ -3170,6 +3240,7 @@ class DiscordCodexClient(discord.Client):
                 conversation_channel=interaction.channel,
                 replied_to=getattr(interaction.message, "id", None),
                 previews=previews,
+                entry=REDO_ENTRY,
                 **self._routed_kw(routed),
             )
         finally:
@@ -3253,6 +3324,8 @@ class DiscordCodexClient(discord.Client):
                 pass
 
         # A fresh, unremembered turn: the summary must not become the member's conversation.
+        # The Bot wrote the request, but it still says it came from /summary and its focus.
+        entry = self._slash_entry(self.summary_command, "focus" if focus else "", composed=True)
         result = await self._run_tracked(
             key,
             interaction.user.id,
@@ -3264,6 +3337,7 @@ class DiscordCodexClient(discord.Client):
                 interaction.user.id,
                 resume="",
                 on_delta=on_delta,
+                entry=entry,
             ),
         )
         if result is None:
@@ -5265,7 +5339,12 @@ class DiscordCodexClient(discord.Client):
             await interaction.response.send_message(reason, ephemeral=True)
             return
         await self._slash_ask(
-            interaction, prompt, attachments, effort.value if effort is not None else "", new
+            interaction,
+            prompt,
+            attachments,
+            effort.value if effort is not None else "",
+            new,
+            entry=self._slash_entry(self.codex_command, "prompt"),
         )
 
     @app_commands.rename(request="需求")
@@ -5284,7 +5363,8 @@ class DiscordCodexClient(discord.Client):
             return
         # Always a new conversation: the wish mode belongs to the thread this answer starts, and
         # replying to the answer (or @mentioning the Bot here afterwards) continues it.
-        await self._slash_ask(interaction, request, [], "", new=True, wish=True)
+        entry = self._slash_entry(self.wish_command, "request")
+        await self._slash_ask(interaction, request, [], "", new=True, wish=True, entry=entry)
 
     async def _slash_ask(
         self,
@@ -5294,10 +5374,11 @@ class DiscordCodexClient(discord.Client):
         effort: str,
         new: bool,
         wish: bool = False,
+        entry: str = "",
     ) -> None:
         """Answer a validated slash question in public, as the deferred interaction response;
         `effort` is the one the member chose for this message ("" for none), `wish` opens a
-        wish conversation."""
+        wish conversation, `entry` is the command's ENTRY (`_slash_entry`)."""
         # Unset means the member's own /model effort (or DEFAULT_MODEL's), not Codex's default.
         effort_value = effort or self._member_effort(interaction.guild_id, interaction.user.id)
         key = ThreadStore.key(interaction.guild_id, interaction.channel_id, interaction.user.id)
@@ -5317,6 +5398,7 @@ class DiscordCodexClient(discord.Client):
             plain,
             fresh=new,
             effort=effort,
+            wish=wish,
         )
         if routed is not None:
             resume = routed.resume
@@ -5341,6 +5423,7 @@ class DiscordCodexClient(discord.Client):
                     conversation_channel=interaction.channel,
                     fresh=new,
                     wish=wish,
+                    entry=entry,
                     **self._routed_kw(routed),
                 ),
             )
@@ -5447,9 +5530,10 @@ class DiscordCodexClient(discord.Client):
         # Replying to another member's message (e.g. one that carries a picture) points the Bot
         # at it: its text and images are folded into this request.
         quoted = await self._referenced(message)
-        if quoted is not None and (
+        folded = quoted is not None and (
             quoted.author != self.user or await self._replies_to_repost(message)
-        ):
+        )
+        if folded:
             usable = [
                 a
                 for a in quoted.attachments
@@ -5465,6 +5549,7 @@ class DiscordCodexClient(discord.Client):
             await message.reply(reason, mention_author=False)
             return
         previews = await self._previews(message, quoted)
+        entry = mention_entry(message.reference is not None, quoted is not None, folded)
 
         # Replying to one of the Bot's answers continues that exact thread; otherwise the member's
         # most recent thread in this channel (within the TTL) is continued.
@@ -5509,6 +5594,7 @@ class DiscordCodexClient(discord.Client):
                     conversation_channel=message.channel,
                     message_id=message.id,
                     replied_to=replied_to,
+                    entry=entry,
                     **self._routed_kw(routed),
                 ),
             )

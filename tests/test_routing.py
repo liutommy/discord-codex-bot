@@ -1398,3 +1398,215 @@ async def test_grok_chat_without_a_usable_reset_time(
     monkeypatch.setattr(bot_module.grok, "usage", usage)
     expected = reset_at == "2026-01-01T00:00:00+00:00"  # past: nothing left to keep back
     assert await bot._grok_usable() is expected
+
+
+# --------------------------------------------------------------------------- wish conversations
+
+
+def _table_with(tmp_path, **changes) -> Path:
+    data = json.loads(TABLE_PATH.read_text("utf-8"))
+    for key, value in changes.items():
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
+    path = tmp_path / "routing.json"
+    path.write_text(json.dumps(data), "utf-8")
+    return path
+
+
+def test_the_wish_target_is_checked_like_a_cell(tmp_path) -> None:
+    assert routing.load_table(TABLE_PATH).wish == "codex|high"
+    assert routing.load_table(_table_with(tmp_path, wish=None)).wish == "codex|high"
+    for bad, match in (
+        ("codex", "needs a Codex effort"),
+        ("agy:gemini-4-hydrogen|max", "does not take"),
+    ):  # without candidates, where the strength check would stop it first
+        with pytest.raises(ValueError, match=match):
+            routing.load_table(_table_with(tmp_path, wish=bad, candidates={}))
+    for bad, match in (
+        ("codex|xhigh", "cells without a candidate: codex\\|xhigh"),
+        ("agy:gemini-4-argon|medium", "argon_failed has no stand-in for 'wish'"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            routing.load_table(_table_with(tmp_path, wish=bad))
+    data = json.loads(TABLE_PATH.read_text("utf-8"))
+    data["wish"] = "agy:gemini-4-argon|medium"
+    data["degrade"]["argon_failed"]["wish"] = "codex|high"  # "wish" is a stand-in key there
+    path = tmp_path / "routing.json"
+    path.write_text(json.dumps(data), "utf-8")
+    assert routing.load_table(path).argon_failed["wish"] == "codex|high"
+
+
+def test_a_wish_conversation_never_moves_to_a_weaker_target() -> None:
+    table = replace(routing.load_table(TABLE_PATH), wish="agy:gemini-4-hydrogen|low")
+    stronger = Route("codex|high", "H", "code", ("old",))
+    assert routing.wish_route(table, stronger) == (
+        Route("codex|high", "H", routing.WISH, ("old",)),
+        "wish-weaker",
+    )
+    weaker = Route("codex|low", "L", "code")
+    assert routing.wish_route(table, weaker) == (
+        Route("agy:gemini-4-hydrogen|low", "L", routing.WISH),
+        "wish",
+    )
+    assert routing.wish_route(table, None) == (
+        Route("agy:gemini-4-hydrogen|low", "M", routing.WISH),
+        "wish",
+    )
+
+
+async def test_a_wish_goes_to_the_wish_target_and_stays_there(
+    client, backends, monkeypatch, caplog
+) -> None:
+    asked = verdicts(monkeypatch, ok("chat", 2))
+    caplog.set_level(logging.INFO, logger="discord_codex_bot.bot")
+    codex_high = Resolved("codex", client.config.codex_model, "high")
+    # The opening /wish turn: a new conversation, not judged, on the wish target.
+    plan = await client._route(KEY, None, GUILD, USER, "幫我潤飾公告", [], False, True, wish=True)
+    assert asked == [] and plan.target == codex_high and plan.resume == ""
+    assert plan.log["status"] == "wish" and plan.log["why"] == "wish"
+    assert plan.log["cell"] == plan.log["target"] == "codex|high"
+    result = await client._answer(
+        "幫我潤飾公告", [], GUILD, USER, wish=True, fresh=True, **client._routed_kw(plan)
+    )
+    client._log_route(plan, result)
+    client._remember(KEY, result.thread_id, None, False, *client._routed_memo(plan, result, ""))
+    assert client.wishes.is_wish_thread(result.thread_id)
+    # Later turns of the conversation keep it, a chat-like one and one with an image included.
+    plan, _ = await ask(client, "謝謝，那要多久？")
+    assert asked == [] and plan.target == codex_high and plan.log["why"] == "kept"
+    assert plan.resume == result.thread_id
+    image = types.SimpleNamespace(content_type="image/png", filename="a.png", size=10)
+    plan = await client._route(KEY, None, GUILD, USER, "像這樣", [image], False)
+    assert plan.target == codex_high and plan.log["status"] == "wish"
+    # An ordinary conversation is judged again.
+    plan = await client._route(KEY, None, GUILD, USER, "早安", [], False, fresh=True)
+    assert asked == [("早安", [])] and plan.log["status"] == "ok"
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Route ")]
+    assert json.loads(lines[0].removeprefix("Route "))["status"] == "wish"
+
+
+async def test_a_wish_target_takes_the_same_stand_ins_as_any_cell(
+    client, backends, monkeypatch
+) -> None:
+    table = client.routing
+    client.routing = replace(
+        table,
+        wish="agy:gemini-4-argon|medium",
+        argon_failed={**table.argon_failed, "wish": "codex|xhigh"},
+    )
+    client.agy_quota.update(_quota(15.0, 144))  # Argon under its reserve
+    plan = await client._route(KEY, None, GUILD, USER, "許願", [], False, True, wish=True)
+    assert plan.target == Resolved("codex", client.config.codex_model, "xhigh")
+    assert plan.log["degraded"] == ["argon-reserve"] and plan.route.kind == routing.WISH
+    # Codex near its quota drops a level on the wish target too.
+    client.routing = table
+    monkeypatch.setattr(bot_module, "read_rate_limits", lambda config: RateLimits(95, 10, "test"))
+    plan = await client._route(KEY, None, GUILD, USER, "許願", [], False, True, wish=True)
+    assert plan.target.effort == "medium" and plan.log["degraded"] == ["codex-quota"]
+
+
+async def test_the_wish_command_routes_its_opening_turn_to_the_wish_target(
+    client, backends, monkeypatch
+) -> None:
+    asked = verdicts(monkeypatch, ok("chat", 2))  # judged, this would go to Hydrogen low
+
+    async def run_tracked(key, owner, show, start):
+        return await start(None, None)
+
+    async def quietly(*args, **kw):
+        return types.SimpleNamespace(id=999)
+
+    monkeypatch.setattr(client, "_run_tracked", run_tracked)
+    interaction = types.SimpleNamespace(
+        guild_id=GUILD,
+        channel_id=None,
+        channel=types.SimpleNamespace(id=None),
+        user=types.SimpleNamespace(id=USER),
+        response=types.SimpleNamespace(defer=quietly, send_message=quietly),
+        followup=types.SimpleNamespace(send=quietly),
+        edit_original_response=quietly,
+    )
+    monkeypatch.setattr(client, "_access", lambda *args: "")
+    await client.wish_command(interaction, "幫我潤飾這段公告")
+    assert asked == [] and backends["agy"].calls == []
+    assert backends["codex"].calls[0][2]["effort"] == "high"
+
+
+def test_a_wish_conversation_whose_strength_is_unknown_keeps_its_target() -> None:
+    table = routing.load_table(TABLE_PATH)
+    # codex|xhigh is no candidate's target: its strength is unknown, so no "weaker" can hold.
+    on_xhigh = Route("codex|xhigh", "H", routing.WISH, ("old",))
+    assert routing.wish_route(table, on_xhigh) == (
+        Route("codex|xhigh", "H", routing.WISH, ("old",)),
+        "wish-unranked",
+    )
+    bare = replace(table, candidates={})  # no strengths at all
+    on_hydrogen = Route("agy:gemini-4-hydrogen|xhigh", "X", "chat")
+    assert routing.wish_route(bare, on_hydrogen) == (
+        Route("agy:gemini-4-hydrogen|xhigh", "X", routing.WISH),
+        "wish-unranked",
+    )
+    # A target without its stand-in for wish turns is not kept, ranked or not.
+    on_argon = Route("agy:gemini-4-argon|medium", "X", "code")
+    assert routing.wish_route(bare, on_argon) == (Route("codex|high", "X", routing.WISH), "wish")
+    on_wish = Route("codex|high", "H", routing.WISH)
+    assert routing.wish_route(bare, on_wish) == (on_wish, "kept")
+
+
+def test_with_jev_off_the_wish_target_comes_from_routing_json_or_its_default(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    hydrogen = "agy:gemini-4-hydrogen|high"
+    assert routing.wish_table(_table_with(tmp_path, wish=hydrogen)).wish == hydrogen
+    missing = tmp_path / "missing.json"
+    table = routing.wish_table(missing)
+    assert table.wish == routing.DEFAULT_WISH and table.candidates == {}
+    assert "wish conversations go to codex|high" in caplog.text
+    # The default is checked as load_table checks a wish target.
+    monkeypatch.setattr(routing, "DEFAULT_WISH", "codex")
+    with pytest.raises(ValueError, match="needs a Codex effort"):
+        routing.wish_table(missing)
+
+
+async def test_with_jev_off_a_wish_conversation_still_goes_to_the_wish_target(
+    client, backends, monkeypatch
+) -> None:
+    asked = verdicts(monkeypatch, ok("chat", 2))
+    off = DiscordCodexClient(replace(client.config, jev_enabled=False))
+    assert off.routing is None and off.wish_routing.wish == "codex|high"
+    client.routing, client.wish_routing = None, off.wish_routing  # this client, Jev off
+    codex_high = Resolved("codex", client.config.codex_model, "high")
+    plan = await client._route(KEY, None, GUILD, USER, "幫我潤飾公告", [], False, True, wish=True)
+    assert plan.target == codex_high and plan.log["status"] == "wish"  # not DEFAULT_MODEL's Grok
+    result = await client._answer(
+        "幫我潤飾公告", [], GUILD, USER, wish=True, fresh=True, **client._routed_kw(plan)
+    )
+    client._remember(KEY, result.thread_id, None, False, *client._routed_memo(plan, result, ""))
+    plan, _ = await ask(client, "謝謝，那要多久？")
+    assert plan.target == codex_high and plan.log["why"] == "kept"
+    assert plan.resume == result.thread_id and backends["grok"].calls == []
+    # Any other conversation is not routed while Jev is off.
+    assert await client._route(KEY, None, GUILD, USER, "早安", [], False, fresh=True) is None
+    assert asked == []
+
+
+async def test_a_member_with_their_own_model_still_gets_the_wish_target(
+    client, backends, monkeypatch
+) -> None:
+    asked = verdicts(monkeypatch, ok("code", 9))
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|high")
+    codex_high = Resolved("codex", client.config.codex_model, "high")
+    plan = await client._route(KEY, None, GUILD, USER, "幫我潤飾公告", [], False, True, wish=True)
+    assert plan is not None and plan.target == codex_high
+    result = await client._answer(
+        "幫我潤飾公告", [], GUILD, USER, wish=True, fresh=True, **client._routed_kw(plan)
+    )
+    client._remember(KEY, result.thread_id, None, False, *client._routed_memo(plan, result, ""))
+    plan, _ = await ask(client, "再改短一點")
+    assert plan.target == codex_high and plan.log["why"] == "kept"
+    assert backends["agy"].calls == [] and len(backends["codex"].calls) == 2
+    # Outside the wish conversation the member's own model answers, unrouted.
+    assert await client._route(KEY, None, GUILD, USER, "寫程式", [], False, fresh=True) is None
+    assert asked == []
