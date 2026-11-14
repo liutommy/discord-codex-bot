@@ -945,6 +945,28 @@ wake the Bot by itself (Discord's reply ping lands in `mentions`); a typed `@Bot
 does, and the repost's links are then folded into the question. Delivery follows the linkclean mode above. Instagram, Reddit and Bluesky are not proxied: no live proxy that redirects humans
 and beats the native preview was found (verified 2026-09-16).
 
+An X post can carry more media than one card shows: for Discord, vxtwitter shows at most 10
+media per card and selects page N with `/p<N>` after the status path, counting photos, videos
+and gifs alike; fixupx ignores the suffix (verified 2026-11-14). The `x多圖分頁` option of
+`/<prefix>-linkclean` sets what the Bot does with such a post:
+
+- `on` (default): a link the Bot swaps to vxtwitter for a post with more than 10 media becomes
+  every page link, `/p1` to `/p<N>`, built from the plain `/<user>/status/<id>` path (a query
+  such as `?s=20` is dropped). The media count comes from the same vxtwitter API answer as the
+  sensitive flag, so paging adds no request. An unknown count, the fixupx fallback, and a
+  link to one item (`/photo/3`) keep the single link.
+- `all`: additionally, a `vxtwitter.com` or `fixvx.com` post link a member posts without a page
+  suffix gets the missing page links (`/p2` onward) posted below it, in either linkclean mode
+  (they are no copy of the member's text); the member's message is never replaced for this.
+  This works with `/<prefix>-embedfix` off too. A failed API read adds nothing.
+- `off`: one link per post.
+
+Discord previews at most 5 links per message, so page links that do not fit go into further
+messages; the Bot posts at most 3 messages per member message (the repost or first appended
+message included) and drops and logs pages beyond that. An appended note under a text message
+still posts each changed link on its own, as before. Every page link of a sensitive or
+member-spoilered post is spoilered.
+
 With Manage Messages in the channel, link-only messages are reposted with author attribution
 before deleting the original. Emoji and punctuation are preserved. A link-only reply is
 reposted as a reply to the same message, so it stays in its conversation. Attachments,
