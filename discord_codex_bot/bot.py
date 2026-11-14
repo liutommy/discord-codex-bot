@@ -2736,14 +2736,23 @@ class DiscordCodexClient(discord.Client):
         command opening one; or a conversation whose threads were marked by a wish-mode answer,
         as `_answer` tells) is not judged either: it goes to the table's wish target, with Jev
         off (`wish_routing`) and over the member's own /model too."""
-        current = None if fresh else self.threads.routed(key, replied_to, plain)
-        route = Route.from_dict(current["route"]) if current else None
+        current = None if fresh else self.threads.continued(key, replied_to, plain)
+        unrouted = current is not None and current["route"] is None
+        if unrouted and (guild_id is None or not self.wishes.is_wish_thread(current["thread_id"])):
+            # A thread with no route (a member's own model's, or Jev off) is continued here only
+            # as a wish conversation: one opened before wishes were routed, still marked one.
+            current = None
+        route = Route.from_dict(current["route"]) if current and not unrouted else None
         if route is not None and routing.retired(route.entry):
             # Its model is gone (agy dropped it): kept, it would quietly resolve to Codex for as
             # long as nothing moved the conversation. Start over instead.
             LOGGER.info("Stored route %s is on a retired model; starting over", route.entry)
             current = route = None
-        sources = [*route.earlier, current["thread_id"]] if current and route else []
+        if current and route:
+            sources = [*route.earlier, current["thread_id"]]
+        else:
+            # An unrouted wish thread is the conversation's only thread (replayed on a move).
+            sources = [current["thread_id"]] if current and unrouted else []
         wish_turn = guild_id is not None and (
             wish or any(self.wishes.is_wish_thread(thread) for thread in sources)
         )

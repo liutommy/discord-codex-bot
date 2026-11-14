@@ -1610,3 +1610,28 @@ async def test_a_member_with_their_own_model_still_gets_the_wish_target(
     # Outside the wish conversation the member's own model answers, unrouted.
     assert await client._route(KEY, None, GUILD, USER, "寫程式", [], False, fresh=True) is None
     assert asked == []
+
+
+async def test_a_wish_thread_recorded_without_a_route_still_goes_to_the_wish_target(
+    client, backends, monkeypatch
+) -> None:
+    # Codex re-review: a wish opened before wishes were routed (or on a member's own model) is
+    # marked in WishStore, but its ThreadStore entry has no route, so it was never found.
+    asked = verdicts(monkeypatch, ok("chat", 2))
+    client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|high")
+    own = client._model(GUILD, USER)
+    client._remember(KEY, "agy-wish", 42, False, own)  # no route
+    client.wishes.mark_thread("agy-wish", GUILD, USER)
+    turns = {"agy-wish": [Turn("user", "幫我潤飾公告", USER), Turn("assistant", "初稿如下")]}
+    monkeypatch.setattr(bot_module, "transcript_turns", lambda c, t: turns.get(t, []))
+    codex_high = Resolved("codex", client.config.codex_model, "high")
+    for replied_to in (42, None):  # a reply to its answer, and a bare @mention
+        plan = await client._route(KEY, replied_to, GUILD, USER, "再短一點", [], False)
+        assert plan is not None and plan.target == codex_high and plan.log["status"] == "wish"
+        assert plan.route.earlier == ("agy-wish",) and "初稿如下" in plan.history
+        assert client._routed_kw(plan)["earlier_threads"] == ("agy-wish",)  # wish mode
+    # A thread without a route that is no wish one stays the member's own model's.
+    client._remember(KEY, "agy-plain", 43, False, own)
+    assert await client._route(KEY, 43, GUILD, USER, "寫程式", [], False) is None
+    assert await client._route(KEY, None, GUILD, USER, "寫程式", [], False) is None
+    assert asked == []
