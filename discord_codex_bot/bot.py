@@ -2775,8 +2775,8 @@ class DiscordCodexClient(discord.Client):
         wish: bool = False,
     ) -> RoutePlan | None:
         """Where this request goes when the router picks the model; None when it does not (Jev
-        off, or the member chose a model with /model), except for a wish turn (below), which
-        is routed either way. Every message is judged; a conversation never drops a band and
+        off, except for a wish turn (below); or the member chose a model with /model, a wish
+        turn included). Every message is judged; a conversation never drops a band and
         follows its latest message of substance (routing.decide). An image is not judged (Jev
         reads text only): that message goes down the table's `image` list (Codex → Grok → agy;
         a conversation already on a Codex cell keeps it), and the conversation's route is left
@@ -2785,7 +2785,7 @@ class DiscordCodexClient(discord.Client):
         and sends a new one to DEFAULT_MODEL, without retrying Jev. A wish turn (`wish`: the wish
         command opening one; or a conversation whose threads were marked by a wish-mode answer,
         as `_answer` tells) is not judged either: it goes to the table's wish target, with Jev
-        off (`wish_routing`) and over the member's own /model too."""
+        off too (`wish_routing`)."""
         current = None if fresh else self.threads.continued(key, replied_to, plain)
         unrouted = current is not None and current["route"] is None
         if unrouted and (guild_id is None or not self.wishes.is_wish_thread(current["thread_id"])):
@@ -2807,7 +2807,7 @@ class DiscordCodexClient(discord.Client):
             wish or any(self.wishes.is_wish_thread(thread) for thread in sources)
         )
         table = self.routing or (self.wish_routing if wish_turn else None)
-        if table is None or (not wish_turn and self._own_model(guild_id, user_id)):
+        if table is None or self._own_model(guild_id, user_id):
             return None
         turns = await asyncio.to_thread(
             lambda: [turn for thread in sources for turn in transcript_turns(self.config, thread)]
