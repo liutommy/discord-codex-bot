@@ -1592,22 +1592,16 @@ async def test_with_jev_off_a_wish_conversation_still_goes_to_the_wish_target(
     assert asked == []
 
 
-async def test_a_member_with_their_own_model_still_gets_the_wish_target(
+async def test_a_member_with_their_own_model_keeps_it_for_a_wish(
     client, backends, monkeypatch
 ) -> None:
     asked = verdicts(monkeypatch, ok("code", 9))
     client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|high")
-    codex_high = Resolved("codex", client.config.codex_model, "high")
-    plan = await client._route(KEY, None, GUILD, USER, "幫我潤飾公告", [], False, True, wish=True)
-    assert plan is not None and plan.target == codex_high
-    result = await client._answer(
-        "幫我潤飾公告", [], GUILD, USER, wish=True, fresh=True, **client._routed_kw(plan)
+    # The member's own model answers the wish conversation, unrouted, like any other.
+    assert (
+        await client._route(KEY, None, GUILD, USER, "幫我潤飾公告", [], False, True, wish=True)
+        is None
     )
-    client._remember(KEY, result.thread_id, None, False, *client._routed_memo(plan, result, ""))
-    plan, _ = await ask(client, "再改短一點")
-    assert plan.target == codex_high and plan.log["why"] == "kept"
-    assert backends["agy"].calls == [] and len(backends["codex"].calls) == 2
-    # Outside the wish conversation the member's own model answers, unrouted.
     assert await client._route(KEY, None, GUILD, USER, "寫程式", [], False, fresh=True) is None
     assert asked == []
 
@@ -1618,8 +1612,7 @@ async def test_a_wish_thread_recorded_without_a_route_still_goes_to_the_wish_tar
     # Codex re-review: a wish opened before wishes were routed (or on a member's own model) is
     # marked in WishStore, but its ThreadStore entry has no route, so it was never found.
     asked = verdicts(monkeypatch, ok("chat", 2))
-    client.memory.set_model(GUILD, USER, "agy:gemini-4-hydrogen|high")
-    own = client._model(GUILD, USER)
+    own = "agy:gemini-4-hydrogen|high"
     client._remember(KEY, "agy-wish", 42, False, own)  # no route
     client.wishes.mark_thread("agy-wish", GUILD, USER)
     turns = {"agy-wish": [Turn("user", "幫我潤飾公告", USER), Turn("assistant", "初稿如下")]}
@@ -1630,7 +1623,9 @@ async def test_a_wish_thread_recorded_without_a_route_still_goes_to_the_wish_tar
         assert plan is not None and plan.target == codex_high and plan.log["status"] == "wish"
         assert plan.route.earlier == ("agy-wish",) and "初稿如下" in plan.history
         assert client._routed_kw(plan)["earlier_threads"] == ("agy-wish",)  # wish mode
-    # A thread without a route that is no wish one stays the member's own model's.
+    # With the member's own model set, both the wish thread and any other stay on it.
+    client.memory.set_model(GUILD, USER, own)
+    assert await client._route(KEY, 42, GUILD, USER, "再短一點", [], False) is None
     client._remember(KEY, "agy-plain", 43, False, own)
     assert await client._route(KEY, 43, GUILD, USER, "寫程式", [], False) is None
     assert await client._route(KEY, None, GUILD, USER, "寫程式", [], False) is None

@@ -325,10 +325,10 @@ absent), checked like a table cell. It takes the same stand-ins as a cell, under
 `wish` (`argon_failed` / `claude_failed` need a `wish` entry for an Argon or Claude target), the
 Codex effort drop near quota and then `MODEL_CHAIN`. A conversation already on a stronger
 target keeps it, and so does one whose target or the wish target has no candidate strength
-to compare (`"why": "wish-unranked"`). The wish target applies over a member's own
-`/codex-model` choice and with `JEV_ENABLED=false`, when the Bot reads `routing.json` only
-for this; a file that does not load is logged and the target is then `codex|high`. The
-`Route` log line carries `"status": "wish"` for these turns.
+to compare (`"why": "wish-unranked"`). A member's own `/codex-model` choice answers their
+wish conversations too. The wish target applies with `JEV_ENABLED=false`, when the Bot reads
+`routing.json` only for this; a file that does not load is logged and the target is then
+`codex|high`. The `Route` log line carries `"status": "wish"` for these turns.
 OpenRouter is stateless, so the Bot keeps those conversations itself (`OPENROUTER_DIR`,
 replayed within `OPENROUTER_HISTORY_CHARS`), sends the persona as the system message, inlines
 images for models the catalog marks image-capable and `reasoning.effort` for models that take it;
