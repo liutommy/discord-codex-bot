@@ -11,6 +11,7 @@ from discord_codex_bot import routing
 from discord_codex_bot.backends import Resolved
 from discord_codex_bot.routing import Route, Verdict
 from tests.test_routing import (  # noqa: F401  (backends, client and jev are fixtures)
+    SHIPPED_PATH,
     TABLE_PATH,
     answer,
     ask,
@@ -43,7 +44,7 @@ def write_table(tmp_path: Path, edit) -> Path:
 
 
 def test_every_shipped_cell_is_a_candidate_with_a_strength() -> None:
-    t = table()
+    t = routing.load_table(SHIPPED_PATH)
     assert t.candidates and "_comment" not in t.candidates
     for row in t.types.values():
         for cell in row:

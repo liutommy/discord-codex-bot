@@ -310,10 +310,11 @@ or the API answers `429 free_rate_limited`. Each member picks `provider` → `mo
 first) → default `effort` with `/<prefix>-model` (Codex Luna; Gemini 4 Argon; Gemini 4
 Hydrogen; Claude Sonnet 5.5; Claude Opus 5.5; GPT-OSS 120B; whatever OpenRouter lists as free that
 hour — the agy list follows `agy models`; Gemini 4 Hydrogen replaced Gemini 3.8 Flash on
-2026-11-13, and settings saved as `agy:gemini-3.8-flash` are read as Hydrogen). Gemini 4 Argon
-has its own small weekly pool (no 5-hour window) and answers the hardest band of every routed
-type but quick (Codex) and live-x (Grok) (`config/routing.json`); when it is spent (`credits
-balance is too low`), `argon_failed` sends the question back to the cell it replaced.
+2026-11-13, and settings saved as `agy:gemini-3.8-flash` are read as Hydrogen). The routed table
+(`config/routing.json`, v4 from the 2026-11-15 answer-quality evaluation) sends every type to
+Gemini 4 Hydrogen `high` for L and M and `xhigh` for H and X, and live-x to Grok `medium`. Gemini
+4 Argon has its own small weekly pool (no 5-hour window); a table that puts it in a cell needs an
+`argon_failed` stand-in for that type, used when the pool is spent (`credits balance is too low`).
 With `JEV_PICK` (`shadow` by default) the same Jev call also picks the answering model from
 `routing.json`'s `candidates` (each a routing entry, a strength rank and the option text Jev
 reads; every table cell must be one). `shadow` only logs the pick next to the table's cell;
