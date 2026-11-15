@@ -27,7 +27,10 @@ from discord_codex_bot.usage import RateLimits
 
 GUILD, USER = 111111111111111111, 5
 KEY = f"{GUILD}:None:{USER}"
-TABLE_PATH = Path(__file__).resolve().parent.parent / "config" / "routing.json"
+# The routing mechanics are tested on the hand-made v3 table (every backend, Argon and Claude
+# cells, stand-ins); the shipped table is checked on its own below.
+TABLE_PATH = Path(__file__).resolve().parent / "fixtures" / "routing_v3.json"
+SHIPPED_PATH = Path(__file__).resolve().parent.parent / "config" / "routing.json"
 CHAIN = ("grok:grok-4.7|medium", "codex", "agy:gemini-4-hydrogen|medium")
 SECRET = "ts-test-SECRET-key-0123456789"
 
@@ -115,15 +118,14 @@ async def ask(client, text: str = "問題", attachments=(), replied_to=None):
 
 
 def test_the_shipped_table_loads_and_every_cell_is_checked() -> None:
-    table = routing.load_table(TABLE_PATH)
+    table = routing.load_table(SHIPPED_PATH)
     assert set(table.types) == set(routing.TYPES)
-    assert table.types["code"] == (
-        "codex|low",
-        "codex|medium",
-        "codex|high",
-        "agy:gemini-4-argon|medium",
-    )
+    high, xhigh = "agy:gemini-4-hydrogen|high", "agy:gemini-4-hydrogen|xhigh"
+    for kind, row in table.types.items():
+        expected = ("grok:grok-4.7|medium",) * 4 if kind == "live-x" else (high, high, xhigh, xhigh)
+        assert row == expected, kind
     assert table.needs == {"live-x": "grok"}  # every model gets the Bot's <web> and <run>
+    assert table.wish == "codex|high"
 
 
 @pytest.mark.parametrize(
